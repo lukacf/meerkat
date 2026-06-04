@@ -14,10 +14,12 @@ use meerkat_core::handles::{
     DslTransitionError, PeerInteractionCleanupObserver, PeerInteractionHandle,
     PeerTerminalDisposition as CorePeerDisposition,
 };
+use meerkat_core::interaction::{TerminalDisposition, TerminalityClass};
 use meerkat_core::peer_correlation::{
     InboundPeerRequestState as CoreInboundState, OutboundPeerRequestState as CoreOutboundState,
     PeerCorrelationId,
 };
+use meerkat_core::types::HandlingMode;
 
 use super::HandleDslAuthority;
 use crate::meerkat_machine::dsl as mm_dsl;
@@ -141,6 +143,55 @@ fn dsl_corr_id_to_core(dsl_id: mm_dsl::PeerCorrelationId) -> Option<PeerCorrelat
         .map(PeerCorrelationId::from_uuid)
 }
 
+fn response_status_to_dsl(
+    status: meerkat_core::ResponseStatus,
+) -> mm_dsl::PeerIngressResponseStatus {
+    match status {
+        meerkat_core::ResponseStatus::Accepted => mm_dsl::PeerIngressResponseStatus::Accepted,
+        meerkat_core::ResponseStatus::Completed => mm_dsl::PeerIngressResponseStatus::Completed,
+        meerkat_core::ResponseStatus::Failed => mm_dsl::PeerIngressResponseStatus::Failed,
+    }
+}
+
+fn terminality_from_dsl(terminality: mm_dsl::PeerIngressResponseTerminality) -> TerminalityClass {
+    match terminality {
+        mm_dsl::PeerIngressResponseTerminality::Progress => TerminalityClass::Progress,
+        mm_dsl::PeerIngressResponseTerminality::TerminalCompleted => TerminalityClass::Terminal {
+            disposition: TerminalDisposition::Completed,
+        },
+        mm_dsl::PeerIngressResponseTerminality::TerminalFailed => TerminalityClass::Terminal {
+            disposition: TerminalDisposition::Failed,
+        },
+    }
+}
+
+fn handling_mode_from_dsl(lane: mm_dsl::InputLane) -> HandlingMode {
+    match lane {
+        mm_dsl::InputLane::Queue => HandlingMode::Queue,
+        mm_dsl::InputLane::Steer => HandlingMode::Steer,
+    }
+}
+
+fn peer_reply_classified_effect(
+    effects: Vec<mm_dsl::MeerkatMachineEffect>,
+    context: &'static str,
+) -> Result<TerminalityClass, DslTransitionError> {
+    effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            mm_dsl::MeerkatMachineEffect::PeerResponseReplyClassified {
+                response_terminality,
+            } => Some(terminality_from_dsl(response_terminality)),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            DslTransitionError::guard_rejected(
+                context,
+                "machine transition did not emit PeerResponseReplyClassified",
+            )
+        })
+}
+
 impl PeerInteractionHandle for RuntimePeerInteractionHandle {
     fn request_sent(
         &self,
@@ -179,6 +230,15 @@ impl PeerInteractionHandle for RuntimePeerInteractionHandle {
         )
     }
 
+    fn response_rejected(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
+        self.apply_input_and_dispatch_cleanup(
+            mm_dsl::MeerkatMachineInput::PeerResponseRejected {
+                corr_id: corr_id.into(),
+            },
+            "PeerInteractionHandle::response_rejected",
+        )
+    }
+
     fn request_timed_out(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
         self.apply_input_and_dispatch_cleanup(
             mm_dsl::MeerkatMachineInput::PeerRequestTimedOut {
@@ -188,13 +248,32 @@ impl PeerInteractionHandle for RuntimePeerInteractionHandle {
         )
     }
 
-    fn request_received(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
+    fn request_received(
+        &self,
+        corr_id: PeerCorrelationId,
+        handling_mode: HandlingMode,
+    ) -> Result<(), DslTransitionError> {
         self.apply_input_and_dispatch_cleanup(
             mm_dsl::MeerkatMachineInput::PeerRequestReceived {
                 corr_id: corr_id.into(),
+                handling_mode: mm_dsl::InputLane::from(handling_mode),
             },
             "PeerInteractionHandle::request_received",
         )
+    }
+
+    fn classify_response_reply(
+        &self,
+        status: meerkat_core::ResponseStatus,
+    ) -> Result<TerminalityClass, DslTransitionError> {
+        let context = "PeerInteractionHandle::classify_response_reply";
+        let effects = self.dsl.apply_signal_with_effects(
+            mm_dsl::MeerkatMachineSignal::ClassifyPeerResponseReply {
+                status: response_status_to_dsl(status),
+            },
+            context,
+        )?;
+        peer_reply_classified_effect(effects, context)
     }
 
     fn response_replied(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
@@ -224,6 +303,16 @@ impl PeerInteractionHandle for RuntimePeerInteractionHandle {
             .get(&dsl_key)
             .copied()
             .map(Into::into)
+    }
+
+    fn inbound_handling_mode(&self, corr_id: PeerCorrelationId) -> Option<HandlingMode> {
+        let dsl_key: mm_dsl::PeerCorrelationId = corr_id.into();
+        self.dsl
+            .snapshot_state()
+            .inbound_peer_request_lanes
+            .get(&dsl_key)
+            .copied()
+            .map(handling_mode_from_dsl)
     }
 
     fn install_cleanup_observer(&self, observer: Arc<dyn PeerInteractionCleanupObserver>) {

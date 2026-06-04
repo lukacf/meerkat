@@ -4,15 +4,16 @@ use super::turn_executor::{
     ActorTurnTicket, FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition,
 };
 use crate::error::MobError;
-use crate::ids::{MeerkatId, RunId, StepId};
+use crate::event::MemberRef;
+use crate::ids::{AgentIdentity, MeerkatId, RunId, StepId};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use async_trait::async_trait;
 use futures::FutureExt;
 use meerkat_core::EventEnvelope;
-use meerkat_core::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame, TurnErrorMetadata};
+use meerkat_core::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
 use meerkat_core::service::{StartTurnRequest, TurnToolOverlay};
-use meerkat_core::types::ContentInput;
+use meerkat_core::types::{ContentInput, SessionId};
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -104,6 +105,30 @@ impl ActorFlowTurnExecutor {
     fn actor_ticket(ticket: FlowTurnTicket) -> Arc<ActorTurnTicket> {
         match ticket {
             FlowTurnTicket::Actor(ticket) => ticket,
+        }
+    }
+
+    fn project_member_ref_session_binding(
+        member_ref: &MemberRef,
+        current_bridge_session_id: Option<SessionId>,
+    ) -> Option<MemberRef> {
+        match member_ref {
+            MemberRef::Session { .. } => {
+                current_bridge_session_id.map(MemberRef::from_bridge_session_id)
+            }
+            MemberRef::BackendPeer {
+                peer_id,
+                address,
+                pubkey,
+                bootstrap_token,
+                ..
+            } => Some(MemberRef::BackendPeer {
+                peer_id: peer_id.clone(),
+                address: address.clone(),
+                pubkey: *pubkey,
+                bootstrap_token: bootstrap_token.clone(),
+                session_id: current_bridge_session_id,
+            }),
         }
     }
 
@@ -204,14 +229,6 @@ impl ActorFlowTurnExecutor {
                                 reason: format!(
                                     "structured output extraction failed after {attempts} attempt(s): {reason}; last_output={output:?}"
                                 ),
-                                error_report: None,
-                                error: Some(TurnErrorMetadata::terminal(
-                                    meerkat_core::TurnTerminalCauseKind::StructuredOutputValidationFailed,
-                                    meerkat_core::TurnTerminalOutcome::StructuredOutputValidationFailed,
-                                    format!(
-                                        "structured output extraction failed after {attempts} attempt(s): {reason}; last_output={output:?}"
-                                    ),
-                                )),
                             });
                         }
                         return;
@@ -235,36 +252,19 @@ impl ActorFlowTurnExecutor {
                         if let Some(tx) = completion_tx.take() {
                             let _ = tx.send(FlowTurnOutcome::Failed {
                                 reason: format!("callback pending for tool '{tool_name}': {args}"),
-                                error_report: None,
-                                error: None,
                             });
                         }
                         return;
                     }
-                    AgentEvent::RunFailed {
-                        error,
-                        error_report,
-                        ..
-                    } => {
+                    AgentEvent::RunFailed { error, .. } => {
                         if let Some(tx) = completion_tx.take() {
-                            let metadata = error_report.as_ref().and_then(|report| {
-                                TurnErrorMetadata::from_agent_error_report(report, error.clone())
-                            });
-                            let _ = tx.send(FlowTurnOutcome::Failed {
-                                reason: error,
-                                error_report,
-                                error: metadata,
-                            });
+                            let _ = tx.send(FlowTurnOutcome::Failed { reason: error });
                         }
                         return;
                     }
                     AgentEvent::InteractionFailed { error, .. } => {
                         if let Some(tx) = completion_tx.take() {
-                            let _ = tx.send(FlowTurnOutcome::Failed {
-                                reason: error,
-                                error_report: None,
-                                error: None,
-                            });
+                            let _ = tx.send(FlowTurnOutcome::Failed { reason: error });
                         }
                         return;
                     }
@@ -275,8 +275,6 @@ impl ActorFlowTurnExecutor {
             if let Some(tx) = completion_tx {
                 let _ = tx.send(FlowTurnOutcome::Failed {
                     reason: "turn event stream closed before terminal outcome".to_string(),
-                    error_report: None,
-                    error: None,
                 });
             }
         })
@@ -399,14 +397,18 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                          use turn_driven runtime mode for steps with allowed_tools/blocked_tools"
                     )));
                 }
-                let bridge_session_id = entry.member_ref.bridge_session_id().ok_or_else(|| {
+                let bridge_session_id = self
+                    .handle
+                    .resolve_bridge_session_id(&AgentIdentity::from(target.as_str()))
+                    .await
+                    .ok_or_else(|| {
                     MobError::Internal(format!(
-                        "autonomous flow dispatch requires session-backed member ref for '{target}'"
+                        "autonomous flow dispatch requires MobMachine session binding for '{target}'"
                     ))
                 })?;
                 let injector = self
                     .provisioner
-                    .interaction_event_injector(bridge_session_id)
+                    .interaction_event_injector(&bridge_session_id)
                     .await
                     .ok_or_else(|| MobError::MissingMemberCapability {
                         member_id: target.clone(),
@@ -433,6 +435,21 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                 )
             }
             crate::MobRuntimeMode::TurnDriven => {
+                let bridge_session_id = self
+                    .handle
+                    .resolve_bridge_session_id(&AgentIdentity::from(target.as_str()))
+                    .await;
+                let member_ref = match Self::project_member_ref_session_binding(
+                    &entry.member_ref,
+                    bridge_session_id,
+                ) {
+                    Some(member_ref) => member_ref,
+                    None => {
+                        return Err(MobError::Internal(format!(
+                            "turn-driven flow dispatch requires MobMachine session binding for '{target}'"
+                        )));
+                    }
+                };
                 let (event_tx, event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(8);
                 let bridge_handle = Self::spawn_subscription_bridge_enveloped(
                     event_rx,
@@ -444,7 +461,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                 if let Err(error) = self
                     .provisioner
                     .start_flow_step(
-                        &entry.member_ref,
+                        &member_ref,
                         run_id,
                         step_id,
                         StartTurnRequest {
@@ -503,8 +520,6 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                 }
                 Ok(FlowTurnOutcome::Failed {
                     reason: "turn completion channel closed".to_string(),
-                    error_report: None,
-                    error: None,
                 })
             }
             Err(_) => Err(MobError::FlowTurnTimedOut),
@@ -535,10 +550,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
             Ok(TimeoutDisposition::Detached)
         } else {
             bridge_handle.abort();
-            Err(MobError::Internal(
-                "flow turn timeout with exhausted orphan budget or per-flow orphan limit"
-                    .to_string(),
-            ))
+            Ok(TimeoutDisposition::Canceled)
         }
     }
 }
@@ -669,7 +681,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_subscription_bridge_preserves_run_failed_typed_llm_error() {
+    async fn test_subscription_bridge_keeps_run_failed_metadata_display_only() {
         let (events_tx, events_rx) = tokio::sync::mpsc::channel(1);
         let (completion_tx, completion_rx) = oneshot::channel();
         let bridge =
@@ -696,21 +708,8 @@ mod tests {
             .expect("send event");
 
         match completion_rx.await.expect("completion outcome") {
-            FlowTurnOutcome::Failed {
-                reason,
-                error_report,
-                error,
-            } => {
+            FlowTurnOutcome::Failed { reason } => {
                 assert_eq!(reason, "LLM failure terminal turn");
-                assert_eq!(error_report, Some(report));
-                let error = error.expect("typed turn error metadata");
-                assert_eq!(error.kind, meerkat_core::TurnTerminalCauseKind::LlmFailure);
-                assert!(error.terminal);
-                assert_eq!(
-                    error.outcome,
-                    Some(meerkat_core::TurnTerminalOutcome::Failed)
-                );
-                assert_eq!(error.detail.as_deref(), Some("LLM failure terminal turn"));
             }
             other => panic!("expected failed outcome, got {other:?}"),
         }
@@ -788,7 +787,7 @@ mod tests {
             .expect("send extraction failed event");
 
         match completion_rx.await.expect("completion outcome") {
-            FlowTurnOutcome::Failed { reason, .. } => {
+            FlowTurnOutcome::Failed { reason } => {
                 assert!(
                     reason.contains("structured output extraction failed after 2 attempt(s)"),
                     "reason should preserve extraction attempts: {reason}"

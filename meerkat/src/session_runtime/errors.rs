@@ -95,6 +95,9 @@ impl RecoveryError {
             Self::Recovery(SurfaceSessionRecoveryError::MissingSessionMetadata(_)) => {
                 "MISSING_SESSION_METADATA"
             }
+            Self::Recovery(SurfaceSessionRecoveryError::MissingSessionBuildState(_)) => {
+                "MISSING_SESSION_BUILD_STATE"
+            }
             Self::Recovery(SurfaceSessionRecoveryError::MissingRuntimeBuildMode(_)) => {
                 "MISSING_RUNTIME_BUILD_MODE"
             }

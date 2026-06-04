@@ -26,7 +26,6 @@ pub mod agent;
 pub(crate) mod classify;
 pub mod event_injector;
 pub mod mcp;
-pub(crate) mod peer_directory_reachability_authority;
 pub(crate) mod peer_types;
 pub mod router;
 pub mod runtime;
@@ -43,7 +42,10 @@ pub use router::{CommsConfig, DEFAULT_MAX_MESSAGE_BYTES, Router, SendError};
 #[cfg(not(target_arch = "wasm32"))]
 pub use transport::codec::{EnvelopeFrame, TransportCodec};
 pub use transport::{PeerAddr, TransportError};
-pub use trust::{TrustEntry, TrustError, TrustResolveError, TrustStore, TrustedPeer, TrustedPeers};
+pub use trust::{
+    TrustEntry, TrustError, TrustResolveError, TrustStore, TrustedPeer, TrustedPeers,
+    TrustedPeersView,
+};
 pub use types::{Envelope, InboxItem, MessageKind, Status};
 
 // Re-export high-level components

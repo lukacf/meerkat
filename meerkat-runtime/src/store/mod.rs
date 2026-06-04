@@ -10,8 +10,10 @@ pub mod sqlite;
 use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
 
 use crate::identifiers::LogicalRuntimeId;
-use crate::input_state::StoredInputState;
+use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
 use crate::runtime_state::RuntimeState;
+
+const MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 1;
 
 /// Errors from RuntimeStore operations.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -54,24 +56,234 @@ pub struct SessionDelta {
     pub session_snapshot: Vec<u8>,
 }
 
-/// Machine-owned lifecycle commit token.
+/// Runtime binding facts selected by generated MeerkatMachine authority.
 ///
-/// This token has no public constructor. RuntimeStore implementors can persist
-/// the selected state, but callers outside the machine/driver commit path
-/// cannot select arbitrary lifecycle truth.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MachineLifecycleCommit {
-    runtime_state: RuntimeState,
+/// RuntimeStore implementations persist and read these facts as part of a
+/// machine lifecycle snapshot. The commit token that writes these facts stays
+/// crate-private so compatibility callers cannot mint replacement lifecycle
+/// truth.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MachineLifecycleBindingFacts {
+    agent_runtime_id: Option<String>,
+    fence_token: Option<u64>,
+    runtime_generation: Option<u64>,
+    runtime_epoch_id: Option<String>,
 }
 
-impl MachineLifecycleCommit {
-    pub(crate) fn new(runtime_state: RuntimeState) -> Self {
-        Self { runtime_state }
+impl MachineLifecycleBindingFacts {
+    pub(crate) fn new(
+        agent_runtime_id: Option<String>,
+        fence_token: Option<u64>,
+        runtime_generation: Option<u64>,
+        runtime_epoch_id: Option<String>,
+    ) -> Self {
+        Self {
+            agent_runtime_id,
+            fence_token,
+            runtime_generation,
+            runtime_epoch_id,
+        }
+    }
+
+    pub fn agent_runtime_id(&self) -> Option<&str> {
+        self.agent_runtime_id.as_deref()
+    }
+
+    pub fn fence_token(&self) -> Option<u64> {
+        self.fence_token
+    }
+
+    pub fn runtime_generation(&self) -> Option<u64> {
+        self.runtime_generation
+    }
+
+    pub fn runtime_epoch_id(&self) -> Option<&str> {
+        self.runtime_epoch_id.as_deref()
+    }
+}
+
+/// Durable read-back shape for machine-owned lifecycle state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineLifecycleSnapshot {
+    runtime_state: RuntimeState,
+    binding: MachineLifecycleBindingFacts,
+}
+
+impl MachineLifecycleSnapshot {
+    pub(crate) fn new(runtime_state: RuntimeState, binding: MachineLifecycleBindingFacts) -> Self {
+        Self {
+            runtime_state,
+            binding,
+        }
     }
 
     /// Runtime state selected by the owning MeerkatMachine transition.
-    pub fn runtime_state(self) -> RuntimeState {
+    pub fn runtime_state(&self) -> RuntimeState {
         self.runtime_state
+    }
+
+    /// Runtime binding facts selected by the owning MeerkatMachine transition.
+    pub fn binding(&self) -> &MachineLifecycleBindingFacts {
+        &self.binding
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MachineLifecycleBindingFactsStoreWire {
+    agent_runtime_id: Option<String>,
+    fence_token: Option<u64>,
+    runtime_generation: Option<u64>,
+    runtime_epoch_id: Option<String>,
+}
+
+impl From<&MachineLifecycleBindingFacts> for MachineLifecycleBindingFactsStoreWire {
+    fn from(binding: &MachineLifecycleBindingFacts) -> Self {
+        Self {
+            agent_runtime_id: binding.agent_runtime_id().map(ToOwned::to_owned),
+            fence_token: binding.fence_token(),
+            runtime_generation: binding.runtime_generation(),
+            runtime_epoch_id: binding.runtime_epoch_id().map(ToOwned::to_owned),
+        }
+    }
+}
+
+impl From<MachineLifecycleBindingFactsStoreWire> for MachineLifecycleBindingFacts {
+    fn from(binding: MachineLifecycleBindingFactsStoreWire) -> Self {
+        Self::new(
+            binding.agent_runtime_id,
+            binding.fence_token,
+            binding.runtime_generation,
+            binding.runtime_epoch_id,
+        )
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MachineLifecycleSnapshotStoreWire {
+    record_version: u16,
+    runtime_state: RuntimeState,
+    binding: MachineLifecycleBindingFactsStoreWire,
+}
+
+impl From<&MachineLifecycleSnapshot> for MachineLifecycleSnapshotStoreWire {
+    fn from(snapshot: &MachineLifecycleSnapshot) -> Self {
+        Self {
+            record_version: MACHINE_LIFECYCLE_STORE_RECORD_VERSION,
+            runtime_state: snapshot.runtime_state(),
+            binding: snapshot.binding().into(),
+        }
+    }
+}
+
+impl TryFrom<MachineLifecycleSnapshotStoreWire> for MachineLifecycleSnapshot {
+    type Error = RuntimeStoreError;
+
+    fn try_from(record: MachineLifecycleSnapshotStoreWire) -> Result<Self, Self::Error> {
+        if record.record_version != MACHINE_LIFECYCLE_STORE_RECORD_VERSION {
+            return Err(RuntimeStoreError::ReadFailed(format!(
+                "unsupported machine lifecycle store record version {}",
+                record.record_version
+            )));
+        }
+        Ok(Self::new(record.runtime_state, record.binding.into()))
+    }
+}
+
+fn decode_machine_lifecycle_store_record(
+    bytes: &[u8],
+) -> Result<MachineLifecycleSnapshot, RuntimeStoreError> {
+    let record = serde_json::from_slice::<MachineLifecycleSnapshotStoreWire>(bytes)
+        .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+    MachineLifecycleSnapshot::try_from(record)
+}
+
+/// Load the last persisted runtime-state projection from a generated lifecycle
+/// record.
+///
+/// This is a projection of [`MachineLifecycleCommit`] authority. Store
+/// implementations provide only opaque record bytes; the runtime crate owns the
+/// decoding and rejects compatibility rows that are not machine lifecycle
+/// records.
+pub async fn load_runtime_state(
+    store: &dyn RuntimeStore,
+    runtime_id: &LogicalRuntimeId,
+) -> Result<Option<RuntimeState>, RuntimeStoreError> {
+    Ok(load_machine_lifecycle(store, runtime_id)
+        .await?
+        .map(|snapshot| snapshot.runtime_state()))
+}
+
+pub(crate) async fn load_machine_lifecycle(
+    store: &dyn RuntimeStore,
+    runtime_id: &LogicalRuntimeId,
+) -> Result<Option<MachineLifecycleSnapshot>, RuntimeStoreError> {
+    store
+        .load_machine_lifecycle_record(runtime_id)
+        .await?
+        .map(|bytes| decode_machine_lifecycle_store_record(&bytes))
+        .transpose()
+}
+
+/// Declared durable store record for generated machine lifecycle truth.
+///
+/// Stores receive this record from [`MachineLifecycleCommit`] and may persist
+/// its encoded form. Loading must decode this exact record shape; compatibility
+/// runtime-state projections are not lifecycle authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineLifecycleStoreRecord {
+    snapshot: MachineLifecycleSnapshot,
+}
+
+impl MachineLifecycleStoreRecord {
+    pub(crate) fn from_snapshot(snapshot: &MachineLifecycleSnapshot) -> Self {
+        Self {
+            snapshot: snapshot.clone(),
+        }
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, RuntimeStoreError> {
+        let wire = MachineLifecycleSnapshotStoreWire::from(&self.snapshot);
+        serde_json::to_vec(&wire).map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))
+    }
+}
+
+/// Machine-owned lifecycle commit token.
+///
+/// This token has no public constructor. RuntimeStore implementors can persist
+/// the selected state and binding facts, but callers outside the machine/driver
+/// commit path cannot select arbitrary lifecycle truth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineLifecycleCommit {
+    snapshot: MachineLifecycleSnapshot,
+}
+
+impl MachineLifecycleCommit {
+    pub(crate) fn new_with_binding(
+        runtime_state: RuntimeState,
+        binding: MachineLifecycleBindingFacts,
+    ) -> Self {
+        Self {
+            snapshot: MachineLifecycleSnapshot::new(runtime_state, binding),
+        }
+    }
+
+    /// Runtime state selected by the owning MeerkatMachine transition.
+    pub fn runtime_state(&self) -> RuntimeState {
+        self.snapshot.runtime_state()
+    }
+
+    /// Durable lifecycle snapshot selected by the owning MeerkatMachine transition.
+    pub fn snapshot(&self) -> &MachineLifecycleSnapshot {
+        &self.snapshot
+    }
+
+    /// Durable record selected by the owning MeerkatMachine transition.
+    pub fn store_record(&self) -> MachineLifecycleStoreRecord {
+        MachineLifecycleStoreRecord::from_snapshot(&self.snapshot)
+    }
+
+    pub(crate) fn into_snapshot(self) -> MachineLifecycleSnapshot {
+        self.snapshot
     }
 }
 
@@ -169,7 +381,7 @@ pub trait RuntimeStore: Send + Sync {
         runtime_id: &LogicalRuntimeId,
         session_delta: Option<SessionDelta>,
         receipt: RunBoundaryReceipt,
-        input_updates: Vec<StoredInputState>,
+        input_updates: Vec<InputStatePersistenceRecord>,
         session_store_key: Option<meerkat_core::types::SessionId>,
     ) -> Result<(), RuntimeStoreError>;
 
@@ -230,7 +442,7 @@ pub trait RuntimeStore: Send + Sync {
     async fn persist_input_state(
         &self,
         runtime_id: &LogicalRuntimeId,
-        state: &StoredInputState,
+        state: &InputStatePersistenceRecord,
     ) -> Result<(), RuntimeStoreError>;
 
     /// Load a single input state.
@@ -240,22 +452,29 @@ pub trait RuntimeStore: Send + Sync {
         input_id: &InputId,
     ) -> Result<Option<StoredInputState>, RuntimeStoreError>;
 
-    /// Load the last persisted runtime state, if any.
-    async fn load_runtime_state(
+    /// Load the last persisted machine lifecycle record bytes, if any.
+    ///
+    /// Implementations return only the opaque bytes previously obtained from
+    /// [`MachineLifecycleCommit::store_record`]. The runtime crate decodes
+    /// these bytes through `load_runtime_state` or internal recovery helpers;
+    /// stores must not promote compatibility rows or bare runtime states into
+    /// lifecycle authority.
+    async fn load_machine_lifecycle_record(
         &self,
         runtime_id: &LogicalRuntimeId,
-    ) -> Result<Option<RuntimeState>, RuntimeStoreError>;
+    ) -> Result<Option<Vec<u8>>, RuntimeStoreError>;
 
     /// Atomically commit machine-owned lifecycle state changes.
     ///
-    /// Writes runtime state + all input state updates in a single atomic
-    /// operation. `MachineLifecycleCommit` has no public constructor, so this
-    /// cannot be used by compatibility callers to pick runtime truth.
+    /// Writes runtime state, generated runtime binding facts, and all input
+    /// state updates in a single atomic operation. `MachineLifecycleCommit` has
+    /// no public constructor, so this cannot be used by compatibility callers
+    /// to pick runtime truth.
     async fn commit_machine_lifecycle(
         &self,
         runtime_id: &LogicalRuntimeId,
         commit: MachineLifecycleCommit,
-        input_states: &[StoredInputState],
+        input_states: &[InputStatePersistenceRecord],
     ) -> Result<(), RuntimeStoreError>;
 
     /// Persist a snapshot of the ops lifecycle registry state.
@@ -277,6 +496,17 @@ pub trait RuntimeStore: Send + Sync {
     ) -> Result<Option<crate::ops_lifecycle::PersistedOpsSnapshot>, RuntimeStoreError> {
         let _ = runtime_id;
         Err(RuntimeStoreError::Unsupported("load_ops_lifecycle".into()))
+    }
+
+    /// Delete a previously persisted ops lifecycle snapshot.
+    async fn delete_ops_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<(), RuntimeStoreError> {
+        let _ = runtime_id;
+        Err(RuntimeStoreError::Unsupported(
+            "delete_ops_lifecycle".into(),
+        ))
     }
 }
 

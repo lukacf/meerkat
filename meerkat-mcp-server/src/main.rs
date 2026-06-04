@@ -2,8 +2,8 @@
 
 use clap::{Parser, ValueEnum};
 use meerkat::surface::{
-    RequestTerminalResolution, StdioJsonWriter, SurfaceRequestExecutor, SurfaceRequestSemantics,
-    noop_request_action, spawn_stdio_json_writer,
+    RequestAdmissionError, RequestTerminalResolution, StdioJsonWriter, SurfaceRequestExecutor,
+    SurfaceRequestSemantics, noop_request_action, spawn_stdio_json_writer,
 };
 use meerkat_contracts::{ErrorCode, mcp_tool_request_lifecycle};
 use meerkat_core::{RealmConfig, RealmSelection, RuntimeBootstrap};
@@ -193,11 +193,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         let semantics =
                             SurfaceRequestSemantics::from(mcp_tool_request_lifecycle(&name));
-                        let context = request_executor.begin_request_with_semantics(
+                        let context = match request_executor.try_begin_request_with_semantics(
                             request_key.clone(),
                             noop_request_action(),
                             semantics,
-                        );
+                        ) {
+                            Ok(context) => context,
+                            Err(error) => {
+                                if writer
+                                    .send(request_admission_error_response(Some(request_id), error))
+                                    .await
+                                    .is_err()
+                                {
+                                    break Ok(());
+                                }
+                                continue;
+                            }
+                        };
 
                         let notifier_writer = writer.clone();
                         let notifier: meerkat_mcp_server::EventNotifier =
@@ -368,6 +380,27 @@ fn request_lifecycle_error_response(
             "message": format!("request lifecycle rejected publish response: {err}")
         }
     })
+}
+
+fn request_admission_error_response(id: Option<Value>, err: RequestAdmissionError) -> Value {
+    match err {
+        RequestAdmissionError::AlreadyExists => json!({
+            "jsonrpc": "2.0",
+            "id": id.unwrap_or(Value::Null),
+            "error": {
+                "code": ErrorCode::DuplicateInput.jsonrpc_code(),
+                "message": "request already admitted"
+            }
+        }),
+        RequestAdmissionError::AuthorityRejected { .. } => json!({
+            "jsonrpc": "2.0",
+            "id": id.unwrap_or(Value::Null),
+            "error": {
+                "code": -32603,
+                "message": format!("request admission rejected by generated authority: {err}")
+            }
+        }),
+    }
 }
 
 #[cfg(test)]

@@ -16,7 +16,7 @@ use thiserror::Error;
 
 use meerkat_auth_core::auth_oauth::{
     OAuthEndpoints, OAuthError, OAuthTokenRequestFormat, OAuthTokenResult, PkcePair,
-    exchange_authorization_code_with_state, exchange_refresh_token,
+    exchange_authorization_code_with_state, exchange_refresh_token, oauth_refresh_error,
 };
 use meerkat_auth_core::auth_store::{
     InMemoryCoordinator, PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
@@ -257,13 +257,16 @@ impl AnthropicOAuthRuntime {
                             "persisted tokens disappeared before OAuth refresh".into(),
                         )
                     })?;
-                let refresh_token = current
-                    .refresh_token
-                    .clone()
-                    .ok_or_else(|| RefreshError::Refresh("missing refresh_token".into()))?;
+                let refresh_token = current.refresh_token.clone().ok_or_else(|| {
+                    RefreshError::Observed {
+                        message: "missing refresh_token".into(),
+                        observation:
+                            meerkat_core::RefreshFailureObservation::local_credential_unusable(),
+                    }
+                })?;
                 let result = exchange_refresh_token(&http, &endpoints, &refresh_token, None)
                     .await
-                    .map_err(|e| RefreshError::Refresh(e.to_string()))?;
+                    .map_err(oauth_refresh_error)?;
                 let refreshed = oauth_result_to_persisted(
                     result,
                     PersistedAuthMode::ClaudeAiOauth,

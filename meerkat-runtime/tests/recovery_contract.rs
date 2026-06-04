@@ -17,10 +17,13 @@ use meerkat_runtime::input::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PromptInput,
 };
 use meerkat_runtime::input_state::{
-    InputLifecycleState, InputState, InputStateSeed, InputTerminalOutcome, StoredInputState,
+    InputLifecycleState, InputState, InputStatePersistenceRecord, InputStateSeed,
+    InputTerminalOutcome, StoredInputState,
 };
 use meerkat_runtime::runtime_state::RuntimeState;
-use meerkat_runtime::store::{InMemoryRuntimeStore, RuntimeStore, SessionDelta};
+use meerkat_runtime::store::{
+    InMemoryRuntimeStore, RuntimeStore, SessionDelta, load_runtime_state,
+};
 use meerkat_runtime::traits::RuntimeDriver;
 use meerkat_runtime::{EphemeralRuntimeDriver, MeerkatMachine, PersistentRuntimeDriver};
 use meerkat_store::MemoryBlobStore;
@@ -109,10 +112,10 @@ fn stamp_runtime_metadata(state: &mut InputState, input: &Input) {
     let policy = meerkat_runtime::DefaultPolicyTable::resolve(input, true);
     let policy_version = policy.policy_version;
     state.runtime_semantics = Some(
-        meerkat_runtime::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
-            &policy,
-            input.kind(),
-        ),
+        meerkat_runtime::ingress_types::RuntimeInputSemantics::try_from_generated_admission(
+            input, true,
+        )
+        .expect("generated admission semantics"),
     );
     state.policy = Some(meerkat_runtime::input_state::PolicySnapshot {
         version: policy_version,
@@ -139,8 +142,17 @@ fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> Stored
             last_boundary_sequence: Some(sequence),
             terminal_outcome: None,
             attempt_count: 1,
+            admission_sequence: None,
+            recovery_lane: Some(meerkat_core::types::HandlingMode::Queue),
         },
     }
+}
+
+fn persistable(stored: StoredInputState) -> InputStatePersistenceRecord {
+    let mut driver = EphemeralRuntimeDriver::new(make_runtime_id("persistence-record"));
+    driver
+        .recover_input_state_persistence_record(stored)
+        .expect("test input-state seed should pass generated recovery authority")
 }
 
 fn sorted_id_strings(ids: impl IntoIterator<Item = InputId>) -> Vec<String> {
@@ -159,16 +171,7 @@ fn bind_running(driver: &mut EphemeralRuntimeDriver, run_id: RunId, pre_run_phas
 async fn retire_runtime(
     driver: &mut PersistentRuntimeDriver,
 ) -> Result<meerkat_runtime::RetireReport, meerkat_runtime::RuntimeDriverError> {
-    let pending = driver
-        .active_input_ids()
-        .into_iter()
-        .filter(|input_id| {
-            driver
-                .input_phase(input_id)
-                .map(|phase| !phase.is_terminal())
-                .unwrap_or(false)
-        })
-        .count();
+    let pending = driver.active_input_ids().len();
     Ok(meerkat_runtime::RetireReport {
         inputs_abandoned: 0,
         inputs_pending_drain: pending,
@@ -202,8 +205,8 @@ async fn recovery_store_contract_applies_machine_owned_receipts_across_supported
                 }),
                 receipt.clone(),
                 vec![
-                    applied_pending_state(&first, &run_id, 0),
-                    applied_pending_state(&second, &run_id, 0),
+                    persistable(applied_pending_state(&first, &run_id, 0)),
+                    persistable(applied_pending_state(&second, &run_id, 0)),
                 ],
                 None,
             )
@@ -296,7 +299,7 @@ async fn recovery_store_contract_applies_machine_owned_receipts_across_supported
                     message_count: 1,
                     sequence: 1,
                 },
-                vec![applied_pending_state(&second, &run_id, 1)],
+                vec![persistable(applied_pending_state(&second, &run_id, 1))],
                 None,
             )
             .await;
@@ -333,12 +336,18 @@ async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persis
 
         harness
             .store
-            .persist_input_state(&runtime_id, &applied_pending_state(&first, &run_id, 0))
+            .persist_input_state(
+                &runtime_id,
+                &persistable(applied_pending_state(&first, &run_id, 0)),
+            )
             .await
             .unwrap();
         harness
             .store
-            .persist_input_state(&runtime_id, &applied_pending_state(&second, &run_id, 0))
+            .persist_input_state(
+                &runtime_id,
+                &persistable(applied_pending_state(&second, &run_id, 0)),
+            )
             .await
             .unwrap();
 
@@ -455,7 +464,9 @@ async fn recovery_contract_preserves_durable_lifecycle_state_projection() {
                 harness.name
             );
             assert_eq!(
-                harness.store.load_runtime_state(&runtime_id).await.unwrap(),
+                load_runtime_state(harness.store.as_ref(), &runtime_id)
+                    .await
+                    .unwrap(),
                 Some(recovered_state),
                 "{}: recovered {recovered_state} projection must remain durable lifecycle truth after machine recovery",
                 harness.name
@@ -485,8 +496,8 @@ async fn recovery_persistent_driver_contract_consumes_committed_boundary_contrib
                 }),
                 receipt.clone(),
                 vec![
-                    applied_pending_state(&first, &run_id, 0),
-                    applied_pending_state(&second, &run_id, 0),
+                    persistable(applied_pending_state(&first, &run_id, 0)),
+                    persistable(applied_pending_state(&second, &run_id, 0)),
                 ],
                 None,
             )
@@ -511,7 +522,9 @@ async fn recovery_persistent_driver_contract_consumes_committed_boundary_contrib
             harness.name
         );
         assert_eq!(
-            harness.store.load_runtime_state(&runtime_id).await.unwrap(),
+            load_runtime_state(harness.store.as_ref(), &runtime_id)
+                .await
+                .unwrap(),
             Some(RuntimeState::Idle),
             "{}: recovery should persist the runtime back to an idle lifecycle state",
             harness.name

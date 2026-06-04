@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 
 use crate::session::{SYSTEM_CONTEXT_SEPARATOR, SessionMeta};
 use crate::time_compat::SystemTime;
-use crate::types::{Message, SessionId};
+use crate::types::{Message, SessionId, SystemMessage};
 use crate::{
     Session, TranscriptHistoryState, TranscriptRewriteCommit, TranscriptRewriteSelection,
     transcript_messages_digest,
@@ -419,7 +419,7 @@ fn messages_preserve_conversation_tail_with_system_context_append(
     let Some(incoming_system) = incoming_system else {
         return Ok(false);
     };
-    if !system_context_is_append(previous_system, incoming_system) {
+    if !system_context_is_append(previous_system, incoming_system)? {
         return Ok(false);
     }
     if incoming_tail.len() < previous_tail.len() {
@@ -433,24 +433,75 @@ fn messages_preserve_conversation_tail_with_system_context_append(
     Ok(previous_tail_revision == incoming_tail_prefix_revision)
 }
 
-fn split_single_leading_system(messages: &[Message]) -> (Option<&str>, &[Message]) {
+fn split_single_leading_system(messages: &[Message]) -> (Option<&SystemMessage>, &[Message]) {
     match messages.first() {
-        Some(Message::System(system)) => (Some(system.content.as_str()), &messages[1..]),
+        Some(Message::System(system)) => (Some(system), &messages[1..]),
         _ => (None, messages),
     }
 }
 
-fn system_context_is_append(previous: Option<&str>, incoming: &str) -> bool {
-    let appended = match previous {
-        Some(previous) if incoming == previous => return true,
-        Some(previous) if incoming.starts_with(previous) => {
-            let appended = &incoming[previous.len()..];
-            appended.strip_prefix(SYSTEM_CONTEXT_SEPARATOR)
-        }
-        Some(_) => None,
-        None => Some(incoming),
-    };
-    appended.is_some_and(|appended| appended.starts_with("[Runtime System Context]"))
+/// Decide whether `incoming` is a continuation of `previous` produced by a
+/// runtime system-context append.
+///
+/// The structural part — identical content, or `incoming = previous +
+/// separator + suffix` — is a transcript-continuity proof (content equality of
+/// the retained prefix), not classification. The SEMANTIC append-admission
+/// verdict ("is this incoming persisted prompt an admissible
+/// runtime-context-append continuation of the persisted one") is owned by the
+/// canonical [`SessionDocumentMachine`] — the same machine the staging path
+/// already drives for the four-way append disposition — not a handwritten shell
+/// reducer. This function extracts only the pure structural observations plus
+/// the typed [`SystemPromptMutationKind`] runtime-context-append marker, drives
+/// the machine's `ResolveSystemContextPersistAppendAdmission` input, and mirrors
+/// the emitted verdict (`Admit` -> `true`, `Reject` -> `false`). It fails closed
+/// if the machine refuses or emits no verdict.
+fn system_context_is_append(
+    previous: Option<&SystemMessage>,
+    incoming: &SystemMessage,
+) -> Result<bool, SessionStoreError> {
+    // Pure structural observations the shell computes; NO semantic decision.
+    let has_previous = previous.is_some();
+    let content_identical = previous.is_some_and(|previous| incoming.content == previous.content);
+    let content_extends_previous =
+        previous.is_some_and(|previous| incoming.content.starts_with(&previous.content));
+    let appended_starts_with_separator = previous.is_some_and(|previous| {
+        incoming
+            .content
+            .get(previous.content.len()..)
+            .is_some_and(|appended| appended.starts_with(SYSTEM_CONTEXT_SEPARATOR))
+    });
+    let incoming_is_runtime_context_append = incoming.mutation_kind.is_runtime_context_append();
+
+    let mut authority = crate::session_document::SessionDocumentMachineAuthority::new();
+    let effects = authority
+        .resolve_system_context_persist_append_admission(
+            has_previous,
+            content_identical,
+            content_extends_previous,
+            appended_starts_with_separator,
+            incoming_is_runtime_context_append,
+        )
+        .map_err(|err| {
+            SessionStoreError::Internal(format!(
+                "session document authority refused persist-time system-context append admission: {err}"
+            ))
+        })?;
+    effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            crate::session_document::SessionDocumentEffect::SystemContextPersistAppendAdmissionResolved {
+                admission,
+            } => Some(matches!(
+                admission,
+                crate::session_document::SystemContextPersistAppendAdmission::Admit
+            )),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            SessionStoreError::Internal(
+                "session document authority emitted no persist-time system-context append admission verdict".to_string(),
+            )
+        })
 }
 
 fn incoming_preserves_prefix_after_transient_notice_cleanup(
@@ -507,6 +558,9 @@ pub fn run_boundary_snapshot_save_guard(
     match append_only_save_guard(incoming, previous) {
         Ok(()) => Ok(()),
         Err(append_error) => {
+            if run_boundary_commitless_history_projection_save_guard(incoming, previous)? {
+                return Ok(());
+            }
             let Some(previous) = previous else {
                 return Err(append_error);
             };
@@ -527,11 +581,24 @@ pub fn run_boundary_snapshot_save_guard(
                 previous,
                 &incoming_revision,
             )?;
+            if commits.is_none()
+                && run_boundary_context_summary_tail_projection_save_guard(
+                    incoming, previous, &state,
+                )?
+            {
+                return Ok(());
+            }
             let Some(commits) = commits else {
                 return Err(append_error);
             };
             let Some(commit) = commits.first() else {
-                return Err(append_error);
+                if state.commits.is_empty() {
+                    return Err(append_error);
+                }
+                for commit in &state.commits {
+                    validate_transcript_rewrite_commit_bodies(incoming, commit, &state)?;
+                }
+                return Ok(());
             };
             transcript_rewrite_bridge_save_guard(incoming, commit, &state, &incoming_revision)?;
             for commit in commits.iter().skip(1) {
@@ -540,6 +607,115 @@ pub fn run_boundary_snapshot_save_guard(
             Ok(())
         }
     }
+}
+
+fn run_boundary_commitless_history_projection_save_guard(
+    incoming: &Session,
+    previous: Option<&Session>,
+) -> Result<bool, SessionStoreError> {
+    let Some(state) = incoming.transcript_history_state().map_err(|err| {
+        SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("incoming transcript history state is malformed: {err}"),
+        }
+    })?
+    else {
+        return Ok(false);
+    };
+    if !state.commits.is_empty() {
+        return Ok(false);
+    }
+
+    let incoming_revision =
+        transcript_messages_digest(incoming.messages()).map_err(SessionStoreError::from)?;
+    if state.head != incoming_revision
+        || !state
+            .revisions
+            .iter()
+            .any(|body| body.revision == incoming_revision)
+    {
+        return Ok(false);
+    }
+
+    let mut projection_without_history = incoming.clone();
+    projection_without_history.clear_transcript_history_state();
+    if append_only_save_guard(&projection_without_history, previous).is_err() {
+        return Ok(false);
+    }
+
+    let Some(previous) = previous else {
+        return Ok(state.commits.is_empty());
+    };
+    if previous
+        .transcript_history_state()
+        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("previous transcript history state is malformed: {err}"),
+        })?
+        .is_some()
+    {
+        return Ok(false);
+    }
+
+    let previous_revision =
+        transcript_messages_digest(previous.messages()).map_err(SessionStoreError::from)?;
+    Ok(incoming_revision == previous_revision
+        || transcript_history_revision_extends(&state, &incoming_revision, &previous_revision))
+}
+
+fn run_boundary_context_summary_tail_projection_save_guard(
+    incoming: &Session,
+    previous: &Session,
+    state: &TranscriptHistoryState,
+) -> Result<bool, SessionStoreError> {
+    if state.commits.is_empty() {
+        return Ok(false);
+    }
+    incoming
+        .validate_transcript_history_state()
+        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("incoming transcript history state is malformed: {err}"),
+        })?;
+
+    let (incoming_system, incoming_tail) = match incoming.messages().split_first() {
+        Some((Message::System(system), tail)) => (Some(system), tail),
+        _ => (None, incoming.messages()),
+    };
+    let (previous_system, previous_tail) = match previous.messages().split_first() {
+        Some((Message::System(system), tail)) => (Some(system), tail),
+        _ => (None, previous.messages()),
+    };
+    if incoming_system.is_some() != previous_system.is_some()
+        || incoming_tail.len() <= previous_tail.len()
+    {
+        return Ok(false);
+    }
+    let Some(Message::User(summary)) = incoming_tail.first() else {
+        return Ok(false);
+    };
+    // Typed marker, not content classification: the runtime compaction producer
+    // stamps the rebuilt-transcript boundary message with the
+    // `CompactionSummary` transcript role. The save-guard admits the divergent
+    // rewrite parent only when that typed fact is present.
+    if !summary.transcript_role.is_compaction_summary() {
+        return Ok(false);
+    }
+
+    let retained_end = 1 + previous_tail.len();
+    let retained = &incoming_tail[1..retained_end];
+    let retained_revision =
+        transcript_messages_digest(retained).map_err(SessionStoreError::from)?;
+    let previous_revision =
+        transcript_messages_digest(previous_tail).map_err(SessionStoreError::from)?;
+    if retained_revision != previous_revision {
+        return Ok(false);
+    }
+
+    for commit in &state.commits {
+        validate_transcript_rewrite_commit_bodies(incoming, commit, state)?;
+    }
+    Ok(true)
 }
 
 /// Find the rewrite commit that authorizes replacing `previous_revision`,
@@ -1212,6 +1388,107 @@ mod tests {
         SystemNoticeKind, SystemNoticeMessage, Usage, UserMessage,
     };
 
+    /// FOLD C: the canonical SessionDocumentMachine — not a handwritten shell
+    /// boolean reducer — owns the live-vs-durable session-document authority
+    /// verdict, the precedence (archived > uncommitted transcript > runtime
+    /// system-context > stored transcript-revision), and the typed reason. This
+    /// drives the classifier directly and asserts every authority/reason outcome
+    /// and the precedence ordering.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn classify_live_session_authority_is_decided_by_machine() {
+        use crate::session_document::{
+            LiveSessionAuthorityKind, LiveSessionAuthorityReason, SessionDocumentEffect,
+            SessionDocumentMachineAuthority,
+        };
+
+        fn classify(
+            stored_transcript_diverged: bool,
+            live_has_uncommitted_transcript: bool,
+            runtime_system_context_diverged: bool,
+            stored_is_archived: bool,
+        ) -> (LiveSessionAuthorityKind, LiveSessionAuthorityReason) {
+            let mut authority = SessionDocumentMachineAuthority::new();
+            let effects = authority
+                .classify_live_session_authority(
+                    stored_transcript_diverged,
+                    live_has_uncommitted_transcript,
+                    runtime_system_context_diverged,
+                    stored_is_archived,
+                )
+                .expect("classifier must resolve a verdict");
+            effects
+                .iter()
+                .find_map(|effect| match effect {
+                    SessionDocumentEffect::LiveSessionAuthorityClassified { authority, reason } => {
+                        Some((*authority, *reason))
+                    }
+                    _ => None,
+                })
+                .expect("classifier must emit a verdict")
+        }
+
+        // All four false -> LiveAuthoritative.
+        let (kind, _) = classify(false, false, false, false);
+        assert_eq!(kind, LiveSessionAuthorityKind::LiveAuthoritative);
+
+        // Each divergence (in isolation) -> DurableAuthoritative with its reason.
+        assert_eq!(
+            classify(true, false, false, false),
+            (
+                LiveSessionAuthorityKind::DurableAuthoritative,
+                LiveSessionAuthorityReason::StoredTranscriptRevisionDiverged
+            ),
+        );
+        assert_eq!(
+            classify(false, true, false, false),
+            (
+                LiveSessionAuthorityKind::DurableAuthoritative,
+                LiveSessionAuthorityReason::LiveUncommittedTranscript
+            ),
+        );
+        assert_eq!(
+            classify(false, false, true, false),
+            (
+                LiveSessionAuthorityKind::DurableAuthoritative,
+                LiveSessionAuthorityReason::RuntimeSystemContextDiverged
+            ),
+        );
+        assert_eq!(
+            classify(false, false, false, true),
+            (
+                LiveSessionAuthorityKind::DurableAuthoritative,
+                LiveSessionAuthorityReason::StoredArchived
+            ),
+        );
+
+        // Precedence: archived > uncommitted > system-context > revision.
+        // When ALL four diverge, archived wins.
+        assert_eq!(
+            classify(true, true, true, true),
+            (
+                LiveSessionAuthorityKind::DurableAuthoritative,
+                LiveSessionAuthorityReason::StoredArchived
+            ),
+        );
+        // Not archived, but uncommitted + system-context + revision -> uncommitted.
+        assert_eq!(
+            classify(true, true, true, false),
+            (
+                LiveSessionAuthorityKind::DurableAuthoritative,
+                LiveSessionAuthorityReason::LiveUncommittedTranscript
+            ),
+        );
+        // Not archived, not uncommitted, but system-context + revision -> system-context.
+        assert_eq!(
+            classify(true, false, true, false),
+            (
+                LiveSessionAuthorityKind::DurableAuthoritative,
+                LiveSessionAuthorityReason::RuntimeSystemContextDiverged
+            ),
+        );
+    }
+
     #[test]
     fn append_only_guard_rejects_leading_system_message_replacement() {
         let mut previous = Session::new();
@@ -1238,17 +1515,45 @@ mod tests {
     }
 
     #[test]
-    fn append_only_guard_accepts_runtime_system_context_append() {
+    fn append_only_guard_accepts_runtime_system_context_append()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut previous = Session::new();
         previous.push(Message::System(SystemMessage::new("base system")));
         previous.push(Message::User(UserMessage::text("hello".to_string())));
 
         let mut incoming = previous.clone();
-        incoming.set_system_prompt(format!(
-            "base system{SYSTEM_CONTEXT_SEPARATOR}[Runtime System Context]\nsource: unit-test\n\nextra context"
-        ));
+        // The typed runtime-context-append producer stamps the system message's
+        // mutation_kind so the save-guard admits the divergence from a typed
+        // field, not the rendered `[Runtime System Context]` label.
+        incoming.set_system_prompt_with_source(
+            format!(
+                "base system{SYSTEM_CONTEXT_SEPARATOR}[Runtime System Context]\nsource: unit-test\n\nextra context"
+            ),
+            crate::session_durable_config_authority::SessionSystemPromptSource::RuntimeContextAppend,
+        )?;
 
         assert!(append_only_save_guard(&incoming, Some(&previous)).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn append_only_guard_rejects_append_shaped_prompt_without_runtime_context_marker() {
+        let mut previous = Session::new();
+        previous.push(Message::System(SystemMessage::new("base system")));
+        previous.push(Message::User(UserMessage::text("hello".to_string())));
+
+        // Same rendered shape as a runtime context append, but produced via a
+        // direct mutation (mutation_kind != RuntimeContextAppend). The typed
+        // gate must reject it — content prefix alone is not authority.
+        let mut incoming = previous.clone();
+        incoming.set_system_prompt(format!(
+            "base system{SYSTEM_CONTEXT_SEPARATOR}[Runtime System Context]\nsource: forged\n\nextra context"
+        ));
+
+        assert!(matches!(
+            append_only_save_guard(&incoming, Some(&previous)),
+            Err(SessionStoreError::TranscriptContinuityViolation { .. })
+        ));
     }
 
     #[test]
@@ -1293,7 +1598,9 @@ mod tests {
         let mut incoming = parent.clone();
         let mut replacement = vec![
             parent.messages()[0].clone(),
-            Message::User(UserMessage::text("[Context compacted] summary".to_string())),
+            Message::User(UserMessage::compaction_summary(
+                "[Context compacted] summary".to_string(),
+            )),
         ];
         replacement.extend_from_slice(&parent.messages()[1..]);
         incoming.commit_transcript_rewrite(
@@ -1340,7 +1647,9 @@ mod tests {
         let mut incoming = parent.clone();
         let mut replacement = vec![
             parent.messages()[0].clone(),
-            Message::User(UserMessage::text("[Context compacted] summary".to_string())),
+            Message::User(UserMessage::compaction_summary(
+                "[Context compacted] summary".to_string(),
+            )),
         ];
         replacement.extend_from_slice(&parent.messages()[1..]);
         incoming.commit_transcript_rewrite(
@@ -1391,7 +1700,7 @@ mod tests {
                 },
             ],
         };
-        incoming.set_metadata(
+        incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(history)?,
         );
@@ -1420,7 +1729,7 @@ mod tests {
             "unrelated poisoned history".to_string(),
         ))];
         let poisoned_revision = transcript_messages_digest(&poisoned_messages)?;
-        incoming.set_metadata(
+        incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(TranscriptHistoryState {
                 head: poisoned_revision.clone(),
@@ -1498,7 +1807,7 @@ mod tests {
         )?;
         let incoming_revision = incoming.transcript_revision()?;
         let commit_parent_revision = commit.parent_revision.clone();
-        incoming.set_metadata(
+        incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(TranscriptHistoryState {
                 head: incoming_revision.clone(),
@@ -1561,7 +1870,7 @@ mod tests {
         poisoned_state.head = first_commit.revision.clone();
 
         let mut poisoned = first_snapshot;
-        poisoned.set_metadata(
+        poisoned.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(poisoned_state)?,
         );
@@ -1632,7 +1941,7 @@ mod tests {
         let mut incoming = Session::new();
         incoming.push(Message::User(UserMessage::text("persisted".to_string())));
         let incoming_revision = incoming.transcript_revision()?;
-        incoming.set_metadata(
+        incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(TranscriptHistoryState {
                 head: incoming_revision.clone(),
@@ -1670,7 +1979,7 @@ mod tests {
             created_at: crate::types::message_timestamp_now(),
         }));
         let incoming_revision = incoming.transcript_revision()?;
-        incoming.set_metadata(
+        incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(TranscriptHistoryState {
                 head: incoming_revision.clone(),
@@ -1701,15 +2010,13 @@ mod tests {
     }
 
     #[test]
-    fn append_only_guard_rejects_new_rewrite_commits_on_system_context_append()
+    fn run_boundary_guard_accepts_commitless_history_seed_on_plain_append()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut previous = Session::new();
-        previous.push(Message::System(SystemMessage::new("base system")));
         previous.push(Message::User(UserMessage::text("persisted".to_string())));
+        let previous_revision = previous.transcript_revision()?;
+
         let mut incoming = previous.clone();
-        incoming.set_system_prompt(format!(
-            "base system{SYSTEM_CONTEXT_SEPARATOR}[Runtime System Context]\nsource: unit-test\n\nextra context"
-        ));
         incoming.push(Message::Assistant(AssistantMessage {
             content: "plain append".to_string(),
             tool_calls: Vec::new(),
@@ -1718,7 +2025,157 @@ mod tests {
             created_at: crate::types::message_timestamp_now(),
         }));
         let incoming_revision = incoming.transcript_revision()?;
-        incoming.set_metadata(
+        incoming.set_metadata_unchecked_for_test(
+            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(TranscriptHistoryState {
+                head: incoming_revision.clone(),
+                commits: Vec::new(),
+                revisions: vec![
+                    crate::TranscriptRevisionBody {
+                        revision: previous_revision.clone(),
+                        parent_revision: None,
+                        messages: previous.messages().to_vec(),
+                        created_at: previous.updated_at(),
+                    },
+                    crate::TranscriptRevisionBody {
+                        revision: incoming_revision,
+                        parent_revision: Some(previous_revision),
+                        messages: incoming.messages().to_vec(),
+                        created_at: incoming.updated_at(),
+                    },
+                ],
+            })?,
+        );
+
+        assert!(append_only_save_guard(&incoming, Some(&previous)).is_err());
+        assert!(run_boundary_snapshot_save_guard(&incoming, Some(&previous)).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn run_boundary_guard_accepts_retained_history_seed_on_plain_append()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut original = Session::new();
+        original.push(Message::User(UserMessage::text("verbose seed".to_string())));
+        let original_revision = original.transcript_revision()?;
+
+        let mut previous = original.clone();
+        previous.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::User(UserMessage::text(
+                "compacted seed".to_string(),
+            ))],
+            crate::TranscriptRewriteReason::new("compaction"),
+            Some("meerkat-core".to_string()),
+            Some(original_revision),
+        )?;
+        let previous_with_history = previous.clone();
+        previous.clear_transcript_history_state();
+
+        let mut incoming = previous_with_history;
+        incoming.push(Message::Assistant(AssistantMessage {
+            content: "plain append after retained history".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+
+        assert!(append_only_save_guard(&incoming, Some(&previous)).is_err());
+        assert!(run_boundary_snapshot_save_guard(&incoming, Some(&previous)).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn run_boundary_guard_accepts_commitless_history_seed_on_first_snapshot()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut incoming = Session::new();
+        incoming.push(Message::User(UserMessage::text("persisted".to_string())));
+        let incoming_revision = incoming.transcript_revision()?;
+        incoming.set_metadata_unchecked_for_test(
+            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(TranscriptHistoryState {
+                head: incoming_revision.clone(),
+                commits: Vec::new(),
+                revisions: vec![crate::TranscriptRevisionBody {
+                    revision: incoming_revision,
+                    parent_revision: None,
+                    messages: incoming.messages().to_vec(),
+                    created_at: incoming.updated_at(),
+                }],
+            })?,
+        );
+
+        assert!(append_only_save_guard(&incoming, None).is_err());
+        assert!(run_boundary_snapshot_save_guard(&incoming, None).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn run_boundary_guard_accepts_commitless_history_seed_on_initial_multi_revision_snapshot()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut base = Session::new();
+        base.push(Message::User(UserMessage::text("first".to_string())));
+        let base_revision = base.transcript_revision()?;
+
+        let mut incoming = base.clone();
+        incoming.push(Message::Assistant(AssistantMessage {
+            content: "second".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        let incoming_revision = incoming.transcript_revision()?;
+        incoming.set_metadata_unchecked_for_test(
+            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(TranscriptHistoryState {
+                head: incoming_revision.clone(),
+                commits: Vec::new(),
+                revisions: vec![
+                    crate::TranscriptRevisionBody {
+                        revision: base_revision.clone(),
+                        parent_revision: None,
+                        messages: base.messages().to_vec(),
+                        created_at: base.updated_at(),
+                    },
+                    crate::TranscriptRevisionBody {
+                        revision: incoming_revision,
+                        parent_revision: Some(base_revision),
+                        messages: incoming.messages().to_vec(),
+                        created_at: incoming.updated_at(),
+                    },
+                ],
+            })?,
+        );
+
+        assert!(append_only_save_guard(&incoming, None).is_err());
+        assert!(run_boundary_snapshot_save_guard(&incoming, None).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn append_only_guard_rejects_new_rewrite_commits_on_system_context_append()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut previous = Session::new();
+        previous.push(Message::System(SystemMessage::new("base system")));
+        previous.push(Message::User(UserMessage::text("persisted".to_string())));
+        let mut incoming = previous.clone();
+        incoming.set_system_prompt_with_source(
+            format!(
+                "base system{SYSTEM_CONTEXT_SEPARATOR}[Runtime System Context]\nsource: unit-test\n\nextra context"
+            ),
+            crate::session_durable_config_authority::SessionSystemPromptSource::RuntimeContextAppend,
+        )?;
+        incoming.push(Message::Assistant(AssistantMessage {
+            content: "plain append".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        let incoming_revision = incoming.transcript_revision()?;
+        incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(TranscriptHistoryState {
                 head: incoming_revision.clone(),
@@ -1770,7 +2227,7 @@ mod tests {
             created_at: crate::types::message_timestamp_now(),
         }));
         let incoming_revision = incoming.transcript_revision()?;
-        incoming.set_metadata(
+        incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(TranscriptHistoryState {
                 head: incoming_revision.clone(),
@@ -1798,6 +2255,115 @@ mod tests {
         assert!(matches!(
             append_only_save_guard(&incoming, Some(&previous)),
             Err(SessionStoreError::InvalidTranscriptRewrite { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn run_boundary_guard_accepts_generated_context_summary_before_retained_tail()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut previous = Session::new();
+        previous.push(Message::System(SystemMessage::new(
+            "runtime system before context refresh",
+        )));
+        previous.push(Message::User(UserMessage::text(
+            "Turn 1 request".to_string(),
+        )));
+        previous.push(Message::Assistant(AssistantMessage {
+            content: "Turn 1 answer".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+
+        let mut incoming = Session::with_id(previous.id().clone());
+        incoming.push(Message::System(SystemMessage::new(
+            "runtime system after context refresh",
+        )));
+        incoming.push(Message::User(UserMessage::text(
+            "Verbose context that will be compacted".to_string(),
+        )));
+        for message in previous.messages()[1..].iter().cloned() {
+            incoming.push(message);
+        }
+        incoming.push(Message::Assistant(AssistantMessage {
+            content: "Turn 2 generated answer".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        let parent_revision = incoming.transcript_revision()?;
+        incoming.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+            vec![Message::User(UserMessage::compaction_summary(
+                "[Context compacted] Earlier runtime context".to_string(),
+            ))],
+            crate::TranscriptRewriteReason::new("compaction"),
+            Some("meerkat-core".to_string()),
+            Some(parent_revision),
+        )?;
+
+        assert!(append_only_save_guard(&incoming, Some(&previous)).is_err());
+        assert!(run_boundary_snapshot_save_guard(&incoming, Some(&previous)).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn run_boundary_guard_rejects_context_summary_tail_without_compaction_summary_marker()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut previous = Session::new();
+        previous.push(Message::System(SystemMessage::new(
+            "runtime system before context refresh",
+        )));
+        previous.push(Message::User(UserMessage::text(
+            "Turn 1 request".to_string(),
+        )));
+        previous.push(Message::Assistant(AssistantMessage {
+            content: "Turn 1 answer".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+
+        let mut incoming = Session::with_id(previous.id().clone());
+        incoming.push(Message::System(SystemMessage::new(
+            "runtime system after context refresh",
+        )));
+        incoming.push(Message::User(UserMessage::text(
+            "Verbose context that will be compacted".to_string(),
+        )));
+        for message in previous.messages()[1..].iter().cloned() {
+            incoming.push(message);
+        }
+        incoming.push(Message::Assistant(AssistantMessage {
+            content: "Turn 2 generated answer".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        let parent_revision = incoming.transcript_revision()?;
+        // Same rendered shape (content begins with `[Context compacted]`) but the
+        // summary message uses the ordinary conversational role. The typed gate
+        // must reject it: rendered content alone is not authority.
+        incoming.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+            vec![Message::User(UserMessage::text(
+                "[Context compacted] Earlier runtime context".to_string(),
+            ))],
+            crate::TranscriptRewriteReason::new("compaction"),
+            Some("meerkat-core".to_string()),
+            Some(parent_revision),
+        )?;
+
+        assert!(append_only_save_guard(&incoming, Some(&previous)).is_err());
+        assert!(matches!(
+            run_boundary_snapshot_save_guard(&incoming, Some(&previous)),
+            Err(SessionStoreError::TranscriptContinuityViolation { .. }
+                | SessionStoreError::MonotonicityViolation { .. })
         ));
         Ok(())
     }
@@ -2088,7 +2654,7 @@ mod tests {
             .transcript_history_state()?
             .ok_or_else(|| std::io::Error::other("incoming rewrite should retain history"))?;
         state.commits = vec![new_commit];
-        incoming.set_metadata(
+        incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(state)?,
         );
@@ -2099,5 +2665,116 @@ mod tests {
                 if reason.contains("drop retained transcript rewrite commits")
         ));
         Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // FOLD 2: the persist-time system-context append-admission decision routes
+    // through SessionDocumentMachine ResolveSystemContextPersistAppendAdmission
+    // (the SAME machine the staging path drives). These tests pin that the
+    // persist-time verdict matches a direct machine call for every shape, and
+    // that the four admission cases behave exactly as the retired shell reducer.
+    // ------------------------------------------------------------------
+
+    fn runtime_append_system(content: &str) -> SystemMessage {
+        let mut system = SystemMessage::new(content);
+        system.mutation_kind = crate::types::SystemPromptMutationKind::RuntimeContextAppend;
+        system
+    }
+
+    /// Direct machine call mirroring the persist-time observation extraction —
+    /// the persist-time path MUST agree with this for every input shape.
+    #[allow(clippy::expect_used)]
+    fn machine_persist_append_admits(
+        previous: Option<&SystemMessage>,
+        incoming: &SystemMessage,
+    ) -> bool {
+        let has_previous = previous.is_some();
+        let content_identical =
+            previous.is_some_and(|previous| incoming.content == previous.content);
+        let content_extends_previous =
+            previous.is_some_and(|previous| incoming.content.starts_with(&previous.content));
+        let appended_starts_with_separator = previous.is_some_and(|previous| {
+            incoming
+                .content
+                .get(previous.content.len()..)
+                .is_some_and(|appended| appended.starts_with(SYSTEM_CONTEXT_SEPARATOR))
+        });
+        let incoming_is_runtime_context_append = incoming.mutation_kind.is_runtime_context_append();
+        let mut authority = crate::session_document::SessionDocumentMachineAuthority::new();
+        let effects = authority
+            .resolve_system_context_persist_append_admission(
+                has_previous,
+                content_identical,
+                content_extends_previous,
+                appended_starts_with_separator,
+                incoming_is_runtime_context_append,
+            )
+            .expect("machine resolves persist-append admission");
+        effects.into_iter().any(|effect| {
+            matches!(
+                effect,
+                crate::session_document::SessionDocumentEffect::SystemContextPersistAppendAdmissionResolved {
+                    admission: crate::session_document::SystemContextPersistAppendAdmission::Admit,
+                }
+            )
+        })
+    }
+
+    #[allow(clippy::expect_used)]
+    fn assert_persist_append_matches_machine(
+        previous: Option<&SystemMessage>,
+        incoming: &SystemMessage,
+        expected: bool,
+    ) {
+        let verdict =
+            system_context_is_append(previous, incoming).expect("persist-time admission resolves");
+        assert_eq!(verdict, expected, "persist-time verdict mismatch");
+        assert_eq!(
+            verdict,
+            machine_persist_append_admits(previous, incoming),
+            "persist-time verdict diverges from direct machine call"
+        );
+    }
+
+    #[test]
+    fn persist_append_identical_content_admits() {
+        let previous = SystemMessage::new("base system");
+        let incoming = SystemMessage::new("base system");
+        assert_persist_append_matches_machine(Some(&previous), &incoming, true);
+    }
+
+    #[test]
+    fn persist_append_separator_append_with_marker_admits() {
+        let previous = SystemMessage::new("base system");
+        let incoming = runtime_append_system(&format!(
+            "base system{SYSTEM_CONTEXT_SEPARATOR}[Runtime System Context]\nextra"
+        ));
+        assert_persist_append_matches_machine(Some(&previous), &incoming, true);
+    }
+
+    #[test]
+    fn persist_append_shaped_without_marker_rejects() {
+        let previous = SystemMessage::new("base system");
+        // Append-shaped content but no runtime-context-append provenance marker.
+        let incoming = SystemMessage::new(format!(
+            "base system{SYSTEM_CONTEXT_SEPARATOR}[Runtime System Context]\nextra"
+        ));
+        assert_persist_append_matches_machine(Some(&previous), &incoming, false);
+    }
+
+    #[test]
+    fn persist_append_divergent_content_rejects() {
+        let previous = SystemMessage::new("base system");
+        let incoming = runtime_append_system("totally different");
+        assert_persist_append_matches_machine(Some(&previous), &incoming, false);
+    }
+
+    #[test]
+    fn persist_append_no_previous_admits_only_with_marker() {
+        let with_marker = runtime_append_system("brand new context");
+        assert_persist_append_matches_machine(None, &with_marker, true);
+
+        let without_marker = SystemMessage::new("brand new context");
+        assert_persist_append_matches_machine(None, &without_marker, false);
     }
 }

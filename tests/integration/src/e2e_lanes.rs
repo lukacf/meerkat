@@ -482,14 +482,24 @@ impl SmokeScheduler {
                         format!("mob-suite scheduler closed for {}", run_label(spec))
                     })?)
                 }
-                SmokeRuntimeClass::Standard => None,
+                SmokeRuntimeClass::Browser | SmokeRuntimeClass::Standard => None,
             };
-        let global = self.global.clone().acquire_owned().await.map_err(|_| {
-            format!(
-                "e2e smoke scheduler closed before starting {}",
-                run_label(spec)
-            )
-        })?;
+        let global_permits = if matches!(class, SmokeRuntimeClass::Browser) {
+            self.jobs
+        } else {
+            1
+        };
+        let global = self
+            .global
+            .clone()
+            .acquire_many_owned(u32::try_from(global_permits).unwrap_or(u32::MAX))
+            .await
+            .map_err(|_| {
+                format!(
+                    "e2e smoke scheduler closed before starting {}",
+                    run_label(spec)
+                )
+            })?;
         eprintln!(
             "e2e smoke scheduler dispatch: {} [{class:?}]",
             run_label(spec)
@@ -511,10 +521,14 @@ enum SmokeRuntimeClass {
     Standard,
     Media,
     MobSuite,
+    Browser,
 }
 
 fn smoke_runtime_class(spec: &Spec) -> SmokeRuntimeClass {
     let label = run_label(spec).to_ascii_lowercase();
+    if label.contains("browser ") {
+        return SmokeRuntimeClass::Browser;
+    }
     if label.contains("mob flow runtime") || label.contains("partial resume collaborative joke") {
         return SmokeRuntimeClass::MobSuite;
     }
@@ -566,6 +580,7 @@ fn smoke_runtime_priority(spec: &Spec) -> u16 {
         SmokeRuntimeClass::Media => 500,
         SmokeRuntimeClass::MobSuite => 400,
         SmokeRuntimeClass::Standard => 100,
+        SmokeRuntimeClass::Browser => 50,
     }
 }
 
@@ -2188,7 +2203,11 @@ fn bazel_rust_test_path(
         "meerkat-integration-tests:smoke_shared_realm" => {
             "tests/integration/smoke_shared_realm_test"
         }
+        "meerkat-comms:e2e" => "meerkat-comms/e2e_test",
         "meerkat-mob:smoke_mob_flow_runtime" => "meerkat-mob/smoke_mob_flow_runtime_test",
+        "meerkat-mob:smoke_mob_generated_image_comms" => {
+            "meerkat-mob/smoke_mob_generated_image_comms_test"
+        }
         "meerkat-mob:smoke_mob_pictionary" => "meerkat-mob/smoke_mob_pictionary_test",
         "meerkat-mob:smoke_mob_resume" => "meerkat-mob/smoke_mob_resume_test",
         "meerkat-rpc:live_smoke_rpc" => "meerkat-rpc/live_smoke_rpc_test",
@@ -4867,11 +4886,21 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
             id: None,
             lane: Lane::Smoke,
             title: "Mob flow runtime smoke suite",
-            timeout_secs: 2400,
+            // The suite drives 18 live multi-model flow scenarios; the heaviest
+            // (maximal_matrix) legitimately runs ~552s solo. Running 4 such flows
+            // concurrently against a single shared provider key saturates rate
+            // limits and slows every in-flight flow past the per-flow deadline,
+            // so this lane scenario throttles the in-process flow concurrency to
+            // 2 and grants a generous per-flow deadline. The outer budget covers
+            // the extra serial waves that the lower concurrency implies.
+            timeout_secs: 3600,
             required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
             required_bins: &["cargo"],
             cwd: ".",
-            env: &[],
+            env: &[
+                ("MEERKAT_FLOW_RUNTIME_SMOKE_CONCURRENCY", "2"),
+                ("MEERKAT_FLOW_RUNTIME_SMOKE_RUN_TIMEOUT_SECS", "1800"),
+            ],
             cargo_bin_env: &[],
             pre_commands: &[],
             command: CommandSpec::Raw {
@@ -4895,7 +4924,11 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
             id: None,
             lane: Lane::Smoke,
             title: "Mob external TCP production drain smoke",
-            timeout_secs: 300,
+            // Each smoke scenario builds in its own isolated target dir, so this
+            // scenario cold-compiles the large smoke_mob_flow_runtime test binary
+            // before running its single live bind+turn. 300s cannot cover a cold
+            // build plus a live turn; align with the other mob scenarios' budget.
+            timeout_secs: 900,
             required_env: &[],
             required_bins: &["cargo"],
             cwd: ".",
@@ -5105,6 +5138,10 @@ mod tests {
         assert_eq!(
             smoke_runtime_class(scenario_spec(81).unwrap()),
             SmokeRuntimeClass::Media
+        );
+        assert_eq!(
+            smoke_runtime_class(scenario_spec(48).unwrap()),
+            SmokeRuntimeClass::Browser
         );
         assert_eq!(
             smoke_runtime_class(suite_spec("rpc-dynamic-tool-pickup").unwrap()),

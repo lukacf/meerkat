@@ -210,6 +210,36 @@ fn test_system_notice_block_without_type_is_invalid() {
 }
 
 #[test]
+fn peer_terminal_notice_projection_does_not_default_missing_status() {
+    let block = SystemNoticeBlock::Comms {
+        kind: "peer_response_terminal".to_string(),
+        direction: SystemNoticeDirection::Incoming,
+        peer: Some(SystemNoticePeer {
+            id: "peer-a".to_string(),
+            display_name: Some("Peer A".to_string()),
+        }),
+        request_id: Some("request-1".to_string()),
+        intent: None,
+        status: None,
+        summary: None,
+        payload: Some(json!({"ok": true})),
+        content: Vec::new(),
+    };
+
+    let projection = block.model_projection_text();
+    assert!(
+        !projection.contains("Status: completed"),
+        "missing terminal status must not be projected as completed: {projection}"
+    );
+    assert!(
+        !projection.contains("Status:"),
+        "missing terminal status must remain absent from model projection: {projection}"
+    );
+    assert!(projection.contains("Request ID: request-1"));
+    assert!(projection.contains("Result:"));
+}
+
+#[test]
 fn test_tool_call_serialization() {
     let tool_call = ToolCall::new(
         "tc_abc123".to_string(),

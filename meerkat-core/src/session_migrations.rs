@@ -1,11 +1,7 @@
 //! v0 → v1 persistence migration for session snapshots and runtime input
 //! state blobs.
 //!
-//! See `docs/wave-c-prep/persistence-migration.md` (authoritative). Wave-c
-//! C-3 lands fixtures 1-11; fixture #12 (`runtime_session_snapshots` drift)
-//! is owned by C-6r.
-//!
-//! # Strategy (per §4 of the design doc)
+//! # Strategy
 //!
 //! *Opportunistic upgrade on read:* the `SessionStore` load path pushes each
 //! persisted blob through [`migrate_session_value`] before `serde_json`
@@ -16,31 +12,37 @@
 //!
 //! # What actually changes v0 → v1
 //!
-//! - `AuthBindingRef` inner field names (`realm_id` / `binding_id` →
-//!   `realm` / `binding`) — structural rename inside `SessionMetadata`
-//!   and inside `SessionLlmIdentity`. Slug validation is deferred to
-//!   `RealmId::parse` / `BindingId::parse`. Invalid slugs are slugified
-//!   (`[^a-z0-9_.-]` → `_`) and the original payload is retained under
-//!   `legacy_auth_binding` so no binding intent is dropped silently.
+//! - `AuthBindingRef` must already use the current typed shape
+//!   (`realm` / `binding`). Legacy aliases (`connection_ref`,
+//!   `realm_id`, `binding_id`) are rejected fail-closed here rather than
+//!   rewritten, because auth-binding identity affects trust/default
+//!   resolution and no generated migration authority owns a value change.
 //! - `SessionMetadata.schema_version` byte is stamped with the current
 //!   `SESSION_METADATA_SCHEMA_VERSION` on write; on read, rows lacking the
-//!   field default to `1` via `#[serde(default)]`.
+//!   field default to `1` via `#[serde(default)]`. Canonical nested
+//!   `metadata.session_metadata` must deserialize as [`SessionMetadata`] and
+//!   pass generated durable-config restore authority after stamping; malformed
+//!   or incomplete metadata fails closed rather than becoming absent metadata.
+//! - Root `session_metadata` and `session_llm_identity` rows are rejected
+//!   fail-closed. `Session` does not carry those root fields, and lowering
+//!   them into metadata would change identity/trust/default-resolution facts
+//!   without generated migration authority.
 //! - `provider_params` remains `Option<serde_json::Value>` on
 //!   `SessionMetadata` in this wave — the canonical typed shape
 //!   (`ProviderParamsOverride`) lives on `RuntimeTurnMetadata`. C-3's only
 //!   obligation here is to keep the value opaque (fixture #4, the Anthropic
 //!   extended-thinking canary, must be preserved byte-for-byte through the
 //!   round-trip).
-//! - Input-state (`StoredInputState`) lives in `meerkat-runtime`; C-3
-//!   provides the transform entry point ([`migrate_input_state_value`])
-//!   that fixtures 9-11 exercise. Wiring the transform into the runtime
-//!   store's read path is C-6r's responsibility.
+//! - Input-state (`StoredInputState`) lives in `meerkat-runtime`; its
+//!   production serde shape carries a generated-authority version byte, and
+//!   this module exposes the JSON transform used by compatibility fixtures.
 
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
-use crate::Session;
-use crate::session::{SESSION_METADATA_SCHEMA_VERSION, SESSION_VERSION};
+use crate::generated::session_persistence_version_authority;
+use crate::session_durable_config_authority;
+use crate::{Session, SessionMetadata};
 
 /// Salvaged-migration payload carried by [`SessionMigrationError::Partial`].
 ///
@@ -69,6 +71,30 @@ pub enum SessionMigrationError {
     /// that can't be re-typed is retained alongside the migrated session,
     /// not discarded.
     Partial(Box<PartialSessionMigration>),
+    /// Generated persistence-version authority rejected a migration stamp.
+    GeneratedAuthority(
+        session_persistence_version_authority::SessionPersistenceVersionAuthorityError,
+    ),
+    /// Generated durable-config authority rejected restored session metadata.
+    GeneratedDurableConfigAuthority(
+        session_durable_config_authority::SessionDurableConfigAuthorityError,
+    ),
+    /// Canonical nested `metadata.session_metadata` failed typed restore.
+    InvalidSessionMetadata(serde_json::Error),
+    /// Canonical nested `metadata.session_metadata` was not a JSON object.
+    InvalidSessionMetadataShape(&'static str),
+    /// Legacy auth-binding identity would require a semantic migration that
+    /// this compatibility path is not allowed to perform.
+    UnsupportedLegacyAuthBinding {
+        location: &'static str,
+        field: &'static str,
+    },
+    /// Root `session_metadata` would be ignored by `Session` serde unless a
+    /// generated migration authority owns a typed lowering/rejection path.
+    UnsupportedRootSessionMetadata,
+    /// Root `session_llm_identity` would be ignored by `Session` serde unless
+    /// a generated migration authority owns a typed lowering/rejection path.
+    UnsupportedRootSessionLlmIdentity,
 }
 
 impl std::fmt::Display for SessionMigrationError {
@@ -86,6 +112,29 @@ impl std::fmt::Display for SessionMigrationError {
                 "persisted session migrated with salvaged legacy payload ({} keys retained)",
                 inner.legacy.len()
             ),
+            Self::GeneratedAuthority(err) => write!(f, "{err}"),
+            Self::GeneratedDurableConfigAuthority(err) => write!(f, "{err}"),
+            Self::InvalidSessionMetadata(err) => {
+                write!(f, "persisted session metadata failed typed restore: {err}")
+            }
+            Self::InvalidSessionMetadataShape(reason) => {
+                write!(
+                    f,
+                    "persisted session metadata failed typed restore: {reason}"
+                )
+            }
+            Self::UnsupportedLegacyAuthBinding { location, field } => write!(
+                f,
+                "legacy auth-binding identity field '{field}' in {location} requires generated migration authority"
+            ),
+            Self::UnsupportedRootSessionMetadata => write!(
+                f,
+                "root session_metadata requires generated migration authority"
+            ),
+            Self::UnsupportedRootSessionLlmIdentity => write!(
+                f,
+                "root session_llm_identity requires generated migration authority"
+            ),
         }
     }
 }
@@ -94,6 +143,9 @@ impl std::error::Error for SessionMigrationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Deserialize(err) => Some(err),
+            Self::GeneratedAuthority(err) => Some(err),
+            Self::GeneratedDurableConfigAuthority(err) => Some(err),
+            Self::InvalidSessionMetadata(err) => Some(err),
             _ => None,
         }
     }
@@ -144,37 +196,27 @@ pub fn migrate_session_value(mut value: Value) -> Result<Session, SessionMigrati
 
     // `SessionMetadata` lives inside `session.metadata` under the
     // `session_metadata` key (`SESSION_METADATA_KEY`).
-    if let Some(sess_meta) = root
-        .get_mut("metadata")
-        .and_then(Value::as_object_mut)
-        .and_then(|map| map.get_mut("session_metadata"))
-        .and_then(Value::as_object_mut)
+    if let Some(metadata) = root.get_mut("metadata").and_then(Value::as_object_mut)
+        && let Some(sess_meta_value) = metadata.get_mut("session_metadata")
     {
-        migrate_metadata_object(sess_meta, &mut legacy);
+        let Some(sess_meta) = sess_meta_value.as_object_mut() else {
+            return Err(SessionMigrationError::InvalidSessionMetadataShape(
+                "metadata.session_metadata is not a JSON object",
+            ));
+        };
+        migrate_metadata_object(sess_meta, &mut legacy)?;
+        validate_session_metadata_object(sess_meta)?;
     }
 
-    // Some projection sites serialize `session_metadata` at the
-    // envelope level instead of nested inside `metadata`; accept both
-    // shapes so test fixtures and wild rows both migrate cleanly.
-    if let Some(sess_meta) = root
-        .get_mut("session_metadata")
-        .and_then(Value::as_object_mut)
-    {
-        migrate_metadata_object(sess_meta, &mut legacy);
+    if root.contains_key("session_metadata") {
+        return Err(SessionMigrationError::UnsupportedRootSessionMetadata);
     }
 
-    // Migrate SessionLlmIdentity sub-tree (identical auth_binding logic).
-    if let Some(ident) = root
-        .get_mut("session_llm_identity")
-        .and_then(Value::as_object_mut)
-    {
-        migrate_identity_object(ident, &mut legacy);
+    if root.contains_key("session_llm_identity") {
+        return Err(SessionMigrationError::UnsupportedRootSessionLlmIdentity);
     }
 
-    // Stamp envelope version forward. A blob missing `version` is the
-    // pre-SESSION_VERSION shape; treat as v1 and bump to current.
-    root.entry("version").or_insert_with(|| json!(1));
-    root.insert("version".to_string(), json!(SESSION_VERSION));
+    stamp_session_envelope_version(root)?;
 
     match serde_json::from_value::<Session>(value) {
         Ok(session) if legacy.is_empty() => Ok(session),
@@ -187,9 +229,9 @@ pub fn migrate_session_value(mut value: Value) -> Result<Session, SessionMigrati
 
 /// Migration entry point for `StoredInputState` rows (fixtures 9-11).
 ///
-/// Production wiring (replacing `runtime_store.load_input_states`'s direct
-/// `serde_json::from_slice`) lands with C-6r. C-3 exposes the transform
-/// so the persistence compat suite can exercise it in isolation.
+/// Production `StoredInputState` serde now validates the same generated
+/// version authority on write/read; this transform is the compatibility
+/// fixture entry point for pre-version JSON blobs.
 pub fn migrate_input_state_value(mut value: Value) -> Result<Value, SessionMigrationError> {
     let Some(root) = value.as_object_mut() else {
         return Err(SessionMigrationError::Malformed(
@@ -211,207 +253,212 @@ pub fn migrate_input_state_value(mut value: Value) -> Result<Value, SessionMigra
                 .get_mut("turn_metadata")
                 .and_then(Value::as_object_mut)
             {
-                migrate_turn_metadata_object(tm);
+                migrate_turn_metadata_object(tm)?;
             }
         }
     }
 
-    // Stamp the new per-entity version byte so the production deserialize
-    // path (once C-6r wires it) sees v2 rows.
-    root.entry("stored_input_state_version")
-        .or_insert_with(|| json!(1));
-    root.insert(
-        "stored_input_state_version".to_string(),
-        json!(STORED_INPUT_STATE_VERSION),
-    );
+    stamp_stored_input_state_version(root)?;
 
     Ok(value)
 }
 
-/// Current `StoredInputState` on-disk version, bumped by wave-c C-3.
-pub const STORED_INPUT_STATE_VERSION: u32 = 2;
-
-fn migrate_metadata_object(meta: &mut Map<String, Value>, legacy: &mut BTreeMap<String, Value>) {
-    migrate_auth_binding_field(meta, legacy, "legacy_auth_binding_session_metadata");
-
-    // `realm_id` on SessionMetadata is kept as Option<String> for v1;
-    // cross-check dogma §5 of persistence-migration.md: if auth_binding
-    // is absent but realm_id is present, lift realm_id into a
-    // auth_binding shell so resume doesn't fall back to env defaults.
-    // We only do this when binding_id is also inferrable — otherwise we
-    // leave realm_id alone (resume handles the absence cleanly).
-    // NB: field population happens through `default_binding` inference,
-    // which is business-policy territory; we do not fabricate a binding
-    // here, we only rewrite the shape that exists.
-
-    // Stamp schema_version forward for any blob that didn't carry it.
-    meta.entry("schema_version").or_insert_with(|| json!(1));
-    meta.insert(
-        "schema_version".to_string(),
-        json!(SESSION_METADATA_SCHEMA_VERSION),
-    );
+fn stamp_session_envelope_version(
+    object: &mut Map<String, Value>,
+) -> Result<(), SessionMigrationError> {
+    let stamp = session_persistence_version_authority::authorize_session_envelope_version_stamp();
+    session_persistence_version_authority::stamp_authorized_version(object, stamp)
+        .map_err(SessionMigrationError::GeneratedAuthority)?;
+    Ok(())
 }
 
-fn migrate_identity_object(ident: &mut Map<String, Value>, legacy: &mut BTreeMap<String, Value>) {
-    migrate_auth_binding_field(ident, legacy, "legacy_auth_binding_session_llm_identity");
+fn stamp_stored_input_state_version(
+    object: &mut Map<String, Value>,
+) -> Result<(), SessionMigrationError> {
+    let stamp = session_persistence_version_authority::authorize_stored_input_state_version_stamp();
+    session_persistence_version_authority::stamp_authorized_version(object, stamp)
+        .map_err(SessionMigrationError::GeneratedAuthority)?;
+    Ok(())
 }
 
-fn migrate_turn_metadata_object(tm: &mut Map<String, Value>) {
-    if let Some(old) = tm.remove("connection_ref")
-        && !tm.contains_key("auth_binding")
-    {
-        tm.insert("auth_binding".to_string(), old);
-    }
-    if let Some(cref) = tm.get_mut("auth_binding") {
-        // Turn-metadata AuthBindingRef is salvage-best-effort; we drop
-        // ill-formed values to None (the turn already ran; the override
-        // only matters on a *future* retry).
-        let mut throwaway = BTreeMap::new();
-        rewrite_auth_binding(cref, &mut throwaway, "__discard__");
-    }
+fn stamp_session_metadata_schema_version(
+    object: &mut Map<String, Value>,
+) -> Result<(), SessionMigrationError> {
+    let stamp =
+        session_persistence_version_authority::authorize_session_metadata_schema_version_stamp();
+    session_persistence_version_authority::stamp_authorized_version(object, stamp)
+        .map_err(SessionMigrationError::GeneratedAuthority)?;
+    Ok(())
+}
+
+fn migrate_metadata_object(
+    meta: &mut Map<String, Value>,
+    legacy: &mut BTreeMap<String, Value>,
+) -> Result<(), SessionMigrationError> {
+    let _ = legacy;
+    reject_legacy_auth_binding_field(meta, "SessionMetadata")?;
+
+    stamp_session_metadata_schema_version(meta)?;
+    Ok(())
+}
+
+fn validate_session_metadata_object(
+    meta: &Map<String, Value>,
+) -> Result<(), SessionMigrationError> {
+    let mut metadata = serde_json::from_value::<SessionMetadata>(Value::Object(meta.clone()))
+        .map_err(SessionMigrationError::InvalidSessionMetadata)?;
+    metadata.schema_version =
+        session_persistence_version_authority::restore_session_metadata_schema_version(
+            metadata.schema_version,
+        )
+        .map_err(SessionMigrationError::GeneratedAuthority)?;
+    session_durable_config_authority::restore_session_metadata(metadata)
+        .map_err(SessionMigrationError::GeneratedDurableConfigAuthority)?;
+    Ok(())
+}
+
+fn migrate_turn_metadata_object(tm: &mut Map<String, Value>) -> Result<(), SessionMigrationError> {
+    reject_legacy_auth_binding_field(tm, "RuntimeTurnMetadata")?;
     // Provider string that no longer parses: leave it; serde will
     // surface the typed-Provider error on the way out and the deserialize
     // path will propagate. Fixture #11 exercises this.
+    Ok(())
 }
 
-fn migrate_auth_binding_field(
-    map: &mut Map<String, Value>,
-    legacy: &mut BTreeMap<String, Value>,
-    legacy_key: &str,
-) {
-    if let Some(old) = map.remove("connection_ref") {
-        if map.contains_key("auth_binding") {
-            legacy.insert(format!("{legacy_key}_compat_alias"), old);
-        } else {
-            map.insert("auth_binding".to_string(), old);
+fn reject_legacy_auth_binding_field(
+    map: &Map<String, Value>,
+    location: &'static str,
+) -> Result<(), SessionMigrationError> {
+    if map.contains_key("connection_ref") {
+        return Err(SessionMigrationError::UnsupportedLegacyAuthBinding {
+            location,
+            field: "connection_ref",
+        });
+    }
+    if let Some(obj) = map.get("auth_binding").and_then(Value::as_object) {
+        for field in ["realm_id", "binding_id"] {
+            if obj.contains_key(field) {
+                return Err(SessionMigrationError::UnsupportedLegacyAuthBinding {
+                    location,
+                    field,
+                });
+            }
         }
     }
-    if let Some(cref) = map.get_mut("auth_binding") {
-        rewrite_auth_binding(cref, legacy, legacy_key);
-    }
-}
-
-/// Rewrite `{realm_id, binding_id, profile}` → `{realm, binding, profile}`
-/// in place on a `AuthBindingRef` JSON object. If the slug validation
-/// embedded in the typed newtypes would reject the raw value, slugify
-/// (`[^a-z0-9_.-]` → `_`) and retain the original under
-/// `legacy[legacy_key]`.
-fn rewrite_auth_binding(cref: &mut Value, legacy: &mut BTreeMap<String, Value>, legacy_key: &str) {
-    let Some(obj) = cref.as_object_mut() else {
-        return;
-    };
-
-    // Retain a snapshot of the pre-migration shape if we detect the v0
-    // field names — so operator tooling can compare the two.
-    let has_legacy_keys = obj.contains_key("realm_id") || obj.contains_key("binding_id");
-
-    let realm_raw = obj.remove("realm_id").or_else(|| obj.remove("realm"));
-    let binding_raw = obj.remove("binding_id").or_else(|| obj.remove("binding"));
-
-    let mut preserved = serde_json::Map::new();
-    let mut slugified = false;
-
-    if let Some(raw) = realm_raw {
-        if let Some(s) = raw.as_str() {
-            let (coerced, was_slugified) = slugify_if_needed(s);
-            if was_slugified {
-                preserved.insert("realm_id".to_string(), Value::String(s.to_string()));
-                slugified = true;
-            }
-            obj.insert("realm".to_string(), Value::String(coerced));
-        } else {
-            // Non-string value — let serde surface it.
-            obj.insert("realm".to_string(), raw);
-        }
-    }
-
-    if let Some(raw) = binding_raw {
-        if let Some(s) = raw.as_str() {
-            let (coerced, was_slugified) = slugify_if_needed(s);
-            if was_slugified {
-                preserved.insert("binding_id".to_string(), Value::String(s.to_string()));
-                slugified = true;
-            }
-            obj.insert("binding".to_string(), Value::String(coerced));
-        } else {
-            obj.insert("binding".to_string(), raw);
-        }
-    }
-
-    // `profile` is re-used as-is — same field name, same Option<String>
-    // shape; slug validation happens inside ProfileId::parse on
-    // deserialize.
-    if let Some(profile_raw) = obj.remove("profile") {
-        if let Some(s) = profile_raw.as_str() {
-            let (coerced, was_slugified) = slugify_if_needed(s);
-            if was_slugified {
-                preserved.insert("profile".to_string(), Value::String(s.to_string()));
-                slugified = true;
-            }
-            obj.insert("profile".to_string(), Value::String(coerced));
-        } else {
-            obj.insert("profile".to_string(), profile_raw);
-        }
-    }
-
-    if slugified && legacy_key != "__discard__" {
-        legacy.insert(legacy_key.to_string(), Value::Object(preserved));
-    } else if has_legacy_keys && legacy_key != "__discard__" {
-        // Pure rename, no slug coercion — retain nothing (clean v0→v2).
-    }
-}
-
-/// If the raw value is already a valid realm/binding/profile slug
-/// (ASCII alphanumeric + `-`, `_`, `.`), return it unchanged. Otherwise
-/// lowercase and replace each out-of-class byte with `_`.
-fn slugify_if_needed(raw: &str) -> (String, bool) {
-    if !raw.is_empty()
-        && raw
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-    {
-        return (raw.to_string(), false);
-    }
-    let lower = raw.to_ascii_lowercase();
-    let coerced: String = lower
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    (coerced, true)
+    Ok(())
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
     #[test]
-    fn slugify_passes_clean_slugs() {
-        assert_eq!(slugify_if_needed("dev"), ("dev".to_string(), false));
-        assert_eq!(
-            slugify_if_needed("default_openai"),
-            ("default_openai".to_string(), false)
+    fn legacy_connection_ref_rejected_fail_closed() {
+        let mut map = Map::new();
+        map.insert(
+            "connection_ref".to_string(),
+            serde_json::json!({"realm": "dev"}),
         );
-        assert_eq!(
-            slugify_if_needed("realm-1.2"),
-            ("realm-1.2".to_string(), false)
-        );
+
+        let err = reject_legacy_auth_binding_field(&map, "SessionMetadata")
+            .expect_err("legacy connection_ref must not be rewritten");
+
+        assert!(matches!(
+            err,
+            SessionMigrationError::UnsupportedLegacyAuthBinding {
+                location: "SessionMetadata",
+                field: "connection_ref",
+            }
+        ));
     }
 
     #[test]
-    fn slugify_coerces_invalid_chars() {
-        assert_eq!(
-            slugify_if_needed("dev mode"),
-            ("dev_mode".to_string(), true)
+    fn legacy_auth_binding_identity_fields_rejected_fail_closed() {
+        let mut map = Map::new();
+        map.insert(
+            "auth_binding".to_string(),
+            serde_json::json!({"realm_id": "dev", "binding_id": "default"}),
         );
-        assert_eq!(
-            slugify_if_needed("Prod/Thing"),
-            ("prod_thing".to_string(), true)
-        );
+
+        let err = reject_legacy_auth_binding_field(&map, "SessionLlmIdentity")
+            .expect_err("legacy auth binding identity fields must not be rewritten");
+
+        assert!(matches!(
+            err,
+            SessionMigrationError::UnsupportedLegacyAuthBinding {
+                location: "SessionLlmIdentity",
+                field: "realm_id",
+            }
+        ));
+    }
+
+    #[test]
+    fn root_session_metadata_rejected_fail_closed() {
+        let envelope = serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "messages": [],
+            "created_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "updated_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "session_metadata": {
+                "provider": "openai",
+                "model": "gpt-4o-mini"
+            }
+        });
+
+        let err = migrate_session_value(envelope)
+            .expect_err("root session_metadata must not be silently dropped");
+
+        assert!(matches!(
+            err,
+            SessionMigrationError::UnsupportedRootSessionMetadata
+        ));
+    }
+
+    #[test]
+    fn invalid_nested_session_metadata_rejected_fail_closed() {
+        let envelope = serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "messages": [],
+            "created_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "updated_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "metadata": {
+                "session_metadata": {
+                    "provider_params": {
+                        "temperature": 0.2
+                    }
+                }
+            }
+        });
+
+        let err = migrate_session_value(envelope)
+            .expect_err("incomplete nested session_metadata must fail closed");
+
+        assert!(matches!(
+            err,
+            SessionMigrationError::InvalidSessionMetadata(_)
+        ));
+    }
+
+    #[test]
+    fn root_session_llm_identity_rejected_fail_closed() {
+        let envelope = serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "messages": [],
+            "created_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "updated_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "session_llm_identity": {
+                "provider": "openai",
+                "model": "gpt-4o-mini"
+            }
+        });
+
+        let err = migrate_session_value(envelope)
+            .expect_err("root session_llm_identity must not be silently dropped");
+
+        assert!(matches!(
+            err,
+            SessionMigrationError::UnsupportedRootSessionLlmIdentity
+        ));
     }
 }

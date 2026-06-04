@@ -7,12 +7,41 @@ use indexmap::{IndexMap, IndexSet};
 use std::fmt;
 
 const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
+    "meerkat_peer_endpoint_set_cardinality_matches",
+    "meerkat_peer_endpoint_set_contains_peer_id",
+    "meerkat_peer_endpoint_option_peer_id_matches",
+    "meerkat_peer_endpoint_peer_id_matches",
+    "meerkat_peer_endpoint_set_peer_ids_unique",
+    "mob_machine_identity_has_session_binding",
+    "mob_machine_external_peer_edge_has_matching_key",
+    "mob_machine_external_peer_edge_local",
+    "mob_machine_external_peer_edge_peer_id",
+    "mob_machine_external_peer_identity_absent",
+    "mob_machine_external_peer_key_matches_edge",
+    "mob_machine_external_peer_key_matches_local",
+    "mob_machine_session_bound_live_runtime_ids_match",
+    "mob_machine_member_peer_endpoint_peer_id",
+    "mob_machine_member_peer_overlay",
+    "mob_machine_member_peer_overlay_complete",
+    "mob_machine_member_peer_overlay_peer_ids_unique",
+    "mob_machine_wiring_edge_matches_members",
+    "mob_machine_run_step_status_after_set",
+    "mob_machine_run_step_bool_after_set",
+    "mob_machine_run_step_condition_result_after_set",
+    "mob_machine_run_step_u64_after_set",
+    "mob_machine_run_step_u64_after_increment",
+    "mob_machine_run_retry_count_after_increment",
+    "mob_machine_frame_node_bool_after_set",
     "mob_machine_frame_node_status_after_admit",
     "mob_machine_frame_ready_queue_after_admit",
     "mob_machine_frame_node_status_after_terminal",
     "mob_machine_frame_ready_queue_after_terminal",
     "mob_machine_node_terminal",
     "mob_machine_step_status_from_frame_node_status",
+    "mob_coordination_work_intent_unexpired",
+    "mob_coordination_resource_claim_unexpired",
+    "mob_coordination_resource_claim_active_at",
+    "mob_coordination_resource_claim_inactive_at",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -828,10 +857,26 @@ pub enum Quantifier {
 pub enum Expr {
     Bool(bool),
     U64(u64),
+    U64Max,
     String(String),
     NamedVariant {
         enum_name: EnumTypeId,
         variant: EnumVariantId,
+    },
+    FieldAccess {
+        base: Box<Expr>,
+        field: FieldId,
+    },
+    EnumVariantIs {
+        value: Box<Expr>,
+        enum_name: EnumTypeId,
+        variant: EnumVariantId,
+    },
+    EnumStringSetPayload {
+        value: Box<Expr>,
+        enum_name: EnumTypeId,
+        variant: EnumVariantId,
+        field: FieldId,
     },
     EmptySet,
     EmptyMap,
@@ -872,6 +917,10 @@ pub enum Expr {
     },
     SeqElements(Box<Expr>),
     Len(Box<Expr>),
+    Count {
+        collection: Box<Expr>,
+        value: Box<Expr>,
+    },
     Head(Box<Expr>),
     MapKeys(Box<Expr>),
     MapGet {
@@ -906,6 +955,7 @@ impl Expr {
         match self {
             Self::Bool(_)
             | Self::U64(_)
+            | Self::U64Max
             | Self::String(_)
             | Self::NamedVariant { .. }
             | Self::EmptySet
@@ -955,6 +1005,19 @@ impl Expr {
                         variant: variant.clone(),
                     });
                 }
+            }
+            Self::FieldAccess { base, .. }
+            | Self::EnumVariantIs { value: base, .. }
+            | Self::EnumStringSetPayload { value: base, .. } => {
+                base.validate(
+                    phase_names,
+                    field_names,
+                    input_variants,
+                    signal_variants,
+                    effect_variants,
+                    helper_names,
+                    bindings,
+                )?;
             }
             Self::IfElse {
                 condition,
@@ -1043,6 +1106,26 @@ impl Expr {
                 )?;
             }
             Self::Contains { collection, value } => {
+                collection.validate(
+                    phase_names,
+                    field_names,
+                    input_variants,
+                    signal_variants,
+                    effect_variants,
+                    helper_names,
+                    bindings,
+                )?;
+                value.validate(
+                    phase_names,
+                    field_names,
+                    input_variants,
+                    signal_variants,
+                    effect_variants,
+                    helper_names,
+                    bindings,
+                )?;
+            }
+            Self::Count { collection, value } => {
                 collection.validate(
                     phase_names,
                     field_names,
@@ -1378,8 +1461,12 @@ pub(crate) fn collect_named_type_references_machine(
 fn collect_named_type_references_binding(binding: &NamedTypeBinding, out: &mut IndexSet<String>) {
     if let RustTypeAtom::TypePathStruct { fields, .. } = &binding.rust {
         for field in fields {
-            if let crate::TypePathStructFieldAtom::Named(name) = &field.atom {
-                out.insert(name.as_str().to_owned());
+            match &field.atom {
+                crate::TypePathStructFieldAtom::Named(name)
+                | crate::TypePathStructFieldAtom::OptionalNamed(name) => {
+                    out.insert(name.as_str().to_owned());
+                }
+                crate::TypePathStructFieldAtom::String => {}
             }
         }
     }
@@ -1555,7 +1642,12 @@ fn validate_string_enum_named_variants_expr(
         | Expr::Head(inner)
         | Expr::MapKeys(inner)
         | Expr::SeqElements(inner)
-        | Expr::Some(inner) => validate_string_enum_named_variants_expr(schema, inner)?,
+        | Expr::Some(inner)
+        | Expr::FieldAccess { base: inner, .. }
+        | Expr::EnumVariantIs { value: inner, .. }
+        | Expr::EnumStringSetPayload { value: inner, .. } => {
+            validate_string_enum_named_variants_expr(schema, inner)?;
+        }
         Expr::Eq(left, right)
         | Expr::Neq(left, right)
         | Expr::Add(left, right)
@@ -1568,6 +1660,10 @@ fn validate_string_enum_named_variants_expr(
             validate_string_enum_named_variants_expr(schema, right)?;
         }
         Expr::Contains { collection, value } => {
+            validate_string_enum_named_variants_expr(schema, collection)?;
+            validate_string_enum_named_variants_expr(schema, value)?;
+        }
+        Expr::Count { collection, value } => {
             validate_string_enum_named_variants_expr(schema, collection)?;
             validate_string_enum_named_variants_expr(schema, value)?;
         }
@@ -1590,6 +1686,7 @@ fn validate_string_enum_named_variants_expr(
         }
         Expr::Bool(_)
         | Expr::U64(_)
+        | Expr::U64Max
         | Expr::String(_)
         | Expr::EmptySet
         | Expr::EmptyMap
@@ -1800,8 +1897,8 @@ mod tests {
         let transition = schema
             .transitions
             .iter_mut()
-            .find(|transition| transition.name.as_str() == "RegisterOpIdle")
-            .expect("RegisterOpIdle transition");
+            .find(|transition| transition.name.as_str() == "RegisterOpAcceptedIdle")
+            .expect("RegisterOpAcceptedIdle transition");
         let update = transition
             .updates
             .iter_mut()
@@ -1913,7 +2010,7 @@ mod tests {
 
         assert_eq!(
             schema.validate(),
-            Err(MachineSchemaError::MissingStringEnumBinding {
+            Err(MachineSchemaError::MissingNamedTypeBinding {
                 name: "OperationStatus".into(),
             })
         );

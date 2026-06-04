@@ -324,31 +324,13 @@ fn default_event_router_buffer_size() -> usize {
     256
 }
 
-/// Canonical cleanup semantics for mobs indexed to an owning bridge session.
-///
-/// `owner_bridge_session_id` is lookup/indexing metadata only. Cleanup
-/// eligibility is owned exclusively by this policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionCleanupPolicy {
-    #[default]
-    Manual,
-    DestroyOnOwnerArchive,
-}
-
-impl SessionCleanupPolicy {
-    pub fn is_manual(policy: &Self) -> bool {
-        matches!(policy, Self::Manual)
-    }
-}
-
 /// Complete mob definition.
 ///
 /// Describes profiles, MCP servers, wiring rules, and skill sources.
 /// Serializable for storage in `MobCreated` events. `rust_bundles` in
 /// `ToolConfig` are stored as string names only; actual dispatchers
 /// must be re-registered on resume.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MobDefinition {
     /// Unique mob identifier.
     pub id: MobId,
@@ -383,24 +365,16 @@ pub struct MobDefinition {
     #[serde(default)]
     pub limits: Option<LimitsSpec>,
     /// Optional declarative spawn policy for automatic member provisioning.
+    /// Runtime create/resume lowers this static config into MobMachine before
+    /// it can affect unknown-member admission.
     #[serde(default)]
     pub spawn_policy: Option<SpawnPolicyConfig>,
     /// Optional declarative event router configuration.
     #[serde(default)]
     pub event_router: Option<EventRouterConfig>,
-    /// Canonical identity-first owner bridge session binding for lookup/indexing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) owner_bridge_session_id: Option<String>,
-    /// Canonical cleanup policy for session-indexed mobs.
-    #[serde(default, skip_serializing_if = "SessionCleanupPolicy::is_manual")]
-    pub session_cleanup_policy: SessionCleanupPolicy,
-    /// Whether this is an implicit delegation mob (created by `delegate` tool).
-    /// Implicit mobs cannot be destroyed directly — they are cleaned up when
-    /// the owning session is archived. Explicit mobs (created by `mob_create`)
-    /// can be destroyed by their owning session.
-    #[serde(default)]
-    pub is_implicit: bool,
 }
+
+impl Eq for MobDefinition {}
 
 /// Helper struct for TOML deserialization of the `[mob]` section.
 #[derive(Deserialize)]
@@ -458,16 +432,15 @@ impl MobDefinition {
             limits: None,
             spawn_policy: None,
             event_router: None,
-            owner_bridge_session_id: None,
-            session_cleanup_policy: SessionCleanupPolicy::Manual,
-            is_implicit: false,
         }
     }
 
-    /// Create a minimal implicit delegation mob indexed to the given bridge session.
+    /// Create a minimal implicit delegation mob request for the given bridge session.
     ///
-    /// The mob is tagged with `owner_bridge_session_id` for
-    /// bridge-session-indexed lookup and marked session-scoped for cleanup.
+    /// The bridge session parameter is retained for stable implicit mob id
+    /// derivation. Runtime create lowers the owner-session binding and cleanup
+    /// classification through generated `MobMachine` authority; this definition
+    /// does not own those facts.
     /// The owning session is wired as an external peer by the delegate tool;
     /// implicit mobs do not create a local orchestrator member.
     #[doc(hidden)]
@@ -492,7 +465,7 @@ impl MobDefinition {
                 provider_params: None,
             }),
         );
-        let mut definition = Self {
+        Self {
             id: mob_id,
             orchestrator: None,
             profiles,
@@ -508,12 +481,7 @@ impl MobDefinition {
             limits: None,
             spawn_policy: None,
             event_router: None,
-            owner_bridge_session_id: None,
-            session_cleanup_policy: SessionCleanupPolicy::Manual,
-            is_implicit: true,
-        };
-        definition.mark_owner_bridge_session_indexed(bridge_session_id);
-        definition
+        }
     }
 
     /// Parse a mob definition from TOML content.
@@ -538,70 +506,7 @@ impl MobDefinition {
             limits: raw.limits,
             spawn_policy: raw.spawn_policy,
             event_router: raw.event_router,
-            owner_bridge_session_id: None,
-            session_cleanup_policy: SessionCleanupPolicy::Manual,
-            is_implicit: false,
         })
-    }
-
-    #[doc(hidden)]
-    pub fn owner_bridge_session_index(&self) -> Option<&str> {
-        self.owner_bridge_session_id.as_deref()
-    }
-
-    /// Assign bridge-session lookup ownership without changing cleanup semantics.
-    #[doc(hidden)]
-    pub fn set_owner_bridge_session_lookup_index(&mut self, bridge_session_id: impl Into<String>) {
-        self.owner_bridge_session_id = Some(bridge_session_id.into());
-    }
-
-    /// Clear any bridge-session lookup ownership without changing other flags.
-    #[doc(hidden)]
-    pub fn clear_owner_bridge_session_lookup_index(&mut self) {
-        self.owner_bridge_session_id = None;
-    }
-
-    #[doc(hidden)]
-    pub fn has_owner_bridge_session_index(&self, bridge_session_id: &str) -> bool {
-        self.owner_bridge_session_index() == Some(bridge_session_id)
-    }
-
-    #[doc(hidden)]
-    pub fn is_indexed_to_owner_bridge_session(&self, bridge_session_id: &str) -> bool {
-        self.has_owner_bridge_session_index(bridge_session_id)
-    }
-
-    #[doc(hidden)]
-    pub fn is_cleanup_scoped_to_owner_bridge_session(&self, bridge_session_id: &str) -> bool {
-        self.has_owner_bridge_session_index(bridge_session_id)
-            && self.session_cleanup_policy == SessionCleanupPolicy::DestroyOnOwnerArchive
-    }
-
-    #[doc(hidden)]
-    pub fn mark_owner_bridge_session_indexed(&mut self, bridge_session_id: &str) {
-        self.set_owner_bridge_session_lookup_index(bridge_session_id.to_string());
-        self.session_cleanup_policy = SessionCleanupPolicy::DestroyOnOwnerArchive;
-    }
-
-    #[doc(hidden)]
-    pub fn is_owned_by_bridge_session(&self, bridge_session_id: &str) -> bool {
-        self.has_owner_bridge_session_index(bridge_session_id)
-    }
-
-    #[doc(hidden)]
-    pub fn is_bridge_session_scoped_to(&self, bridge_session_id: &str) -> bool {
-        self.is_cleanup_scoped_to_owner_bridge_session(bridge_session_id)
-    }
-
-    #[doc(hidden)]
-    pub fn mark_bridge_session_scoped(&mut self, bridge_session_id: &str) {
-        self.mark_owner_bridge_session_indexed(bridge_session_id);
-    }
-
-    #[doc(hidden)]
-    pub fn clear_internal_lifecycle_flags(&mut self) {
-        self.is_implicit = false;
-        self.session_cleanup_policy = SessionCleanupPolicy::Manual;
     }
 
     /// Resolve an inline profile by name.
@@ -788,9 +693,6 @@ path = "skills/reviewer.md"
             limits: None,
             spawn_policy: None,
             event_router: None,
-            owner_bridge_session_id: None,
-            session_cleanup_policy: SessionCleanupPolicy::Manual,
-            is_implicit: false,
         };
         let json = serde_json::to_string_pretty(&def).unwrap();
         let parsed: MobDefinition = serde_json::from_str(&json).unwrap();
@@ -819,26 +721,37 @@ id = "minimal"
     }
 
     #[test]
-    fn test_owner_bridge_session_index_is_canonical() {
-        let mut def = MobDefinition::implicit("bridge-session", "gpt-5.4");
-        assert_eq!(
-            def.owner_bridge_session_id.as_deref(),
-            Some("bridge-session"),
-            "owner bridge session id should be populated"
-        );
+    fn test_implicit_definition_does_not_mint_owner_cleanup_authority() {
+        let def = MobDefinition::implicit("bridge-session", "gpt-5.4");
+        let json = serde_json::to_value(&def).unwrap();
+        assert!(json.get("owner_bridge_session_id").is_none());
+        assert!(json.get("session_cleanup_policy").is_none());
+        assert!(json.get("is_implicit").is_none());
         assert!(def.orchestrator.is_none());
         assert!(
             !def.wiring.auto_wire_orchestrator,
             "implicit delegate mobs rely on external owner wiring"
         );
-        assert!(def.has_owner_bridge_session_index("bridge-session"));
-        assert!(def.is_indexed_to_owner_bridge_session("bridge-session"));
-        assert!(def.is_cleanup_scoped_to_owner_bridge_session("bridge-session"));
-        assert!(def.is_owned_by_bridge_session("bridge-session"));
-        assert!(def.is_bridge_session_scoped_to("bridge-session"));
+    }
 
-        def.owner_bridge_session_id = None;
-        assert!(!def.has_owner_bridge_session_index("bridge-session"));
+    #[test]
+    fn test_legacy_lifecycle_projection_fields_are_deserialize_only_unknowns() {
+        let base = MobDefinition::explicit("legacy-projection");
+        let mut value = serde_json::to_value(&base).unwrap();
+        value["owner_bridge_session_id"] =
+            serde_json::json!("019dbd3d-d7ad-75a1-96d0-8013927e78f8");
+        value["session_cleanup_policy"] = serde_json::json!("destroy_on_owner_archive");
+        value["is_implicit"] = serde_json::json!(true);
+
+        let parsed: MobDefinition = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            parsed, base,
+            "legacy lifecycle projections are ignored during definition decoding"
+        );
+        let serialized = serde_json::to_value(&parsed).unwrap();
+        assert!(serialized.get("owner_bridge_session_id").is_none());
+        assert!(serialized.get("session_cleanup_policy").is_none());
+        assert!(serialized.get("is_implicit").is_none());
     }
 
     #[test]

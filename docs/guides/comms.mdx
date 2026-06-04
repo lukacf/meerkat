@@ -630,7 +630,7 @@ let result = comms_agent.run_stay_alive("You are a coordinator.".to_string(), No
 let bootstrap = CommsBootstrap::from_config(config, base_dir);
 let prepared = bootstrap.prepare().await?;
 
-// Child runtime (inproc, auto-trusts parent)
+// Child runtime (inproc; generated wiring must install parent trust)
 let bootstrap = CommsBootstrap::for_child_inproc(
     "child-agent".to_string(),
     ParentCommsContext {

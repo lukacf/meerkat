@@ -6,12 +6,12 @@ mod sealed {
     pub trait Sealed {}
 }
 
-/// Sealed mutator trait for roster canonical state.
+/// Sealed mutator trait for the event-backed roster projection.
 ///
-/// Only [`RosterAuthority`] implements this trait so that all canonical roster
-/// mutations flow through a single source of truth. External helpers can take a
-/// mutable reference to the authority and drive the lifecycle/wiring transitions
-/// without touching the underlying projection directly.
+/// Only [`RosterAuthority`] implements this trait so that projection mutations
+/// flow through one actor-owned facade. Machine facts such as lifecycle,
+/// membership admission, profile identity, and wiring authority remain owned by
+/// the generated `MobMachine`; this wrapper only updates roster display state.
 pub(crate) trait RosterMutator: sealed::Sealed {
     fn add_member(&mut self, entry: RosterAddEntry) -> bool;
     fn remove_member(&mut self, agent_identity: &MeerkatId) -> bool;
@@ -22,11 +22,11 @@ pub(crate) trait RosterMutator: sealed::Sealed {
     ) -> bool;
 }
 
-/// Canonical authority for the roster projection.
+/// Actor-owned facade for the roster projection.
 ///
-/// This registry owns the same data that `Roster` exposes but enforces that all
-/// mutations (add, retire, wire) happen through this sealed authority so that
-/// higher-level actors can reason about lifecycle/wiring ordering separately.
+/// This registry owns the same data that `Roster` exposes and keeps writes
+/// local to the actor. It is not behavior authority for machine facts; runtime
+/// control paths must consult generated `MobMachine` state before acting.
 #[derive(Debug, Clone)]
 pub(crate) struct RosterAuthority {
     roster: Roster,
@@ -85,22 +85,15 @@ impl RosterAuthority {
         self.roster.apply(event);
     }
 
-    /// Flip a roster entry to `Retiring` state. Mirrors
-    /// [`Roster::mark_retiring_by_identity`]. Returns `true` if the member
-    /// was present and was flipped to `Retiring`; `false` otherwise.
-    pub(crate) fn mark_retiring_by_identity(&mut self, identity: &AgentIdentity) -> bool {
-        self.roster.mark_retiring_by_identity(identity)
-    }
-
-    pub(crate) fn replace_backend_peer_binding_by_peer_id(
+    pub(crate) fn replace_backend_peer_binding_for_identities(
         &mut self,
-        prior_peer_id: &str,
+        identities: &std::collections::BTreeSet<AgentIdentity>,
         next_peer_id: &str,
         next_address: &str,
         bootstrap_token: Option<meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken>,
     ) -> Vec<(AgentIdentity, Generation, Option<[u8; 32]>)> {
-        self.roster.replace_backend_peer_binding_by_peer_id(
-            prior_peer_id,
+        self.roster.replace_backend_peer_binding_for_identities(
+            identities,
             next_peer_id,
             next_address,
             bootstrap_token,

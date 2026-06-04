@@ -1,9 +1,9 @@
 //! Surface-agnostic LLM hot-swap support.
 //!
 //! Hosts the [`SessionRuntimeLlmReconfigureHost`] struct + its
-//! [`SessionLlmReconfigureHost`] implementation, plus the `idle` hot-swap
-//! flow ([`hot_swap_llm_client_on_idle_session`]) that surfaces drive when
-//! the runtime adapter reports an idle session. The cross-surface
+//! [`SessionLlmReconfigureHost`] implementation. The generated runtime
+//! adapter owns the hot-swap transition for idle, attached, and running
+//! sessions. The cross-surface
 //! `meerkat-rpc::SessionRuntime::hot_swap_llm_client` thin wrapper stays
 //! in `meerkat-rpc` because it adapts the RPC `TurnOverrides` struct onto
 //! [`SessionLlmReconfigureRequest`] and translates the `RuntimeDriverError`
@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use crate::LlmClient;
 use meerkat_core::error::AgentError;
-use meerkat_core::handles::AuthLeaseHandle;
+use meerkat_core::handles::GeneratedAuthLeaseHandle;
 use meerkat_core::service::{SessionError, SessionService};
 use meerkat_core::types::SessionId;
 use meerkat_core::{
@@ -85,7 +85,7 @@ pub fn registered_model_provider_mismatch_reason(
 /// Surface-agnostic implementation of [`SessionLlmReconfigureHost`].
 ///
 /// Surfaces construct one of these per-call (RPC, REST, MCP, …) so the
-/// hot-swap helpers can hydrate the live session, resolve target
+/// generated runtime-adapter reconfigure path can hydrate the live session, resolve target
 /// identities, build adapters, and apply the swap without depending on
 /// any RPC-specific wire shape.
 pub struct SessionRuntimeLlmReconfigureHost {
@@ -97,7 +97,7 @@ pub struct SessionRuntimeLlmReconfigureHost {
     /// Agent factory used to build LLM clients/adapters.
     pub factory: AgentFactory,
     /// Auth lease handle threaded into freshly-built clients.
-    pub auth_lease: Arc<dyn AuthLeaseHandle>,
+    pub auth_lease: GeneratedAuthLeaseHandle,
     /// Override LLM client (test injection slot).
     pub default_llm_client: Arc<std::sync::RwLock<Option<Arc<dyn LlmClient>>>>,
     /// Default decorator applied to every freshly-built client.
@@ -137,6 +137,7 @@ impl SessionRuntimeLlmReconfigureHost {
             .staged_sessions
             .effective_llm_identity(session_id)
             .await
+            .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?
         else {
             return Ok(None);
         };
@@ -194,7 +195,7 @@ impl SessionRuntimeLlmReconfigureHost {
                 .build_llm_client_for_identity_with_auth_lease(
                     &config,
                     identity,
-                    Some(Arc::clone(&self.auth_lease)),
+                    Some(self.auth_lease.clone()),
                 )
                 .await
                 .map_err(|e| {
@@ -480,127 +481,4 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
             .await
             .map_err(session_error_to_runtime_driver)
     }
-}
-
-/// Pure: derive the new visibility state for a hot-swap given the
-/// current state, target capability surface, and the base tool names.
-/// Used by surfaces driving the idle hot-swap flow.
-#[must_use]
-pub fn derive_reconfigured_visibility_state(
-    current: &SessionToolVisibilityState,
-    target_capability_surface: &SessionLlmCapabilitySurface,
-    base_tool_names: &std::collections::BTreeSet<String>,
-) -> SessionToolVisibilityState {
-    let current_view_image_visible =
-        committed_visibility_allows(base_tool_names, current, meerkat_core::VIEW_IMAGE_TOOL_NAME);
-
-    let mut next = current.clone();
-    next.capability_base_filter = meerkat_core::capability_base_filter_for_image_tool_results(
-        target_capability_surface.image_tool_results,
-    );
-
-    let next_view_image_visible =
-        committed_visibility_allows(base_tool_names, &next, meerkat_core::VIEW_IMAGE_TOOL_NAME);
-    if current_view_image_visible != next_view_image_visible {
-        next.active_revision = current.active_revision.max(current.staged_revision) + 1;
-    }
-
-    next
-}
-
-fn committed_visibility_allows(
-    base_tool_names: &std::collections::BTreeSet<String>,
-    visibility_state: &SessionToolVisibilityState,
-    tool_name: &str,
-) -> bool {
-    if !base_tool_names.contains(tool_name) {
-        return false;
-    }
-
-    meerkat_core::ToolScope::compose(&[
-        visibility_state.capability_base_filter.clone(),
-        visibility_state.inherited_base_filter.clone(),
-        visibility_state.active_filter.clone(),
-    ])
-    .allows(tool_name)
-}
-
-/// Roll back the live session to its prior identity + visibility state
-/// after a failed idle hot-swap. Discards the live session if rollback
-/// itself fails so the next request reattaches from durable state.
-pub async fn rollback_idle_hot_swap_failure(
-    host: &dyn SessionLlmReconfigureHost,
-    session_id: &SessionId,
-    previous_identity: &SessionLlmIdentity,
-    previous_visibility_state: &SessionToolVisibilityState,
-    original_error: RuntimeDriverError,
-) -> Result<(), RuntimeDriverError> {
-    let rollback_result = async {
-        host.apply_live_session_llm_identity(session_id, previous_identity)
-            .await?;
-        host.apply_live_session_tool_visibility_state(
-            session_id,
-            Some(previous_visibility_state.clone()),
-        )
-        .await?;
-        Ok::<(), RuntimeDriverError>(())
-    }
-    .await;
-
-    match rollback_result {
-        Ok(()) => Err(original_error),
-        Err(rollback_error) => {
-            let _ = host.discard_live_session(session_id).await;
-            Err(RuntimeDriverError::Internal(format!(
-                "failed to rollback idle live llm reconfiguration after error ({original_error}): {rollback_error}"
-            )))
-        }
-    }
-}
-
-/// Idle-session hot-swap entry point. Drives hydrate → resolve →
-/// derive-visibility → apply-identity → apply-visibility → persist,
-/// rolling back to the previous identity on failure.
-pub async fn hot_swap_llm_client_on_idle_session(
-    host: &dyn SessionLlmReconfigureHost,
-    session_id: &SessionId,
-    request: &SessionLlmReconfigureRequest,
-) -> Result<(), RuntimeDriverError> {
-    let hydrated = host.hydrate_session_llm_state(session_id).await?;
-    let resolved = host
-        .resolve_target_session_llm_identity(request, &hydrated.current_identity)
-        .await?;
-    let next_visibility_state = derive_reconfigured_visibility_state(
-        &hydrated.current_visibility_state,
-        &resolved.target_capability_surface,
-        &hydrated.base_tool_names,
-    );
-
-    host.apply_live_session_llm_identity(session_id, &resolved.target_identity)
-        .await?;
-    if let Err(error) = host
-        .apply_live_session_tool_visibility_state(session_id, Some(next_visibility_state))
-        .await
-    {
-        return rollback_idle_hot_swap_failure(
-            host,
-            session_id,
-            &hydrated.current_identity,
-            &hydrated.current_visibility_state,
-            error,
-        )
-        .await;
-    }
-    if let Err(error) = host.persist_live_session(session_id).await {
-        return rollback_idle_hot_swap_failure(
-            host,
-            session_id,
-            &hydrated.current_identity,
-            &hydrated.current_visibility_state,
-            error,
-        )
-        .await;
-    }
-
-    Ok(())
 }

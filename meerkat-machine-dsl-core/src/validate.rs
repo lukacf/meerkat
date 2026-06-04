@@ -5,12 +5,41 @@ use syn::Error;
 use crate::ast::*;
 
 const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
+    "meerkat_peer_endpoint_set_cardinality_matches",
+    "meerkat_peer_endpoint_set_contains_peer_id",
+    "meerkat_peer_endpoint_option_peer_id_matches",
+    "meerkat_peer_endpoint_peer_id_matches",
+    "meerkat_peer_endpoint_set_peer_ids_unique",
+    "mob_machine_external_peer_edge_has_matching_key",
+    "mob_machine_external_peer_edge_local",
+    "mob_machine_external_peer_edge_peer_id",
+    "mob_machine_external_peer_identity_absent",
+    "mob_machine_external_peer_key_matches_edge",
+    "mob_machine_external_peer_key_matches_local",
+    "mob_machine_identity_has_session_binding",
+    "mob_machine_session_bound_live_runtime_ids_match",
+    "mob_machine_member_peer_endpoint_peer_id",
+    "mob_machine_member_peer_overlay",
+    "mob_machine_member_peer_overlay_complete",
+    "mob_machine_member_peer_overlay_peer_ids_unique",
+    "mob_machine_wiring_edge_matches_members",
+    "mob_machine_run_step_status_after_set",
+    "mob_machine_run_step_bool_after_set",
+    "mob_machine_run_step_condition_result_after_set",
+    "mob_machine_run_step_u64_after_set",
+    "mob_machine_run_step_u64_after_increment",
+    "mob_machine_run_retry_count_after_increment",
+    "mob_machine_frame_node_bool_after_set",
     "mob_machine_frame_node_status_after_admit",
     "mob_machine_frame_ready_queue_after_admit",
     "mob_machine_frame_node_status_after_terminal",
     "mob_machine_frame_ready_queue_after_terminal",
     "mob_machine_node_terminal",
     "mob_machine_step_status_from_frame_node_status",
+    "mob_coordination_work_intent_unexpired",
+    "mob_coordination_resource_claim_unexpired",
+    "mob_coordination_resource_claim_active_at",
+    "mob_coordination_resource_claim_inactive_at",
 ];
 
 /// Validate the parsed machine definition for semantic correctness.
@@ -327,6 +356,11 @@ fn validate_expr(
                 ));
             }
         }
+        ExprDef::FieldAccess { base, .. }
+        | ExprDef::EnumVariantIs { value: base, .. }
+        | ExprDef::EnumStringSetPayload { value: base, .. } => {
+            validate_expr(base, fields, bindings, helpers, errors);
+        }
         ExprDef::Not(inner)
         | ExprDef::IsSome(inner)
         | ExprDef::IsNone(inner)
@@ -352,6 +386,10 @@ fn validate_expr(
             validate_expr(r, fields, bindings, helpers, errors);
         }
         ExprDef::Contains { collection, value } => {
+            validate_expr(collection, fields, bindings, helpers, errors);
+            validate_expr(value, fields, bindings, helpers, errors);
+        }
+        ExprDef::Count { collection, value } => {
             validate_expr(collection, fields, bindings, helpers, errors);
             validate_expr(value, fields, bindings, helpers, errors);
         }
@@ -392,6 +430,7 @@ fn validate_expr(
         // Literals and phase refs don't need validation
         ExprDef::Bool(_)
         | ExprDef::U64(_)
+        | ExprDef::U64Max
         | ExprDef::StringLit(_)
         | ExprDef::None
         | ExprDef::EmptySeq

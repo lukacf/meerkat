@@ -37,6 +37,12 @@ pub enum PeerIngressProjectionError {
     MissingResponseTerminality {
         interaction_id: meerkat_core::InteractionId,
     },
+    #[error(
+        "classified peer response {interaction_id} has unsupported machine response terminality"
+    )]
+    UnsupportedResponseTerminality {
+        interaction_id: meerkat_core::InteractionId,
+    },
 }
 
 /// Convert a classified comms interaction into the appropriate runtime-owned
@@ -166,7 +172,7 @@ fn map_ingress_convention(
         } => {
             let terminality = response_terminality
                 .ok_or(PeerIngressProjectionError::MissingResponseTerminality { interaction_id })?;
-            Ok(map_response_convention(*in_reply_to, terminality))
+            map_response_convention(interaction_id, *in_reply_to, terminality)
         }
         PeerIngressConvention::Lifecycle { kind, .. } => Ok(PeerConvention::Request {
             request_id: ingress.interaction_id.to_string(),
@@ -182,11 +188,12 @@ fn map_ingress_convention(
 }
 
 fn map_response_convention(
+    interaction_id: meerkat_core::InteractionId,
     in_reply_to: meerkat_core::InteractionId,
     terminality: meerkat_core::interaction::TerminalityClass,
-) -> PeerConvention {
+) -> Result<PeerConvention, PeerIngressProjectionError> {
     let request_id = in_reply_to.to_string();
-    match terminality {
+    Ok(match terminality {
         meerkat_core::interaction::TerminalityClass::Progress => PeerConvention::ResponseProgress {
             request_id,
             phase: ResponseProgressPhase::Accepted,
@@ -199,12 +206,10 @@ fn map_response_convention(
                 meerkat_core::interaction::TerminalDisposition::Failed => {
                     ResponseTerminalStatus::Failed
                 }
-                other => {
-                    tracing::warn!(
-                        disposition = ?other,
-                        "unknown terminal disposition; treating as Failed"
-                    );
-                    ResponseTerminalStatus::Failed
+                _ => {
+                    return Err(PeerIngressProjectionError::UnsupportedResponseTerminality {
+                        interaction_id,
+                    });
                 }
             };
             PeerConvention::ResponseTerminal {
@@ -212,17 +217,12 @@ fn map_response_convention(
                 status: term,
             }
         }
-        other => {
-            tracing::warn!(
-                class = ?other,
-                "unknown terminality class; routing response as progress (non-terminal)"
-            );
-            PeerConvention::ResponseProgress {
-                request_id,
-                phase: ResponseProgressPhase::Accepted,
-            }
+        _ => {
+            return Err(PeerIngressProjectionError::UnsupportedResponseTerminality {
+                interaction_id,
+            });
         }
-    }
+    })
 }
 
 fn peer_rendered_body(interaction: &InboxInteraction) -> String {
@@ -351,53 +351,8 @@ mod tests {
     }
 
     fn candidate_for_interaction(interaction: InboxInteraction) -> PeerInputCandidate {
-        let id = interaction.id;
-        let label = interaction.from.clone();
         let peer_id = interaction.from_route.unwrap_or_else(test_peer_id);
-        let (class, convention, response_terminality) = match &interaction.content {
-            InteractionContent::Message { .. } => (
-                PeerInputClass::ActionableMessage,
-                PeerIngressConvention::Message,
-                None,
-            ),
-            InteractionContent::Request { intent, .. } => (
-                PeerInputClass::ActionableRequest,
-                PeerIngressConvention::Request {
-                    request_id: id.to_string(),
-                    intent: intent.clone(),
-                },
-                None,
-            ),
-            InteractionContent::Response {
-                in_reply_to,
-                status,
-                ..
-            } => {
-                let terminality = meerkat_core::interaction::classify_response_terminality(*status);
-                let class = match terminality {
-                    meerkat_core::TerminalityClass::Progress => PeerInputClass::ResponseProgress,
-                    meerkat_core::TerminalityClass::Terminal { .. } => {
-                        PeerInputClass::ResponseTerminal
-                    }
-                    _ => PeerInputClass::ResponseTerminal,
-                };
-                (
-                    class,
-                    PeerIngressConvention::Response {
-                        in_reply_to: *in_reply_to,
-                        status: *status,
-                    },
-                    Some(terminality),
-                )
-            }
-        };
-        let ingress = peer_ingress(id, peer_id, &label, class, convention);
-        PeerInputCandidate {
-            interaction,
-            ingress,
-            lifecycle_peer: None,
-            response_terminality,
-        }
+        crate::test_peer_input_candidate_from_interaction(interaction, peer_id)
     }
 
     fn peer_input_for_test(interaction: &InboxInteraction, runtime_id: &LogicalRuntimeId) -> Input {

@@ -219,7 +219,7 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         // Verify it completed
-        let job = manager.get_status(&job_id).await.unwrap();
+        let job = manager.get_status(&job_id).await.unwrap().unwrap();
         assert!(
             matches!(job.status, JobStatus::Completed { .. }),
             "Job should be completed for this test"

@@ -11,6 +11,7 @@ use meerkat_machine_schema::catalog::dsl::{
     dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
     dsl_occurrence_lifecycle_machine as occurrence_lifecycle_machine,
     dsl_schedule_lifecycle_machine as schedule_lifecycle_machine,
+    dsl_workgraph_lifecycle_machine as workgraph_lifecycle_machine,
 };
 use meerkat_machine_schema::identity::{
     ActorId, CompositionDriverId, CompositionId, EffectVariantId, EnumTypeId, EnumVariantId,
@@ -48,22 +49,361 @@ fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
             // lifecycle and gets its own canonical machine per
             // dogma §1 "one semantic fact, one owner".
             "AuthMachine",
+            // Approval lifecycle owns approval status/result truth.
+            "ApprovalLifecycleMachine",
+            // SessionDocument owns per-session session-document lifecycle
+            // truth (currently the first-turn region) in its own per-session
+            // `Map` registry. Folds the former non-canonical
+            // SessionDeferredTurnAuthorityMachine, whose stateless-classifier
+            // shape (current_phase passed as input) is replaced by registry
+            // state that the machine reads and mutates itself. It also owns the
+            // pending-continuation disposition folded from the retired
+            // non-canonical PendingContinuationAdmissionMachine.
+            "SessionDocumentMachine",
+            // SessionTurnAdmission owns the live ephemeral turn-admission
+            // lifecycle (Idle/Admitted/Running/Completing/ShuttingDown with a
+            // ShuttingDown terminal). Promoted to canonical under LUC-524
+            // (P0 Dogma Invariant 1): it is a real multi-phase admission
+            // machine, no longer an inline `machine!` without a TLA model.
+            "SessionTurnAdmissionMachine",
             // WorkGraph: realm-scoped commitment graph lifecycle,
             // readiness, claim state, and topology validation.
             "WorkGraphLifecycleMachine",
+            // Work attention owns goal/attention queue lifecycle.
+            "WorkAttentionLifecycleMachine",
         ]
     );
 
     for absorbed in [
-        "SessionTurnAdmissionMachine",
         "SessionToolVisibilityMachine",
         "PeerDirectoryReachabilityMachine",
+        // Pending-continuation was a stateless boundary classifier (single
+        // `Ready` phase, `terminal []`, all self-loops). Its
+        // `has_effective_pending_boundary` disposition is now a transition in
+        // the canonical SessionDocumentMachine (pending-continuation region);
+        // the former standalone PendingContinuationAdmissionMachine is deleted
+        // and must NOT be canonical.
+        "PendingContinuationAdmissionMachine",
+        // System-context append/apply/discard decisions and the runtime-steer
+        // marker are folded into SessionDocumentMachine's system-context
+        // region (LUC-524, P0 Dogma Invariant 1). The former standalone
+        // SessionSystemContextAuthorityMachine — a stateless classifier whose
+        // real reducer logic was hand-coded in the xtask emitter — is deleted.
+        "SessionSystemContextAuthorityMachine",
     ] {
         assert!(
             !names.iter().any(|name| name == absorbed),
             "{absorbed} should be absorbed into canonical kernels, not published separately"
         );
     }
+}
+
+/// Anti-regression ratchet (LUC-524, P0 Dogma Invariant 1): a stateless
+/// classifier must never be registered as a canonical machine. A classifier
+/// has a single phase, an empty `terminal []` set, every transition self-loops
+/// back to that phase, and NO per-entity `Map` state field — it owns no
+/// lifecycle and no durable registry, it only reduces inputs to a disposition.
+/// This is exactly the shape `PendingContinuationAdmissionMachine` had when it
+/// was wrongly promoted to canonical; promoting such a reducer makes its
+/// conclusion an unproved trusted base relative to the canonical TLA proof.
+///
+/// Stateful registries are NOT classifiers and remain allowed: e.g.
+/// `ApprovalLifecycleMachine` keeps an `approval_statuses: Map<..>` (its
+/// per-approval lifecycle lives in the map values), so it has registry state.
+#[test]
+fn no_canonical_machine_is_a_stateless_classifier() {
+    fn contains_map(ty: &TypeRef) -> bool {
+        match ty {
+            TypeRef::Map(_, _) => true,
+            TypeRef::Option(inner) | TypeRef::Set(inner) | TypeRef::Seq(inner) => {
+                contains_map(inner)
+            }
+            _ => false,
+        }
+    }
+
+    for schema in canonical_machine_schemas() {
+        let single_phase = schema.state.phase.variants.len() == 1;
+        let no_terminal = schema.state.terminal_phases.is_empty();
+        let all_self_loop = schema
+            .transitions
+            .iter()
+            .all(|transition| transition.from.iter().all(|from| *from == transition.to));
+        let has_registry_state = schema
+            .state
+            .fields
+            .iter()
+            .any(|field| contains_map(&field.ty));
+
+        let is_stateless_classifier =
+            single_phase && no_terminal && all_self_loop && !has_registry_state;
+
+        assert!(
+            !is_stateless_classifier,
+            "{} is a stateless classifier (single phase, empty terminal set, all \
+             transitions self-loop, no Map registry state) and must NOT be canonical — \
+             fold its decision into the owning canonical machine, or keep it as a \
+             non-canonical generated helper revalidated by one",
+            schema.machine.as_str()
+        );
+    }
+}
+
+/// Witness-purity ratchet (LUC-524, P0 Dogma Invariant 1): the
+/// `SessionPersistenceVersionAuthorityMachine` is a NON-canonical generated
+/// WITNESS — a pure version encoder/decoder. It stamps a constant current
+/// version and accepts a persisted version iff it equals the current or the
+/// single legacy default (a pure equality), then returns the current constant.
+/// It must never silently grow into session lifecycle / per-session authority:
+/// that would smuggle a semantic reducer behind a "witness" that no canonical
+/// TLA proof covers.
+///
+/// This ratchet pins the witness to its pure shape so any future edit that adds
+/// a per-session `Map` registry, a second lifecycle phase, a non-self-loop
+/// transition, or an effect beyond the two pure version verdicts fails loudly
+/// and forces an explicit re-classification (fold into a canonical machine, or
+/// keep as a witness with a justified ratchet update).
+#[test]
+fn session_persistence_version_witness_stays_a_pure_version_encoder() {
+    use meerkat_machine_schema::catalog::dsl::dsl_session_persistence_version_authority_machine as persistence_version_machine;
+
+    fn contains_map(ty: &TypeRef) -> bool {
+        match ty {
+            TypeRef::Map(_, _) => true,
+            TypeRef::Option(inner) | TypeRef::Set(inner) | TypeRef::Seq(inner) => {
+                contains_map(inner)
+            }
+            _ => false,
+        }
+    }
+
+    let schema = persistence_version_machine();
+
+    // (1) No per-entity registry state. A version encoder owns only the
+    // scalar current/legacy version constants — never a per-session `Map`
+    // lifecycle registry. This is the structural line between a witness and a
+    // canonical per-session authority.
+    assert!(
+        !schema
+            .state
+            .fields
+            .iter()
+            .any(|field| contains_map(&field.ty)),
+        "persistence-version witness must own no Map registry state; \
+         a per-entity registry means it has grown into session authority and \
+         must be folded into a canonical machine"
+    );
+
+    // (2) Single lifecycle phase with an empty terminal set and every
+    // transition self-looping: no lifecycle progression, no terminality. A
+    // pure encoder has no states to move between.
+    assert_eq!(
+        schema.state.phase.variants.len(),
+        1,
+        "persistence-version witness must stay single-phase (no lifecycle)"
+    );
+    assert!(
+        schema.state.terminal_phases.is_empty(),
+        "persistence-version witness must own no terminal phases (no lifecycle)"
+    );
+    assert!(
+        schema
+            .transitions
+            .iter()
+            .all(|transition| transition.from.iter().all(|from| *from == transition.to)),
+        "persistence-version witness transitions must all self-loop (no lifecycle progression)"
+    );
+
+    // (3) The emitted decision set is EXACTLY the two pure version verdicts:
+    // a constant-version stamp and an equality-checked restore. No admission,
+    // mint, or lifecycle effect may appear — those would be facts->conclusion
+    // reductions that belong in a canonical machine.
+    let mut effect_names = schema
+        .effects
+        .variants
+        .iter()
+        .map(|variant| variant.name.as_str().to_owned())
+        .collect::<Vec<_>>();
+    effect_names.sort();
+    assert_eq!(
+        effect_names,
+        vec![
+            "VersionRestoreAuthorized".to_string(),
+            "VersionStampAuthorized".to_string(),
+        ],
+        "persistence-version witness must emit only the two pure version verdicts \
+         (constant stamp + equality-checked restore); any other effect is a \
+         semantic reduction that must move to a canonical machine"
+    );
+}
+
+/// Witness-purity ratchet (LUC-524, P0 Dogma Invariant 1): the
+/// `auth_lease_durable_lifecycle_marker` relation
+/// (`marker_relation_for_tokens_and_snapshot`) is a NON-canonical generated
+/// WITNESS — a pure ordering/equality comparison between the durably-persisted
+/// credential marker and the live AuthMachine `AuthLeaseSnapshot` projection. It
+/// answers exactly one mechanical question: "is the persisted marker equal-to /
+/// newer-than / staler-than / unrelated-to the live credential projection?"
+/// (a tuple `Ord`/`Eq` over `(token_key, expires_at, generation,
+/// credential_published_at_millis)`). The admission POLICY lives in the
+/// resolver (`meerkat-auth-core::resolver`), which maps `Matches` → proceed and
+/// `{TokenNewer, TokenStale, Invalid}` → stale-credential rejection. The witness
+/// never mints a lease fact, never advances any lifecycle, and never decides
+/// allow/reject itself.
+///
+/// This relation CANNOT be folded into the canonical `AuthMachine`: AuthMachine's
+/// generated authority is emitted into `meerkat-runtime`
+/// (`AUTH_MACHINE_PRODUCTION_RUST_CRATE`), but the sole consumer
+/// `meerkat-auth-core` sits BELOW runtime (runtime depends on auth-core; auth-core
+/// has runtime only as a dev-dependency). Folding would create the dependency
+/// cycle `meerkat-auth-core -> meerkat-runtime -> meerkat-auth-core`. Because the
+/// relation is genuinely pure, keeping it as a generated witness is the correct
+/// resolution — this ratchet pins it to that pure shape.
+///
+/// Any future edit that adds a NON-pure relation variant (an admission/mint/
+/// lifecycle verdict instead of a pure comparison), attaches owner feedback
+/// inputs (turning publication into a closure-bearing lifecycle handoff), or
+/// changes the closure policy off `PublicationOnly` fails loudly and forces an
+/// explicit re-classification (fold into a canonical machine if layering ever
+/// permits, or justify a ratchet update for a still-pure relation).
+#[test]
+fn auth_lease_durable_marker_witness_stays_a_pure_ordering_relation() {
+    use meerkat_machine_schema::catalog::auth_lease_bundle_composition;
+    use meerkat_machine_schema::{ClosurePolicy, DurableMarkerRelationProtocol};
+
+    let composition = auth_lease_bundle_composition();
+
+    // Exactly one durable-marker handoff protocol in this composition, matching
+    // the single-protocol contract the codegen (`auth_lease_durable_marker_contract`)
+    // enforces. If a second durable marker appears, the witness shape and the
+    // generated emitter assumptions both need re-review.
+    let markers: Vec<_> = composition
+        .handoff_protocols
+        .iter()
+        .filter_map(|protocol| protocol.durable_marker.as_ref().map(|m| (protocol, m)))
+        .collect();
+    assert_eq!(
+        markers.len(),
+        1,
+        "auth_lease_bundle must own exactly one durable-marker witness protocol"
+    );
+    let (protocol, marker) = markers[0];
+
+    // (1) The relation is the single PURE-COMPARISON variant. The
+    // `DurableMarkerRelationProtocol` enum must not grow an admission/mint/
+    // lifecycle relation that would turn the witness into a facts->conclusion
+    // reducer; and this protocol must select that pure-comparison variant.
+    match marker.relation {
+        DurableMarkerRelationProtocol::AuthLeaseCredentialPublication => {}
+    }
+    // Pin the enum to a single variant. A new variant is the smell of a
+    // semantic relation being smuggled in; adding one must be a deliberate,
+    // reviewed act that updates this ratchet.
+    let relation_variants = [DurableMarkerRelationProtocol::AuthLeaseCredentialPublication];
+    assert_eq!(
+        relation_variants.len(),
+        1,
+        "DurableMarkerRelationProtocol must stay a single pure ordering/equality \
+         relation; a new variant is a candidate semantic reducer that must be \
+         re-classified, not silently emitted as a witness"
+    );
+
+    // (2) The witness compares EXACTLY the four pure scalar fields plus the
+    // three opaque identity-key fields — nothing richer. Each scalar binds to a
+    // real producer obligation field (the codegen re-validates this too). A pure
+    // comparison witness owns no other inputs, so it cannot grow into a reducer
+    // that folds additional facts into a conclusion.
+    for (label, binding) in [
+        ("phase", &marker.phase),
+        ("expires_at", &marker.expires_at),
+        ("generation", &marker.generation),
+        (
+            "credential_published_at_millis",
+            &marker.credential_published_at_millis,
+        ),
+    ] {
+        assert!(
+            protocol
+                .obligation_fields
+                .contains(&binding.obligation_field),
+            "durable marker field `{label}` must bind to a real producer obligation \
+             field carried by protocol `{}`",
+            protocol.name.as_str()
+        );
+    }
+    // Identity fields are opaque key components, never comparison inputs.
+    assert!(
+        !marker.realm_field.is_empty()
+            && !marker.binding_field.is_empty()
+            && !marker.profile_field.is_empty(),
+        "durable marker must carry the three opaque identity-key fields (realm, \
+         binding, profile) used only for token-key equality"
+    );
+
+    // (3) Publication-only closure with NO owner feedback inputs. A durable
+    // marker that gained feedback inputs or a closure policy requiring
+    // acknowledgement would be participating in a lifecycle handoff, not merely
+    // stamping a comparable fact — i.e. it would have become a lifecycle
+    // authority. Keep it a one-way pure publication.
+    assert_eq!(
+        protocol.closure_policy,
+        ClosurePolicy::PublicationOnly,
+        "durable-marker witness protocol must stay PublicationOnly; a closure \
+         policy requiring acknowledgement means it drives lifecycle, not a pure \
+         comparable fact"
+    );
+    assert!(
+        protocol.allowed_feedback_inputs.is_empty(),
+        "durable-marker witness protocol must carry no owner feedback inputs; \
+         feedback inputs make it a lifecycle handoff rather than a pure \
+         publication a consumer compares"
+    );
+}
+
+#[test]
+fn workgraph_machine_state_wire_retains_topology_projection_fields() {
+    let value = serde_json::json!({
+        "lifecycle_phase": "open",
+        "revision": 1,
+        "unresolved_blocker_count": 0,
+        "topology_item_keys": [],
+        "claim_owner_key": null,
+        "claimed_at_utc_ms": null,
+        "lease_expires_at_utc_ms": null,
+        "due_at_utc_ms": null,
+        "not_before_utc_ms": null,
+        "snoozed_until_utc_ms": null,
+        "terminal_at_utc_ms": null,
+        "evidence_count": 0
+    });
+
+    let state = serde_json::from_value::<
+        meerkat_machine_schema::catalog::dsl::workgraph_lifecycle::WorkGraphLifecycleMachineState,
+    >(value)
+    .expect("mainline WorkGraph topology projection fields must deserialize");
+
+    assert_eq!(state.unresolved_blocker_count, 0);
+    assert!(state.topology_item_keys.is_empty());
+}
+
+#[test]
+fn workgraph_refresh_eligibility_input_uses_scalar_unresolved_blocker_count() {
+    let schema = workgraph_lifecycle_machine();
+    let refresh = schema
+        .inputs
+        .variants
+        .iter()
+        .find(|variant| variant.name.as_str() == "RefreshEligibility")
+        .expect("RefreshEligibility input");
+
+    let field_names = refresh
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(field_names, vec!["unresolved_blocker_count"]);
+
+    assert_eq!(refresh.fields[0].ty, TypeRef::U64);
 }
 
 #[test]
@@ -143,6 +483,7 @@ fn canonical_composition_registry_contains_kernel_seam_and_schedule_perimeter_en
             "schedule_runtime_bundle",
             "schedule_mob_bundle",
             "auth_lease_bundle",
+            "workgraph_attention_bundle",
         ]
     );
 }
@@ -366,6 +707,7 @@ fn kernel_seam_retains_coverage_metadata() {
             "schedule_runtime_bundle",
             "schedule_mob_bundle",
             "auth_lease_bundle",
+            "workgraph_attention_bundle",
         ]
     );
 }
@@ -406,11 +748,14 @@ fn meerkat_machine_absorbs_runtime_ingress_turn_tool_and_peer_domains() {
         "InterruptCurrentRun",
         "CancelAfterBoundary",
         "ReconfigureSessionLlmIdentity",
+        "ResolvePeerIngressReceive",
+        "ResolvePeerIngressDequeue",
         "StagePersistentFilter",
         "RequestDeferredTools",
         "SurfaceStageAdd",
         "SurfaceStageRemove",
         "SurfaceStageReload",
+        "SurfaceSetRemovalTimeout",
         "SurfaceMarkPendingSucceeded",
         "SurfaceMarkPendingFailed",
         "SurfaceSnapshotAligned",
@@ -440,6 +785,8 @@ fn meerkat_machine_absorbs_runtime_ingress_turn_tool_and_peer_domains() {
         "SubmitOpEvent",
         "EnqueueClassifiedEntry",
         "PeerIngressClassified",
+        "PeerIngressReceiveResolved",
+        "PeerIngressDequeueResolved",
         "SpawnDrainTask",
         "EmitExternalToolDelta",
         "CommittedVisibleSetPublished",
@@ -520,24 +867,37 @@ fn meerkat_machine_merges_turn_admission_tool_visibility_and_peer_directory_stat
         "RequestDeferredToolsAttached",
         "RequestDeferredToolsRunning",
         "BoundaryAppliedPublish",
+        "SurfaceStageAddIdle",
         "SurfaceStageAddAttached",
         "SurfaceStageAddRunning",
+        "SurfaceStageRemoveIdle",
         "SurfaceStageRemoveAttached",
         "SurfaceStageRemoveRunning",
+        "SurfaceSetRemovalTimeoutIdle",
+        "SurfaceSetRemovalTimeoutAttached",
+        "SurfaceSetRemovalTimeoutRunning",
+        "SurfaceStageReloadIdle",
         "SurfaceStageReloadAttached",
         "SurfaceStageReloadRunning",
+        "SurfaceApplyBoundaryAddIdle",
         "SurfaceApplyBoundaryAddAttached",
         "SurfaceApplyBoundaryAddRunning",
+        "SurfaceApplyBoundaryReloadIdle",
         "SurfaceApplyBoundaryReloadAttached",
         "SurfaceApplyBoundaryReloadRunning",
+        "SurfaceApplyBoundaryRemoveDrainingIdle",
         "SurfaceApplyBoundaryRemoveDrainingAttached",
         "SurfaceApplyBoundaryRemoveDrainingRunning",
+        "SurfaceApplyBoundaryRemoveNoopIdle",
         "SurfaceApplyBoundaryRemoveNoopAttached",
         "SurfaceApplyBoundaryRemoveNoopRunning",
+        "SurfaceMarkPendingSucceededAddIdle",
         "SurfaceMarkPendingSucceededAddAttached",
         "SurfaceMarkPendingSucceededAddRunning",
+        "SurfaceMarkPendingSucceededReloadIdle",
         "SurfaceMarkPendingSucceededReloadAttached",
         "SurfaceMarkPendingSucceededReloadRunning",
+        "SurfaceFinalizeRemovalCleanIdle",
         "SurfaceFinalizeRemovalCleanAttached",
         "SurfaceFinalizeRemovalCleanRunning",
         "PublishCommittedVisibleSetAttached",
@@ -1475,6 +1835,8 @@ mod handoff_binding {
             }],
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: None,
+            comms_trust_authority: None,
+            durable_marker: None,
             rust,
         }
     }
@@ -1535,6 +1897,48 @@ mod handoff_binding {
     }
 
     #[test]
+    fn ack_required_closure_requires_feedback_input() {
+        let mut protocol = handle_bridge_protocol(ok_handle_binding());
+        protocol.allowed_feedback_inputs = vec![];
+        let composition = composition_with_protocol(protocol);
+
+        let err = composition
+            .validate()
+            .expect_err("AckRequired without feedback must be rejected");
+        match err {
+            CompositionSchemaError::InvalidHandoffClosurePolicy { protocol, detail } => {
+                assert_eq!(protocol, "test_handoff");
+                assert!(
+                    detail.contains("AckRequired"),
+                    "error detail should name AckRequired, got {detail}"
+                );
+            }
+            other => panic!("expected InvalidHandoffClosurePolicy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publication_only_closure_rejects_feedback_inputs() {
+        let mut protocol = handle_bridge_protocol(ok_handle_binding());
+        protocol.closure_policy = ClosurePolicy::PublicationOnly;
+        let composition = composition_with_protocol(protocol);
+
+        let err = composition
+            .validate()
+            .expect_err("PublicationOnly with feedback must be rejected");
+        match err {
+            CompositionSchemaError::InvalidHandoffClosurePolicy { protocol, detail } => {
+                assert_eq!(protocol, "test_handoff");
+                assert!(
+                    detail.contains("PublicationOnly"),
+                    "error detail should name PublicationOnly, got {detail}"
+                );
+            }
+            other => panic!("expected InvalidHandoffClosurePolicy, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn validate_against_rejects_protocol_without_machine_owned_disposition() {
         let binding = ProtocolRustBinding {
             module_path: "crate-x/src/generated/proto.rs".into(),
@@ -1564,8 +1968,10 @@ mod handoff_binding {
             correlation_fields: vec![],
             obligation_fields: vec![],
             allowed_feedback_inputs: vec![],
-            closure_policy: ClosurePolicy::AckRequired,
+            closure_policy: ClosurePolicy::PublicationOnly,
             liveness_annotation: None,
+            comms_trust_authority: None,
+            durable_marker: None,
             rust: binding,
         };
         let composition = composition_with_protocol(protocol);
@@ -1797,6 +2203,8 @@ mod handoff_binding {
                 }],
                 closure_policy: ClosurePolicy::AckRequired,
                 liveness_annotation: None,
+                comms_trust_authority: None,
+                durable_marker: None,
                 rust: ProtocolRustBinding {
                     module_path: "meerkat-mcp/src/generated/test_protocol.rs".into(),
                     generation_mode: ProtocolGenerationMode::EffectExtractor,
@@ -1871,10 +2279,11 @@ mod canonical_handoff_parity {
 
     #[test]
     fn meerkat_wait_all_satisfied_mirrors_runtime_struct() {
-        // The canonical `WaitAllSatisfied` effect must name the two
+        // The canonical `WaitAllSatisfied` effect must name the three
         // fields the runtime's hand-written `WaitAllSatisfied` struct
         // in `meerkat-core/src/ops_lifecycle.rs` exposes:
         //   pub wait_request_id: WaitRequestId,
+        //   pub run_id: RunId,
         //   pub operation_ids: Vec<OperationId>,
         // Drift in either direction silently desyncs the canonical
         // `ops_barrier_satisfaction` handoff obligation.
@@ -1892,21 +2301,31 @@ mod canonical_handoff_parity {
             "canonical effect lost `wait_request_id` field — runtime struct has it"
         );
         assert!(
+            field_names.contains("run_id"),
+            "canonical effect lost `run_id` field — runtime struct has it"
+        );
+        assert!(
             field_names.contains("operation_ids"),
             "canonical effect lost `operation_ids` field — runtime struct has it"
         );
         assert_eq!(
             field_names.len(),
-            2,
+            3,
             "canonical effect gained extra fields not present on runtime struct — audit both"
         );
         // Type-shape parity: operation_ids must render as a sequence
-        // of OperationId, wait_request_id as the typed newtype.
+        // of OperationId, wait_request_id and run_id as typed newtypes.
         let wait_request = effect.field_named("wait_request_id").expect("field");
         assert_eq!(
             wait_request.ty,
             TypeRef::Named(NamedTypeId::parse("WaitRequestId").expect("valid NamedTypeId")),
             "canonical wait_request_id must be `WaitRequestId` typed"
+        );
+        let run_id = effect.field_named("run_id").expect("field");
+        assert_eq!(
+            run_id.ty,
+            TypeRef::Named(NamedTypeId::parse("RunId").expect("valid NamedTypeId")),
+            "canonical run_id must be `RunId` typed"
         );
         let operation_ids = effect.field_named("operation_ids").expect("field");
         assert!(
@@ -2094,5 +2513,56 @@ fn schedule_bundle_validates_with_reciprocal_ack_route() {
         composition.validate_against(&canonical_machine_refs),
         Ok(()),
         "schedule_bundle composition must validate after the reciprocal ack is wired"
+    );
+}
+
+/// P0 Dogma Invariant 1 (LUC-524): the recoverable-vs-fatal recovery FORK must
+/// be a MeerkatMachine-owned conclusion, not a shell verdict the machine merely
+/// records. This pins the `RecoverableFailure` transition to revalidate BOTH
+/// the recoverability of the typed `failure_kind` (via the machine-owned
+/// `llm_failure_kind_recoverable` helper) AND retry exhaustion
+/// (`retry_attempt <= max_retries`). Any edit that drops either revalidation
+/// reintroduces the shell-trust violation and trips this ratchet.
+#[test]
+fn recoverable_failure_transition_revalidates_recoverability_and_exhaustion() {
+    let schema = meerkat_machine();
+
+    // The recoverability classification is owned by the machine as a helper —
+    // not pre-reduced to a bool fed by the shell.
+    let helper = schema
+        .helpers
+        .iter()
+        .find(|helper| helper.name == "llm_failure_kind_recoverable")
+        .expect(
+            "MeerkatMachine must own the LLM recoverability classification as a helper \
+             (P0 Dogma Invariant 1)",
+        );
+    assert_eq!(
+        helper.params.len(),
+        1,
+        "llm_failure_kind_recoverable must classify a single typed failure_kind"
+    );
+
+    let recoverable_failure = schema
+        .transitions
+        .iter()
+        .find(|transition| transition.on.variant_str() == "RecoverableFailure")
+        .expect("MeerkatMachine must define a RecoverableFailure transition");
+
+    let guard_names = recoverable_failure
+        .guards
+        .iter()
+        .map(|guard| guard.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert!(
+        guard_names.contains("failure_kind_recoverable"),
+        "RecoverableFailure must guard on machine-owned recoverability of the typed \
+         failure_kind; found guards: {guard_names:?}"
+    );
+    assert!(
+        guard_names.contains("retries_remaining"),
+        "RecoverableFailure must guard on retry exhaustion (retry_attempt <= max_retries); \
+         found guards: {guard_names:?}"
     );
 }

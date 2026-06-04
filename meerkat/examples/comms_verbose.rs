@@ -303,23 +303,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Agent B listening on: tcp://{addr_b}");
 
     // Each agent knows about the other as a trusted peer
-    let trusted_for_a = TrustedPeers {
-        peers: vec![TrustedPeer {
-            name: "agent-b".to_string(),
-            pubkey: pubkey_b,
-            addr: format!("tcp://{addr_b}"),
-            meta: meerkat_comms::PeerMeta::default(),
-        }],
-    };
+    let trusted_for_a = TrustedPeers::from_peers(vec![TrustedPeer {
+        name: "agent-b".to_string(),
+        pubkey: pubkey_b,
+        addr: format!("tcp://{addr_b}"),
+        meta: meerkat_comms::PeerMeta::default(),
+    }]);
 
-    let trusted_for_b = TrustedPeers {
-        peers: vec![TrustedPeer {
-            name: "agent-a".to_string(),
-            pubkey: pubkey_a,
-            addr: format!("tcp://{addr_a}"),
-            meta: meerkat_comms::PeerMeta::default(),
-        }],
-    };
+    let trusted_for_b = TrustedPeers::from_peers(vec![TrustedPeer {
+        name: "agent-a".to_string(),
+        pubkey: pubkey_a,
+        addr: format!("tcp://{addr_a}"),
+        meta: meerkat_comms::PeerMeta::default(),
+    }]);
 
     // Create separate CommsManagers (each agent has its own)
     println!("\n=== CREATING SEPARATE COMMS MANAGERS ===");
@@ -359,8 +355,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Show available tools
-    let tools_check =
-        CommsToolDispatcher::new(comms_manager_a.router().clone(), trusted_a_shared.clone());
+    let tools_check = CommsToolDispatcher::new(
+        comms_manager_a.router().clone(),
+        comms_manager_a.router().trusted_peers_view(),
+    );
     println!("\n=== COMMS TOOLS AVAILABLE TO EACH AGENT ===");
     for tool in tools_check.tools().iter() {
         println!("  • {} - {}", tool.name, tool.description);
@@ -368,12 +366,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create logging tool dispatchers (separate for each agent)
     let tools_a = Arc::new(LoggingToolDispatcher {
-        inner: CommsToolDispatcher::new(comms_manager_a.router().clone(), trusted_a_shared),
+        inner: CommsToolDispatcher::new(
+            comms_manager_a.router().clone(),
+            comms_manager_a.router().trusted_peers_view(),
+        ),
         agent_name: "Agent A".to_string(),
     });
 
     let tools_b = Arc::new(LoggingToolDispatcher {
-        inner: CommsToolDispatcher::new(comms_manager_b.router().clone(), trusted_b_shared),
+        inner: CommsToolDispatcher::new(
+            comms_manager_b.router().clone(),
+            comms_manager_b.router().trusted_peers_view(),
+        ),
         agent_name: "Agent B".to_string(),
     });
 

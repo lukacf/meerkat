@@ -573,7 +573,7 @@ pub async fn handle_public_tools_call(
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
             Ok(json!({
-                "results": results.into_iter().map(|result: Result<meerkat_mob::SpawnResult, meerkat_mob::MobError>| match result {
+                "results": results.into_iter().map(|result: Result<meerkat_mob::SpawnResult, meerkat_mob::MobSpawnManyFailure>| match result {
                     Ok(spawn_result) => {
                         let identity = spawn_result.agent_identity.to_string();
                         json!(meerkat_contracts::MobSpawnManyResultEntry::spawned(
@@ -582,7 +582,7 @@ pub async fn handle_public_tools_call(
                         ))
                     }
                     Err(error) => json!(meerkat_contracts::MobSpawnManyResultEntry::failed(
-                        error.spawn_many_failure_cause(),
+                        error.cause(),
                         error.to_string(),
                     )),
                 }).collect::<Vec<_>>()
@@ -716,6 +716,7 @@ pub async fn handle_public_tools_call(
                         text: input.text,
                         source: input.source,
                         idempotency_key: input.idempotency_key,
+                        source_kind: meerkat_core::session::SystemContextSource::Normal,
                     },
                 )
                 .await
@@ -764,6 +765,8 @@ pub async fn handle_public_tools_call(
             let run = state
                 .mob_flow_status(&mob_id, run_id)
                 .await
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+            let run = meerkat_mob::MobRun::public_flow_status_run_value(run.as_ref())
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
             Ok(json!({ "run": run }))
         }

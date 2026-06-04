@@ -649,6 +649,35 @@ pub enum ImageOperationTerminalClass {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "observation", rename_all = "snake_case")]
+pub enum ImageProviderTerminalObservation {
+    Generated,
+    EmptyResult,
+    ProviderHttpError {
+        status_code: Option<u16>,
+        code: ImageProviderErrorCode,
+    },
+    ProviderNativeError {
+        code: ImageProviderErrorCode,
+    },
+    ExecutionFailed,
+    BlobCommitFailed,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageProviderErrorCode {
+    Unknown,
+    OpenAiContentFilter,
+    OpenAiModelRefusal,
+    GeminiSafety,
+    GeminiModelRefusal,
+    GeminiDeadlineExceeded,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum ImageOperationDenialReason {
     UnsupportedTarget,
@@ -1511,6 +1540,28 @@ mod tests {
         roundtrip(ImageOperationTerminalClass::ScopedRestoreFailed {
             trigger: PostActivationImageTerminal::Failed,
         });
+
+        roundtrip(ImageProviderTerminalObservation::Generated);
+        roundtrip(ImageProviderTerminalObservation::EmptyResult);
+        roundtrip(ImageProviderTerminalObservation::ProviderHttpError {
+            status_code: Some(400),
+            code: ImageProviderErrorCode::OpenAiContentFilter,
+        });
+        roundtrip(ImageProviderTerminalObservation::ProviderNativeError {
+            code: ImageProviderErrorCode::GeminiModelRefusal,
+        });
+        roundtrip(ImageProviderTerminalObservation::ExecutionFailed);
+        roundtrip(ImageProviderTerminalObservation::BlobCommitFailed);
+        for code in [
+            ImageProviderErrorCode::Unknown,
+            ImageProviderErrorCode::OpenAiContentFilter,
+            ImageProviderErrorCode::OpenAiModelRefusal,
+            ImageProviderErrorCode::GeminiSafety,
+            ImageProviderErrorCode::GeminiModelRefusal,
+            ImageProviderErrorCode::GeminiDeadlineExceeded,
+        ] {
+            roundtrip(code);
+        }
 
         for reason in [
             ImageOperationDenialReason::UnsupportedTarget,

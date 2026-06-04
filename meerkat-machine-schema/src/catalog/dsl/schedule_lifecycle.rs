@@ -1,3 +1,4 @@
+use super::OptionValueExt;
 use meerkat_machine_dsl::machine;
 
 machine! {
@@ -6,13 +7,19 @@ machine! {
         rust: "self" / "catalog::dsl::schedule_lifecycle",
 
         state {
+            schedule_id: ScheduleId,
             lifecycle_phase: ScheduleLifecycleState,
             revision: u64,
             trigger_key: String,
             target_binding_key: String,
             misfire_policy: Enum<MisfirePolicy>,
+            misfire_policy_key: String,
             overlap_policy: Enum<OverlapPolicy>,
+            overlap_policy_key: String,
             missing_target_policy: Enum<MissingTargetPolicy>,
+            missing_target_policy_key: String,
+            planning_horizon_days: u64,
+            planning_horizon_occurrences: u64,
             planning_cursor_utc_ms: Option<u64>,
             next_occurrence_ordinal: u64,
             // Reciprocal-ack accumulator (wave-d D-f): occurrence ids
@@ -24,12 +31,18 @@ machine! {
         }
 
         init(Active) {
+            schedule_id = "schedule-0",
             revision = 1,
             trigger_key = "trigger-0",
             target_binding_key = "target-0",
             misfire_policy = MisfirePolicy::Skip,
+            misfire_policy_key = "misfire:skip",
             overlap_policy = OverlapPolicy::SkipIfRunning,
+            overlap_policy_key = "overlap:skip_if_running",
             missing_target_policy = MissingTargetPolicy::MarkMisfired,
+            missing_target_policy_key = "missing_target:mark_misfired",
+            planning_horizon_days = 30,
+            planning_horizon_occurrences = 64,
             planning_cursor_utc_ms = None,
             next_occurrence_ordinal = 0,
             superseded_ack_ids = EmptySet,
@@ -45,23 +58,37 @@ machine! {
 
         input ScheduleLifecycleInput {
             Create {
+                schedule_id: ScheduleId,
                 trigger_key: String,
                 target_binding_key: String,
                 misfire_policy: Enum<MisfirePolicy>,
+                misfire_policy_key: String,
                 overlap_policy: Enum<OverlapPolicy>,
+                overlap_policy_key: String,
                 missing_target_policy: Enum<MissingTargetPolicy>,
+                missing_target_policy_key: String,
+                planning_horizon_days: Option<u64>,
+                planning_horizon_occurrences: Option<u64>,
             },
             Revise {
                 trigger_key: String,
                 target_binding_key: String,
                 misfire_policy: Enum<MisfirePolicy>,
+                misfire_policy_key: String,
                 overlap_policy: Enum<OverlapPolicy>,
+                overlap_policy_key: String,
                 missing_target_policy: Enum<MissingTargetPolicy>,
+                missing_target_policy_key: String,
+                planning_horizon_days: u64,
+                planning_horizon_occurrences: u64,
+                at_utc_ms: u64,
             },
+            UpdatePlanningConfig { planning_horizon_days: u64, planning_horizon_occurrences: u64 },
             RecordPlanningWindow {
                 planning_cursor_utc_ms: u64,
                 next_occurrence_ordinal: u64,
             },
+            SyncTargetSnapshot { target_binding_key: String },
             Pause { at_utc_ms: u64 },
             Resume { at_utc_ms: u64 },
             Delete { at_utc_ms: u64 },
@@ -75,7 +102,7 @@ machine! {
 
         effect ScheduleLifecycleEffect {
             EmitScheduleNotice { new_state: ScheduleLifecycleState, revision: u64 },
-            SupersedePendingOccurrences { superseding_revision: u64 },
+            SupersedePendingOccurrences { superseding_revision: u64, at_utc_ms: u64 },
             PlanningWindowRecorded { planning_cursor_utc_ms: u64, next_occurrence_ordinal: u64 },
         }
 
@@ -98,14 +125,36 @@ machine! {
         // --- Create (only from Active, self-loop) ---
 
         transition CreateSchedule {
-            on input Create { trigger_key, target_binding_key, misfire_policy, overlap_policy, missing_target_policy }
+            on input Create {
+                schedule_id,
+                trigger_key,
+                target_binding_key,
+                misfire_policy,
+                misfire_policy_key,
+                overlap_policy,
+                overlap_policy_key,
+                missing_target_policy,
+                missing_target_policy_key,
+                planning_horizon_days,
+                planning_horizon_occurrences
+            }
             guard { self.lifecycle_phase == Phase::Active }
             update {
+                self.schedule_id = schedule_id;
                 self.trigger_key = trigger_key;
                 self.target_binding_key = target_binding_key;
                 self.misfire_policy = misfire_policy;
+                self.misfire_policy_key = misfire_policy_key;
                 self.overlap_policy = overlap_policy;
+                self.overlap_policy_key = overlap_policy_key;
                 self.missing_target_policy = missing_target_policy;
+                self.missing_target_policy_key = missing_target_policy_key;
+                if planning_horizon_days != None {
+                    self.planning_horizon_days = planning_horizon_days.get("value");
+                }
+                if planning_horizon_occurrences != None {
+                    self.planning_horizon_occurrences = planning_horizon_occurrences.get("value");
+                }
             }
             to Active
             emit EmitScheduleNotice { new_state: self.lifecycle_phase, revision: self.revision }
@@ -114,37 +163,95 @@ machine! {
         // --- Revise (per-phase, bumps revision) ---
 
         transition ReviseActive {
-            on input Revise { trigger_key, target_binding_key, misfire_policy, overlap_policy, missing_target_policy }
+            on input Revise {
+                trigger_key,
+                target_binding_key,
+                misfire_policy,
+                misfire_policy_key,
+                overlap_policy,
+                overlap_policy_key,
+                missing_target_policy,
+                missing_target_policy_key,
+                planning_horizon_days,
+                planning_horizon_occurrences,
+                at_utc_ms
+            }
             guard { self.lifecycle_phase == Phase::Active }
             update {
                 self.trigger_key = trigger_key;
                 self.target_binding_key = target_binding_key;
                 self.misfire_policy = misfire_policy;
+                self.misfire_policy_key = misfire_policy_key;
                 self.overlap_policy = overlap_policy;
+                self.overlap_policy_key = overlap_policy_key;
                 self.missing_target_policy = missing_target_policy;
+                self.missing_target_policy_key = missing_target_policy_key;
+                self.planning_horizon_days = planning_horizon_days;
+                self.planning_horizon_occurrences = planning_horizon_occurrences;
                 self.revision += 1;
                 self.planning_cursor_utc_ms = None;
             }
             to Active
             emit EmitScheduleNotice { new_state: self.lifecycle_phase, revision: self.revision }
-            emit SupersedePendingOccurrences { superseding_revision: self.revision }
+            emit SupersedePendingOccurrences { superseding_revision: self.revision, at_utc_ms: at_utc_ms }
         }
 
         transition RevisePaused {
-            on input Revise { trigger_key, target_binding_key, misfire_policy, overlap_policy, missing_target_policy }
+            on input Revise {
+                trigger_key,
+                target_binding_key,
+                misfire_policy,
+                misfire_policy_key,
+                overlap_policy,
+                overlap_policy_key,
+                missing_target_policy,
+                missing_target_policy_key,
+                planning_horizon_days,
+                planning_horizon_occurrences,
+                at_utc_ms
+            }
             guard { self.lifecycle_phase == Phase::Paused }
             update {
                 self.trigger_key = trigger_key;
                 self.target_binding_key = target_binding_key;
                 self.misfire_policy = misfire_policy;
+                self.misfire_policy_key = misfire_policy_key;
                 self.overlap_policy = overlap_policy;
+                self.overlap_policy_key = overlap_policy_key;
                 self.missing_target_policy = missing_target_policy;
+                self.missing_target_policy_key = missing_target_policy_key;
+                self.planning_horizon_days = planning_horizon_days;
+                self.planning_horizon_occurrences = planning_horizon_occurrences;
                 self.revision += 1;
                 self.planning_cursor_utc_ms = None;
             }
             to Paused
             emit EmitScheduleNotice { new_state: self.lifecycle_phase, revision: self.revision }
-            emit SupersedePendingOccurrences { superseding_revision: self.revision }
+            emit SupersedePendingOccurrences { superseding_revision: self.revision, at_utc_ms: at_utc_ms }
+        }
+
+        // --- Planning config update ---
+
+        transition UpdatePlanningConfigActive {
+            on input UpdatePlanningConfig { planning_horizon_days, planning_horizon_occurrences }
+            guard { self.lifecycle_phase == Phase::Active }
+            update {
+                self.planning_horizon_days = planning_horizon_days;
+                self.planning_horizon_occurrences = planning_horizon_occurrences;
+            }
+            to Active
+            emit EmitScheduleNotice { new_state: self.lifecycle_phase, revision: self.revision }
+        }
+
+        transition UpdatePlanningConfigPaused {
+            on input UpdatePlanningConfig { planning_horizon_days, planning_horizon_occurrences }
+            guard { self.lifecycle_phase == Phase::Paused }
+            update {
+                self.planning_horizon_days = planning_horizon_days;
+                self.planning_horizon_occurrences = planning_horizon_occurrences;
+            }
+            to Paused
+            emit EmitScheduleNotice { new_state: self.lifecycle_phase, revision: self.revision }
         }
 
         // --- Record planning window (per-phase, with guard) ---
@@ -166,6 +273,31 @@ machine! {
         // `RecordPlanningWindow` as an invalid transition; this closes the
         // race where a driver tick could race with `Pause` and silently
         // advance the planning cursor against a paused schedule.
+
+        // --- Target snapshot sync ---
+        //
+        // Materialized on-demand sessions update the schedule target binding
+        // without revising schedule authoring intent. The generated authority
+        // owns that target binding key before the shell persists the full
+        // target snapshot.
+
+        transition SyncTargetSnapshotActive {
+            on input SyncTargetSnapshot { target_binding_key }
+            guard { self.lifecycle_phase == Phase::Active }
+            update {
+                self.target_binding_key = target_binding_key;
+            }
+            to Active
+        }
+
+        transition SyncTargetSnapshotPaused {
+            on input SyncTargetSnapshot { target_binding_key }
+            guard { self.lifecycle_phase == Phase::Paused }
+            update {
+                self.target_binding_key = target_binding_key;
+            }
+            to Paused
+        }
 
         // --- Pause / Resume (from Active or Paused) ---
 
@@ -196,7 +328,7 @@ machine! {
             }
             to Deleted
             emit EmitScheduleNotice { new_state: self.lifecycle_phase, revision: self.revision }
-            emit SupersedePendingOccurrences { superseding_revision: self.revision }
+            emit SupersedePendingOccurrences { superseding_revision: self.revision, at_utc_ms: at_utc_ms }
         }
 
         transition DeletePaused {
@@ -208,7 +340,7 @@ machine! {
             }
             to Deleted
             emit EmitScheduleNotice { new_state: self.lifecycle_phase, revision: self.revision }
-            emit SupersedePendingOccurrences { superseding_revision: self.revision }
+            emit SupersedePendingOccurrences { superseding_revision: self.revision, at_utc_ms: at_utc_ms }
         }
 
         // Idempotent no-op: Delete applied to an already-Deleted schedule
@@ -277,6 +409,14 @@ pub enum MissingTargetPolicy {
     Skip,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleId(pub String);
+impl<T: Into<String>> From<T> for ScheduleId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
 // OccurrenceId is defined alongside OccurrenceLifecycleMachine; redeclare
 // locally so the schedule-lifecycle DSL macro can compile its generated
 // struct. The typed atom (`NamedTypeBinding::string("OccurrenceId")`)
@@ -305,9 +445,9 @@ mod tests {
         )
         .expect("first Delete from Active must succeed");
         assert_eq!(first.to_phase, ScheduleLifecycleState::Deleted);
-        let revision_after_delete = auth.state.revision;
-        let planning_after_delete = auth.state.planning_cursor_utc_ms;
-        let ordinal_after_delete = auth.state.next_occurrence_ordinal;
+        let revision_after_delete = auth.state().revision;
+        let planning_after_delete = auth.state().planning_cursor_utc_ms;
+        let ordinal_after_delete = auth.state().next_occurrence_ordinal;
 
         let second = ScheduleLifecycleMachineMutator::apply(
             &mut auth,
@@ -321,8 +461,8 @@ mod tests {
             "Delete from Deleted must emit zero effects, got {:?}",
             second.effects
         );
-        assert_eq!(auth.state.revision, revision_after_delete);
-        assert_eq!(auth.state.planning_cursor_utc_ms, planning_after_delete);
-        assert_eq!(auth.state.next_occurrence_ordinal, ordinal_after_delete);
+        assert_eq!(auth.state().revision, revision_after_delete);
+        assert_eq!(auth.state().planning_cursor_utc_ms, planning_after_delete);
+        assert_eq!(auth.state().next_occurrence_ordinal, ordinal_after_delete);
     }
 }

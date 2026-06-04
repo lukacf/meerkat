@@ -15,10 +15,10 @@ use meerkat_core::{AuthLease, AuthMetadata, Provider};
 use meerkat_auth_core::resolver::interactive_login_error;
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::resolver::{
-    ManagedStoreLifecycle, begin_managed_store_oauth_refresh_lifecycle,
-    load_managed_store_tokens_with_lifecycle, managed_store_oauth_refresh_failure_coordinator,
-    managed_store_oauth_refresh_failure_is_permanent, mark_managed_store_oauth_refresh_failed,
-    publish_managed_store_tokens_lifecycle_and_save, refresh_allowed,
+    ManagedStoreLifecycle, OAuthLoginCredentialAdmission,
+    begin_managed_store_oauth_refresh_lifecycle, load_managed_store_tokens_with_lifecycle,
+    managed_store_oauth_refresh_failure_coordinator, mark_managed_store_oauth_refresh_failed,
+    publish_managed_store_tokens_lifecycle_and_save, resolve_oauth_login_credential_disposition,
 };
 use meerkat_auth_core::resolver::{
     finalize_auth_metadata, resolve_external_authorizer, resolve_simple_secret,
@@ -42,17 +42,19 @@ use crate::client::AzureOpenAiWireConfig;
 pub use meerkat_core::provider_matrix::openai::{OpenAiAuthMethod, OpenAiBackendKind};
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
-fn openai_oauth_refresh_failure_is_permanent(error: &oauth::OpenAiOAuthError) -> bool {
+fn openai_oauth_refresh_failure_observation(
+    error: &oauth::OpenAiOAuthError,
+) -> meerkat_auth_core::RefreshFailureObservation {
     match error {
         oauth::OpenAiOAuthError::InteractiveLoginRequired
-        | oauth::OpenAiOAuthError::MissingRefreshToken => true,
-        oauth::OpenAiOAuthError::Refresh(meerkat_auth_core::RefreshError::Refresh(message)) => {
-            managed_store_oauth_refresh_failure_is_permanent(message)
+        | oauth::OpenAiOAuthError::MissingRefreshToken => {
+            meerkat_auth_core::RefreshFailureObservation::local_credential_unusable()
         }
+        oauth::OpenAiOAuthError::Refresh(error) => error.observation(),
         oauth::OpenAiOAuthError::OAuth(error) => {
-            managed_store_oauth_refresh_failure_is_permanent(&error.to_string())
+            meerkat_auth_core::auth_oauth::oauth_refresh_observation(error)
         }
-        _ => false,
+        _ => meerkat_auth_core::RefreshFailureObservation::transient(),
     }
 }
 
@@ -241,71 +243,77 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                             persisted
                         }
                         OpenAiAuthMethod::ManagedChatGptOauth => {
-                            if lifecycle == ManagedStoreLifecycle::Authorized
-                                && persisted.primary_secret.is_some()
-                                && !env.force_refresh
-                            {
-                                persisted
-                            } else {
-                                if !refresh_allowed(binding) {
-                                    return Err(ProviderAuthError::Auth(
-                                        AuthError::RefreshRequired,
-                                    ));
-                                }
-                                let refresh_started = begin_managed_store_oauth_refresh_lifecycle(
-                                    env,
-                                    binding,
-                                    &mut managed,
-                                )?;
-                                let coord = env.refresh_coord.clone().unwrap_or_else(|| {
-                                    Arc::new(meerkat_auth_core::InMemoryCoordinator::new())
-                                });
-                                let coord = managed_store_oauth_refresh_failure_coordinator(
-                                    coord,
-                                    env.clone(),
-                                    binding.clone(),
-                                    refresh_started,
-                                );
-                                let endpoints =
-                                    oauth::chatgpt_endpoints("http://127.0.0.1:0/callback");
-                                let runtime = oauth::OpenAiOAuthRuntime::new(
-                                    managed.store.clone(),
-                                    coord,
-                                    endpoints,
-                                    managed.key.clone(),
-                                );
-                                let commit_env = env.clone();
-                                let commit_binding = binding.clone();
-                                let commit: oauth::TokenCommitFn = Box::new(move |tokens| {
-                                    Box::pin(async move {
-                                        publish_managed_store_tokens_lifecycle_and_save(
-                                            &commit_env,
-                                            &commit_binding,
-                                            &managed,
-                                            &tokens,
-                                        )
-                                        .await
-                                        .map_err(|e| {
-                                            meerkat_auth_core::RefreshError::Refresh(e.to_string())
-                                        })
-                                    })
-                                });
-                                let refreshed = runtime
-                                    .refresh_tokens_with_commit(commit, env.force_refresh)
-                                    .await;
-                                refreshed.map_err(|e| {
-                                    let permanent = openai_oauth_refresh_failure_is_permanent(&e);
-                                    let failure = mark_managed_store_oauth_refresh_failed(
-                                        env,
-                                        binding,
+                            // Cached-vs-refresh disposition owned by the
+                            // per-binding AuthMachine: feed the pure observations
+                            // and mirror the verdict (see anthropic runtime for
+                            // the full contract).
+                            match resolve_oauth_login_credential_disposition(
+                                env,
+                                binding,
+                                persisted.primary_secret.is_some(),
+                            )? {
+                                OAuthLoginCredentialAdmission::UseCached => persisted,
+                                OAuthLoginCredentialAdmission::BeginRefresh => {
+                                    let refresh_started =
+                                        begin_managed_store_oauth_refresh_lifecycle(
+                                            env,
+                                            binding,
+                                            &mut managed,
+                                        )?;
+                                    let coord = env.refresh_coord.clone().unwrap_or_else(|| {
+                                        Arc::new(meerkat_auth_core::InMemoryCoordinator::new())
+                                    });
+                                    let coord = managed_store_oauth_refresh_failure_coordinator(
+                                        coord,
+                                        env.clone(),
+                                        binding.clone(),
                                         refresh_started,
-                                        permanent,
-                                    )
-                                    .err()
-                                    .map(|err| format!("; {err}"))
-                                    .unwrap_or_default();
-                                    openai_oauth_refresh_error(e, failure)
-                                })?
+                                    );
+                                    let endpoints =
+                                        oauth::chatgpt_endpoints("http://127.0.0.1:0/callback");
+                                    let runtime = oauth::OpenAiOAuthRuntime::new(
+                                        managed.store.clone(),
+                                        coord,
+                                        endpoints,
+                                        managed.key.clone(),
+                                    );
+                                    let commit_env = env.clone();
+                                    let commit_binding = binding.clone();
+                                    let commit: oauth::TokenCommitFn =
+                                        Box::new(move |tokens| {
+                                            Box::pin(async move {
+                                                publish_managed_store_tokens_lifecycle_and_save(
+                                                    &commit_env,
+                                                    &commit_binding,
+                                                    &managed,
+                                                    &tokens,
+                                                )
+                                                .await
+                                                .map_err(|e| {
+                                                    meerkat_auth_core::RefreshError::Refresh(
+                                                        e.to_string(),
+                                                    )
+                                                })
+                                            })
+                                        });
+                                    let refreshed = runtime
+                                        .refresh_tokens_with_commit(commit, env.force_refresh)
+                                        .await;
+                                    refreshed.map_err(|e| {
+                                        let observation =
+                                            openai_oauth_refresh_failure_observation(&e);
+                                        let failure = mark_managed_store_oauth_refresh_failed(
+                                            env,
+                                            binding,
+                                            refresh_started,
+                                            observation,
+                                        )
+                                        .err()
+                                        .map(|err| format!("; {err}"))
+                                        .unwrap_or_default();
+                                        openai_oauth_refresh_error(e, failure)
+                                    })?
+                                }
                             }
                         }
                         _ => unreachable!("arm guarded by outer match"),
@@ -553,7 +561,7 @@ mod tests {
         Json, Router, extract::State, http::HeaderMap, response::IntoResponse, routing::post,
     };
     use meerkat_core::{
-        AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, ImageOperationTerminalClass,
+        AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, ImageProviderTerminalObservation,
         OpenAiAuthMetadata, ProviderAuthMetadata,
     };
     use meerkat_llm_core::{
@@ -953,8 +961,8 @@ mod tests {
             .await?;
 
         assert!(matches!(
-            output.terminal,
-            ImageOperationTerminalClass::Generated
+            output.terminal_observation,
+            ImageProviderTerminalObservation::Generated
         ));
         let headers = seen.lock().expect("seen headers");
         let first = headers.first().expect("captured image request headers");

@@ -162,7 +162,7 @@ impl std::fmt::Display for SupersessionKey {
     }
 }
 
-/// Version of the policy table used for a decision.
+/// Version of the generated admission policy used for a decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PolicyVersion(pub u64);
 
@@ -172,12 +172,11 @@ impl std::fmt::Display for PolicyVersion {
     }
 }
 
-/// Typed input-kind taxonomy used by the runtime policy table.
+/// Typed input-kind taxonomy used by the generated admission-policy projection.
 ///
-/// Every variant the policy table dispatches on is enumerated here. New input
-/// kinds must be added to this enum AND wired into
-/// `DefaultPolicyTable::resolve_by_kind`; the compiler enforces exhaustive
-/// coverage.
+/// Every variant the generated admission authority dispatches on is enumerated
+/// here so compatibility projections can request policy decisions by typed
+/// kind instead of by string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]

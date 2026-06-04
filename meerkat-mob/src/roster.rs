@@ -10,6 +10,8 @@
 //! - `Roster` stores the event/projected peer graph used for read surfaces and
 //!   consistency checks.
 //! - `wire`/`unwire`/`remove` are projection mutations only.
+//! - `kickoff` preserves durable event timestamps for display; runtime read
+//!   surfaces project kickoff phase/error from `MobMachineState`.
 
 use crate::event::{MemberRef, MemberWireEdge, MobEvent, MobEventKind};
 use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken, Generation, ProfileName};
@@ -28,13 +30,16 @@ where
     Ok(raw.and_then(|value| PeerId::parse(&value).ok()))
 }
 
-/// Lifecycle state for a roster member.
+/// Compatibility lifecycle projection for a roster member.
 ///
-/// `Retiring` is runtime-only — event projection never produces it
-/// (`MemberSpawned` creates `Active`; `MemberRetired` removes entirely).
+/// Event projection never owns `Retiring` (`MemberSpawned` creates `Active`;
+/// `MemberRetired` removes entirely). Runtime read surfaces overwrite this
+/// field from the generated `MobMachine` member lifecycle material before
+/// exposing it publicly.
 ///
-/// As of phase 5G, authority over `Retiring` is owned by the `MobMachine`
-/// DSL via its `member_state_markers` map.
+/// Authority over `Retiring` is owned by the `MobMachine` DSL via its
+/// `member_state_markers` map; the stored roster field is a compatibility
+/// mirror and must not gate behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MemberState {
     #[default]
@@ -87,7 +92,10 @@ pub struct RosterEntry {
     /// Runtime mode for this member.
     #[serde(default)]
     pub runtime_mode: MobRuntimeMode,
-    /// Lifecycle state (Active or Retiring).
+    /// Compatibility lifecycle projection (Active or Retiring).
+    ///
+    /// Runtime public reads project this from `MobMachineState`; the event
+    /// roster itself does not mutate this field to decide member lifecycle.
     #[serde(default)]
     pub state: MemberState,
     /// Set of peer identities this member is wired to.
@@ -95,7 +103,11 @@ pub struct RosterEntry {
     /// Application-defined labels for this member.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
-    /// Projected kickoff state for autonomous initial turn resolution.
+    /// Projected kickoff event metadata for autonomous initial turn display.
+    ///
+    /// `MobMachineState` owns kickoff phase/error truth. Runtime public reads
+    /// use this field only as a timestamp hint when the machine has the
+    /// matching phase/error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kickoff: Option<MobMemberKickoffSnapshot>,
 
@@ -306,6 +318,23 @@ impl Roster {
             .is_none()
     }
 
+    /// Build a read projection from already-materialized entries.
+    pub(crate) fn from_projected_entries(entries: impl IntoIterator<Item = RosterEntry>) -> Self {
+        let mut projected = Self {
+            entries: entries
+                .into_iter()
+                .map(|entry| (entry.agent_identity.clone(), entry))
+                .collect(),
+        };
+        let identities = projected.entries.keys().cloned().collect::<BTreeSet<_>>();
+        for entry in projected.entries.values_mut() {
+            entry
+                .wired_to
+                .retain(|identity| identities.contains(identity));
+        }
+        projected
+    }
+
     /// Remove a member by AgentIdentity.
     pub fn remove_by_identity(&mut self, identity: &AgentIdentity) {
         if self.entries.remove(identity).is_some() {
@@ -319,29 +348,6 @@ impl Roster {
     /// Remove a member — delegates to identity-based removal.
     pub(crate) fn remove(&mut self, agent_identity: &AgentIdentity) {
         self.remove_by_identity(agent_identity);
-    }
-
-    /// Flip a roster entry's `state` to [`MemberState::Retiring`].
-    ///
-    /// Invoked by the retire pipeline (MobActor::handle_retire_inner) before
-    /// the disposal pipeline starts so that live readers of
-    /// `list_members()` / `list_all_members()` / `member_status()` observe
-    /// the Retiring state while disposal (notify peers, archive session) is
-    /// still in flight. Returns `true` when the member existed and was
-    /// flipped; `false` when absent or already Retiring.
-    ///
-    /// The canonical removal still happens in the finally block of
-    /// `dispose_member` via `dispose_remove_from_roster`, which calls
-    /// `remove_by_identity`. This helper is the observability seam for the
-    /// window between retire-event-appended and roster-entry-removed.
-    pub(crate) fn mark_retiring_by_identity(&mut self, identity: &AgentIdentity) -> bool {
-        match self.entries.get_mut(identity) {
-            Some(entry) if entry.state != MemberState::Retiring => {
-                entry.state = MemberState::Retiring;
-                true
-            }
-            _ => false,
-        }
     }
 
     /// Resolve an identity — returns the canonical identity if present.
@@ -484,82 +490,85 @@ impl Roster {
         false
     }
 
-    /// Replace the projected peer-only binding for all entries currently using a
-    /// given remote peer id. Returns the identities and generations that changed.
-    pub fn replace_backend_peer_binding_by_peer_id(
+    /// Replace projected peer-only bindings for machine-selected identities.
+    ///
+    /// The caller must choose identities from generated `MobMachine` peer
+    /// authority. This roster mutation is display/persistence projection only.
+    pub fn replace_backend_peer_binding_for_identities(
         &mut self,
-        prior_peer_id: &str,
+        identities: &BTreeSet<AgentIdentity>,
         next_peer_id: &str,
         next_address: &str,
         bootstrap_token: Option<meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken>,
     ) -> Vec<(AgentIdentity, Generation, Option<[u8; 32]>)> {
         let mut updated = Vec::new();
-        for entry in self.entries.values_mut() {
-            match &entry.member_ref {
-                MemberRef::BackendPeer {
-                    peer_id,
+        for identity in identities {
+            let Some(entry) = self.entries.get_mut(identity) else {
+                continue;
+            };
+            if let MemberRef::BackendPeer {
+                pubkey,
+                session_id: None,
+                ..
+            } = &entry.member_ref
+            {
+                let pubkey = *pubkey;
+                entry.member_ref = MemberRef::BackendPeer {
+                    peer_id: next_peer_id.to_string(),
+                    address: next_address.to_string(),
                     pubkey,
+                    bootstrap_token: bootstrap_token.clone(),
                     session_id: None,
-                    ..
-                } if peer_id == prior_peer_id => {
-                    let pubkey = *pubkey;
-                    entry.member_ref = MemberRef::BackendPeer {
-                        peer_id: next_peer_id.to_string(),
-                        address: next_address.to_string(),
-                        pubkey,
-                        bootstrap_token: bootstrap_token.clone(),
-                        session_id: None,
-                    };
-                    updated.push((entry.agent_identity.clone(), entry.generation, pubkey));
-                }
-                _ => {}
+                };
+                updated.push((entry.agent_identity.clone(), entry.generation, pubkey));
             }
         }
         updated
     }
 
-    /// List active roster entries (excludes `Retiring`).
+    /// List structural roster entries.
+    ///
+    /// Lifecycle filtering belongs to the generated `MobMachine` projection; the
+    /// roster is only the event-derived membership/read model.
     pub fn list(&self) -> impl Iterator<Item = &RosterEntry> {
-        self.entries
-            .values()
-            .filter(|e| e.state == MemberState::Active)
+        self.entries.values()
     }
 
-    /// List all roster entries including `Retiring` members.
+    /// List all structural roster entries.
     pub fn list_all(&self) -> impl Iterator<Item = &RosterEntry> {
         self.entries.values()
     }
 
-    /// List only `Retiring` members.
-    pub fn list_retiring(&self) -> impl Iterator<Item = &RosterEntry> {
-        self.entries
-            .values()
-            .filter(|e| e.state == MemberState::Retiring)
+    pub(crate) fn project_member_states(
+        &mut self,
+        mut project: impl FnMut(&RosterEntry) -> MemberState,
+    ) {
+        for entry in self.entries.values_mut() {
+            entry.state = project(entry);
+        }
     }
 
-    /// Find active members with a given profile name.
+    /// Find members with a given profile name.
     pub fn by_profile(&self, profile: &ProfileName) -> impl Iterator<Item = &RosterEntry> {
+        self.entries.values().filter(move |e| e.role == *profile)
+    }
+
+    /// Find the first member matching a label key-value pair.
+    pub fn find_by_label(&self, key: &str, value: &str) -> Option<&RosterEntry> {
         self.entries
             .values()
-            .filter(move |e| e.role == *profile && e.state == MemberState::Active)
+            .find(|e| e.labels.get(key).is_some_and(|v| v == value))
     }
 
-    /// Find the first active member matching a label key-value pair.
-    pub fn find_by_label(&self, key: &str, value: &str) -> Option<&RosterEntry> {
-        self.entries.values().find(|e| {
-            e.state == MemberState::Active && e.labels.get(key).is_some_and(|v| v == value)
-        })
-    }
-
-    /// Find all active members matching a label key-value pair.
+    /// Find all members matching a label key-value pair.
     pub fn find_all_by_label<'a>(
         &'a self,
         key: &'a str,
         value: &'a str,
     ) -> impl Iterator<Item = &'a RosterEntry> {
-        self.entries.values().filter(move |e| {
-            e.state == MemberState::Active && e.labels.get(key).is_some_and(|v| v == value)
-        })
+        self.entries
+            .values()
+            .filter(move |e| e.labels.get(key).is_some_and(|v| v == value))
     }
 
     /// Find the first entry whose bridge session matches `session_id`.
@@ -576,20 +585,14 @@ impl Roster {
         self.find_by_bridge_session_id(session_id).is_some()
     }
 
-    /// Number of active members in the roster.
+    /// Number of structural members in the roster.
     pub fn len(&self) -> usize {
-        self.entries
-            .values()
-            .filter(|e| e.state == MemberState::Active)
-            .count()
+        self.entries.len()
     }
 
-    /// Whether the roster has no active members.
+    /// Whether the roster has no structural members.
     pub fn is_empty(&self) -> bool {
-        !self
-            .entries
-            .values()
-            .any(|e| e.state == MemberState::Active)
+        self.entries.is_empty()
     }
 
     /// Verify that each entry's key matches its `agent_identity` field.

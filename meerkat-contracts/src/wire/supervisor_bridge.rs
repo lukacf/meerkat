@@ -49,19 +49,33 @@ impl std::error::Error for UnsupportedBridgeProtocolVersion {}
 impl BridgeProtocolVersion {
     /// Protocol with typed rejection causes.
     pub const V2: Self = Self(2);
+    /// Protocol carrying the MobMachine peer overlay on peer wiring commands.
+    pub const V3: Self = Self(3);
     /// Current protocol version implemented by this bridge contract.
-    pub const CURRENT: Self = Self::V2;
+    pub const CURRENT: Self = Self::V3;
     /// Default protocol version for new supervisor authority records.
-    pub const DEFAULT: Self = Self::V2;
+    pub const DEFAULT: Self = Self::V3;
     /// Protocol versions accepted by this bridge contract.
-    pub const SUPPORTED: &'static [Self] = &[Self::V2];
+    ///
+    /// V2 is retained so persisted supervisor-authority records and V2 peers
+    /// keep loading and decoding. Only peer wiring (`WireMember`/`UnwireMember`),
+    /// which now requires the MobMachine peer overlay, demands V3 — a V2 peer
+    /// wiring command is rejected with a typed `UnsupportedProtocolVersion`
+    /// cause rather than a raw deserialization error.
+    pub const SUPPORTED: &'static [Self] = &[Self::V2, Self::V3];
 
     pub const fn is_supported(self) -> bool {
-        matches!(self.0, 2)
+        matches!(self.0, 2 | 3)
     }
 
     pub const fn same_protocol_as(self, other: Self) -> bool {
         self.0 == other.0
+    }
+
+    /// Whether this protocol version carries the MobMachine peer overlay on
+    /// peer wiring commands. V2 predates the overlay; V3 and later require it.
+    pub const fn supports_peer_overlay(self) -> bool {
+        self.0 >= 3
     }
 
     pub fn supported() -> &'static [Self] {
@@ -71,6 +85,7 @@ impl BridgeProtocolVersion {
     fn from_supported_u32(raw: u32) -> Result<Self, UnsupportedBridgeProtocolVersion> {
         match raw {
             2 => Ok(Self::V2),
+            3 => Ok(Self::V3),
             _ => Err(UnsupportedBridgeProtocolVersion { raw }),
         }
     }
@@ -130,6 +145,13 @@ impl<'de> Deserialize<'de> for BridgeProtocolVersion {
 ///   `BridgeReply` values through to the transport. Delivery rejections
 ///   carry typed `BridgeDeliveryRejectionCause` data; the string `reason`
 ///   remains diagnostic presentation only.
+/// - `3`: `WireMember`/`UnwireMember` carry the MobMachine peer overlay
+///   (`BridgePeerWiringPayload::mob_peer_overlay`), which the receiver folds
+///   into the generated direct-peer-endpoint projection. The field is
+///   `#[serde(default, skip_serializing_if)]` so a V2 wiring payload (no
+///   overlay) still deserializes on a V3 receiver; the receiver then rejects
+///   it with a typed `UnsupportedProtocolVersion` cause instead of a raw
+///   serde error. New supervisor authorities default to V3.
 pub const SUPERVISOR_BRIDGE_PROTOCOL_VERSION: BridgeProtocolVersion =
     BridgeProtocolVersion::CURRENT;
 /// Canonical current supervisor bridge protocol version.
@@ -405,45 +427,12 @@ pub enum BridgeRejectionCause {
     Internal,
 }
 
-/// Recoverability class of a bridge rejection.
-///
-/// The class is a protocol-level property of each [`BridgeRejectionCause`]
-/// variant — not a decision for downstream helpers to make by pattern
-/// matching on a hardcoded cause set. Callers branch on the class to
-/// decide whether recovery by re-running `BindMember` is appropriate.
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum BridgeRejectionClass {
-    /// Member is reachable and protocol-compliant, but its supervisor
-    /// authority is missing or out-of-sync with the caller's. A fresh
-    /// `BindMember` will reconcile.
-    RecoverableBySupervisorRebind,
-    /// The rejection reflects a hard contract violation (protocol
-    /// version, identity, bootstrap proof, invariant) that a fresh bind
-    /// cannot fix. The rejection must bubble up.
-    Fatal,
-}
-
-impl BridgeRejectionCause {
-    /// Protocol-level recoverability class for this rejection cause.
-    pub const fn class(self) -> BridgeRejectionClass {
-        match self {
-            Self::NotBound | Self::StaleSupervisor | Self::SenderMismatch => {
-                BridgeRejectionClass::RecoverableBySupervisorRebind
-            }
-            Self::AlreadyBound
-            | Self::InvalidBootstrapToken
-            | Self::UnsupportedProtocolVersion
-            | Self::InvalidSupervisorSpec
-            | Self::InvalidPeerSpec
-            | Self::AddressMismatch
-            | Self::Unsupported
-            | Self::Internal => BridgeRejectionClass::Fatal,
-        }
-    }
-}
+// The recoverable-vs-fatal recovery verdict for a `BridgeRejectionCause` is a
+// MobMachine-owned semantic fact (mob supervisor-authority recovery lifecycle),
+// decided inside the canonical MobMachine via the
+// `ClassifyBridgeRejectionRecovery` input and mirrored by the mob shell. The
+// wire reply carries only the raw cause; no protocol-level recoverability class
+// is reduced here.
 
 // ---------------------------------------------------------------------------
 // Member runtime state (wire projection)
@@ -898,7 +887,25 @@ pub struct BridgeDeliveryCompletion {
     pub tool_calls: u32,
 }
 
+/// Generated MobMachine peer overlay handoff carried with peer wiring commands.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeMobPeerOverlayHandoff {
+    pub recipient_peer_id: String,
+    pub topology_epoch: u64,
+    pub peer_specs: Vec<BridgePeerSpec>,
+}
+
 /// Peer wiring command payload.
+///
+/// `mob_peer_overlay` is present from protocol V3 onward. It is
+/// `#[serde(default, skip_serializing_if)]` so that (a) a V2 wiring payload
+/// emitted by a pre-overlay peer still deserializes here as `None` instead of
+/// erroring on a missing field, and (b) a V3 payload remains byte-identical on
+/// the wire to the pre-Option shape (the field is always `Some` when emitted by
+/// V3 senders). A `None` overlay on a wiring command is rejected by the
+/// receiver with a typed `UnsupportedProtocolVersion` cause.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -907,6 +914,8 @@ pub struct BridgePeerWiringPayload {
     pub epoch: u64,
     pub protocol_version: BridgeProtocolVersion,
     pub peer_spec: BridgePeerSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_peer_overlay: Option<BridgeMobPeerOverlayHandoff>,
 }
 
 /// Response to a retire command.
@@ -1024,17 +1033,34 @@ mod tests {
     }
 
     fn sample_wiring_payload() -> BridgePeerWiringPayload {
+        let peer_spec = BridgePeerSpec {
+            name: "member-b".to_string(),
+            peer_id: "peer-xyz".to_string(),
+            address: "tcp://127.0.0.1:7001".to_string(),
+            pubkey: [0u8; 32],
+        };
         BridgePeerWiringPayload {
             supervisor: sample_peer_spec(),
             epoch: 7,
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
-            peer_spec: BridgePeerSpec {
-                name: "member-b".to_string(),
-                peer_id: "peer-xyz".to_string(),
-                address: "tcp://127.0.0.1:7001".to_string(),
-                pubkey: [0u8; 32],
-            },
+            mob_peer_overlay: Some(BridgeMobPeerOverlayHandoff {
+                recipient_peer_id: sample_peer_spec().peer_id,
+                topology_epoch: 11,
+                peer_specs: vec![peer_spec.clone()],
+            }),
+            peer_spec,
         }
+    }
+
+    fn valid_trusted_peer(name: &str, seed: u8, address: &str) -> TrustedPeerDescriptor {
+        let pubkey = [seed; 32];
+        TrustedPeerDescriptor::unsigned_with_pubkey(
+            name.to_string(),
+            PeerId::from_ed25519_pubkey(&pubkey).as_str(),
+            pubkey,
+            address,
+        )
+        .expect("valid trusted peer descriptor")
     }
 
     // -----------------------------------------------------------------------
@@ -1053,6 +1079,117 @@ mod tests {
         assert_eq!(
             value, reencoded,
             "BridgeCommand round-trip must preserve wire shape"
+        );
+    }
+
+    #[test]
+    fn bridge_peer_wiring_payload_carries_generated_mob_overlay_handoff() {
+        let peer = valid_trusted_peer("member-b", 2, "tcp://127.0.0.1:7001");
+        let external = valid_trusted_peer("external", 3, "tcp://127.0.0.1:7002");
+        let payload = BridgePeerWiringPayload {
+            supervisor: sample_peer_spec(),
+            epoch: 7,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+            peer_spec: peer.clone().into(),
+            mob_peer_overlay: Some(BridgeMobPeerOverlayHandoff {
+                recipient_peer_id: "recipient-peer".to_string(),
+                topology_epoch: 13,
+                peer_specs: vec![peer.into(), external.into()],
+            }),
+        };
+
+        let value = serde_json::to_value(&payload).expect("serialize payload");
+        assert_eq!(value["mob_peer_overlay"]["topology_epoch"], json!(13));
+        assert_eq!(
+            value["mob_peer_overlay"]["recipient_peer_id"],
+            json!("recipient-peer")
+        );
+        assert_eq!(
+            value["mob_peer_overlay"]["peer_specs"]
+                .as_array()
+                .expect("overlay array")
+                .len(),
+            2
+        );
+        let decoded: BridgePeerWiringPayload =
+            serde_json::from_value(value).expect("decode payload");
+        let decoded_overlay = decoded
+            .mob_peer_overlay
+            .expect("V3 payload carries the overlay");
+        assert_eq!(decoded_overlay.topology_epoch, 13);
+        assert_eq!(decoded_overlay.peer_specs.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-version wire compatibility (protocol V2 <-> V3, mob_peer_overlay).
+    //
+    // V3 added the `mob_peer_overlay` field to peer wiring commands. These
+    // tests pin the contract that keeps a mixed-version distributed mob from
+    // breaking silently or confusingly:
+    //   * old (V2) -> new (V3) receiver: a wiring payload WITHOUT the overlay
+    //     still deserializes (overlay -> None); the receiver rejects None with a
+    //     typed cause rather than a raw missing-field serde error.
+    //   * new (V3) -> old (V2) receiver: the old receiver's decode rejects the
+    //     V3 `protocol_version` with a typed `UnsupportedProtocolVersion` BEFORE
+    //     it ever tries to deserialize the unknown-shaped (overlay-bearing)
+    //     payload, so it fails cleanly instead of on `deny_unknown_fields`.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn wire_member_v2_payload_without_overlay_decodes_as_none() {
+        let mut value = serde_json::to_value(BridgeCommand::WireMember(sample_wiring_payload()))
+            .expect("serialize");
+        let obj = value.as_object_mut().expect("command object");
+        // A pre-overlay V2 peer emits no `mob_peer_overlay`.
+        obj.remove("mob_peer_overlay");
+        obj.insert("protocol_version".to_string(), json!(2));
+        match decode_bridge_command(value).expect("V2 wiring payload must decode on a V3 receiver")
+        {
+            BridgeCommand::WireMember(payload) => {
+                assert_eq!(payload.protocol_version, BridgeProtocolVersion::V2);
+                assert!(
+                    payload.mob_peer_overlay.is_none(),
+                    "a V2 wiring payload carries no overlay"
+                );
+            }
+            other => panic!("expected WireMember, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wire_member_v3_payload_round_trips_with_overlay() {
+        let value = serde_json::to_value(BridgeCommand::WireMember(sample_wiring_payload()))
+            .expect("serialize");
+        assert_eq!(
+            value["protocol_version"],
+            json!(3),
+            "V3 is the current peer wiring protocol"
+        );
+        assert!(
+            !value["mob_peer_overlay"].is_null(),
+            "a V3 wiring payload always carries the overlay"
+        );
+        match decode_bridge_command(value).expect("V3 wiring payload decodes") {
+            BridgeCommand::WireMember(payload) => {
+                assert!(payload.mob_peer_overlay.is_some());
+            }
+            other => panic!("expected WireMember, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wiring_command_with_unsupported_protocol_version_rejects_before_serde() {
+        let mut value = serde_json::to_value(BridgeCommand::WireMember(sample_wiring_payload()))
+            .expect("serialize");
+        value
+            .as_object_mut()
+            .expect("command object")
+            .insert("protocol_version".to_string(), json!(99));
+        let err =
+            decode_bridge_command(value).expect_err("unsupported protocol version must reject");
+        assert!(
+            matches!(err, BridgeCommandDecodeError::UnsupportedProtocolVersion(_)),
+            "expected typed UnsupportedProtocolVersion, got {err:?}"
         );
     }
 
@@ -1336,8 +1473,18 @@ mod tests {
         );
         assert_eq!(
             supervisor_bridge_supported_protocol_versions(),
-            &[SUPERVISOR_BRIDGE_PROTOCOL_VERSION]
+            &[BridgeProtocolVersion::V2, BridgeProtocolVersion::V3]
         );
+        // Current/default is the latest (V3, which carries the peer overlay);
+        // V2 remains accepted for persisted authority records and pre-overlay
+        // peers.
+        assert_eq!(
+            supervisor_bridge_current_protocol_version(),
+            BridgeProtocolVersion::V3
+        );
+        assert!(supervisor_bridge_protocol_version_supported(
+            BridgeProtocolVersion::V2
+        ));
         assert!(supervisor_bridge_protocol_version_supported(
             SUPERVISOR_BRIDGE_PROTOCOL_VERSION
         ));
@@ -1358,7 +1505,7 @@ mod tests {
         );
         assert_eq!(
             capabilities.supported_protocol_versions,
-            vec![SUPERVISOR_BRIDGE_PROTOCOL_VERSION]
+            vec![BridgeProtocolVersion::V2, BridgeProtocolVersion::V3]
         );
     }
 
@@ -1385,7 +1532,7 @@ mod tests {
         );
         assert_eq!(
             capabilities.supported_protocol_versions,
-            vec![SUPERVISOR_BRIDGE_PROTOCOL_VERSION]
+            vec![BridgeProtocolVersion::V2, BridgeProtocolVersion::V3]
         );
         assert!(capabilities.deliver_member_input);
         assert!(capabilities.observe_member);
@@ -1560,9 +1707,10 @@ mod tests {
     // 6. BridgeRejectionCause — snake_case round-trip for every variant.
     // -----------------------------------------------------------------------
     //
-    // Mob-side fallback logic (see `should_fall_back_to_bind`) branches on
-    // typed causes. Any accidental rename or new variant that skipped the
-    // snake_case convention would silently change fallback behavior, so pin
+    // The mob side maps these typed causes onto the MobMachine
+    // `ClassifyBridgeRejectionRecovery` input, which owns the recoverable-vs-
+    // fatal recovery verdict. Any accidental rename or new variant that skipped
+    // the snake_case convention would silently change recovery behavior, so pin
     // the full matrix.
 
     #[test]
@@ -1646,7 +1794,7 @@ mod tests {
                 "capabilities": {
                     "current_protocol_version": SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
                     "default_protocol_version": SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
-                    "supported_protocol_versions": [SUPERVISOR_BRIDGE_PROTOCOL_VERSION],
+                    "supported_protocol_versions": [BridgeProtocolVersion::V2, BridgeProtocolVersion::V3],
                     "deliver_member_input": false,
                     "observe_member": false,
                     "interrupt_member": false,

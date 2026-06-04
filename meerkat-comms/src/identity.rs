@@ -27,7 +27,7 @@ pub enum IdentityError {
 /// Ed25519 public key (32 bytes).
 ///
 /// Serialized as a CBOR byte string (not array) for interoperability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PubKey(pub [u8; 32]);
 
 // Custom serde implementation for PubKey to serialize as byte string (CBOR major type 2)

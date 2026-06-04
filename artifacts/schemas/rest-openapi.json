@@ -138,12 +138,12 @@
         "properties": {
           "current_protocol_version": {
             "$ref": "#/components/schemas/BridgeProtocolVersion",
-            "default": 2,
+            "default": 3,
             "description": "Protocol version implemented by the responding member runtime."
           },
           "default_protocol_version": {
             "$ref": "#/components/schemas/BridgeProtocolVersion",
-            "default": 2,
+            "default": 3,
             "description": "Protocol version new supervisors should use for fresh authority records."
           },
           "deliver_member_input": {
@@ -172,7 +172,8 @@
           },
           "supported_protocol_versions": {
             "default": [
-              2
+              2,
+              3
             ],
             "description": "Protocol versions accepted by the responding member runtime.",
             "items": {
@@ -477,7 +478,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "Peer wiring command payload.",
+            "description": "Peer wiring command payload.\n\n`mob_peer_overlay` is present from protocol V3 onward. It is\n`#[serde(default, skip_serializing_if)]` so that (a) a V2 wiring payload\nemitted by a pre-overlay peer still deserializes here as `None` instead of\nerroring on a missing field, and (b) a V3 payload remains byte-identical on\nthe wire to the pre-Option shape (the field is always `Some` when emitted by\nV3 senders). A `None` overlay on a wiring command is rejected by the\nreceiver with a typed `UnsupportedProtocolVersion` cause.",
             "properties": {
               "command": {
                 "const": "wire_member",
@@ -487,6 +488,16 @@
                 "format": "uint64",
                 "minimum": 0,
                 "type": "integer"
+              },
+              "mob_peer_overlay": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/BridgeMobPeerOverlayHandoff"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "peer_spec": {
                 "$ref": "#/components/schemas/BridgePeerSpec"
@@ -509,7 +520,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "Peer wiring command payload.",
+            "description": "Peer wiring command payload.\n\n`mob_peer_overlay` is present from protocol V3 onward. It is\n`#[serde(default, skip_serializing_if)]` so that (a) a V2 wiring payload\nemitted by a pre-overlay peer still deserializes here as `None` instead of\nerroring on a missing field, and (b) a V3 payload remains byte-identical on\nthe wire to the pre-Option shape (the field is always `Some` when emitted by\nV3 senders). A `None` overlay on a wiring command is rejected by the\nreceiver with a typed `UnsupportedProtocolVersion` cause.",
             "properties": {
               "command": {
                 "const": "unwire_member",
@@ -519,6 +530,16 @@
                 "format": "uint64",
                 "minimum": 0,
                 "type": "integer"
+              },
+              "mob_peer_overlay": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/BridgeMobPeerOverlayHandoff"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "peer_spec": {
                 "$ref": "#/components/schemas/BridgePeerSpec"
@@ -717,6 +738,32 @@
           "destroyed"
         ],
         "type": "string"
+      },
+      "BridgeMobPeerOverlayHandoff": {
+        "additionalProperties": false,
+        "description": "Generated MobMachine peer overlay handoff carried with peer wiring commands.",
+        "properties": {
+          "peer_specs": {
+            "items": {
+              "$ref": "#/components/schemas/BridgePeerSpec"
+            },
+            "type": "array"
+          },
+          "recipient_peer_id": {
+            "type": "string"
+          },
+          "topology_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "recipient_peer_id",
+          "topology_epoch",
+          "peer_specs"
+        ],
+        "type": "object"
       },
       "BridgePeerConnectivity": {
         "description": "Connectivity class observed for the bridged member runtime.",
@@ -3146,7 +3193,6 @@
       "Occurrence": {
         "properties": {
           "attempt_count": {
-            "default": 0,
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
@@ -3290,6 +3336,7 @@
           "misfire_policy",
           "overlap_policy",
           "missing_target_policy",
+          "attempt_count",
           "created_at_utc"
         ],
         "type": "object"
@@ -3437,16 +3484,6 @@
           "capabilities": {
             "$ref": "#/components/schemas/PeerCapabilitySet"
           },
-          "last_unreachable_reason": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/PeerReachabilityReason"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "meta": {
             "$ref": "#/components/schemas/PeerMeta",
             "description": "Supplementary discovery metadata (description, labels)."
@@ -3458,9 +3495,6 @@
           "peer_id": {
             "$ref": "#/components/schemas/PeerId",
             "description": "Canonical runtime identity — the routing key."
-          },
-          "reachability": {
-            "$ref": "#/components/schemas/PeerReachability"
           },
           "sendable_kinds": {
             "items": {
@@ -3479,7 +3513,6 @@
           "source",
           "sendable_kinds",
           "capabilities",
-          "reachability",
           "meta"
         ],
         "type": "object"
@@ -3529,30 +3562,6 @@
       "PeerName": {
         "description": "Display-only slug for a peer.\n\n`PeerName` is **not** a routing key after Wave-B V5: the router resolves\nsends by [`PeerId`], and trust stores are keyed by [`PeerId`]. `PeerName`\nis retained so human-facing surfaces (CLI, REST `comms.peers`, logs) can\nrender a recognisable handle next to the opaque id.",
         "type": "string"
-      },
-      "PeerReachability": {
-        "enum": [
-          "unknown",
-          "reachable",
-          "unreachable"
-        ],
-        "type": "string"
-      },
-      "PeerReachabilityReason": {
-        "oneOf": [
-          {
-            "enum": [
-              "offline_or_no_ack",
-              "transport_error"
-            ],
-            "type": "string"
-          },
-          {
-            "const": "admission_dropped",
-            "description": "The peer admitted the transport but rejected our envelope at its\ningress policy gate (untrusted sender, full inbox, etc.). The peer\nis still reachable at the transport level; policy denied us.",
-            "type": "string"
-          }
-        ]
       },
       "PeerResponseTerminalStatusWire": {
         "description": "Terminal status for dedicated correlated peer-response ingress.",
@@ -4653,6 +4662,72 @@
       },
       "Schedule": {
         "properties": {
+          "config": {
+            "$ref": "#/components/schemas/ScheduleConfig"
+          },
+          "misfire_policy": {
+            "$ref": "#/components/schemas/MisfirePolicy"
+          },
+          "missing_target_policy": {
+            "$ref": "#/components/schemas/MissingTargetPolicy"
+          },
+          "next_occurrence_ordinal": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "overlap_policy": {
+            "$ref": "#/components/schemas/OverlapPolicy"
+          },
+          "phase": {
+            "$ref": "#/components/schemas/SchedulePhase"
+          },
+          "planning_cursor_utc": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "schedule_id": {
+            "$ref": "#/components/schemas/ScheduleId"
+          },
+          "superseded_ack_ids": {
+            "items": {
+              "$ref": "#/components/schemas/OccurrenceId"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "target": {
+            "$ref": "#/components/schemas/TargetBinding"
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/TriggerSpec"
+          }
+        },
+        "required": [
+          "schedule_id",
+          "phase",
+          "revision",
+          "trigger",
+          "target",
+          "misfire_policy",
+          "overlap_policy",
+          "missing_target_policy",
+          "next_occurrence_ordinal",
+          "superseded_ack_ids",
+          "config"
+        ],
+        "type": "object"
+      },
+      "ScheduleConfig": {
+        "properties": {
           "created_at_utc": {
             "format": "date-time",
             "type": "string"
@@ -4676,73 +4751,21 @@
             },
             "type": "object"
           },
-          "misfire_policy": {
-            "$ref": "#/components/schemas/MisfirePolicy",
-            "default": {
-              "type": "skip"
-            }
-          },
-          "missing_target_policy": {
-            "$ref": "#/components/schemas/MissingTargetPolicy",
-            "default": "mark_misfired"
-          },
           "name": {
             "type": [
               "string",
               "null"
             ]
           },
-          "next_occurrence_ordinal": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "overlap_policy": {
-            "$ref": "#/components/schemas/OverlapPolicy",
-            "default": "skip_if_running"
-          },
-          "phase": {
-            "$ref": "#/components/schemas/SchedulePhase"
-          },
-          "planning_cursor_utc": {
-            "format": "date-time",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "planning_horizon_days": {
-            "default": 30,
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
           },
           "planning_horizon_occurrences": {
-            "default": 64,
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
-          },
-          "revision": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "schedule_id": {
-            "$ref": "#/components/schemas/ScheduleId"
-          },
-          "superseded_ack_ids": {
-            "items": {
-              "$ref": "#/components/schemas/OccurrenceId"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "target": {
-            "$ref": "#/components/schemas/TargetBinding"
-          },
-          "trigger": {
-            "$ref": "#/components/schemas/TriggerSpec"
           },
           "updated_at_utc": {
             "format": "date-time",
@@ -4750,12 +4773,8 @@
           }
         },
         "required": [
-          "schedule_id",
-          "phase",
-          "revision",
-          "trigger",
-          "target",
-          "next_occurrence_ordinal",
+          "planning_horizon_days",
+          "planning_horizon_occurrences",
           "created_at_utc",
           "updated_at_utc"
         ],
@@ -6035,22 +6054,6 @@
               "phase"
             ],
             "type": "object"
-          },
-          {
-            "properties": {
-              "kind": {
-                "const": "legacy_status",
-                "type": "string"
-              },
-              "status": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "status"
-            ],
-            "type": "object"
           }
         ]
       },
@@ -6095,14 +6098,7 @@
             "type": "string"
           },
           "status_info": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ToolConfigChangeStatus"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/ToolConfigChangeStatus"
           },
           "target": {
             "type": "string"
@@ -6112,6 +6108,7 @@
           "operation",
           "target",
           "status",
+          "status_info",
           "persisted"
         ],
         "type": "object"

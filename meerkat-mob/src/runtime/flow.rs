@@ -14,16 +14,19 @@ use crate::definition::{
     PolicyMode, StepOutputFormat,
 };
 use crate::error::MobError;
-use crate::ids::{AgentIdentity, FlowId, FlowNodeId, FrameId, MeerkatId, RunId, StepId};
+use crate::ids::{
+    AgentIdentity, FlowId, FlowNodeId, FrameId, MeerkatId, ProfileName, RunId, StepId,
+};
 use crate::machines::mob_machine as mob_dsl;
 use crate::run::flow_run;
 use crate::run::{
     FailureLedgerEntry, FlowContext, FlowRunConfig, MobMachineFlowAuthorityToken,
-    MobMachineFlowRunCommand, MobRun, MobRunStatus, StepLedgerEntry, StepRunStatus,
-    apply_mob_machine_flow_run_command,
+    MobMachineFlowRunCommand, MobRun, MobRunProvenanceAuthority, MobRunStatus, StepLedgerEntry,
+    StepRunStatus, apply_mob_machine_flow_run_command, mob_machine_run_status_is_terminal,
+    mob_machine_step_status_is_terminal,
 };
 use crate::runtime::flow_frame_engine::{FlowFrameTerminalPhase, FrameStepProjection};
-use crate::store::{MobEventStore, MobRunStore};
+use crate::store::{MobEventStore, MobRunStore, authority_validating_mob_run_store};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use chrono::Utc;
@@ -50,8 +53,9 @@ pub struct FlowEngine {
 pub struct FrameStepProjectionEffects {
     pub step_status: StepRunStatus,
     pub persist_output: bool,
-    pub append_failure_ledger: bool,
+    pub failure_ledger_effect: bool,
     pub escalate_supervisor: bool,
+    pub authority: MobRunProvenanceAuthority,
 }
 
 #[derive(Debug, Clone)]
@@ -64,32 +68,19 @@ struct FrameStepProjectionOutcome {
 pub struct FrameStepProjectionRequest {
     pub frame_id: FrameId,
     pub node_id: FlowNodeId,
-    pub append_failure_ledger: bool,
 }
 
 impl FrameStepProjectionRequest {
     pub fn completed(frame_id: FrameId, node_id: FlowNodeId) -> Self {
-        Self {
-            frame_id,
-            node_id,
-            append_failure_ledger: false,
-        }
+        Self { frame_id, node_id }
     }
 
     pub fn skipped(frame_id: FrameId, node_id: FlowNodeId) -> Self {
-        Self {
-            frame_id,
-            node_id,
-            append_failure_ledger: false,
-        }
+        Self { frame_id, node_id }
     }
 
-    pub fn failed(frame_id: FrameId, node_id: FlowNodeId, append_failure_ledger: bool) -> Self {
-        Self {
-            frame_id,
-            node_id,
-            append_failure_ledger,
-        }
+    pub fn failed(frame_id: FrameId, node_id: FlowNodeId) -> Self {
+        Self { frame_id, node_id }
     }
 }
 
@@ -101,6 +92,7 @@ impl FlowEngine {
         event_store: Arc<dyn MobEventStore>,
         topology: Arc<MobTopologyService>,
     ) -> Self {
+        let run_store = authority_validating_mob_run_store(run_store);
         let emitter = MobEventEmitter::new(event_store.clone(), handle.mob_id().clone());
         let terminalization = FlowTerminalizationAuthority::new(
             run_store.clone(),
@@ -206,69 +198,65 @@ impl FlowEngine {
                                     &projection_record.frame_id,
                                     &projection_record.node_id,
                                 )?;
-                                if !matches!(
-                                    step_status,
-                                    StepRunStatus::Failed | StepRunStatus::Skipped
-                                ) {
-                                    continue;
-                                }
                                 let failure = frame_outcome.step_failures.get(step_id);
-                                let request = match (&step_status, failure) {
-                                    (StepRunStatus::Failed, Some(failure)) => {
+                                let (request, output, reason) = match (&step_status, failure) {
+                                    (StepRunStatus::Completed, _) => (
+                                        FrameStepProjectionRequest::completed(
+                                            projection_record.frame_id.clone(),
+                                            projection_record.node_id.clone(),
+                                        ),
+                                        frame_outcome.outputs.get(step_id).cloned(),
+                                        None,
+                                    ),
+                                    (StepRunStatus::Failed, Some(failure)) => (
                                         FrameStepProjectionRequest::failed(
                                             projection_record.frame_id.clone(),
                                             projection_record.node_id.clone(),
-                                            failure.append_failure_ledger,
-                                        )
-                                    }
-                                    (StepRunStatus::Failed, None) => {
+                                        ),
+                                        None,
+                                        Some(failure.reason.clone()),
+                                    ),
+                                    (StepRunStatus::Failed, None) => (
                                         FrameStepProjectionRequest::failed(
                                             projection_record.frame_id.clone(),
                                             projection_record.node_id.clone(),
-                                            true,
-                                        )
-                                    }
-                                    (StepRunStatus::Skipped, _) => {
+                                        ),
+                                        None,
+                                        Some("frame execution marked step failed".to_string()),
+                                    ),
+                                    (StepRunStatus::Skipped, _) => (
                                         FrameStepProjectionRequest::skipped(
                                             projection_record.frame_id.clone(),
                                             projection_record.node_id.clone(),
-                                        )
-                                    }
-                                    _ => unreachable!("filtered terminal status above"),
+                                        ),
+                                        None,
+                                        Some("auto-skipped by failed frame execution".to_string()),
+                                    ),
+                                    _ => continue,
                                 };
                                 let projection = self
                                     .project_frame_step_status(&run_id, step_id, request)
                                     .await?;
-                                let reason = match (&projection.step_status, failure) {
-                                    (StepRunStatus::Failed, Some(failure)) => {
-                                        failure.reason.as_str()
-                                    }
-                                    (StepRunStatus::Failed, None) => {
-                                        "frame execution marked step failed"
-                                    }
-                                    (StepRunStatus::Skipped, _) => {
-                                        "auto-skipped by failed frame execution"
-                                    }
-                                    _ => {
-                                        return Err(MobError::Internal(format!(
-                                            "failed frame projected non-failed step status {:?} \
-                                             for step '{step_id}' in run '{run_id}'",
-                                            projection.step_status
-                                        )));
-                                    }
-                                };
+                                if projection.step_status != step_status {
+                                    return Err(MobError::Internal(format!(
+                                        "failed frame projected status {:?} for step '{step_id}' \
+                                         in run '{run_id}', expected {step_status:?}",
+                                        projection.step_status
+                                    )));
+                                }
                                 if self
                                     .apply_frame_step_projection(
                                         projection.effects,
                                         &run_id,
                                         step_id,
-                                        None,
-                                        Some(reason.to_owned()),
+                                        output,
+                                        reason.clone(),
                                     )
                                     .await?
                                 {
                                     let supervisor =
                                         Supervisor::new(self.handle.clone(), self.emitter.clone());
+                                    let reason = reason.as_deref().unwrap_or("frame step failed");
                                     supervisor
                                         .escalate(&config, &run_id, step_id, reason)
                                         .await?;
@@ -278,7 +266,7 @@ impl FlowEngine {
                             return self
                                 .fail_run(
                                     &run_id,
-                                    &config.flow_id,
+                                    &config,
                                     MobError::FlowFailed {
                                         run_id: run_id.clone(),
                                         reason: "root frame sealed failed".into(),
@@ -327,10 +315,75 @@ impl FlowEngine {
                         }
                         return Ok(());
                     }
-                    return self.fail_run(&run_id, &config.flow_id, e).await;
+                    frame_engine
+                        .fail_running_nodes_for_terminalization(
+                            &run_id, &frame_id, root_spec, &context,
+                        )
+                        .await?;
+                    return self.fail_run(&run_id, &config, e).await;
                 }
             }
         }
+    }
+
+    /// Resolve the flow-topology delegation-edge admission verdict for a
+    /// `from_role -> to_role` edge under the configured enforcement `mode`.
+    ///
+    /// The shell extracts the *pure* rule-match verdict from the declarative
+    /// `TopologyRules` (`MobTopologyService::evaluate` / `evaluate_topology`)
+    /// — a config-only observation, not a semantic decision — and feeds it,
+    /// together with the enforcement mode, to MobMachine as a witness. The
+    /// MACHINE decides the admission verdict (`Admitted` / `DeniedStrict` /
+    /// `DeniedAdvisory`); this method returns that machine-emitted verdict so
+    /// the caller can mirror it. The shell never computes-and-enforces the
+    /// admission itself: it only mirrors what the machine emitted.
+    async fn resolve_topology_edge_admission(
+        &self,
+        from_role: &ProfileName,
+        to_role: &ProfileName,
+        mode: &PolicyMode,
+    ) -> Result<mob_dsl::MobFlowDelegationEdgeAdmissionKind, MobError> {
+        let rule_verdict = match self.topology.evaluate(from_role, to_role) {
+            PolicyDecision::Allow => mob_dsl::MobFlowDelegationEdgeRuleVerdictKind::Allow,
+            PolicyDecision::Deny => mob_dsl::MobFlowDelegationEdgeRuleVerdictKind::Deny,
+        };
+        let dsl_mode = match mode {
+            PolicyMode::Advisory => mob_dsl::MobFlowDelegationEdgeModeKind::Advisory,
+            PolicyMode::Strict => mob_dsl::MobFlowDelegationEdgeModeKind::Strict,
+        };
+        let effects = self
+            .handle
+            .apply_machine_input_effects(
+                mob_dsl::MobMachineInput::ResolveFlowDelegationEdgeAdmission {
+                    from_role: from_role.as_str().to_owned(),
+                    to_role: to_role.as_str().to_owned(),
+                    rule_verdict,
+                    mode: dsl_mode,
+                },
+            )
+            .await?;
+        let (effect_from_role, effect_to_role, admission) = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::FlowDelegationEdgeAdmissionResolved {
+                    from_role,
+                    to_role,
+                    admission,
+                } => Some((from_role, to_role, admission)),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted flow topology edge observation but emitted no admission verdict"
+                        .into(),
+                )
+            })?;
+        if effect_from_role != from_role.as_str() || effect_to_role != to_role.as_str() {
+            return Err(MobError::Internal(format!(
+                "MobMachine flow topology admission drift: input=({from_role} -> {to_role}), effect=({effect_from_role} -> {effect_to_role})"
+            )));
+        }
+        Ok(admission)
     }
 
     /// Canonical step execution: condition -> topology -> targets -> dispatch ->
@@ -392,28 +445,37 @@ impl FlowEngine {
             Err(error) => {
                 return Ok(StepGuardOutcome::Failed {
                     reason: format!("template render failed for step '{step_id}': {error}"),
-                    failure_ledger_recorded: false,
                 });
             }
         };
 
         // ── 3. Topology check ──────────────────────────────────────────────
+        // The admission verdict is owned by MobMachine. The shell extracts
+        // only the pure rule-match witness and feeds it (with the enforcement
+        // mode) to the machine; the machine decides Admitted/DeniedStrict/
+        // DeniedAdvisory and the shell MIRRORS that verdict here. Strict-block
+        // is keyed on the MACHINE's `DeniedStrict`, never on a shell-computed
+        // denial.
         if let (Some(topology_spec), Some(from_role)) =
             (&config.topology, &config.orchestrator_role)
-            && matches!(
-                self.topology.evaluate(from_role, &step.role),
-                PolicyDecision::Deny
-            )
         {
-            if matches!(topology_spec.mode, PolicyMode::Strict) {
-                return Err(MobError::TopologyViolation {
-                    from_role: from_role.clone(),
-                    to_role: step.role.clone(),
-                });
+            match self
+                .resolve_topology_edge_admission(from_role, &step.role, &topology_spec.mode)
+                .await?
+            {
+                mob_dsl::MobFlowDelegationEdgeAdmissionKind::Admitted => {}
+                mob_dsl::MobFlowDelegationEdgeAdmissionKind::DeniedStrict => {
+                    return Err(MobError::TopologyViolation {
+                        from_role: from_role.clone(),
+                        to_role: step.role.clone(),
+                    });
+                }
+                mob_dsl::MobFlowDelegationEdgeAdmissionKind::DeniedAdvisory => {
+                    self.emitter
+                        .topology_violation(from_role.clone(), step.role.clone())
+                        .await?;
+                }
             }
-            self.emitter
-                .topology_violation(from_role.clone(), step.role.clone())
-                .await?;
         }
 
         // ── 4. Target selection ────────────────────────────────────────────
@@ -450,7 +512,6 @@ impl FlowEngine {
             };
             return Ok(StepGuardOutcome::Failed {
                 reason: error.to_string(),
-                failure_ledger_recorded: false,
             });
         }
 
@@ -458,6 +519,10 @@ impl FlowEngine {
         if targets.len() > 1 && matches!(step.dispatch_mode, DispatchMode::OneToOne) {
             targets.truncate(1);
         }
+
+        let dispatch_effects = self.dispatch_step_effects(run_id, step_id).await?;
+        self.apply_dispatch_projection(dispatch_effects, run_id, step_id)
+            .await?;
 
         // ── 6. Multi-target (FanOut/FanIn) ─────────────────────────────────
         if targets.len() > 1 {
@@ -525,10 +590,7 @@ impl FlowEngine {
                         validate_schema_ref(schema_ref, step_id, &aggregate).await
                 {
                     let reason = schema_err.to_string();
-                    return Ok(StepGuardOutcome::Failed {
-                        reason,
-                        failure_ledger_recorded: false,
-                    });
+                    return Ok(StepGuardOutcome::Failed { reason });
                 }
 
                 self.emitter
@@ -538,7 +600,6 @@ impl FlowEngine {
             }
             Err(failure) => Ok(StepGuardOutcome::Failed {
                 reason: failure.reason,
-                failure_ledger_recorded: failure.failure_ledger_recorded,
             }),
         }
     }
@@ -568,7 +629,6 @@ impl FlowEngine {
             Err(error) => {
                 return Ok(StepGuardOutcome::Failed {
                     reason: format!("template render failed for step '{step_id}': {error}"),
-                    failure_ledger_recorded: false,
                 });
             }
         };
@@ -644,13 +704,7 @@ impl FlowEngine {
                     .collect::<Vec<_>>()
                     .join("; ")
             };
-            return Ok(StepGuardOutcome::Failed {
-                reason: combined,
-                failure_ledger_recorded: !failures.is_empty()
-                    && failures
-                        .iter()
-                        .all(|failure| failure.failure_ledger_recorded),
-            });
+            return Ok(StepGuardOutcome::Failed { reason: combined });
         }
 
         // Aggregate output using the step's dispatch/collection policy.
@@ -661,10 +715,7 @@ impl FlowEngine {
             && let Err(schema_err) = validate_schema_ref(schema_ref, step_id, &aggregate).await
         {
             let reason = schema_err.to_string();
-            return Ok(StepGuardOutcome::Failed {
-                reason,
-                failure_ledger_recorded: false,
-            });
+            return Ok(StepGuardOutcome::Failed { reason });
         }
 
         self.emitter
@@ -697,18 +748,6 @@ impl FlowEngine {
             self.emitter
                 .step_dispatched(run_id.clone(), step_id.clone(), target.clone())
                 .await?;
-            self.run_store
-                .append_step_entry_if_absent(
-                    run_id,
-                    StepLedgerEntry {
-                        step_id: step_id.clone(),
-                        agent_identity: AgentIdentity::from(target.as_str()),
-                        status: StepRunStatus::Dispatched,
-                        output: None,
-                        timestamp: Utc::now(),
-                    },
-                )
-                .await?;
 
             let ticket = match self
                 .executor
@@ -733,7 +772,9 @@ impl FlowEngine {
                         result = self.executor.await_terminal(ticket.clone(), step_timeout) => result,
                         () = cancel_token.cancelled() => {
                             match self.executor.on_timeout(ticket.clone()).await {
-                                Ok(_) => return Err(MobError::RunCanceled(run_id.clone())),
+                                Ok(TimeoutDisposition::Detached | TimeoutDisposition::Canceled) => {
+                                    return Err(MobError::RunCanceled(run_id.clone()));
+                                }
                                 Err(e) => {
                                     return Err(MobError::FlowFailed {
                                         run_id: run_id.clone(),
@@ -765,18 +806,6 @@ impl FlowEngine {
                     );
                     match output_value {
                         Ok(value) => {
-                            self.run_store
-                                .append_step_entry(
-                                    run_id,
-                                    StepLedgerEntry {
-                                        step_id: step_id.clone(),
-                                        agent_identity: AgentIdentity::from(target.as_str()),
-                                        status: StepRunStatus::Completed,
-                                        output: Some(value.clone()),
-                                        timestamp: Utc::now(),
-                                    },
-                                )
-                                .await?;
                             self.emitter
                                 .step_target_completed(
                                     run_id.clone(),
@@ -799,18 +828,6 @@ impl FlowEngine {
                                     .await?;
                                 continue;
                             }
-                            self.run_store
-                                .append_step_entry(
-                                    run_id,
-                                    StepLedgerEntry {
-                                        step_id: step_id.clone(),
-                                        agent_identity: AgentIdentity::from(target.as_str()),
-                                        status: StepRunStatus::Failed,
-                                        output: None,
-                                        timestamp: Utc::now(),
-                                    },
-                                )
-                                .await?;
                             self.emitter
                                 .step_target_failed(
                                     run_id.clone(),
@@ -819,94 +836,38 @@ impl FlowEngine {
                                     reason.clone(),
                                 )
                                 .await?;
-                            self.run_store
-                                .append_failure_entry(
-                                    run_id,
-                                    FailureLedgerEntry {
-                                        step_id: step_id.clone(),
-                                        reason: reason.clone(),
-                                        error_report: None,
-                                        error: None,
-                                        timestamp: Utc::now(),
-                                    },
-                                )
-                                .await?;
-                            return Ok(Err(StepTargetFailure::recorded(reason)));
+                            return Ok(Err(StepTargetFailure::unrecorded(reason)));
                         }
                     }
                 }
-                Ok(FlowTurnOutcome::Failed {
-                    reason,
-                    error_report,
-                    error,
-                }) => {
+                Ok(FlowTurnOutcome::Failed { reason }) => {
                     if attempt < max_retries {
                         attempt += 1;
                         self.emitter
-                            .step_target_failed_with_error(
+                            .step_target_failed(
                                 run_id.clone(),
                                 step_id.clone(),
                                 target.clone(),
                                 reason.clone(),
-                                error_report.clone(),
-                                error.clone(),
                             )
                             .await?;
                         continue;
                     }
-                    self.run_store
-                        .append_step_entry(
-                            run_id,
-                            StepLedgerEntry {
-                                step_id: step_id.clone(),
-                                agent_identity: AgentIdentity::from(target.as_str()),
-                                status: StepRunStatus::Failed,
-                                output: None,
-                                timestamp: Utc::now(),
-                            },
-                        )
-                        .await?;
                     self.emitter
-                        .step_target_failed_with_error(
+                        .step_target_failed(
                             run_id.clone(),
                             step_id.clone(),
                             target.clone(),
                             reason.clone(),
-                            error_report.clone(),
-                            error.clone(),
                         )
                         .await?;
-                    self.run_store
-                        .append_failure_entry(
-                            run_id,
-                            FailureLedgerEntry {
-                                step_id: step_id.clone(),
-                                reason: reason.clone(),
-                                error_report,
-                                error,
-                                timestamp: Utc::now(),
-                            },
-                        )
-                        .await?;
-                    return Ok(Err(StepTargetFailure::recorded(reason)));
+                    return Ok(Err(StepTargetFailure::unrecorded(reason)));
                 }
                 Ok(FlowTurnOutcome::Canceled) => {
                     if cancel.is_some_and(CancellationToken::is_cancelled) {
                         return Err(MobError::RunCanceled(run_id.clone()));
                     }
                     let cancel_reason = "canceled".to_string();
-                    self.run_store
-                        .append_step_entry(
-                            run_id,
-                            StepLedgerEntry {
-                                step_id: step_id.clone(),
-                                agent_identity: AgentIdentity::from(target.as_str()),
-                                status: StepRunStatus::Failed,
-                                output: None,
-                                timestamp: Utc::now(),
-                            },
-                        )
-                        .await?;
                     self.emitter
                         .step_target_failed(
                             run_id.clone(),
@@ -915,19 +876,7 @@ impl FlowEngine {
                             cancel_reason.clone(),
                         )
                         .await?;
-                    self.run_store
-                        .append_failure_entry(
-                            run_id,
-                            FailureLedgerEntry {
-                                step_id: step_id.clone(),
-                                reason: cancel_reason.clone(),
-                                error_report: None,
-                                error: None,
-                                timestamp: Utc::now(),
-                            },
-                        )
-                        .await?;
-                    return Ok(Err(StepTargetFailure::recorded(cancel_reason)));
+                    return Ok(Err(StepTargetFailure::unrecorded(cancel_reason)));
                 }
                 Err(MobError::FlowTurnTimedOut) => {
                     let timeout_reason = match self.executor.on_timeout(ticket).await {
@@ -962,18 +911,6 @@ impl FlowEngine {
                             .await?;
                         continue;
                     }
-                    self.run_store
-                        .append_step_entry(
-                            run_id,
-                            StepLedgerEntry {
-                                step_id: step_id.clone(),
-                                agent_identity: AgentIdentity::from(target.as_str()),
-                                status: StepRunStatus::Failed,
-                                output: None,
-                                timestamp: Utc::now(),
-                            },
-                        )
-                        .await?;
                     self.emitter
                         .step_target_failed(
                             run_id.clone(),
@@ -982,19 +919,7 @@ impl FlowEngine {
                             timeout_reason.clone(),
                         )
                         .await?;
-                    self.run_store
-                        .append_failure_entry(
-                            run_id,
-                            FailureLedgerEntry {
-                                step_id: step_id.clone(),
-                                reason: timeout_reason.clone(),
-                                error_report: None,
-                                error: None,
-                                timestamp: Utc::now(),
-                            },
-                        )
-                        .await?;
-                    return Ok(Err(StepTargetFailure::recorded(timeout_reason)));
+                    return Ok(Err(StepTargetFailure::unrecorded(timeout_reason)));
                 }
                 Err(other) => return Err(other),
             }
@@ -1005,13 +930,57 @@ impl FlowEngine {
     async fn fail_run(
         &self,
         run_id: &RunId,
-        flow_id: &FlowId,
+        config: &FlowRunConfig,
         error: MobError,
     ) -> Result<(), MobError> {
         let reason = error.to_string();
-        self.fail_unfinished_steps(run_id).await?;
+        let escalation_steps = self.fail_unfinished_steps(run_id, &reason).await?;
+        if !escalation_steps.is_empty() {
+            let supervisor = Supervisor::new(self.handle.clone(), self.emitter.clone());
+            for step_id in &escalation_steps {
+                supervisor
+                    .escalate(config, run_id, step_id, &reason)
+                    .await?;
+            }
+            supervisor.force_reset().await?;
+        }
         let _ = self
-            .terminalize_failed(run_id.clone(), flow_id.clone(), reason)
+            .terminalize_failed(run_id.clone(), config.flow_id.clone(), reason)
+            .await?;
+        Ok(())
+    }
+
+    async fn apply_dispatch_projection(
+        &self,
+        effects: Option<Vec<flow_run::Effect>>,
+        run_id: &RunId,
+        step_id: &StepId,
+    ) -> Result<(), MobError> {
+        let Some(effects) = effects else {
+            return Ok(());
+        };
+        let Some(step_notice) = find_step_notice_effect(&effects, step_id)? else {
+            return Ok(());
+        };
+        if step_notice.status != StepRunStatus::Dispatched {
+            return Err(MobError::Internal(format!(
+                "dispatch projection for run '{run_id}' step '{step_id}' emitted {:?}",
+                step_notice.status
+            )));
+        }
+        let authority = flow_run_effects_provenance_authority(run_id, &effects, step_id)?;
+        self.run_store
+            .append_step_entry_if_absent_with_authority(
+                run_id,
+                StepLedgerEntry {
+                    step_id: step_notice.step_id,
+                    agent_identity: AgentIdentity::from(flow_system_member_id().as_str()),
+                    status: StepRunStatus::Dispatched,
+                    output: None,
+                    timestamp: Utc::now(),
+                },
+                authority,
+            )
             .await?;
         Ok(())
     }
@@ -1027,8 +996,9 @@ impl FlowEngine {
         let Some(effects) = effects else {
             return Ok(false);
         };
+        let authority = effects.authority.clone();
         self.run_store
-            .append_step_entry(
+            .append_step_entry_with_authority(
                 run_id,
                 StepLedgerEntry {
                     step_id: step_id.clone(),
@@ -1037,6 +1007,7 @@ impl FlowEngine {
                     output: if effects.persist_output { output } else { None },
                     timestamp: Utc::now(),
                 },
+                authority.clone(),
             )
             .await?;
         match effects.step_status {
@@ -1052,9 +1023,9 @@ impl FlowEngine {
             }
             StepRunStatus::Failed => {
                 let reason = reason.unwrap_or_else(|| "frame step failed".into());
-                if effects.append_failure_ledger {
+                if effects.failure_ledger_effect {
                     self.run_store
-                        .append_failure_entry(
+                        .append_failure_entry_with_authority(
                             run_id,
                             FailureLedgerEntry {
                                 step_id: step_id.clone(),
@@ -1063,6 +1034,7 @@ impl FlowEngine {
                                 error: None,
                                 timestamp: Utc::now(),
                             },
+                            authority,
                         )
                         .await?;
                 }
@@ -1080,6 +1052,72 @@ impl FlowEngine {
         Ok(effects.escalate_supervisor)
     }
 
+    async fn apply_fail_step_projection(
+        &self,
+        effects: Option<Vec<flow_run::Effect>>,
+        run_id: &RunId,
+        step_id: &StepId,
+        reason: &str,
+    ) -> Result<bool, MobError> {
+        let Some(effects) = effects else {
+            return Ok(false);
+        };
+        let step_notice = find_step_notice_effect(&effects, step_id)?.ok_or_else(|| {
+            MobError::Internal(format!(
+                "fail-step projection for run '{run_id}' step '{step_id}' emitted no step notice"
+            ))
+        })?;
+        if step_notice.status != StepRunStatus::Failed {
+            return Err(MobError::Internal(format!(
+                "fail-step projection for run '{run_id}' step '{step_id}' emitted {:?}",
+                step_notice.status
+            )));
+        }
+        let authority = flow_run_effects_provenance_authority(run_id, &effects, step_id)?;
+        self.run_store
+            .append_step_entry_with_authority(
+                run_id,
+                StepLedgerEntry {
+                    step_id: step_id.clone(),
+                    agent_identity: AgentIdentity::from(flow_system_member_id().as_str()),
+                    status: StepRunStatus::Failed,
+                    output: None,
+                    timestamp: Utc::now(),
+                },
+                authority.clone(),
+            )
+            .await?;
+        if has_effect(
+            &effects,
+            FlowRunEffectKind::AppendFailureLedger,
+            Some(step_id),
+            None,
+        ) {
+            self.run_store
+                .append_failure_entry_with_authority(
+                    run_id,
+                    FailureLedgerEntry {
+                        step_id: step_id.clone(),
+                        reason: reason.to_owned(),
+                        error_report: None,
+                        error: None,
+                        timestamp: Utc::now(),
+                    },
+                    authority,
+                )
+                .await?;
+        }
+        self.emitter
+            .step_failed(run_id.clone(), step_id.clone(), reason.to_owned())
+            .await?;
+        Ok(has_effect(
+            &effects,
+            FlowRunEffectKind::EscalateSupervisor,
+            Some(step_id),
+            None,
+        ))
+    }
+
     async fn apply_skip_projection(
         &self,
         effects: Option<Vec<flow_run::Effect>>,
@@ -1091,8 +1129,9 @@ impl FlowEngine {
             return Ok(());
         };
         if let Some(step_notice) = find_step_notice_effect(&effects, step_id)? {
+            let authority = flow_run_effects_provenance_authority(run_id, &effects, step_id)?;
             self.run_store
-                .append_step_entry(
+                .append_step_entry_with_authority(
                     run_id,
                     StepLedgerEntry {
                         step_id: step_notice.step_id.clone(),
@@ -1101,6 +1140,7 @@ impl FlowEngine {
                         output: None,
                         timestamp: Utc::now(),
                     },
+                    authority,
                 )
                 .await?;
             self.emitter
@@ -1108,63 +1148,6 @@ impl FlowEngine {
                 .await?;
         }
         Ok(())
-    }
-
-    async fn apply_failure_projection(
-        &self,
-        effects: Option<Vec<flow_run::Effect>>,
-        run_id: &RunId,
-        step_id: &StepId,
-        reason: String,
-        append_failure_ledger: bool,
-    ) -> Result<bool, MobError> {
-        let Some(effects) = effects else {
-            return Ok(false);
-        };
-        if let Some(step_notice) = find_step_notice_effect(&effects, step_id)? {
-            self.run_store
-                .append_step_entry(
-                    run_id,
-                    StepLedgerEntry {
-                        step_id: step_notice.step_id.clone(),
-                        agent_identity: AgentIdentity::from(flow_system_member_id().as_str()),
-                        status: step_notice.status,
-                        output: None,
-                        timestamp: Utc::now(),
-                    },
-                )
-                .await?;
-            self.emitter
-                .step_failed(run_id.clone(), step_id.clone(), reason.clone())
-                .await?;
-        }
-        if append_failure_ledger
-            && has_effect(
-                &effects,
-                FlowRunEffectKind::AppendFailureLedger,
-                Some(step_id),
-                None,
-            )
-        {
-            self.run_store
-                .append_failure_entry(
-                    run_id,
-                    FailureLedgerEntry {
-                        step_id: step_id.clone(),
-                        reason,
-                        error_report: None,
-                        error: None,
-                        timestamp: Utc::now(),
-                    },
-                )
-                .await?;
-        }
-        Ok(has_effect(
-            &effects,
-            FlowRunEffectKind::EscalateSupervisor,
-            Some(step_id),
-            None,
-        ))
     }
 
     async fn is_run_running(&self, run_id: &RunId) -> Result<bool, MobError> {
@@ -1226,6 +1209,7 @@ impl FlowEngine {
         run_id: &RunId,
         machine_state: mob_dsl::MobMachineState,
         authority: MobMachineFlowAuthorityToken,
+        machine_effects: Vec<mob_dsl::MobMachineEffect>,
         context: &'static str,
     ) -> Result<Option<Vec<flow_run::Effect>>, MobError> {
         let command = MobMachineFlowRunCommand::StartRun(flow_run::inputs::StartRun {});
@@ -1241,6 +1225,7 @@ impl FlowEngine {
                 run_id,
                 command.clone(),
                 authority,
+                &machine_effects,
             )?;
             let transitioned = self
                 .run_store
@@ -1271,6 +1256,7 @@ impl FlowEngine {
         command: MobMachineFlowRunCommand,
         machine_state: mob_dsl::MobMachineState,
         authority: MobMachineFlowAuthorityToken,
+        machine_effects: Vec<mob_dsl::MobMachineEffect>,
         context: &'static str,
     ) -> Result<Vec<flow_run::Effect>, MobError> {
         let authority_input = command.authority_input(run_id);
@@ -1282,6 +1268,7 @@ impl FlowEngine {
                 run_id,
                 command.clone(),
                 authority,
+                &machine_effects,
             )?;
             let transitioned = self
                 .run_store
@@ -1330,27 +1317,13 @@ impl FlowEngine {
         .await
     }
 
-    async fn fail_step_effects(
-        &self,
-        run_id: &RunId,
-        step_id: &StepId,
-    ) -> Result<Option<Vec<flow_run::Effect>>, MobError> {
-        self.cas_flow_input_with_effects(
-            run_id,
-            MobMachineFlowRunCommand::FailStep(flow_run::inputs::FailStep {
-                step_id: step_id.clone(),
-            }),
-        )
-        .await
-    }
-
     pub(crate) async fn cancel_unfinished_steps(&self, run_id: &RunId) -> Result<(), MobError> {
         for step_id in self.ordered_steps(run_id).await? {
-            if self
-                .step_status(run_id, &step_id)
-                .await?
-                .is_some_and(|status| status.is_terminal())
-            {
+            let step_terminal = match self.step_status(run_id, &step_id).await? {
+                Some(status) => mob_machine_step_status_is_terminal(run_id, &step_id, &status)?,
+                None => false,
+            };
+            if step_terminal {
                 continue;
             }
             let _ = self
@@ -1365,16 +1338,21 @@ impl FlowEngine {
         Ok(())
     }
 
-    pub(crate) async fn fail_unfinished_steps(&self, run_id: &RunId) -> Result<(), MobError> {
+    pub(crate) async fn fail_unfinished_steps(
+        &self,
+        run_id: &RunId,
+        reason: &str,
+    ) -> Result<Vec<StepId>, MobError> {
+        let mut escalation_steps = Vec::new();
         for step_id in self.ordered_steps(run_id).await? {
-            if self
-                .step_status(run_id, &step_id)
-                .await?
-                .is_some_and(|status| status.is_terminal())
-            {
+            let step_terminal = match self.step_status(run_id, &step_id).await? {
+                Some(status) => mob_machine_step_status_is_terminal(run_id, &step_id, &status)?,
+                None => false,
+            };
+            if step_terminal {
                 continue;
             }
-            let _ = self
+            let effects = self
                 .cas_flow_input_with_effects(
                     run_id,
                     MobMachineFlowRunCommand::FailStep(flow_run::inputs::FailStep {
@@ -1382,8 +1360,14 @@ impl FlowEngine {
                     }),
                 )
                 .await?;
+            if self
+                .apply_fail_step_projection(effects, run_id, &step_id, reason)
+                .await?
+            {
+                escalation_steps.push(step_id);
+            }
         }
-        Ok(())
+        Ok(escalation_steps)
     }
 
     async fn dispatch_step_effects(
@@ -1448,11 +1432,7 @@ impl FlowEngine {
         step_id: &StepId,
         request: FrameStepProjectionRequest,
     ) -> Result<FrameStepProjectionOutcome, MobError> {
-        let FrameStepProjectionRequest {
-            frame_id,
-            node_id,
-            append_failure_ledger: requested_failure_ledger_append,
-        } = request;
+        let FrameStepProjectionRequest { frame_id, node_id } = request;
         let machine_state = self.handle.query_machine_state().await?;
         let step_status = frame_step_projection_status_from_machine(
             &machine_state,
@@ -1464,7 +1444,7 @@ impl FlowEngine {
 
         if let Some(projected_status) =
             machine_run_step_status_from_machine(&machine_state, run_id, step_id)?
-            && projected_status.is_terminal()
+            && mob_machine_step_status_is_terminal(run_id, step_id, &projected_status)?
         {
             if projected_status != step_status {
                 return Err(MobError::Internal(format!(
@@ -1479,18 +1459,16 @@ impl FlowEngine {
             });
         }
 
+        let command = MobMachineFlowRunCommand::ProjectFrameStepStatus(
+            flow_run::inputs::ProjectFrameStepStatus {
+                step_id: step_id.clone(),
+                frame_id,
+                node_id,
+            },
+        );
+        let authority_input = command.authority_input(run_id);
         let effects = self
-            .cas_flow_input_with_effects(
-                run_id,
-                MobMachineFlowRunCommand::ProjectFrameStepStatus(
-                    flow_run::inputs::ProjectFrameStepStatus {
-                        step_id: step_id.clone(),
-                        frame_id,
-                        node_id,
-                        append_failure_ledger: requested_failure_ledger_append,
-                    },
-                ),
-            )
+            .cas_flow_input_with_effects(run_id, command)
             .await?
             .ok_or_else(|| {
                 MobError::Internal(format!(
@@ -1512,7 +1490,7 @@ impl FlowEngine {
             effects: Some(FrameStepProjectionEffects {
                 step_status: projected_status.clone(),
                 persist_output: matches!(projected_status, StepRunStatus::Completed),
-                append_failure_ledger: has_effect(
+                failure_ledger_effect: has_effect(
                     &effects,
                     FlowRunEffectKind::AppendFailureLedger,
                     Some(step_id),
@@ -1524,6 +1502,7 @@ impl FlowEngine {
                     Some(step_id),
                     None,
                 ),
+                authority: MobRunProvenanceAuthority::from_flow_authority_input(authority_input)?,
             }),
         })
     }
@@ -1643,6 +1622,7 @@ impl FlowEngine {
             input,
             machine_state,
             authority,
+            Vec::new(),
         )
         .await
     }
@@ -1682,6 +1662,7 @@ impl FlowEngine {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn terminalize_with_machine_state(
         &self,
         run_id: RunId,
@@ -1690,13 +1671,14 @@ impl FlowEngine {
         input: MobMachineFlowRunCommand,
         machine_state: mob_dsl::MobMachineState,
         authority: MobMachineFlowAuthorityToken,
+        machine_effects: Vec<mob_dsl::MobMachineEffect>,
     ) -> Result<TerminalizationOutcome, MobError> {
         let next_status = target.status();
         let authority_input = input.authority_input(&run_id);
         self.verify_terminal_run_steps(&run_id).await?;
         for attempt in 0..5u32 {
             let run = self.run_snapshot(&run_id).await?;
-            if run.status.is_terminal()
+            if mob_machine_run_status_is_terminal(&run_id, &run.status)?
                 && !matches!(
                     (&target, &run.status),
                     (TerminalizationTarget::Canceled, MobRunStatus::Failed)
@@ -1712,6 +1694,7 @@ impl FlowEngine {
                 &run_id,
                 input.clone(),
                 authority,
+                &machine_effects,
             )?
             .next_state;
             let transitioned = self
@@ -1744,7 +1727,7 @@ impl FlowEngine {
         let steps = self.ordered_steps(run_id).await?;
         for step_id in &steps {
             match self.step_status(run_id, step_id).await? {
-                Some(status) if status.is_terminal() => {}
+                Some(status) if mob_machine_step_status_is_terminal(run_id, step_id, &status)? => {}
                 Some(status) => {
                     return Err(MobError::Internal(format!(
                         "TerminalRunStepInvariant violated: run '{run_id}' is terminal but \
@@ -1788,34 +1771,18 @@ fn legacy_flat_steps_as_root_frame(steps: &IndexMap<StepId, FlowStepSpec>) -> Fr
 /// Outcome of canonical step execution via `execute_step_with_all_guards`.
 pub(crate) enum StepGuardOutcome {
     Completed(Value),
-    Skipped {
-        reason: String,
-    },
-    Failed {
-        reason: String,
-        failure_ledger_recorded: bool,
-    },
+    Skipped { reason: String },
+    Failed { reason: String },
 }
 
 #[derive(Debug)]
 struct StepTargetFailure {
     reason: String,
-    failure_ledger_recorded: bool,
 }
 
 impl StepTargetFailure {
-    fn recorded(reason: String) -> Self {
-        Self {
-            reason,
-            failure_ledger_recorded: true,
-        }
-    }
-
     fn unrecorded(reason: String) -> Self {
-        Self {
-            reason,
-            failure_ledger_recorded: false,
-        }
+        Self { reason }
     }
 }
 
@@ -1890,6 +1857,42 @@ fn find_step_notice_effect(
         return Ok(Some(StepNoticeEffect { step_id, status }));
     }
     Ok(None)
+}
+
+fn flow_run_effects_provenance_authority(
+    run_id: &RunId,
+    effects: &[flow_run::Effect],
+    step_id: &StepId,
+) -> Result<MobRunProvenanceAuthority, MobError> {
+    let notice = find_step_notice_effect(effects, step_id)?.ok_or_else(|| {
+        MobError::Internal(format!(
+            "flow-run effects for run '{run_id}' step '{step_id}' did not include a step notice"
+        ))
+    })?;
+    let command = match notice.status {
+        StepRunStatus::Dispatched => {
+            MobMachineFlowRunCommand::DispatchStep(flow_run::inputs::DispatchStep {
+                step_id: step_id.clone(),
+            })
+        }
+        StepRunStatus::Completed => {
+            MobMachineFlowRunCommand::CompleteStep(flow_run::inputs::CompleteStep {
+                step_id: step_id.clone(),
+            })
+        }
+        StepRunStatus::Failed => MobMachineFlowRunCommand::FailStep(flow_run::inputs::FailStep {
+            step_id: step_id.clone(),
+        }),
+        StepRunStatus::Skipped => MobMachineFlowRunCommand::SkipStep(flow_run::inputs::SkipStep {
+            step_id: step_id.clone(),
+        }),
+        StepRunStatus::Canceled => {
+            MobMachineFlowRunCommand::CancelStep(flow_run::inputs::CancelStep {
+                step_id: step_id.clone(),
+            })
+        }
+    };
+    MobRunProvenanceAuthority::from_flow_authority_input(command.authority_input(run_id))
 }
 
 fn has_effect(
@@ -2413,15 +2416,9 @@ impl super::flow_frame_engine::FrameStepExecutor for FlowTurnExecutorAdapter {
                 let _ = (frame_id, node_id, reason);
                 Ok(super::flow_frame_engine::FrameStepResult::Skipped)
             }
-            StepGuardOutcome::Failed {
-                reason,
-                failure_ledger_recorded,
-            } => {
+            StepGuardOutcome::Failed { reason } => {
                 let _ = (frame_id, node_id);
-                Ok(super::flow_frame_engine::FrameStepResult::Failed {
-                    reason,
-                    failure_ledger_recorded,
-                })
+                Ok(super::flow_frame_engine::FrameStepResult::Failed { reason })
             }
         }
     }
@@ -2491,11 +2488,14 @@ fn machine_run_step_status_from_machine(
     run_id: &RunId,
     step_id: &StepId,
 ) -> Result<Option<StepRunStatus>, MobError> {
-    let key = mob_dsl::RunStepKey::from(format!("{run_id}\u{0}{}", step_id.as_str()));
+    let run_key = mob_dsl::RunId::from(run_id.to_string());
+    let step_key = mob_dsl::StepId::from(step_id.as_str());
     machine_state
-        .run_step_status_flat
-        .get(&key)
+        .run_step_status
+        .get(&run_key)
+        .and_then(|statuses| statuses.get(&step_key))
         .copied()
+        .flatten()
         .map(|status| match status {
             mob_dsl::StepRunStatus::Dispatched => Ok(StepRunStatus::Dispatched),
             mob_dsl::StepRunStatus::Completed => Ok(StepRunStatus::Completed),

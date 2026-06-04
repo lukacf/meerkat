@@ -8,15 +8,441 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `OccurrenceLifecycleMachine`
 
 ### Code Anchors
-- `occurrence_lifecycle`: `meerkat-schedule/src/lifecycle.rs` — Occurrence::apply domain-facing lifecycle transition seam over claim, claimed, dispatch, await completion, complete, completed, skip, skipped, misfire, misfired, supersede, superseded, delivery failure, lease expiry, live owner, revision, and failure classification
+- `occurrence_lifecycle`: `meerkat-schedule/src/lifecycle.rs` — Occurrence::planned_from_schedule and Occurrence::apply domain-facing lifecycle transition seam over plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, classify due no action, due claim eligible, due misfire required, due lease expired, claim, claimed, dispatch, await completion, complete, resolve runtime completion outcome, completed, skip, skipped, misfire, misfired, supersede, superseded, delivery failure, lease expiry, live owner, revision, and failure classification
 
 ### Scenarios
 - `occurrence_start_complete_fail` — occurrence transitions through pending, running, and terminal lifecycle states
-- `occurrence_claim_dispatch_completion` — claim pending occurrence, dispatch started from claimed, await completion, complete from dispatching or awaiting, and record claimed/dispatch/awaiting/completed effects
+- `occurrence_claim_dispatch_completion` — plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, claim pending occurrence, dispatch started from claimed, await completion, complete from dispatching or awaiting, resolve runtime completion outcome, and record claimed/dispatch/awaiting/completed effects
 - `occurrence_terminal_classification` — skip/skipped, misfire/misfired, supersede/superseded, delivery failed, occurrences superseded, records revision and explicit failure class for terminal occurrence outcomes
-- `occurrence_lease_recovery` — lease expired from claimed, dispatching, or awaiting completion returns live claimed work to owner-aware recovery
+- `occurrence_lease_recovery` — classify due no action, due claim eligible, due misfire required, due lease expired, and lease expired from claimed, dispatching, or awaiting completion returns live claimed work to owner-aware recovery
 
 ### Transitions
+- `ClassifyTransitionFailurePlanRejectedPending`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_start_complete_fail`, `occurrence_claim_dispatch_completion`
+- `ClassifyTransitionFailurePlanRejectedClaimed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailurePlanRejectedDispatching`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailurePlanRejectedAwaitingCompletion`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailurePlanRejectedCompleted`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `ClassifyTransitionFailurePlanRejectedSkipped`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
+- `ClassifyTransitionFailurePlanRejectedMisfired`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
+- `ClassifyTransitionFailurePlanRejectedSuperseded`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
+- `ClassifyTransitionFailurePlanRejectedDeliveryFailed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
+- `ClassifyTransitionFailureTargetSyncRejectedPending`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `ClassifyTransitionFailureTargetSyncRejectedClaimed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `ClassifyTransitionFailureTargetSyncRejectedDispatching`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `ClassifyTransitionFailureTargetSyncRejectedAwaitingCompletion`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `ClassifyTransitionFailureTargetSyncRejectedCompleted`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `ClassifyTransitionFailureTargetSyncRejectedSkipped`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `ClassifyTransitionFailureTargetSyncRejectedMisfired`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `ClassifyTransitionFailureTargetSyncRejectedSuperseded`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `ClassifyTransitionFailureTargetSyncRejectedDeliveryFailed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `ClassifyTransitionFailureReceiptRecordRejectedPending`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `ClassifyTransitionFailureReceiptRecordRejectedClaimed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `ClassifyTransitionFailureReceiptRecordRejectedDispatching`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `ClassifyTransitionFailureReceiptRecordRejectedAwaitingCompletion`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `ClassifyTransitionFailureReceiptRecordRejectedCompleted`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `ClassifyTransitionFailureReceiptRecordRejectedSkipped`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
+- `ClassifyTransitionFailureReceiptRecordRejectedMisfired`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
+- `ClassifyTransitionFailureReceiptRecordRejectedSuperseded`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
+- `ClassifyTransitionFailureReceiptRecordRejectedDeliveryFailed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
+- `ClassifyTransitionFailureDueClassificationRejectedPending`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_start_complete_fail`, `occurrence_terminal_classification`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureDueClassificationRejectedClaimed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyTransitionFailureDueClassificationRejectedDispatching`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyTransitionFailureDueClassificationRejectedAwaitingCompletion`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyTransitionFailureDueClassificationRejectedCompleted`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureDueClassificationRejectedSkipped`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `ClassifyTransitionFailureDueClassificationRejectedMisfired`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `ClassifyTransitionFailureDueClassificationRejectedSuperseded`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `ClassifyTransitionFailureClaimedDispatchDispositionRejectedPending`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureClaimedDispatchDispositionRejectedClaimed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyTransitionFailureClaimedDispatchDispositionRejectedDispatching`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyTransitionFailureClaimedDispatchDispositionRejectedAwaitingCompletion`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyTransitionFailureClaimedDispatchDispositionRejectedCompleted`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureClaimedDispatchDispositionRejectedSkipped`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureClaimedDispatchDispositionRejectedMisfired`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureClaimedDispatchDispositionRejectedSuperseded`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureClaimedDispatchDispositionRejectedDeliveryFailed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `ClassifyTransitionFailureCompletionSupersessionRejectedPending`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_start_complete_fail`, `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureCompletionSupersessionRejectedClaimed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyTransitionFailureCompletionSupersessionRejectedDispatching`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyTransitionFailureCompletionSupersessionRejectedAwaitingCompletion`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyTransitionFailureCompletionSupersessionRejectedCompleted`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureCompletionSupersessionRejectedSkipped`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureCompletionSupersessionRejectedMisfired`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureCompletionSupersessionRejectedSuperseded`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureCompletionSupersessionRejectedDeliveryFailed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
+- `ClassifyTransitionFailureClaimRejectedPendingPending`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_start_complete_fail`, `occurrence_claim_dispatch_completion`
+- `ClassifyTransitionFailureNotPendingForClaimClaimed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotPendingForClaimDispatching`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotPendingForClaimAwaitingCompletion`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotPendingForClaimCompleted`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `ClassifyTransitionFailureNotPendingForClaimSkipped`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
+- `ClassifyTransitionFailureNotPendingForClaimMisfired`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
+- `ClassifyTransitionFailureNotPendingForClaimSuperseded`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
+- `ClassifyTransitionFailureNotPendingForClaimDeliveryFailed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
+- `ClassifyTransitionFailureNotClaimedPending`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_start_complete_fail`, `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotClaimedClaimed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotClaimedDispatching`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotClaimedAwaitingCompletion`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotClaimedCompleted`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotClaimedSkipped`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotClaimedMisfired`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotClaimedSuperseded`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotClaimedDeliveryFailed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
+- `ClassifyTransitionFailureNotDispatchingPending`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_start_complete_fail`, `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotDispatchingClaimed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotDispatchingDispatching`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotDispatchingAwaitingCompletion`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotDispatchingCompleted`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotDispatchingSkipped`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotDispatchingMisfired`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotDispatchingSuperseded`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotDispatchingDeliveryFailed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
+- `ClassifyTransitionFailureNotLeaseHoldingPending`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_start_complete_fail`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotLeaseHoldingClaimed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotLeaseHoldingDispatching`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotLeaseHoldingAwaitingCompletion`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotLeaseHoldingCompleted`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotLeaseHoldingSkipped`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotLeaseHoldingMisfired`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotLeaseHoldingSuperseded`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotLeaseHoldingDeliveryFailed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `ClassifyTransitionFailureNotLiveForTerminalPending`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `ClassifyTransitionFailureNotLiveForTerminalClaimed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `ClassifyTransitionFailureNotLiveForTerminalDispatching`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `ClassifyTransitionFailureNotLiveForTerminalAwaitingCompletion`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureNotLiveForTerminalCompleted`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `ClassifyTransitionFailureNotLiveForTerminalSkipped`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `ClassifyTransitionFailureNotLiveForTerminalMisfired`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `ClassifyTransitionFailureNotLiveForTerminalSuperseded`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `ClassifyTransitionFailureNotLiveForTerminalDeliveryFailed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `PlanOccurrenceFromPending`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `ClassifyDuePendingFuture`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyDuePendingMisfire`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyDuePendingClaimEligible`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyDueClaimedLeaseExpired`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyDueDispatchingLeaseExpired`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyDueAwaitingCompletionLeaseExpired`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyDueClaimedLeaseCurrent`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyDueDispatchingLeaseCurrent`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyDueAwaitingCompletionLeaseCurrent`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyDueCompletedNoAction`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyDueSkippedNoAction`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyDueMisfiredNoAction`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyDueSupersededNoAction`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyDueDeliveryFailedNoAction`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`, `occurrence_lease_recovery`
+- `ClassifyOccurrenceTerminalityTerminalCompleted`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_start_complete_fail`, `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`, `occurrence_lease_recovery`
+- `ClassifyOccurrenceTerminalityTerminalSkipped`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `ClassifyOccurrenceTerminalityTerminalMisfired`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `ClassifyOccurrenceTerminalityTerminalSuperseded`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `ClassifyOccurrenceTerminalityTerminalDeliveryFailed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `ClassifyOccurrenceTerminalityLivePending`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyOccurrenceTerminalityLiveClaimed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyOccurrenceTerminalityLiveDispatching`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyOccurrenceTerminalityLiveAwaitingCompletion`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyClaimedDispatchDispositionFutureRevision`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyClaimedDispatchDispositionFrozen`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyClaimedDispatchDispositionSupersedeDeleted`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyClaimedDispatchDispositionSupersedeStale`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyClaimedDispatchDispositionReady`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyCompletionSupersessionDeleted`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyCompletionSupersessionStale`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyCompletionSupersessionProceed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `SyncTargetSnapshotPending`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `SyncTargetSnapshotClaimed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `RecordReceiptPending`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `RecordReceiptClaimed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `RecordReceiptDispatching`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `RecordReceiptAwaitingCompletion`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `RecordReceiptCompleted`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `RecordReceiptSkipped`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `RecordReceiptMisfired`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `RecordReceiptSuperseded`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `RecordReceiptDeliveryFailed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
 - `ClaimPending`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_claim_dispatch_completion`
@@ -29,18 +455,66 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `CompleteFromDispatchingOrAwaiting`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_claim_dispatch_completion`
-- `SkipFromPendingOrLive`
+- `RuntimeCompletionCompleted`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_claim_dispatch_completion`
-- `MisfireFromPendingOrLive`
+- `RuntimeCompletionRuntimeRejected`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_claim_dispatch_completion`
+- `RuntimeCompletionTransportError`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `RuntimeCompletionInternalError`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `DeliveryCompletionFailureTransportError`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
+- `DeliveryCompletionFailureInternalError`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
+- `DeliveryFailureTargetMaterializationFailed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
+- `DeliveryFailureTargetMissing`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
+- `DeliveryFailureTargetBusy`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
+- `DeliveryFailureRuntimeRejected`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
+- `DeliveryFailureMobRejected`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `DeliveryFailureTransportError`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `DeliveryFailureInternalError`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `TargetProbeReadyClaimed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `TargetProbeBusyAllowedByPolicy`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `TargetProbeBusySkipByPolicy`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `TargetProbeMissingSkipByPolicy`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `TargetProbeMissingMisfireByPolicy`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
+- `DueMisfirePending`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
 - `SupersedePendingOrLive`
   - anchors: `occurrence_lifecycle`
-  - scenarios: `occurrence_start_complete_fail`, `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
-- `DeliveryFailedFromClaimedOrLive`
-  - anchors: `occurrence_lifecycle`
-  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`, `occurrence_lease_recovery`
+  - scenarios: `occurrence_claim_dispatch_completion`
 - `LeaseExpiredFromClaimed`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_lease_recovery`
@@ -48,6 +522,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_lease_recovery`
 - `LeaseExpiredFromAwaitingCompletion`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ReleaseLeaseForPausedScheduleFromClaimed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ReleaseLeaseForPausedScheduleFromDispatching`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ReleaseLeaseForPausedScheduleFromAwaitingCompletion`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_lease_recovery`
 
@@ -66,22 +549,46 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `occurrence_claim_dispatch_completion`
 - `Skipped`
   - anchors: `occurrence_lifecycle`
-  - scenarios: `occurrence_terminal_classification`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
 - `Misfired`
   - anchors: `occurrence_lifecycle`
-  - scenarios: `occurrence_terminal_classification`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
 - `Superseded`
   - anchors: `occurrence_lifecycle`
-  - scenarios: `occurrence_terminal_classification`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
 - `OccurrencesSuperseded`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_terminal_classification`
+- `DueNoAction`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `DueClaimEligible`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `DueMisfireRequired`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `DueLeaseExpired`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `OccurrenceTerminalityClassified`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_start_complete_fail`, `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`, `occurrence_lease_recovery`
+- `ClaimedDispatchDispositionClassified`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `CompletionSupersessionClassified`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
 - `DeliveryFailed`
   - anchors: `occurrence_lifecycle`
-  - scenarios: `occurrence_terminal_classification`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`
 - `LeaseExpired`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_lease_recovery`
+- `TransitionFailureClassified`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_start_complete_fail`, `occurrence_terminal_classification`
 
 ### Invariants
 - `live_claim_requires_owner`
@@ -93,6 +600,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `delivery_failed_records_failure_class`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_terminal_classification`
+- `misfire_deadline_not_before_due`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
 
 
 <!-- GENERATED_COVERAGE_END -->

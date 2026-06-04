@@ -35,7 +35,7 @@ pub(crate) fn apply_dsl_transition_on_authority(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     dsl::MeerkatMachineMutator::apply(&mut *authority, input)
-        .map(|transition| DslTransitionEffects::new(transition.effects))
+        .map(|transition| DslTransitionEffects::new(transition.into_effects()))
         .map_err(|err| dsl_authority::map_error(err, context))
 }
 
@@ -48,16 +48,6 @@ impl std::ops::Deref for DslTransitionEffects {
 }
 
 impl MeerkatMachine {
-    pub(super) async fn stage_session_runtime_internal_dsl_input(
-        &self,
-        session_id: &SessionId,
-        input: MeerkatMachineFieldlessRuntimeInternalInput,
-    ) -> Result<Box<dsl::MeerkatMachineState>, String> {
-        self.stage_session_runtime_internal_dsl_transition(session_id, input)
-            .await
-            .map(|staged| staged.previous_state)
-    }
-
     pub(super) async fn stage_session_runtime_internal_dsl_transition(
         &self,
         session_id: &SessionId,
@@ -102,10 +92,10 @@ impl MeerkatMachine {
         session_id: &SessionId,
         input: dsl::MeerkatMachineInput,
         context: &str,
-    ) -> Result<Box<dsl::MeerkatMachineState>, String> {
+    ) -> Result<dsl::MeerkatMachineAuthoritySnapshot, String> {
         self.stage_session_dsl_transition(session_id, input, context)
             .await
-            .map(|staged| staged.previous_state)
+            .map(|staged| staged.previous_snapshot)
     }
 
     pub(super) async fn stage_session_dsl_transition(
@@ -135,12 +125,14 @@ impl MeerkatMachine {
         let mut authority = authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let previous_state = Box::new(authority.state.clone());
+        let previous_snapshot = authority.snapshot();
         let effects = dsl::MeerkatMachineMutator::apply(&mut *authority, input)
-            .map(|transition| DslTransitionEffects::new(transition.effects))
+            .map(|transition| DslTransitionEffects::new(transition.into_effects()))
             .map_err(|err| dsl_authority::map_error(err, context))?;
+        let committed_snapshot = authority.snapshot();
         Ok(StagedSessionDslInput {
-            previous_state,
+            previous_snapshot,
+            committed_snapshot,
             effects,
         })
     }
@@ -156,12 +148,12 @@ impl MeerkatMachine {
         session_id: &SessionId,
         input: dsl::MeerkatMachineInput,
         context: &str,
-    ) -> Result<(Box<dsl::MeerkatMachineState>, DslTransitionEffects), String> {
+    ) -> Result<(dsl::MeerkatMachineAuthoritySnapshot, DslTransitionEffects), String> {
         self.apply_session_dsl_input_with_dispatch_failure(
             session_id,
             input,
             context,
-            CommittedEffectDispatchFailure::RestorePreviousDslState,
+            CommittedEffectDispatchFailure::PreserveCommittedDslState,
         )
         .await
     }
@@ -172,31 +164,25 @@ impl MeerkatMachine {
         input: dsl::MeerkatMachineInput,
         context: &str,
         dispatch_failure: CommittedEffectDispatchFailure,
-    ) -> Result<(Box<dsl::MeerkatMachineState>, DslTransitionEffects), String> {
+    ) -> Result<(dsl::MeerkatMachineAuthoritySnapshot, DslTransitionEffects), String> {
         Self::reject_raw_fieldless_runtime_internal_dsl_input(&input)?;
         let authority = self.session_dsl_authority(session_id).await?;
-        let (previous_state, effects) = {
+        let (previous_snapshot, effects) = {
             let mut authority = authority
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let previous_state = Box::new(authority.state.clone());
+            let previous_snapshot = authority.snapshot();
             let effects = dsl::MeerkatMachineMutator::apply(&mut *authority, input)
-                .map(|transition| DslTransitionEffects::new(transition.effects))
+                .map(|transition| DslTransitionEffects::new(transition.into_effects()))
                 .map_err(|err| dsl_authority::map_error(err, context))?;
-            (previous_state, effects)
+            (previous_snapshot, effects)
         };
         if let Err(error) = self.dispatch_routed_signals_from_effects(&effects).await {
-            match dispatch_failure {
-                CommittedEffectDispatchFailure::PreserveCommittedDslState => {}
-                CommittedEffectDispatchFailure::RestorePreviousDslState => {
-                    self.restore_session_dsl_state(session_id, previous_state)
-                        .await;
-                }
-            }
+            let CommittedEffectDispatchFailure::PreserveCommittedDslState = dispatch_failure;
             return Err(format!(
                 "DSL authority ({context}): committed effect dispatch failed: {error}"
             ));
         }
-        Ok((previous_state, effects))
+        Ok((previous_snapshot, effects))
     }
 }

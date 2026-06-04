@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::error::AuthErrorKind;
-use crate::handles::{AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, AuthLeasePhase, AuthLeaseSnapshot};
+use crate::handles::{AuthLeasePhase, AuthLeaseSnapshot};
 use crate::provider::Provider;
 
 /// Public auth status phase shared by REST, RPC, CLI, and generated SDK wire
@@ -49,49 +49,24 @@ impl AuthStatusPhase {
         match phase {
             Some(AuthLeasePhase::Valid) => Self::Valid,
             Some(AuthLeasePhase::Expiring | AuthLeasePhase::Refreshing) => Self::Expiring,
+            Some(AuthLeasePhase::Expired) => Self::Expired,
             Some(AuthLeasePhase::ReauthRequired) => Self::ReauthRequired,
             Some(AuthLeasePhase::Released) | None => Self::Unknown,
         }
     }
 
-    pub fn from_lease_snapshot(now: DateTime<Utc>, snapshot: &AuthLeaseSnapshot) -> Self {
+    pub fn from_lease_snapshot(_now: DateTime<Utc>, snapshot: &AuthLeaseSnapshot) -> Self {
         if !snapshot.credential_present {
             return Self::Unknown;
         }
         match snapshot.phase {
-            Some(AuthLeasePhase::Valid) => Self::from_lease_expires_at(now, snapshot.expires_at),
-            Some(AuthLeasePhase::Expiring | AuthLeasePhase::Refreshing) => {
-                match snapshot.expires_at {
-                    Some(expires_at) if epoch_secs_expired(now, expires_at) => Self::Expired,
-                    _ => Self::Expiring,
-                }
-            }
+            Some(AuthLeasePhase::Valid) => Self::Valid,
+            Some(AuthLeasePhase::Expiring | AuthLeasePhase::Refreshing) => Self::Expiring,
+            Some(AuthLeasePhase::Expired) => Self::Expired,
             Some(AuthLeasePhase::ReauthRequired) => Self::ReauthRequired,
             Some(AuthLeasePhase::Released) | None => Self::Unknown,
         }
     }
-
-    pub fn from_lease_expires_at(now: DateTime<Utc>, expires_at: Option<u64>) -> Self {
-        match expires_at {
-            Some(expires_at) if epoch_secs_expired(now, expires_at) => Self::Expired,
-            Some(expires_at)
-                if epoch_secs_until(now, expires_at)
-                    < AUTH_LEASE_TTL_REFRESH_WINDOW_SECS as i64 =>
-            {
-                Self::Expiring
-            }
-            Some(_) | None => Self::Valid,
-        }
-    }
-}
-
-fn epoch_secs_expired(now: DateTime<Utc>, expires_at: u64) -> bool {
-    epoch_secs_until(now, expires_at) <= 0
-}
-
-fn epoch_secs_until(now: DateTime<Utc>, expires_at: u64) -> i64 {
-    let expires_at = i64::try_from(expires_at).unwrap_or(i64::MAX);
-    expires_at.saturating_sub(now.timestamp())
 }
 
 /// Status snapshot of a resolved (or unresolved) auth profile.
@@ -168,7 +143,7 @@ mod tests {
     }
 
     #[test]
-    fn auth_status_phase_maps_lease_snapshot_expiry_to_public_values() {
+    fn auth_status_phase_maps_machine_lease_phase_to_public_values() {
         let now = Utc.with_ymd_and_hms(2026, 4, 28, 12, 0, 0).unwrap();
 
         let valid = AuthLeaseSnapshot {
@@ -192,6 +167,18 @@ mod tests {
         };
         assert_eq!(
             AuthStatusPhase::from_lease_snapshot(now, &expired).as_public_str(),
+            "valid"
+        );
+
+        let machine_expired = AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Expired),
+            expires_at: Some((now - Duration::seconds(1)).timestamp() as u64),
+            credential_present: true,
+            generation: 1,
+            credential_published_at_millis: None,
+        };
+        assert_eq!(
+            AuthStatusPhase::from_lease_snapshot(now, &machine_expired).as_public_str(),
             "expired"
         );
 
@@ -217,6 +204,10 @@ mod tests {
         assert_eq!(
             AuthStatusPhase::from_lease_phase(Some(AuthLeasePhase::Expiring)).as_public_str(),
             "expiring"
+        );
+        assert_eq!(
+            AuthStatusPhase::from_lease_phase(Some(AuthLeasePhase::Expired)).as_public_str(),
+            "expired"
         );
         assert_eq!(
             AuthStatusPhase::from_lease_phase(Some(AuthLeasePhase::ReauthRequired)).as_public_str(),

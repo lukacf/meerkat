@@ -36,6 +36,65 @@ fn make_keypair() -> Keypair {
     Keypair::generate()
 }
 
+async fn add_generated_peer_projection_trust(
+    runtime: &CommsRuntime,
+    peer: TrustedPeerDescriptor,
+    context: &'static str,
+) {
+    let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&peer);
+    let state = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineState {
+        lifecycle_phase: meerkat_runtime::meerkat_machine::dsl::MeerkatPhase::Attached,
+        session_id: Some(meerkat_runtime::meerkat_machine::dsl::SessionId::from(
+            "comms-e2e-test-reconcile",
+        )),
+        ..Default::default()
+    };
+    let authority = Arc::new(std::sync::Mutex::new(
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("test MeerkatMachine state must be recoverable"),
+    ));
+    let dsl = Arc::new(meerkat_runtime::handles::HandleDslAuthority::from_shared(
+        Arc::clone(&authority),
+    ));
+    meerkat_runtime::handles::RuntimePeerCommsHandle::install_generated_on(dsl, runtime)
+        .unwrap_or_else(|error| panic!("{context}: install generated peer comms owner: {error}"));
+    let transition = {
+        let mut guard = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *guard,
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
+                epoch: 1,
+                endpoints: std::collections::BTreeSet::from([endpoint.clone()]),
+            },
+        )
+        .expect("ApplyMobPeerOverlay input")
+    };
+    let obligation =
+        meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+            &transition,
+            meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                Arc::clone(&authority),
+            ),
+        )
+        .pop()
+        .expect("generated reconcile obligation");
+    CoreCommsRuntime::apply_trust_mutation(
+        runtime,
+        meerkat_core::comms::CommsTrustMutation::AddTrustedPeer {
+            authority: meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(
+                &obligation,
+                &endpoint,
+            )
+            .expect("generated peer projection add authority"),
+            peer,
+        },
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{context}: {error}"));
+}
+
 #[derive(Default)]
 struct TestBlobStore {
     blobs: tokio::sync::RwLock<HashMap<BlobId, BlobPayload>>,
@@ -80,6 +139,8 @@ impl BlobStore for TestBlobStore {
 struct TestPeerInteractionHandle {
     outbound: parking_lot::Mutex<HashMap<PeerCorrelationId, OutboundPeerRequestState>>,
     inbound: parking_lot::Mutex<HashMap<PeerCorrelationId, InboundPeerRequestState>>,
+    inbound_modes:
+        parking_lot::Mutex<HashMap<PeerCorrelationId, meerkat_core::types::HandlingMode>>,
 }
 
 impl TestPeerInteractionHandle {
@@ -127,6 +188,16 @@ impl meerkat_core::handles::PeerInteractionHandle for TestPeerInteractionHandle 
         Ok(())
     }
 
+    fn response_rejected(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
+        if self.outbound.lock().remove(&corr_id).is_none() {
+            return Err(Self::rejection(
+                "PeerInteractionHandle::response_rejected",
+                corr_id,
+            ));
+        }
+        Ok(())
+    }
+
     fn request_timed_out(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
         if self.outbound.lock().remove(&corr_id).is_none() {
             return Err(Self::rejection(
@@ -137,11 +208,24 @@ impl meerkat_core::handles::PeerInteractionHandle for TestPeerInteractionHandle 
         Ok(())
     }
 
-    fn request_received(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
+    fn request_received(
+        &self,
+        corr_id: PeerCorrelationId,
+        handling_mode: meerkat_core::types::HandlingMode,
+    ) -> Result<(), DslTransitionError> {
         self.inbound
             .lock()
             .insert(corr_id, InboundPeerRequestState::Received);
+        self.inbound_modes.lock().insert(corr_id, handling_mode);
         Ok(())
+    }
+
+    fn classify_response_reply(
+        &self,
+        status: meerkat_core::ResponseStatus,
+    ) -> Result<meerkat_core::TerminalityClass, DslTransitionError> {
+        let generated = meerkat_runtime::handles::RuntimePeerInteractionHandle::ephemeral();
+        meerkat_core::handles::PeerInteractionHandle::classify_response_reply(&generated, status)
     }
 
     fn response_replied(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
@@ -151,6 +235,7 @@ impl meerkat_core::handles::PeerInteractionHandle for TestPeerInteractionHandle 
                 corr_id,
             ));
         }
+        self.inbound_modes.lock().remove(&corr_id);
         Ok(())
     }
 
@@ -160,6 +245,13 @@ impl meerkat_core::handles::PeerInteractionHandle for TestPeerInteractionHandle 
 
     fn inbound_state(&self, corr_id: PeerCorrelationId) -> Option<InboundPeerRequestState> {
         self.inbound.lock().get(&corr_id).copied()
+    }
+
+    fn inbound_handling_mode(
+        &self,
+        corr_id: PeerCorrelationId,
+    ) -> Option<meerkat_core::types::HandlingMode> {
+        self.inbound_modes.lock().get(&corr_id).copied()
     }
 
     fn install_cleanup_observer(
@@ -263,8 +355,6 @@ async fn bind_tcp_or_skip(addr: &str) -> Option<TcpListener> {
 
 /// Helper to set up mutual trust between two peers.
 ///
-/// Returns shared `Arc<RwLock<TrustedPeers>>` handles — the same shape the
-/// router owns and `handle_connection` now reads through.
 fn setup_mutual_trust(
     name_a: &str,
     pubkey_a: &PubKey,
@@ -274,24 +364,20 @@ fn setup_mutual_trust(
     addr_b: &str,
 ) -> (Arc<RwLock<TrustedPeers>>, Arc<RwLock<TrustedPeers>>) {
     // Peer A trusts Peer B
-    let a_trusts = Arc::new(RwLock::new(TrustedPeers {
-        peers: vec![TrustedPeer {
-            name: name_b.to_string(),
-            pubkey: *pubkey_b,
-            addr: addr_b.to_string(),
-            meta: meerkat_comms::PeerMeta::default(),
-        }],
-    }));
+    let a_trusts = Arc::new(RwLock::new(TrustedPeers::from_peers(vec![TrustedPeer {
+        name: name_b.to_string(),
+        pubkey: *pubkey_b,
+        addr: addr_b.to_string(),
+        meta: meerkat_comms::PeerMeta::default(),
+    }])));
 
     // Peer B trusts Peer A
-    let b_trusts = Arc::new(RwLock::new(TrustedPeers {
-        peers: vec![TrustedPeer {
-            name: name_a.to_string(),
-            pubkey: *pubkey_a,
-            addr: addr_a.to_string(),
-            meta: meerkat_comms::PeerMeta::default(),
-        }],
-    }));
+    let b_trusts = Arc::new(RwLock::new(TrustedPeers::from_peers(vec![TrustedPeer {
+        name: name_a.to_string(),
+        pubkey: *pubkey_a,
+        addr: addr_a.to_string(),
+        meta: meerkat_comms::PeerMeta::default(),
+    }])));
 
     (a_trusts, b_trusts)
 }
@@ -405,7 +491,7 @@ async fn integration_real_uds_message_exchange() {
     let peer_b_keypair = make_keypair();
     let peer_b_pubkey = peer_b_keypair.public_key();
 
-    let (peer_a_trust, peer_b_trust) = setup_mutual_trust(
+    let (peer_a_trust, _peer_b_trust) = setup_mutual_trust(
         "peer-a",
         &peer_a_keypair.public_key(),
         "uds:///unused",
@@ -423,22 +509,16 @@ async fn integration_real_uds_message_exchange() {
     // Spawn B's IO task
     let handle_b = tokio::spawn(async move {
         let (stream, _) = listener_b.accept().await.unwrap();
-        handle_connection(
-            stream,
-            true,
-            &peer_b_keypair,
-            &peer_b_trust,
-            &inbox_sender_b,
-        )
-        .await
-        .unwrap();
+        handle_connection(stream, true, &peer_b_keypair, &inbox_sender_b)
+            .await
+            .unwrap();
     });
 
     // Peer A sends a message
     let (_, inbox_sender_a) = Inbox::new();
-    let router_a = Router::with_shared_peers(
+    let router_a = Router::new(
         peer_a_keypair,
-        peer_a_trust,
+        peer_a_trust.read().clone(),
         CommsConfig::default(),
         inbox_sender_a,
         true,
@@ -497,7 +577,7 @@ async fn e2e_smoke_mcp_multimodal_blob_current_turn_request_response_loop() {
     let peer_b_id = runtime_b.public_key().to_peer_id();
     let peer_a_id = runtime_a.public_key().to_peer_id();
 
-    CoreCommsRuntime::add_trusted_peer(
+    add_generated_peer_projection_trust(
         runtime_a.as_ref(),
         TrustedPeerDescriptor::unsigned_with_pubkey(
             name_b.clone(),
@@ -506,10 +586,10 @@ async fn e2e_smoke_mcp_multimodal_blob_current_turn_request_response_loop() {
             format!("inproc://{name_b}"),
         )
         .expect("B trusted descriptor"),
+        "A trusts B",
     )
-    .await
-    .expect("A trusts B");
-    CoreCommsRuntime::add_trusted_peer(
+    .await;
+    add_generated_peer_projection_trust(
         runtime_b.as_ref(),
         TrustedPeerDescriptor::unsigned_with_pubkey(
             name_a.clone(),
@@ -518,9 +598,9 @@ async fn e2e_smoke_mcp_multimodal_blob_current_turn_request_response_loop() {
             format!("inproc://{name_a}"),
         )
         .expect("A trusted descriptor"),
+        "B trusts A",
     )
-    .await
-    .expect("B trusts A");
+    .await;
 
     let ctx_a = tool_context(&runtime_a);
     let ctx_b = tool_context(&runtime_b);
@@ -622,7 +702,10 @@ async fn e2e_smoke_mcp_multimodal_blob_current_turn_request_response_loop() {
         other => panic!("expected B request, got {other:?}"),
     }
     peer_b
-        .request_received(PeerCorrelationId::from_uuid(request_id.0))
+        .request_received(
+            PeerCorrelationId::from_uuid(request_id.0),
+            meerkat_core::types::HandlingMode::Queue,
+        )
         .expect("seed B inbound request authority");
 
     handle_tools_call_with_context(
@@ -687,7 +770,7 @@ async fn integration_real_tcp_message_exchange() {
     let peer_b_keypair = make_keypair();
     let peer_b_pubkey = peer_b_keypair.public_key();
 
-    let (peer_a_trust, peer_b_trust) = setup_mutual_trust(
+    let (peer_a_trust, _peer_b_trust) = setup_mutual_trust(
         "peer-a",
         &peer_a_keypair.public_key(),
         "tcp://127.0.0.1:0",
@@ -702,22 +785,16 @@ async fn integration_real_tcp_message_exchange() {
     // Spawn B's IO task
     let handle_b = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        handle_connection(
-            stream,
-            true,
-            &peer_b_keypair,
-            &peer_b_trust,
-            &inbox_sender_b,
-        )
-        .await
-        .unwrap();
+        handle_connection(stream, true, &peer_b_keypair, &inbox_sender_b)
+            .await
+            .unwrap();
     });
 
     // Peer A sends a message
     let (_, inbox_sender_a) = Inbox::new();
-    let router_a = Router::with_shared_peers(
+    let router_a = Router::new(
         peer_a_keypair,
-        peer_a_trust,
+        peer_a_trust.read().clone(),
         CommsConfig::default(),
         inbox_sender_a,
         true,
@@ -757,7 +834,7 @@ async fn integration_real_request_response_flow() {
     let peer_a_pubkey = peer_a_keypair.public_key();
     let peer_b_pubkey = peer_b_keypair.public_key();
 
-    let (peer_a_trust, peer_b_trust) = setup_mutual_trust(
+    let (peer_a_trust, _peer_b_trust) = setup_mutual_trust(
         "peer-a",
         &peer_a_pubkey,
         &addr_a,
@@ -774,25 +851,18 @@ async fn integration_real_request_response_flow() {
     let (mut inbox_b, inbox_sender_b) = Inbox::new();
 
     // Spawn B's receiver
-    let peer_b_trust_clone = peer_b_trust.clone();
     let handle_b = tokio::spawn(async move {
         let (stream, _) = listener_b.accept().await.unwrap();
-        handle_connection(
-            stream,
-            true,
-            &peer_b_keypair,
-            &peer_b_trust_clone,
-            &inbox_sender_b,
-        )
-        .await
-        .unwrap();
+        handle_connection(stream, true, &peer_b_keypair, &inbox_sender_b)
+            .await
+            .unwrap();
     });
 
     // A sends a Request to B
     let (_, inbox_sender_a) = Inbox::new();
-    let router_a = Router::with_shared_peers(
+    let router_a = Router::new(
         peer_a_keypair,
-        peer_a_trust.clone(),
+        peer_a_trust.read().clone(),
         CommsConfig::default(),
         inbox_sender_a,
         true,
@@ -834,16 +904,14 @@ async fn integration_real_untrusted_rejected() {
     let _untrusted_keypair = make_keypair();
 
     // A trusts B, but B does NOT trust A (empty trust list)
-    let peer_a_trust = Arc::new(RwLock::new(TrustedPeers {
-        peers: vec![TrustedPeer {
-            name: "peer-b".to_string(),
-            pubkey: peer_b_keypair.public_key(),
-            addr: addr_b.clone(),
-            meta: meerkat_comms::PeerMeta::default(),
-        }],
-    }));
+    let peer_a_trust = Arc::new(RwLock::new(TrustedPeers::from_peers(vec![TrustedPeer {
+        name: "peer-b".to_string(),
+        pubkey: peer_b_keypair.public_key(),
+        addr: addr_b.clone(),
+        meta: meerkat_comms::PeerMeta::default(),
+    }])));
 
-    let peer_b_trust = Arc::new(RwLock::new(TrustedPeers { peers: vec![] })); // B trusts no one
+    let _peer_b_trust = Arc::new(RwLock::new(TrustedPeers::new())); // B trusts no one
 
     // Start peer B listening
     let Some(listener_b) = bind_uds_or_skip(&sock_b) else {
@@ -856,21 +924,14 @@ async fn integration_real_untrusted_rejected() {
         // This will reject the message due to untrusted sender
         // The connection handler should complete (possibly with error due to untrusted sender)
         // What matters is the message is NOT delivered to inbox
-        handle_connection(
-            stream,
-            true,
-            &peer_b_keypair,
-            &peer_b_trust,
-            &inbox_sender_b,
-        )
-        .await
+        handle_connection(stream, true, &peer_b_keypair, &inbox_sender_b).await
     });
 
     // A sends a message (will connect, but B will reject it as untrusted)
     let (_, inbox_sender_a) = Inbox::new();
-    let router_a = Router::with_shared_peers(
+    let router_a = Router::new(
         peer_a_keypair,
-        peer_a_trust,
+        peer_a_trust.read().clone(),
         CommsConfig::default(),
         inbox_sender_a,
         true,
@@ -915,42 +976,36 @@ async fn integration_real_concurrent_multi_peer() {
     let addr_c = format!("uds://{}", sock_c.display());
 
     // A trusts B and C
-    let peer_a_trust = Arc::new(RwLock::new(TrustedPeers {
-        peers: vec![
-            TrustedPeer {
-                name: "peer-b".to_string(),
-                pubkey: peer_b_keypair.public_key(),
-                addr: addr_b.clone(),
-                meta: meerkat_comms::PeerMeta::default(),
-            },
-            TrustedPeer {
-                name: "peer-c".to_string(),
-                pubkey: peer_c_keypair.public_key(),
-                addr: addr_c.clone(),
-                meta: meerkat_comms::PeerMeta::default(),
-            },
-        ],
-    }));
+    let peer_a_trust = Arc::new(RwLock::new(TrustedPeers::from_peers(vec![
+        TrustedPeer {
+            name: "peer-b".to_string(),
+            pubkey: peer_b_keypair.public_key(),
+            addr: addr_b.clone(),
+            meta: meerkat_comms::PeerMeta::default(),
+        },
+        TrustedPeer {
+            name: "peer-c".to_string(),
+            pubkey: peer_c_keypair.public_key(),
+            addr: addr_c.clone(),
+            meta: meerkat_comms::PeerMeta::default(),
+        },
+    ])));
 
     // B trusts A
-    let peer_b_trust = Arc::new(RwLock::new(TrustedPeers {
-        peers: vec![TrustedPeer {
-            name: "peer-a".to_string(),
-            pubkey: peer_a_keypair.public_key(),
-            addr: addr_a.clone(),
-            meta: meerkat_comms::PeerMeta::default(),
-        }],
-    }));
+    let _peer_b_trust = Arc::new(RwLock::new(TrustedPeers::from_peers(vec![TrustedPeer {
+        name: "peer-a".to_string(),
+        pubkey: peer_a_keypair.public_key(),
+        addr: addr_a.clone(),
+        meta: meerkat_comms::PeerMeta::default(),
+    }])));
 
     // C trusts A
-    let peer_c_trust = Arc::new(RwLock::new(TrustedPeers {
-        peers: vec![TrustedPeer {
-            name: "peer-a".to_string(),
-            pubkey: peer_a_keypair.public_key(),
-            addr: addr_a.clone(),
-            meta: meerkat_comms::PeerMeta::default(),
-        }],
-    }));
+    let _peer_c_trust = Arc::new(RwLock::new(TrustedPeers::from_peers(vec![TrustedPeer {
+        name: "peer-a".to_string(),
+        pubkey: peer_a_keypair.public_key(),
+        addr: addr_a.clone(),
+        meta: meerkat_comms::PeerMeta::default(),
+    }])));
 
     // Start listeners for B and C
     let Some(listener_b) = bind_uds_or_skip(&sock_b) else {
@@ -967,35 +1022,23 @@ async fn integration_real_concurrent_multi_peer() {
     // Spawn B's and C's handlers
     let handle_b = tokio::spawn(async move {
         let (stream, _) = listener_b.accept().await.unwrap();
-        handle_connection(
-            stream,
-            true,
-            &peer_b_keypair,
-            &peer_b_trust,
-            &inbox_sender_b,
-        )
-        .await
-        .unwrap();
+        handle_connection(stream, true, &peer_b_keypair, &inbox_sender_b)
+            .await
+            .unwrap();
     });
 
     let handle_c = tokio::spawn(async move {
         let (stream, _) = listener_c.accept().await.unwrap();
-        handle_connection(
-            stream,
-            true,
-            &peer_c_keypair,
-            &peer_c_trust,
-            &inbox_sender_c,
-        )
-        .await
-        .unwrap();
+        handle_connection(stream, true, &peer_c_keypair, &inbox_sender_c)
+            .await
+            .unwrap();
     });
 
     // A sends messages to both B and C concurrently
     let (_, inbox_sender_a) = Inbox::new();
-    let router_a = Router::with_shared_peers(
+    let router_a = Router::new(
         peer_a_keypair,
-        peer_a_trust,
+        peer_a_trust.read().clone(),
         CommsConfig::default(),
         inbox_sender_a,
         true,

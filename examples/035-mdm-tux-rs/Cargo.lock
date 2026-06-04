@@ -223,7 +223,7 @@ version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0700ddab506f33b20a03b13996eccd309a48e5ff77d0d95926aa0210fb4e95f1"
 dependencies = [
- "bit-vec 0.6.2",
+ "bit-vec 0.6.3",
 ]
 
 [[package]]
@@ -237,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "bit-vec"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "349f9b6a179ed607305526ca489b34ad0a41aed5f7980fa90eb03160b69598fb"
 
@@ -301,6 +301,12 @@ name = "bytemuck"
 version = "1.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
+
+[[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "bytes"
@@ -513,7 +519,7 @@ dependencies = [
  "document-features",
  "mio",
  "parking_lot",
- "rustix",
+ "rustix 1.1.4",
  "signal-hook",
  "signal-hook-mio",
  "winapi",
@@ -949,6 +955,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs4"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c29c30684418547d476f0b48e84f4821639119c483b1eccd566c8cd0cd05f521"
+dependencies = [
+ "rustix 0.38.44",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "fsevent-sys"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1067,7 +1083,7 @@ version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1bd49230192a3797a9a4d6abe9b3eed6f7fa4c8a8a4947977c6f80025f92cbd8"
 dependencies = [
- "rustix",
+ "rustix 1.1.4",
  "windows-link",
 ]
 
@@ -1653,6 +1669,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "keyring"
+version = "3.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c"
+dependencies = [
+ "byteorder",
+ "linux-keyutils",
+ "log",
+ "security-framework 2.11.1",
+ "security-framework 3.7.0",
+ "windows-sys 0.60.2",
+ "zeroize",
+]
+
+[[package]]
 name = "kqueue"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1724,6 +1755,22 @@ checksum = "3f50e8f47623268b5407192d26876c4d7f89d686ca130fdc53bced4814cd29f8"
 dependencies = [
  "bitflags 2.11.0",
 ]
+
+[[package]]
+name = "linux-keyutils"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83270a18e9f90d0707c41e9f35efada77b64c0e6f3f1810e71c8368a864d5590"
+dependencies = [
+ "bitflags 2.11.0",
+ "libc",
+]
+
+[[package]]
+name = "linux-raw-sys"
+version = "0.4.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
 
 [[package]]
 name = "linux-raw-sys"
@@ -1810,10 +1857,13 @@ dependencies = [
  "dirs",
  "futures",
  "gethostname",
+ "indexmap",
  "meerkat",
  "meerkat-client",
  "meerkat-comms",
  "meerkat-core",
+ "meerkat-machine-dsl",
+ "meerkat-machine-schema",
  "meerkat-mcp",
  "meerkat-mob",
  "meerkat-mob-mcp",
@@ -1835,19 +1885,21 @@ dependencies = [
 
 [[package]]
 name = "meerkat"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "async-trait",
  "chrono",
  "futures",
  "inventory",
  "meerkat-anthropic",
+ "meerkat-capabilities",
  "meerkat-client",
  "meerkat-comms",
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-gemini",
  "meerkat-hooks",
+ "meerkat-live",
  "meerkat-llm-core",
  "meerkat-mcp",
  "meerkat-models",
@@ -1859,7 +1911,9 @@ dependencies = [
  "meerkat-skills",
  "meerkat-store",
  "meerkat-tools",
+ "meerkat-workgraph",
  "parking_lot",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -1870,7 +1924,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-anthropic"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1891,17 +1945,19 @@ dependencies = [
 
 [[package]]
 name = "meerkat-auth-core"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "async-trait",
  "axum",
  "base64",
  "chrono",
  "dirs",
+ "fs4",
  "futures",
  "getrandom 0.3.4",
  "indexmap",
  "jsonwebtoken",
+ "keyring",
  "meerkat-core",
  "meerkat-llm-core",
  "oauth2",
@@ -1917,8 +1973,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerkat-capabilities"
+version = "0.6.23"
+dependencies = [
+ "inventory",
+ "meerkat-core",
+ "schemars 1.2.1",
+ "serde",
+ "strum",
+]
+
+[[package]]
 name = "meerkat-client"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "meerkat-anthropic",
  "meerkat-core",
@@ -1929,7 +1996,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-comms"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "async-trait",
  "base64",
@@ -1940,6 +2007,7 @@ dependencies = [
  "getrandom 0.2.17",
  "getrandom 0.3.4",
  "inventory",
+ "meerkat-capabilities",
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-skills",
@@ -1962,13 +2030,14 @@ dependencies = [
 
 [[package]]
 name = "meerkat-contracts"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "base64",
  "chrono",
- "inventory",
+ "meerkat-capabilities",
  "meerkat-core",
  "meerkat-schedule",
+ "meerkat-workgraph",
  "schemars 1.2.1",
  "serde",
  "serde_json",
@@ -1978,9 +2047,10 @@ dependencies = [
 
 [[package]]
 name = "meerkat-core"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
  "dirs",
  "futures",
@@ -2005,7 +2075,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-gemini"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2021,17 +2091,19 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "tokio_with_wasm",
 ]
 
 [[package]]
 name = "meerkat-hooks"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "async-trait",
  "chrono",
  "futures",
  "inventory",
+ "meerkat-capabilities",
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-skills",
@@ -2044,8 +2116,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerkat-live"
+version = "0.6.23"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64",
+ "indexmap",
+ "meerkat-contracts",
+ "meerkat-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "meerkat-llm-core"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2069,7 +2159,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-derive"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "quote",
  "syn 2.0.117",
@@ -2077,14 +2167,14 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-dsl"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "meerkat-machine-dsl-core",
 ]
 
 [[package]]
 name = "meerkat-machine-dsl-core"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2093,7 +2183,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-kernels"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "indexmap",
  "meerkat-core",
@@ -2104,7 +2194,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-schema"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "indexmap",
  "meerkat-core",
@@ -2115,12 +2205,13 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mcp"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "async-trait",
  "futures",
  "http",
  "inventory",
+ "meerkat-capabilities",
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-skills",
@@ -2136,7 +2227,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2170,7 +2261,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob-mcp"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "async-trait",
  "futures",
@@ -2193,7 +2284,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-models"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "meerkat-core",
  "schemars 1.2.1",
@@ -2202,7 +2293,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-openai"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2215,7 +2306,6 @@ dependencies = [
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-llm-core",
- "meerkat-runtime",
  "oai-rt-rs",
  "reqwest",
  "serde",
@@ -2228,7 +2318,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-providers"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "meerkat-auth-core",
  "meerkat-llm-core",
@@ -2236,10 +2326,11 @@ dependencies = [
 
 [[package]]
 name = "meerkat-rpc"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "async-trait",
  "axum",
+ "base64",
  "chrono",
  "clap",
  "futures",
@@ -2248,6 +2339,7 @@ dependencies = [
  "meerkat-client",
  "meerkat-contracts",
  "meerkat-core",
+ "meerkat-live",
  "meerkat-mob",
  "meerkat-mob-mcp",
  "meerkat-models",
@@ -2266,7 +2358,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-runtime"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2274,6 +2366,7 @@ dependencies = [
  "meerkat-auth-core",
  "meerkat-contracts",
  "meerkat-core",
+ "meerkat-live",
  "meerkat-machine-derive",
  "meerkat-machine-dsl",
  "meerkat-machine-schema",
@@ -2281,7 +2374,6 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "sha2",
  "thiserror 2.0.18",
  "tokio",
  "tokio_with_wasm",
@@ -2291,15 +2383,18 @@ dependencies = [
 
 [[package]]
 name = "meerkat-schedule"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "async-trait",
  "chrono",
  "chrono-tz",
  "futures",
  "indexmap",
+ "inventory",
+ "meerkat-capabilities",
  "meerkat-core",
  "meerkat-machine-schema",
+ "meerkat-skills",
  "schemars 1.2.1",
  "serde",
  "serde_json",
@@ -2311,14 +2406,17 @@ dependencies = [
 
 [[package]]
 name = "meerkat-session"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "async-trait",
  "futures",
  "indexmap",
  "inventory",
+ "meerkat-capabilities",
  "meerkat-contracts",
  "meerkat-core",
+ "meerkat-machine-dsl",
+ "meerkat-machine-schema",
  "meerkat-runtime",
  "meerkat-skills",
  "meerkat-store",
@@ -2333,12 +2431,12 @@ dependencies = [
 
 [[package]]
 name = "meerkat-skills"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "async-trait",
  "indexmap",
  "inventory",
- "meerkat-contracts",
+ "meerkat-capabilities",
  "meerkat-core",
  "regex",
  "reqwest",
@@ -2354,7 +2452,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-store"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2374,7 +2472,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-tools"
-version = "0.6.0"
+version = "0.6.23"
 dependencies = [
  "async-trait",
  "base64",
@@ -2384,6 +2482,7 @@ dependencies = [
  "humantime",
  "inventory",
  "jsonschema",
+ "meerkat-capabilities",
  "meerkat-comms",
  "meerkat-contracts",
  "meerkat-core",
@@ -2405,6 +2504,28 @@ dependencies = [
  "tracing",
  "uuid",
  "which",
+]
+
+[[package]]
+name = "meerkat-workgraph"
+version = "0.6.23"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "indexmap",
+ "inventory",
+ "meerkat-capabilities",
+ "meerkat-core",
+ "meerkat-machine-schema",
+ "meerkat-skills",
+ "rusqlite",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio_with_wasm",
+ "uuid",
 ]
 
 [[package]]
@@ -2474,7 +2595,7 @@ dependencies = [
  "openssl-probe",
  "openssl-sys",
  "schannel",
- "security-framework",
+ "security-framework 3.7.0",
  "security-framework-sys",
  "tempfile",
 ]
@@ -2657,7 +2778,9 @@ dependencies = [
 
 [[package]]
 name = "oai-rt-rs"
-version = "0.2.1"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffa624202cb21ad8d10f56124160a83b425564a4951d04c07837a0d060cd242f"
 dependencies = [
  "async-trait",
  "base64",
@@ -3521,6 +3644,19 @@ dependencies = [
 
 [[package]]
 name = "rustix"
+version = "0.38.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdb5bc1ae2baa591800df16c9ca78619bf65c0488b41b96ccec5d11220d8c154"
+dependencies = [
+ "bitflags 2.11.0",
+ "errno",
+ "libc",
+ "linux-raw-sys 0.4.15",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rustix"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
@@ -3528,7 +3664,7 @@ dependencies = [
  "bitflags 2.11.0",
  "errno",
  "libc",
- "linux-raw-sys",
+ "linux-raw-sys 0.12.1",
  "windows-sys 0.61.2",
 ]
 
@@ -3555,7 +3691,7 @@ dependencies = [
  "openssl-probe",
  "rustls-pki-types",
  "schannel",
- "security-framework",
+ "security-framework 3.7.0",
 ]
 
 [[package]]
@@ -3679,6 +3815,19 @@ name = "sdd"
 version = "3.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "490dcfcbfef26be6800d11870ff2df8774fa6e86d047e3e8c8a76b25655e41ca"
+
+[[package]]
+name = "security-framework"
+version = "2.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "897b2245f0b511c87893af39b033e5ca9cce68824c4d7e7630b5a1d339658d02"
+dependencies = [
+ "bitflags 2.11.0",
+ "core-foundation 0.9.4",
+ "core-foundation-sys",
+ "libc",
+ "security-framework-sys",
+]
 
 [[package]]
 name = "security-framework"
@@ -3959,7 +4108,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "socket2"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
@@ -4107,7 +4256,7 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.2",
  "once_cell",
- "rustix",
+ "rustix 1.1.4",
  "windows-sys 0.61.2",
 ]
 
@@ -5083,7 +5232,7 @@ checksum = "24d643ce3fd3e5b54854602a080f34fb10ab75e0b813ee32d00ca2b44fa74762"
 dependencies = [
  "either",
  "env_home",
- "rustix",
+ "rustix 1.1.4",
  "winsafe",
 ]
 
@@ -5577,7 +5726,7 @@ dependencies = [
 name = "writeable"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
+checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
 
 [[package]]
 name = "yansi"

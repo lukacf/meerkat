@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use meerkat_core::handles::{DslTransitionError, PeerCommsHandle};
 use meerkat_core::interaction::{
-    PeerIngressAdmission, PeerIngressEnvelopeFacts, PeerIngressPlainEventFacts,
+    PeerIngressAdmission, PeerIngressDequeueAuthority, PeerIngressDequeueFacts,
+    PeerIngressEnvelopeFacts, PeerIngressPlainEventFacts, PeerIngressReceiveAuthority,
+    PeerIngressReceiveFacts,
 };
 
 use super::HandleDslAuthority;
@@ -23,6 +25,32 @@ impl RuntimePeerCommsHandle {
     /// Construct a handle backed by the session's shared DSL authority.
     pub fn new(dsl: Arc<HandleDslAuthority>) -> Self {
         Self { dsl }
+    }
+
+    /// Install a generated peer-comms handle and its matching trust owner.
+    ///
+    /// The owner token stays on the generated install path; callers receive no
+    /// reusable token that could be copied into a handwritten handle.
+    #[doc(hidden)]
+    pub fn generated_install_factory(
+        dsl: Arc<HandleDslAuthority>,
+    ) -> Result<meerkat_core::handles::GeneratedPeerCommsInstallFactory, String> {
+        let owner = dsl.generated_authority_owner_token();
+        crate::protocol_comms_trust_reconcile::generated_peer_comms_install_factory(
+            Arc::new(Self::new(dsl)),
+            owner,
+        )
+    }
+
+    /// Install a generated peer-comms handle and its matching trust owner.
+    ///
+    /// The owner token stays on the generated install path; callers receive no
+    /// reusable token that could be copied into a handwritten handle.
+    pub fn install_generated_on(
+        dsl: Arc<HandleDslAuthority>,
+        target: &(dyn meerkat_core::handles::PeerCommsInstallTarget + '_),
+    ) -> Result<(), String> {
+        Self::generated_install_factory(dsl)?.install_on_target(target)
     }
 
     /// Construct a handle backed by an ephemeral DSL authority.
@@ -102,6 +130,31 @@ fn terminality_from_dsl(
     }
 }
 
+fn phase_from_dsl(
+    phase: mm_dsl::PeerIngressAuthorityPhaseClass,
+) -> meerkat_core::PeerIngressAuthorityPhase {
+    phase.into()
+}
+
+fn kind_to_dsl(kind: meerkat_core::PeerIngressKind) -> mm_dsl::PeerIngressAdmittedKind {
+    match kind {
+        meerkat_core::PeerIngressKind::Message => mm_dsl::PeerIngressAdmittedKind::Message,
+        meerkat_core::PeerIngressKind::Request => mm_dsl::PeerIngressAdmittedKind::Request,
+        meerkat_core::PeerIngressKind::Response => mm_dsl::PeerIngressAdmittedKind::Response,
+        meerkat_core::PeerIngressKind::Ack => mm_dsl::PeerIngressAdmittedKind::Ack,
+        meerkat_core::PeerIngressKind::PlainEvent => mm_dsl::PeerIngressAdmittedKind::PlainEvent,
+    }
+}
+
+fn auth_to_dsl(auth: meerkat_core::PeerIngressAuthDecision) -> mm_dsl::PeerIngressAuthClass {
+    match auth {
+        meerkat_core::PeerIngressAuthDecision::Required => mm_dsl::PeerIngressAuthClass::Required,
+        meerkat_core::PeerIngressAuthDecision::Exempt(
+            meerkat_core::PeerIngressAuthExemption::SupervisorBridge,
+        ) => mm_dsl::PeerIngressAuthClass::SupervisorBridgeExempt,
+    }
+}
+
 fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::MeerkatMachineSignal {
     let (
         envelope_kind,
@@ -173,6 +226,7 @@ fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::Meerkat
 
 struct PeerIngressClassifiedEffect {
     class: mm_dsl::PeerIngressInputClass,
+    actionable: bool,
     kind: mm_dsl::PeerIngressAdmittedKind,
     auth: mm_dsl::PeerIngressAuthClass,
     lifecycle_kind: Option<mm_dsl::PeerIngressLifecycleClass>,
@@ -190,6 +244,7 @@ fn classified_effect(
         .find_map(|effect| match effect {
             mm_dsl::MeerkatMachineEffect::PeerIngressClassified {
                 class,
+                actionable,
                 kind,
                 auth,
                 lifecycle_kind,
@@ -198,6 +253,7 @@ fn classified_effect(
                 response_terminality,
             } => Some(PeerIngressClassifiedEffect {
                 class,
+                actionable,
                 kind,
                 auth,
                 lifecycle_kind,
@@ -211,6 +267,56 @@ fn classified_effect(
             DslTransitionError::guard_rejected(
                 context,
                 "machine transition did not emit PeerIngressClassified",
+            )
+        })
+}
+
+struct PeerIngressReceiveResolvedEffect {
+    outcome: mm_dsl::PeerIngressReceiveOutcomeClass,
+    admission_diagnostic: Option<mm_dsl::PeerIngressAdmissionDiagnosticClass>,
+    phase: mm_dsl::PeerIngressAuthorityPhaseClass,
+}
+
+fn receive_resolved_effect(
+    effects: Vec<mm_dsl::MeerkatMachineEffect>,
+    context: &'static str,
+) -> Result<PeerIngressReceiveResolvedEffect, DslTransitionError> {
+    effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            mm_dsl::MeerkatMachineEffect::PeerIngressReceiveResolved {
+                outcome,
+                admission_diagnostic,
+                phase,
+            } => Some(PeerIngressReceiveResolvedEffect {
+                outcome,
+                admission_diagnostic,
+                phase,
+            }),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            DslTransitionError::guard_rejected(
+                context,
+                "machine transition did not emit PeerIngressReceiveResolved",
+            )
+        })
+}
+
+fn dequeue_resolved_effect(
+    effects: Vec<mm_dsl::MeerkatMachineEffect>,
+    context: &'static str,
+) -> Result<mm_dsl::PeerIngressAuthorityPhaseClass, DslTransitionError> {
+    effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            mm_dsl::MeerkatMachineEffect::PeerIngressDequeueResolved { phase } => Some(phase),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            DslTransitionError::guard_rejected(
+                context,
+                "machine transition did not emit PeerIngressDequeueResolved",
             )
         })
 }
@@ -262,6 +368,7 @@ fn classification_from_effect(
 
     meerkat_core::PeerIngressClassification {
         class,
+        actionable: effect.actionable,
         kind,
         auth,
         lifecycle_kind: effect.lifecycle_kind.map(lifecycle_from_dsl),
@@ -311,6 +418,50 @@ impl PeerCommsHandle for RuntimePeerCommsHandle {
         })
     }
 
+    fn resolve_peer_ingress_receive(
+        &self,
+        facts: PeerIngressReceiveFacts,
+    ) -> Result<PeerIngressReceiveAuthority, DslTransitionError> {
+        let context = "PeerCommsHandle::resolve_peer_ingress_receive";
+        let effects = self.dsl.apply_input_with_effects(
+            mm_dsl::MeerkatMachineInput::ResolvePeerIngressReceive {
+                kind: kind_to_dsl(facts.kind),
+                auth_required: facts.auth_required,
+                auth_exempt: facts.auth_exempt,
+                trusted: facts.trusted,
+                queued_work_present: facts.queued_work_present,
+                queue_closed: facts.queue_closed,
+                queue_capacity_available: facts.queue_capacity_available,
+            },
+            context,
+        )?;
+        let effect = receive_resolved_effect(effects, context)?;
+        Ok(PeerIngressReceiveAuthority {
+            outcome: effect.outcome.into(),
+            admission_diagnostic: effect.admission_diagnostic.map(Into::into),
+            authority_phase: phase_from_dsl(effect.phase),
+        })
+    }
+
+    fn resolve_peer_ingress_dequeue(
+        &self,
+        facts: PeerIngressDequeueFacts,
+    ) -> Result<PeerIngressDequeueAuthority, DslTransitionError> {
+        let context = "PeerCommsHandle::resolve_peer_ingress_dequeue";
+        let effects = self.dsl.apply_input_with_effects(
+            mm_dsl::MeerkatMachineInput::ResolvePeerIngressDequeue {
+                kind: kind_to_dsl(facts.kind),
+                auth: auth_to_dsl(facts.auth),
+                queued_work_remaining: facts.queued_work_remaining,
+            },
+            context,
+        )?;
+        let phase = dequeue_resolved_effect(effects, context)?;
+        Ok(PeerIngressDequeueAuthority {
+            authority_phase: phase_from_dsl(phase),
+        })
+    }
+
     fn set_peer_ingress_context(&self, keep_alive: bool) -> Result<(), DslTransitionError> {
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
@@ -318,6 +469,97 @@ impl PeerCommsHandle for RuntimePeerCommsHandle {
             "PeerCommsHandle::set_peer_ingress_context",
         )
     }
+
+    fn install_generated_peer_comms_on_target(
+        &self,
+        expected_owner: &meerkat_core::comms::GeneratedPeerCommsOwnerToken,
+        target: &(dyn meerkat_core::handles::PeerCommsInstallTarget + '_),
+    ) -> Result<(), String> {
+        let target_endpoint = target.generated_peer_comms_target_endpoint()?;
+        let mut guard = self
+            .dsl
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous_endpoint = guard.state().local_endpoint.clone();
+        let publish_input = mm_dsl::MeerkatMachineInput::PublishLocalEndpoint {
+            endpoint: mm_dsl::PeerEndpoint::from(&target_endpoint),
+        };
+        crate::meerkat_machine_types::MeerkatMachineFieldlessRuntimeInternalInput::reject_raw_dsl_input(
+            &publish_input,
+        )
+        .map_err(|reason| {
+            DslTransitionError::no_matching(
+                "PeerCommsHandle::install_generated_peer_comms_on_target",
+                reason,
+            )
+            .to_string()
+        })?;
+        mm_dsl::MeerkatMachineMutator::apply(&mut *guard, publish_input).map_err(|error| {
+            super::map_kernel_error(
+                error,
+                "PeerCommsHandle::install_generated_peer_comms_on_target",
+            )
+            .to_string()
+        })?;
+        let approved_peer_id = guard
+            .state()
+            .local_endpoint
+            .as_ref()
+            .map(|endpoint| endpoint.peer_id.clone())
+            .ok_or_else(|| {
+                "generated peer-comms install target authority did not publish local endpoint"
+                    .to_string()
+            })?;
+        let approved_peer_id = meerkat_core::comms::PeerId::parse(approved_peer_id.as_str())
+            .map_err(|error| {
+                format!("generated peer-comms install target peer_id invalid: {error}")
+            })?;
+        let install = crate::protocol_comms_trust_reconcile::generated_peer_comms_install(
+            Arc::new(Self::new(Arc::clone(&self.dsl))),
+            guard.generated_authority_owner_token(),
+            approved_peer_id,
+        )?;
+        if !install.owner_token().same_owner(expected_owner) {
+            restore_local_endpoint(&mut guard, previous_endpoint)?;
+            return Err(
+                "generated peer-comms install came from a different MeerkatMachine owner"
+                    .to_string(),
+            );
+        }
+        if let Err(error) = target.install_generated_peer_comms_handle(install) {
+            let rollback = restore_local_endpoint(&mut guard, previous_endpoint);
+            if let Err(rollback_error) = rollback {
+                return Err(format!(
+                    "{error}; generated local endpoint rollback failed: {rollback_error}"
+                ));
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+
+fn restore_local_endpoint(
+    guard: &mut mm_dsl::MeerkatMachineAuthority,
+    previous_endpoint: Option<mm_dsl::PeerEndpoint>,
+) -> Result<(), String> {
+    let input = match previous_endpoint {
+        Some(endpoint) => mm_dsl::MeerkatMachineInput::PublishLocalEndpoint { endpoint },
+        None => mm_dsl::MeerkatMachineInput::ClearLocalEndpoint,
+    };
+    crate::meerkat_machine_types::MeerkatMachineFieldlessRuntimeInternalInput::reject_raw_dsl_input(
+        &input,
+    )
+    .map_err(|reason| {
+        DslTransitionError::no_matching("PeerCommsHandle::restore_local_endpoint", reason)
+            .to_string()
+    })?;
+    mm_dsl::MeerkatMachineMutator::apply(guard, input)
+        .map(|_| ())
+        .map_err(|error| {
+            super::map_kernel_error(error, "PeerCommsHandle::restore_local_endpoint").to_string()
+        })
 }
 
 #[cfg(test)]
@@ -326,16 +568,112 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::Mutex;
 
+    struct RejectingPeerCommsInstallTarget {
+        descriptor: meerkat_core::comms::TrustedPeerDescriptor,
+        notify: Arc<tokio::sync::Notify>,
+    }
+
+    impl RejectingPeerCommsInstallTarget {
+        fn new(descriptor: meerkat_core::comms::TrustedPeerDescriptor) -> Self {
+            Self {
+                descriptor,
+                notify: Arc::new(tokio::sync::Notify::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::agent::CommsRuntime for RejectingPeerCommsInstallTarget {
+        async fn drain_messages(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
+            Arc::clone(&self.notify)
+        }
+
+        fn peer_id(&self) -> Option<meerkat_core::comms::PeerId> {
+            Some(self.descriptor.peer_id)
+        }
+
+        fn public_key_bytes(&self) -> Option<[u8; 32]> {
+            Some(self.descriptor.pubkey)
+        }
+
+        fn comms_name(&self) -> Option<String> {
+            Some(self.descriptor.name.as_str().to_string())
+        }
+
+        fn advertised_address(&self) -> Option<String> {
+            Some(self.descriptor.address.to_string())
+        }
+    }
+
+    impl meerkat_core::handles::PeerCommsInstallTarget for RejectingPeerCommsInstallTarget {
+        fn install_generated_peer_comms_handle(
+            &self,
+            _install: meerkat_core::handles::GeneratedPeerCommsInstall,
+        ) -> Result<(), String> {
+            Err("target rejected install".to_string())
+        }
+    }
+
+    fn peer_descriptor(name: &str, seed: u8) -> meerkat_core::comms::TrustedPeerDescriptor {
+        let pubkey = [seed; 32];
+        let peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&pubkey);
+        meerkat_core::comms::TrustedPeerDescriptor::unsigned_with_pubkey(
+            name,
+            peer_id.to_string(),
+            pubkey,
+            format!("inproc://{name}"),
+        )
+        .expect("valid peer descriptor")
+    }
+
     fn handle_for_phase(phase: mm_dsl::MeerkatPhase) -> RuntimePeerCommsHandle {
         let state = mm_dsl::MeerkatMachineState {
             lifecycle_phase: phase,
             session_id: Some(mm_dsl::SessionId("session-1".to_string())),
             ..Default::default()
         };
-        let authority = Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::from_state(
-            state,
-        )));
+        let authority = Arc::new(Mutex::new(
+            mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+                .expect("test MeerkatMachine state must be recoverable"),
+        ));
         RuntimePeerCommsHandle::new(Arc::new(HandleDslAuthority::from_shared(authority)))
+    }
+
+    #[test]
+    fn peer_comms_install_rejection_restores_generated_local_endpoint() {
+        for previous in [None, Some(peer_descriptor("previous", 7))] {
+            let rejected = peer_descriptor("rejected", 9);
+            let expected_previous = previous.as_ref().map(mm_dsl::PeerEndpoint::from);
+            let state = mm_dsl::MeerkatMachineState {
+                lifecycle_phase: mm_dsl::MeerkatPhase::Attached,
+                session_id: Some(mm_dsl::SessionId("session-1".to_string())),
+                local_endpoint: expected_previous.clone(),
+                ..Default::default()
+            };
+            let authority = Arc::new(Mutex::new(
+                mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+                    .expect("test MeerkatMachine state must be recoverable"),
+            ));
+            let dsl = Arc::new(HandleDslAuthority::from_shared(authority));
+            let factory = RuntimePeerCommsHandle::generated_install_factory(Arc::clone(&dsl))
+                .expect("generated peer-comms install factory");
+            let target = RejectingPeerCommsInstallTarget::new(rejected);
+            let target: &dyn meerkat_core::handles::PeerCommsInstallTarget = &target;
+
+            let error = factory
+                .install_on_target(target)
+                .expect_err("target rejection should fail install");
+
+            assert!(
+                error.contains("target rejected install"),
+                "unexpected install error: {error}"
+            );
+            assert_eq!(dsl.snapshot_state().local_endpoint, expected_previous);
+        }
     }
 
     #[test]
@@ -346,9 +684,10 @@ mod tests {
             silent_intent_overrides: BTreeSet::from(["probe.silent".to_string()]),
             ..Default::default()
         };
-        let authority = Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::from_state(
-            state,
-        )));
+        let authority = Arc::new(Mutex::new(
+            mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+                .expect("test MeerkatMachine state must be recoverable"),
+        ));
         let handle =
             RuntimePeerCommsHandle::new(Arc::new(HandleDslAuthority::from_shared(authority)));
 
@@ -376,15 +715,155 @@ mod tests {
     }
 
     #[test]
+    fn machine_emits_actionable_bit_matching_grouping_for_classified_envelopes() {
+        // The machine is the authority on the actionable grouping; assert the
+        // emitted `actionable` bit matches the documented 7-of-12 grouping for
+        // every class the MeerkatMachine PeerIngress classifier can emit.
+        let handle = handle_for_phase(mm_dsl::MeerkatPhase::Attached);
+
+        // ActionableMessage -> actionable
+        let message = handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "m1".to_string(),
+                from_peer: "peer-1".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Message {
+                    body: "hi".to_string(),
+                },
+            })
+            .expect("attached should classify message");
+        assert_eq!(
+            message.classification.class,
+            meerkat_core::PeerInputClass::ActionableMessage
+        );
+        assert!(message.classification.actionable);
+
+        // ActionableRequest -> actionable
+        let request = handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "r1".to_string(),
+                from_peer: "peer-1".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Request {
+                    intent: "do.work".to_string(),
+                    params: serde_json::json!({}),
+                },
+            })
+            .expect("attached should classify request");
+        assert_eq!(
+            request.classification.class,
+            meerkat_core::PeerInputClass::ActionableRequest
+        );
+        assert!(request.classification.actionable);
+
+        // ResponseTerminal -> actionable (responses need a pending request, but
+        // the classification grouping is independent of correlation; the
+        // machine emits the bit on the class). Verify via a completed response.
+        let response = handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "resp-1".to_string(),
+                from_peer: "peer-1".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Response {
+                    in_reply_to: uuid::Uuid::new_v4().to_string(),
+                    status: meerkat_core::ResponseStatus::Completed,
+                    result: serde_json::json!({}),
+                },
+            })
+            .expect("attached should classify response");
+        assert_eq!(
+            response.classification.class,
+            meerkat_core::PeerInputClass::ResponseTerminal
+        );
+        assert!(response.classification.actionable);
+
+        // PeerLifecycleAdded -> NOT actionable
+        let lifecycle = handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "lc-1".to_string(),
+                from_peer: "orchestrator".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Lifecycle {
+                    kind: meerkat_core::comms::PeerLifecycleKind::PeerAdded,
+                    params: serde_json::json!({ "peer": "worker-1" }),
+                },
+            })
+            .expect("attached should classify lifecycle");
+        assert_eq!(
+            lifecycle.classification.class,
+            meerkat_core::PeerInputClass::PeerLifecycleAdded
+        );
+        assert!(!lifecycle.classification.actionable);
+
+        // Ack -> NOT actionable
+        let ack = handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "ack-1".to_string(),
+                from_peer: "peer-1".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Ack {
+                    in_reply_to: uuid::Uuid::new_v4().to_string(),
+                },
+            })
+            .expect("attached should classify ack");
+        assert_eq!(ack.classification.class, meerkat_core::PeerInputClass::Ack);
+        assert!(!ack.classification.actionable);
+
+        // PlainEvent -> actionable
+        let plain = handle
+            .classify_plain_event(PeerIngressPlainEventFacts {
+                source_name: "external".to_string(),
+                body: "event".to_string(),
+            })
+            .expect("attached should classify plain event");
+        assert_eq!(
+            plain.classification.class,
+            meerkat_core::PeerInputClass::PlainEvent
+        );
+        assert!(plain.classification.actionable);
+
+        // SilentRequest -> NOT actionable
+        let silent_state = mm_dsl::MeerkatMachineState {
+            lifecycle_phase: mm_dsl::MeerkatPhase::Attached,
+            session_id: Some(mm_dsl::SessionId("session-1".to_string())),
+            silent_intent_overrides: BTreeSet::from(["probe.silent".to_string()]),
+            ..Default::default()
+        };
+        let silent_authority = Arc::new(Mutex::new(
+            mm_dsl::MeerkatMachineAuthority::recover_from_state(silent_state).expect("recoverable"),
+        ));
+        let silent_handle = RuntimePeerCommsHandle::new(Arc::new(HandleDslAuthority::from_shared(
+            silent_authority,
+        )));
+        let silent = silent_handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "s1".to_string(),
+                from_peer: "peer-1".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Request {
+                    intent: "probe.silent".to_string(),
+                    params: serde_json::json!({}),
+                },
+            })
+            .expect("attached should classify silent request");
+        assert_eq!(
+            silent.classification.class,
+            meerkat_core::PeerInputClass::SilentRequest
+        );
+        assert!(!silent.classification.actionable);
+    }
+
+    #[test]
     fn runtime_peer_comms_handle_lifecycle_subject_is_selected_by_machine() {
         let state = mm_dsl::MeerkatMachineState {
             lifecycle_phase: mm_dsl::MeerkatPhase::Attached,
             session_id: Some(mm_dsl::SessionId("session-1".to_string())),
             ..Default::default()
         };
-        let authority = Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::from_state(
-            state,
-        )));
+        let authority = Arc::new(Mutex::new(
+            mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+                .expect("test MeerkatMachine state must be recoverable"),
+        ));
         let handle =
             RuntimePeerCommsHandle::new(Arc::new(HandleDslAuthority::from_shared(authority)));
 
@@ -490,6 +969,68 @@ mod tests {
     }
 
     #[test]
+    fn runtime_peer_comms_handle_classifies_idle_supervisor_bridge() {
+        let handle = handle_for_phase(mm_dsl::MeerkatPhase::Idle);
+
+        let admission = handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "supervisor-request".to_string(),
+                from_peer: "mob/__mob_supervisor__".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Request {
+                    intent: "supervisor.bridge".to_string(),
+                    params: serde_json::json!({}),
+                },
+            })
+            .expect("idle session should classify supervisor bridge requests");
+        assert_eq!(
+            admission.classification.class,
+            meerkat_core::PeerInputClass::ActionableRequest
+        );
+        assert_eq!(
+            admission.classification.auth,
+            meerkat_core::PeerIngressAuthDecision::Exempt(
+                meerkat_core::PeerIngressAuthExemption::SupervisorBridge
+            )
+        );
+
+        let state = mm_dsl::MeerkatMachineState {
+            lifecycle_phase: mm_dsl::MeerkatPhase::Idle,
+            session_id: Some(mm_dsl::SessionId("session-1".to_string())),
+            silent_intent_overrides: BTreeSet::from(["supervisor.bridge".to_string()]),
+            ..Default::default()
+        };
+        let authority = Arc::new(Mutex::new(
+            mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+                .expect("test MeerkatMachine state must be recoverable"),
+        ));
+        let silent_handle =
+            RuntimePeerCommsHandle::new(Arc::new(HandleDslAuthority::from_shared(authority)));
+
+        let silent = silent_handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "supervisor-silent".to_string(),
+                from_peer: "mob/__mob_supervisor__".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Request {
+                    intent: "supervisor.bridge".to_string(),
+                    params: serde_json::json!({}),
+                },
+            })
+            .expect("idle session should classify silent supervisor bridge requests");
+        assert_eq!(
+            silent.classification.class,
+            meerkat_core::PeerInputClass::SilentRequest
+        );
+        assert_eq!(
+            silent.classification.auth,
+            meerkat_core::PeerIngressAuthDecision::Exempt(
+                meerkat_core::PeerIngressAuthExemption::SupervisorBridge
+            )
+        );
+    }
+
+    #[test]
     fn runtime_peer_comms_handle_drains_terminal_cleanup_without_reopening_topology_adds() {
         for phase in [mm_dsl::MeerkatPhase::Retired, mm_dsl::MeerkatPhase::Stopped] {
             let handle = handle_for_phase(phase);
@@ -540,6 +1081,99 @@ mod tests {
                 "terminal cleanup admission must not accept new peer topology"
             );
         }
+    }
+
+    #[test]
+    fn runtime_peer_comms_handle_resolves_receive_authority_from_dsl() {
+        let handle = handle_for_phase(mm_dsl::MeerkatPhase::Attached);
+
+        let admitted = handle
+            .resolve_peer_ingress_receive(PeerIngressReceiveFacts {
+                kind: meerkat_core::PeerIngressKind::Request,
+                current_phase: meerkat_core::PeerIngressAuthorityPhase::Absent,
+                auth_required: true,
+                auth_exempt: false,
+                trusted: true,
+                queued_work_present: false,
+                queue_closed: false,
+                queue_capacity_available: true,
+            })
+            .expect("trusted receive should resolve");
+        assert_eq!(
+            admitted.outcome,
+            meerkat_core::PeerIngressReceiveOutcome::Admitted
+        );
+        assert_eq!(
+            admitted.admission_diagnostic,
+            Some(meerkat_core::PeerIngressAdmissionDiagnostic::TrustedAtAdmission)
+        );
+        assert_eq!(
+            admitted.authority_phase,
+            meerkat_core::PeerIngressAuthorityPhase::Received
+        );
+
+        let dropped = handle
+            .resolve_peer_ingress_receive(PeerIngressReceiveFacts {
+                kind: meerkat_core::PeerIngressKind::Request,
+                current_phase: meerkat_core::PeerIngressAuthorityPhase::Absent,
+                auth_required: true,
+                auth_exempt: false,
+                trusted: false,
+                queued_work_present: false,
+                queue_closed: false,
+                queue_capacity_available: true,
+            })
+            .expect("untrusted receive should resolve as a typed drop");
+        assert_eq!(
+            dropped.outcome,
+            meerkat_core::PeerIngressReceiveOutcome::DroppedUntrustedSender
+        );
+        assert_eq!(
+            dropped.authority_phase,
+            meerkat_core::PeerIngressAuthorityPhase::Dropped
+        );
+    }
+
+    #[test]
+    fn runtime_peer_comms_handle_resolves_dequeue_phase_from_dsl() {
+        let handle = handle_for_phase(mm_dsl::MeerkatPhase::Attached);
+
+        handle
+            .resolve_peer_ingress_receive(PeerIngressReceiveFacts {
+                kind: meerkat_core::PeerIngressKind::Request,
+                current_phase: meerkat_core::PeerIngressAuthorityPhase::Absent,
+                auth_required: true,
+                auth_exempt: false,
+                trusted: true,
+                queued_work_present: false,
+                queue_closed: false,
+                queue_capacity_available: true,
+            })
+            .expect("trusted receive should seed Received phase");
+
+        let retained = handle
+            .resolve_peer_ingress_dequeue(PeerIngressDequeueFacts {
+                kind: meerkat_core::PeerIngressKind::Request,
+                auth: meerkat_core::PeerIngressAuthDecision::Required,
+                queued_work_remaining: true,
+            })
+            .expect("dequeue with queued work should resolve");
+        assert_eq!(
+            retained.authority_phase,
+            meerkat_core::PeerIngressAuthorityPhase::Received
+        );
+
+        let delivered = handle
+            .resolve_peer_ingress_dequeue(PeerIngressDequeueFacts {
+                kind: meerkat_core::PeerIngressKind::Request,
+                auth: meerkat_core::PeerIngressAuthDecision::Required,
+                queued_work_remaining: false,
+            })
+            .expect("empty dequeue should resolve");
+        assert_eq!(
+            delivered.authority_phase,
+            meerkat_core::PeerIngressAuthorityPhase::Delivered
+        );
     }
 
     #[test]

@@ -10,9 +10,12 @@
 //!    direct peering.
 //! 3. `ApplyMobPeerOverlay { epoch, endpoints }` — composition-driven
 //!    mob overlay, with stale-epoch guard rejection.
-//! 4. `peer_projection_epoch` advances monotonically on every Track-B
+//! 4. duplicate direct adds and absent direct removes are generated
+//!    repair inputs that re-emit trust reconciliation without changing
+//!    machine facts.
+//! 5. `peer_projection_epoch` advances monotonically on every Track-B
 //!    mutation.
-//! 5. `LocalEndpointChanged` / `PeerProjectionChanged` /
+//! 6. `LocalEndpointChanged` / `PeerProjectionChanged` /
 //!    `CommsTrustReconcileRequested` effects carry the right payload
 //!    for downstream Commit 4 consumers.
 //!
@@ -204,6 +207,7 @@ fn add_direct_peer_endpoint_inserts_bumps_epoch_and_emits_trust_reconcile() {
     let reconcile_epoch = effects.iter().find_map(|e| match e {
         mm_dsl::MeerkatMachineEffect::CommsTrustReconcileRequested {
             peer_projection_epoch,
+            ..
         } => Some(*peer_projection_epoch),
         _ => None,
     });
@@ -215,7 +219,7 @@ fn add_direct_peer_endpoint_inserts_bumps_epoch_and_emits_trust_reconcile() {
 }
 
 #[test]
-fn add_direct_peer_endpoint_rejects_duplicate_without_bumping_epoch() {
+fn add_direct_peer_endpoint_repairs_duplicate_without_bumping_epoch() {
     let dsl = new_authority();
     let ep = endpoint("peer-1", "ed25519:peer-1", "inproc://peer-1");
     dsl.apply_input(
@@ -227,15 +231,27 @@ fn add_direct_peer_endpoint_rejects_duplicate_without_bumping_epoch() {
     .expect("first accepted");
     assert_eq!(dsl.snapshot_state().peer_projection_epoch, 1);
 
-    let result = dsl.apply_input(
-        mm_dsl::MeerkatMachineInput::AddDirectPeerEndpoint { endpoint: ep },
-        "test::dup",
+    let effects = dsl
+        .apply_input_with_effects(
+            mm_dsl::MeerkatMachineInput::AddDirectPeerEndpoint { endpoint: ep },
+            "test::dup_repair",
+        )
+        .expect("duplicate direct endpoint must route through generated repair");
+    assert_eq!(dsl.snapshot_state().peer_projection_epoch, 1);
+    assert!(
+        !effects.iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::PeerProjectionChanged { .. }
+        )),
+        "duplicate direct repair must not publish a machine-fact change",
     );
     assert!(
-        result.is_err(),
-        "adding an already-present direct endpoint must be rejected",
+        effects.iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::CommsTrustReconcileRequested { .. }
+        )),
+        "duplicate direct repair must still ask the comms reconciler to converge trust",
     );
-    assert_eq!(dsl.snapshot_state().peer_projection_epoch, 1);
 }
 
 #[test]
@@ -285,18 +301,30 @@ fn remove_direct_peer_endpoint_removes_bumps_epoch_and_emits_trust_reconcile() {
 }
 
 #[test]
-fn remove_direct_peer_endpoint_rejects_absent_endpoint() {
+fn remove_direct_peer_endpoint_repairs_absent_endpoint() {
     let dsl = new_authority();
     let ep = endpoint("peer-1", "ed25519:peer-1", "inproc://peer-1");
-    let result = dsl.apply_input(
-        mm_dsl::MeerkatMachineInput::RemoveDirectPeerEndpoint { endpoint: ep },
-        "test::remove_absent",
+    let effects = dsl
+        .apply_input_with_effects(
+            mm_dsl::MeerkatMachineInput::RemoveDirectPeerEndpoint { endpoint: ep },
+            "test::remove_absent_repair",
+        )
+        .expect("absent direct endpoint must route through generated repair");
+    assert_eq!(dsl.snapshot_state().peer_projection_epoch, 0);
+    assert!(
+        !effects.iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::PeerProjectionChanged { .. }
+        )),
+        "absent direct repair must not publish a machine-fact change",
     );
     assert!(
-        result.is_err(),
-        "removing an absent direct endpoint must be rejected",
+        effects.iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::CommsTrustReconcileRequested { .. }
+        )),
+        "absent direct repair must still ask the comms reconciler to converge trust",
     );
-    assert_eq!(dsl.snapshot_state().peer_projection_epoch, 0);
 }
 
 #[test]
@@ -437,11 +465,9 @@ fn apply_mob_peer_overlay_rejects_stale_epoch() {
         "stale overlay epoch (4 < 5) must be rejected by the stale-epoch guard",
     );
 
-    // Equal epoch is also rejected (strictly-greater guard). The
-    // driver's monotonic counter suppresses no-op dispatches, so any
-    // re-delivery at the same epoch is a retry-bug on the transport
-    // layer and surfaces as an error.
-    let equal = dsl.apply_input(
+    // Equal epoch is accepted only as a generated repair/no-op when the
+    // overlay set already matches the machine-owned overlay facts.
+    let equal = dsl.apply_input_with_effects(
         mm_dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
             epoch: 5,
             endpoints,
@@ -449,8 +475,16 @@ fn apply_mob_peer_overlay_rejects_stale_epoch() {
         "test::overlay_equal_epoch",
     );
     assert!(
-        equal.is_err(),
-        "equal overlay epoch must be rejected by the strictly-greater-epoch guard",
+        equal.is_ok(),
+        "equal overlay epoch with identical endpoints must route through the generated repair transition",
+    );
+    let equal_effects = equal.expect("equal overlay repair accepted");
+    assert!(
+        equal_effects.iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::CommsTrustReconcileRequested { .. }
+        )),
+        "equal overlay repair must still ask the comms reconciler to converge trust"
     );
     assert_eq!(dsl.snapshot_state().mob_overlay_epoch, 5);
 }

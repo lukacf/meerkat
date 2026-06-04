@@ -1,23 +1,15 @@
-//! Silent intent override layer for the runtime policy table.
+//! Silent intent matching for generated runtime admission.
 //!
 //! When a peer sends a request whose `intent` matches one of the session's
-//! `silent_comms_intents`, the runtime must accept the input without triggering
-//! an LLM turn. This module provides the override function that mutates a
-//! `PolicyDecision` in-place when the silent-intent condition is met.
+//! generated `silent_intent_overrides`, the runtime must accept the input
+//! without triggering an LLM turn. This module only reports whether the typed
+//! machine-owned condition is present; generated admission owns the resulting
+//! policy facts.
 
 use crate::input::{Input, PeerConvention};
-use crate::policy::{ApplyMode, PolicyDecision, WakeMode};
 
-/// Check if the given input matches a silent comms intent and override the
-/// policy decision accordingly.
-///
-/// Returns `true` if the override was applied (the intent was silenced),
-/// `false` otherwise.
-pub fn apply_silent_intent_override(
-    input: &Input,
-    silent_intents: &[String],
-    decision: &mut PolicyDecision,
-) -> bool {
+/// Return whether this input matches a configured silent comms intent.
+pub(crate) fn matches_silent_intent(input: &Input, silent_intents: &[String]) -> bool {
     if silent_intents.is_empty() {
         return false;
     }
@@ -30,16 +22,7 @@ pub fn apply_silent_intent_override(
         _ => return false,
     };
 
-    if silent_intents.iter().any(|s| s == intent) {
-        // Keep the input queued so its content is injected into the session
-        // as context for the next LLM turn, but suppress waking so it does
-        // not trigger a turn by itself.
-        decision.apply_mode = ApplyMode::StageRunStart;
-        decision.wake_mode = WakeMode::None;
-        true
-    } else {
-        false
-    }
+    silent_intents.iter().any(|s| s == intent)
 }
 
 #[cfg(test)]
@@ -52,7 +35,6 @@ pub fn apply_silent_intent_override(
 mod tests {
     use super::*;
     use crate::input::*;
-    use crate::policy_table::DefaultPolicyTable;
     use chrono::Utc;
     use meerkat_core::lifecycle::InputId;
 
@@ -100,51 +82,39 @@ mod tests {
     }
 
     #[test]
-    fn silent_intent_overrides_policy() {
+    fn silent_intent_matches_request_intent() {
         let input = make_peer_request("mob.peer_added");
         let silent = vec!["mob.peer_added".to_string(), "mob.peer_retired".to_string()];
-        let mut decision = DefaultPolicyTable::resolve(&input, true);
 
-        let applied = apply_silent_intent_override(&input, &silent, &mut decision);
-        assert!(applied);
-        assert_eq!(decision.apply_mode, ApplyMode::StageRunStart);
-        assert_eq!(decision.wake_mode, WakeMode::None);
+        assert!(matches_silent_intent(&input, &silent));
     }
 
     #[test]
-    fn non_matching_intent_not_overridden() {
+    fn non_matching_intent_not_silent() {
         let input = make_peer_request("custom.action");
         let silent = vec!["mob.peer_added".to_string()];
-        let mut decision = DefaultPolicyTable::resolve(&input, true);
 
-        let original_apply = decision.apply_mode.clone();
-        let applied = apply_silent_intent_override(&input, &silent, &mut decision);
-        assert!(!applied);
-        assert_eq!(decision.apply_mode, original_apply);
+        assert!(!matches_silent_intent(&input, &silent));
     }
 
     #[test]
-    fn peer_message_not_overridden() {
+    fn peer_message_not_silent() {
         let input = make_peer_message();
         let silent = vec!["mob.peer_added".to_string()];
-        let mut decision = DefaultPolicyTable::resolve(&input, true);
 
-        let applied = apply_silent_intent_override(&input, &silent, &mut decision);
-        assert!(!applied);
+        assert!(!matches_silent_intent(&input, &silent));
     }
 
     #[test]
-    fn empty_silent_list_not_overridden() {
+    fn empty_silent_list_not_silent() {
         let input = make_peer_request("mob.peer_added");
         let silent: Vec<String> = vec![];
-        let mut decision = DefaultPolicyTable::resolve(&input, true);
 
-        let applied = apply_silent_intent_override(&input, &silent, &mut decision);
-        assert!(!applied);
+        assert!(!matches_silent_intent(&input, &silent));
     }
 
     #[test]
-    fn prompt_input_not_overridden() {
+    fn prompt_input_not_silent() {
         let input = Input::Prompt(PromptInput {
             header: InputHeader {
                 id: InputId::new(),
@@ -162,9 +132,7 @@ mod tests {
             turn_metadata: None,
         });
         let silent = vec!["mob.peer_added".to_string()];
-        let mut decision = DefaultPolicyTable::resolve(&input, true);
 
-        let applied = apply_silent_intent_override(&input, &silent, &mut decision);
-        assert!(!applied);
+        assert!(!matches_silent_intent(&input, &silent));
     }
 }

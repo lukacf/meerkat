@@ -216,6 +216,33 @@ pub fn live_emit_paths() -> BTreeSet<PathBuf> {
     set.insert(PathBuf::from(
         "meerkat-core/src/generated/terminal_surface_mapping.rs",
     ));
+    set.insert(PathBuf::from(
+        "meerkat-core/src/generated/comms_trust_authority_sources.rs",
+    ));
+    set.insert(PathBuf::from(
+        "meerkat-core/src/generated/auth_lease_transition_authority_sources.rs",
+    ));
+    set.insert(PathBuf::from(
+        "meerkat-core/src/generated/protocol_tool_visibility_owner.rs",
+    ));
+    set.insert(PathBuf::from(
+        "meerkat-core/src/generated/auth_lease_durable_lifecycle_marker.rs",
+    ));
+    set.insert(PathBuf::from(
+        "meerkat-core/src/generated/session_persistence_version_authority.rs",
+    ));
+    set.insert(PathBuf::from(
+        "meerkat-session/src/generated/session_turn_admission.rs",
+    ));
+    set.insert(PathBuf::from(
+        "meerkat-core/src/generated/approval_lifecycle.rs",
+    ));
+    set.insert(PathBuf::from(
+        "meerkat-core/src/generated/session_document.rs",
+    ));
+    set.insert(PathBuf::from(
+        "meerkat-core/src/generated/session_durable_config_authority.rs",
+    ));
 
     set.insert(PathBuf::from(
         "meerkat-machine-kernels/src/generated/mod.rs",

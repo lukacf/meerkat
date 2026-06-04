@@ -906,6 +906,7 @@ impl TranscriptRewriteMessage {
                 created_at,
             } => Ok(Message::System(SystemMessage {
                 content,
+                mutation_kind: meerkat_core::types::SystemPromptMutationKind::default(),
                 created_at: transcript_message_timestamp(created_at)?,
             })),
             Self::SystemNotice {
@@ -933,6 +934,7 @@ impl TranscriptRewriteMessage {
                 Ok(Message::User(UserMessage {
                     content,
                     render_metadata: None,
+                    transcript_role: meerkat_core::types::TranscriptUserRole::default(),
                     created_at: transcript_message_timestamp(created_at)?,
                 }))
             }

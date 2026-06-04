@@ -13,16 +13,23 @@ pub mod transport;
 pub mod webrtc;
 
 pub use host::{
-    DEFAULT_LIVE_TOOL_TIMEOUT, LiveAdapterHost, LiveAdapterHostError, LiveChannelId,
-    LiveProjectionError, LiveProjectionSink, LiveToolDispatchError, LiveToolDispatcher,
-    LiveTranscriptIdentity, NoOpProjectionSink, ObservationOutcome, ObservationRouting,
-    ToolDispatchSkipReason,
+    DEFAULT_LIVE_TOOL_TIMEOUT, LiveAdapterHost, LiveAdapterHostError,
+    LiveChannelCloseCommitAuthority, LiveChannelCloseObservation, LiveChannelId,
+    LiveChannelOpenAuthority, LiveChannelStatusCommitAuthority, LiveChannelStatusObservation,
+    LiveCommandAcceptanceKind, LiveCommandQueueAcceptance, LiveProjectionError, LiveProjectionSink,
+    LiveRefreshQueueAcceptance, LiveToolDispatchError, LiveToolDispatcher, LiveTranscriptIdentity,
+    NoOpProjectionSink, ObservationOutcome, ObservationRouting, ToolDispatchSkipReason,
 };
-pub use transport::{LIVE_WS_PATH, LiveWsState, live_ws_router, serve_live_ws_listener};
+pub use transport::{
+    LIVE_WS_PATH, LiveChannelCloseFeedback, LiveChannelStatusFeedback, LiveTokenString,
+    LiveWsState, LiveWsTokenAdmission, LiveWsTokenAdmissionPublicErrorClass,
+    LiveWsTokenAdmissionRejection, LiveWsTokenAuthority, LiveWsTokenIssue, live_ws_router,
+    serve_live_ws_listener,
+};
 #[cfg(feature = "webrtc")]
 pub use webrtc::{
-    LIVE_WEBRTC_ANSWER_METHOD, LIVE_WEBRTC_ANSWER_PATH, LiveWebrtcError, LiveWebrtcState,
-    WebrtcAudioBridge, live_webrtc_router, serve_live_ws_and_webrtc_listener,
+    LIVE_WEBRTC_ANSWER_METHOD, LIVE_WEBRTC_ANSWER_PATH, LiveWebrtcAnswerAccepted, LiveWebrtcError,
+    LiveWebrtcState, WebrtcAudioBridge, live_webrtc_router, serve_live_ws_and_webrtc_listener,
 };
 
 // E26 regression: `meerkat-live` must not depend on `meerkat-runtime`. The

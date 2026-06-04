@@ -1474,13 +1474,13 @@ mod tests {
     #[test]
     fn initial_state_is_initializing() {
         let auth = MeerkatMachineAuthority::new();
-        assert_eq!(auth.state.phase(), MeerkatPhase::Initializing);
-        assert!(auth.state.session_id.is_none());
-        assert!(auth.state.active_runtime_id.is_none());
-        assert!(auth.state.active_fence_token.is_none());
-        assert!(auth.state.current_run_id.is_none());
-        assert!(auth.state.pre_run_phase.is_none());
-        assert!(auth.state.silent_intent_overrides.is_empty());
+        assert_eq!(auth.state().phase(), MeerkatPhase::Initializing);
+        assert!(auth.state().session_id.is_none());
+        assert!(auth.state().active_runtime_id.is_none());
+        assert!(auth.state().active_fence_token.is_none());
+        assert!(auth.state().current_run_id.is_none());
+        assert!(auth.state().pre_run_phase.is_none());
+        assert!(auth.state().silent_intent_overrides.is_empty());
     }
 
     #[test]
@@ -1497,7 +1497,7 @@ mod tests {
         let mut auth = MeerkatMachineAuthority::new();
         // Initialize
         auth.apply_signal(MeerkatMachineSignal::Initialize).unwrap();
-        assert_eq!(auth.state.phase(), MeerkatPhase::Idle);
+        assert_eq!(auth.state().phase(), MeerkatPhase::Idle);
 
         // RegisterSession
         let r = MeerkatMachineMutator::apply(
@@ -1508,7 +1508,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.to_phase, MeerkatPhase::Idle);
-        assert_eq!(auth.state.session_id, Some("sess-1".into()));
+        assert_eq!(auth.state().session_id, Some("sess-1".into()));
 
         // PrepareBindings: Idle → Attached
         let r = MeerkatMachineMutator::apply(
@@ -1522,8 +1522,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.to_phase, MeerkatPhase::Attached);
-        assert_eq!(auth.state.active_runtime_id, Some("rt-1".into()));
-        assert_eq!(auth.state.active_fence_token, Some("fence-1".into()));
+        assert_eq!(auth.state().active_runtime_id, Some("rt-1".into()));
+        assert_eq!(auth.state().active_fence_token, Some("fence-1".into()));
         // Should emit RuntimeBound
         assert_eq!(r.effects.len(), 1);
     }
@@ -1549,7 +1549,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(auth.state.phase(), MeerkatPhase::Attached);
+        assert_eq!(auth.state().phase(), MeerkatPhase::Attached);
 
         // Prepare: Attached → Running
         let r = MeerkatMachineMutator::apply(
@@ -1561,8 +1561,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.to_phase, MeerkatPhase::Running);
-        assert_eq!(auth.state.current_run_id, Some("run-1".into()));
-        assert_eq!(auth.state.pre_run_phase, Some("attached".into()));
+        assert_eq!(auth.state().current_run_id, Some("run-1".into()));
+        assert_eq!(auth.state().pre_run_phase, Some("attached".into()));
 
         // Commit: Running → Attached
         let r = MeerkatMachineMutator::apply(
@@ -1574,8 +1574,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.to_phase, MeerkatPhase::Attached);
-        assert!(auth.state.current_run_id.is_none());
-        assert!(auth.state.pre_run_phase.is_none());
+        assert!(auth.state().current_run_id.is_none());
+        assert!(auth.state().pre_run_phase.is_none());
     }
 
     #[test]
@@ -1592,7 +1592,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(auth.state.phase(), MeerkatPhase::Attached);
+        assert_eq!(auth.state().phase(), MeerkatPhase::Attached);
 
         // Retire: Attached → Retired
         let r = MeerkatMachineMutator::apply(&mut auth, MeerkatMachineInput::Retire).unwrap();

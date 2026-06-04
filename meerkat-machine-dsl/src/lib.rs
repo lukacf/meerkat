@@ -1,3 +1,5 @@
+#![allow(clippy::redundant_feature_names)]
+
 use proc_macro::TokenStream;
 
 /// Define a Meerkat state machine from a single DSL definition.

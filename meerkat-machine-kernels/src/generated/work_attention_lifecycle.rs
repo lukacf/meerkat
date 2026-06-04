@@ -5,13 +5,74 @@
     clippy::panic,
     clippy::implicit_clone,
     clippy::unnecessary_cast,
-    clippy::redundant_clone
+    clippy::redundant_clone,
+    clippy::zero_sized_map_values
 )]
 
 pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::catalog::dsl::dsl_work_attention_lifecycle_machine()
 }
 
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AttentionDelegatedAuthority {
+    #[default]
+    #[serde(rename = "AddEvidence")]
+    AddEvidence,
+    #[serde(rename = "CloseOwnReviewItem")]
+    CloseOwnReviewItem,
+    #[serde(rename = "RequestClosure")]
+    RequestClosure,
+    #[serde(rename = "CloseIfPolicyAllows")]
+    CloseIfPolicyAllows,
+}
+impl AttentionDelegatedAuthority {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AddEvidence => "AddEvidence",
+            Self::CloseOwnReviewItem => "CloseOwnReviewItem",
+            Self::RequestClosure => "RequestClosure",
+            Self::CloseIfPolicyAllows => "CloseIfPolicyAllows",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AttentionDelegatedAuthority {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "AddEvidence" => Ok(Self::AddEvidence),
+            "CloseOwnReviewItem" => Ok(Self::CloseOwnReviewItem),
+            "RequestClosure" => Ok(Self::RequestClosure),
+            "CloseIfPolicyAllows" => Ok(Self::CloseIfPolicyAllows),
+            other => Err(format!(
+                "invalid AttentionDelegatedAuthority value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AttentionDelegatedAuthority {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AttentionDelegatedAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -38,6 +99,72 @@ impl From<&str> for WorkAttentionBindingKey {
 impl std::fmt::Display for WorkAttentionBindingKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum WorkAttentionMode {
+    #[default]
+    #[serde(rename = "Pursue")]
+    Pursue,
+    #[serde(rename = "Coordinate")]
+    Coordinate,
+    #[serde(rename = "Review")]
+    Review,
+    #[serde(rename = "Falsify")]
+    Falsify,
+    #[serde(rename = "Judge")]
+    Judge,
+    #[serde(rename = "Observe")]
+    Observe,
+}
+impl WorkAttentionMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pursue => "Pursue",
+            Self::Coordinate => "Coordinate",
+            Self::Review => "Review",
+            Self::Falsify => "Falsify",
+            Self::Judge => "Judge",
+            Self::Observe => "Observe",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for WorkAttentionMode {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Pursue" => Ok(Self::Pursue),
+            "Coordinate" => Ok(Self::Coordinate),
+            "Review" => Ok(Self::Review),
+            "Falsify" => Ok(Self::Falsify),
+            "Judge" => Ok(Self::Judge),
+            "Observe" => Ok(Self::Observe),
+            other => Err(format!("invalid WorkAttentionMode value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for WorkAttentionMode {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for WorkAttentionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -91,6 +218,15 @@ pub mod inputs {
         pub expected_revision: u64,
         pub at_utc_ms: u64,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyAttentionEligibility {
+        pub now_utc_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyAttentionAuthority {
+        pub mode: WorkAttentionMode,
+        pub delegated_authority: AttentionDelegatedAuthority,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -99,6 +235,8 @@ pub enum Input {
     Resume(inputs::Resume),
     Supersede(inputs::Supersede),
     Stop(inputs::Stop),
+    ClassifyAttentionEligibility(inputs::ClassifyAttentionEligibility),
+    ClassifyAttentionAuthority(inputs::ClassifyAttentionAuthority),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -107,6 +245,8 @@ impl Input {
             Self::Resume(_) => InputKind::Resume,
             Self::Supersede(_) => InputKind::Supersede,
             Self::Stop(_) => InputKind::Stop,
+            Self::ClassifyAttentionEligibility(_) => InputKind::ClassifyAttentionEligibility,
+            Self::ClassifyAttentionAuthority(_) => InputKind::ClassifyAttentionAuthority,
         }
     }
 }
@@ -116,6 +256,8 @@ pub enum InputKind {
     Resume,
     Supersede,
     Stop,
+    ClassifyAttentionEligibility,
+    ClassifyAttentionAuthority,
 }
 
 pub mod effects {
@@ -137,6 +279,25 @@ pub mod effects {
     pub struct AttentionStopped {
         pub revision: u64,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AttentionEligibilityClassified {
+        pub eligible: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AttentionAuthorityClassified {
+        pub can_get: bool,
+        pub can_add_evidence: bool,
+        pub can_release: bool,
+        pub can_update: bool,
+        pub can_block: bool,
+        pub can_create: bool,
+        pub can_link: bool,
+        pub can_link_parent: bool,
+        pub can_link_related: bool,
+        pub can_link_derived_from: bool,
+        pub can_close_own_review_item: bool,
+        pub can_close_if_policy_allows: bool,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -145,6 +306,8 @@ pub enum Effect {
     AttentionResumed(effects::AttentionResumed),
     AttentionSuperseded(effects::AttentionSuperseded),
     AttentionStopped(effects::AttentionStopped),
+    AttentionEligibilityClassified(effects::AttentionEligibilityClassified),
+    AttentionAuthorityClassified(effects::AttentionAuthorityClassified),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -152,6 +315,8 @@ pub enum EffectKind {
     AttentionResumed,
     AttentionSuperseded,
     AttentionStopped,
+    AttentionEligibilityClassified,
+    AttentionAuthorityClassified,
 }
 
 #[allow(non_camel_case_types)]
@@ -164,6 +329,15 @@ pub enum TransitionId {
     SupersedePaused,
     StopActive,
     StopPaused,
+    ClassifyEligibilityActive,
+    ClassifyEligibilityPausedElapsed,
+    ClassifyEligibilityPausedPending,
+    ClassifyEligibilitySuperseded,
+    ClassifyEligibilityStopped,
+    ClassifyAuthorityActive,
+    ClassifyAuthorityPaused,
+    ClassifyAuthoritySuperseded,
+    ClassifyAuthorityStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

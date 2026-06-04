@@ -15,7 +15,7 @@ use meerkat_core::types::RunResult;
 use meerkat_core::types::SessionId;
 use meerkat_core::{
     ContentInput, InputId, PendingSystemContextAppend, RunApplyBoundary, RunId, Session,
-    SessionLlmIdentity, SessionSystemContextState,
+    SessionSystemContextState,
 };
 use meerkat_runtime::MeerkatMachine;
 
@@ -26,7 +26,10 @@ use meerkat_session::{
 use crate::session_runtime::admission::{
     ActiveCapacityGuard, StagedCapacityAdmissions, restore_staged_capacity_admission,
 };
-use crate::{AgentBuildConfig, FactoryAgentBuilder, PromotingSlot, StagedSessionRegistry};
+use crate::{
+    AgentBuildConfig, FactoryAgentBuilder, GeneratedMachineArchivedResumeAdmission, PromotingSlot,
+    StagedSessionRegistry,
+};
 
 /// Boxed-future shape used by the spawned-task callbacks the staged-promotion
 /// helpers accept. Surfaces wrap their RPC-shaped closures into this type so
@@ -95,6 +98,8 @@ pub fn pending_system_context_appends(
             text: render_context_append_text(&append.content),
             source: Some(append.key.clone()),
             idempotency_key: Some(append.key.clone()),
+            // Durable keyed conversation context append — not a transient steer.
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at,
         })
         .collect()
@@ -190,11 +195,8 @@ pub fn is_archived_create_rejection(error: &SessionError) -> bool {
 pub async fn pending_live_first_turn_is_still_deferred(
     service: &PersistentSessionService<FactoryAgentBuilder>,
     session_id: &SessionId,
-) -> bool {
-    service
-        .live_deferred_first_turn_pending(session_id)
-        .await
-        .unwrap_or(false)
+) -> Result<bool, SessionError> {
+    service.live_deferred_first_turn_pending(session_id).await
 }
 
 /// Replay any promoted system-context state captured during staged
@@ -242,9 +244,15 @@ pub async fn should_restore_pending_after_apply_runtime_turn(
     service: &PersistentSessionService<FactoryAgentBuilder>,
     session_id: &SessionId,
     result: &Result<CoreApplyOutput, SessionError>,
-) -> bool {
-    is_pre_run_apply_runtime_turn_failure(result)
-        || (result.is_err() && pending_live_first_turn_is_still_deferred(service, session_id).await)
+) -> Result<bool, SessionError> {
+    if is_pre_run_apply_runtime_turn_failure(result) {
+        return Ok(true);
+    }
+    if result.is_err() {
+        pending_live_first_turn_is_still_deferred(service, session_id).await
+    } else {
+        Ok(false)
+    }
 }
 
 /// Pure predicate: should the staged slot be restored after a runtime
@@ -257,13 +265,20 @@ pub async fn should_restore_pending_after_start_turn(
     service: &PersistentSessionService<FactoryAgentBuilder>,
     session_id: &SessionId,
     result: &Result<RunResult, SessionError>,
-) -> bool {
-    matches!(
+) -> Result<bool, SessionError> {
+    if matches!(
         result,
         Err(SessionError::Agent(
             meerkat_core::error::AgentError::NoPendingBoundary
         ))
-    ) || (result.is_err() && pending_live_first_turn_is_still_deferred(service, session_id).await)
+    ) {
+        return Ok(true);
+    }
+    if result.is_err() {
+        pending_live_first_turn_is_still_deferred(service, session_id).await
+    } else {
+        Ok(false)
+    }
 }
 
 /// Result-receiver returned by [`spawn_pending_create_and_apply_runtime_turn_with_admission_guard`]
@@ -306,13 +321,13 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
     boundary: RunApplyBoundary,
     contributing_input_ids: Vec<InputId>,
     mut promotion_cleanup: PendingPromotionCleanup,
-    machine_archived_resume_authorized: bool,
+    generated_machine_archived_resume_admission: GeneratedMachineArchivedResumeAdmission,
 ) -> ServiceApplyRuntimeTurnSpawnReceiver {
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let create_result = match (
             promotion_cleanup.take_staged_capacity_admission(),
-            machine_archived_resume_authorized,
+            generated_machine_archived_resume_admission.is_authorized_by_generated_authority(),
         ) {
             (Some(admission), true) => {
                 service
@@ -349,21 +364,8 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
                     let _ = result_tx.send(Err(err));
                     return;
                 }
-                if pending_live_first_turn_is_still_deferred(&service, &session_id).await {
-                    promotion_cleanup.mark_materialized();
-                    finish_pending_promotion_after_service_turn(
-                        staged_sessions.as_ref(),
-                        &session_id,
-                        "create_session",
-                        |starting, current| {
-                            (replay_promoted_system_context)(session_id.clone(), starting, current)
-                        },
-                    )
-                    .await;
-                } else {
-                    let materialized_after_error =
-                        service.has_live_session(&session_id).await.unwrap_or(false);
-                    if materialized_after_error {
+                match pending_live_first_turn_is_still_deferred(&service, &session_id).await {
+                    Ok(true) => {
                         promotion_cleanup.mark_materialized();
                         finish_pending_promotion_after_service_turn(
                             staged_sessions.as_ref(),
@@ -378,18 +380,81 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
                             },
                         )
                         .await;
-                    } else {
-                        if let Err(error) = promotion_cleanup
-                            .replenish_staged_capacity_admission(&service)
+                    }
+                    Ok(false) => {
+                        let materialized_after_error = match service
+                            .has_live_session(&session_id)
                             .await
                         {
-                            tracing::warn!(
-                                session_id = %session_id,
-                                error = %error,
-                                "failed to replenish staged capacity after create_session error"
-                            );
+                            Ok(materialized_after_error) => materialized_after_error,
+                            Err(error) => {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    error = %error,
+                                    "failed to determine live-session materialization after create_session error"
+                                );
+                                let _ = service.discard_live_session(&session_id).await;
+                                runtime_adapter.unregister_session(&session_id).await;
+                                promotion_cleanup
+                                    .fail_closed_after_unknown_materialization()
+                                    .await;
+                                promotion_cleanup.disarm();
+                                let _ = result_tx.send(Err(SessionError::Agent(
+                                        meerkat_core::error::AgentError::InternalError(format!(
+                                            "failed to read live-session materialization authority after create_session error for {session_id}: {error}"
+                                        )),
+                                    )));
+                                return;
+                            }
+                        };
+                        if materialized_after_error {
+                            promotion_cleanup.mark_materialized();
+                            finish_pending_promotion_after_service_turn(
+                                staged_sessions.as_ref(),
+                                &session_id,
+                                "create_session",
+                                |starting, current| {
+                                    (replay_promoted_system_context)(
+                                        session_id.clone(),
+                                        starting,
+                                        current,
+                                    )
+                                },
+                            )
+                            .await;
+                        } else {
+                            if let Err(error) = promotion_cleanup
+                                .replenish_staged_capacity_admission(&service)
+                                .await
+                            {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    error = %error,
+                                    "failed to replenish staged capacity after create_session error"
+                                );
+                            }
+                            promotion_cleanup.restore_now().await;
                         }
-                        promotion_cleanup.restore_now().await;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %error,
+                            create_error = %err,
+                            "failed to determine deferred-first-turn materialization after create_session error"
+                        );
+                        let _ = service.discard_live_session(&session_id).await;
+                        runtime_adapter.unregister_session(&session_id).await;
+                        promotion_cleanup
+                            .fail_closed_after_unknown_materialization()
+                            .await;
+                        promotion_cleanup.disarm();
+                        let _ = result_tx.send(Err(SessionError::Agent(
+                            meerkat_core::error::AgentError::InternalError(format!(
+                                "failed to read deferred-first-turn authority after create_session error for {session_id}: {error}"
+                            )),
+                        )));
+                        return;
                     }
                 }
                 promotion_cleanup.disarm();
@@ -427,13 +492,34 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
                 )),
             ))
         });
-        if should_restore_pending_after_apply_runtime_turn(&service, &session_id, &result).await {
+        let should_restore =
+            match should_restore_pending_after_apply_runtime_turn(&service, &session_id, &result)
+                .await
+            {
+                Ok(should_restore) => should_restore,
+                Err(error) => {
+                    let _ = service.discard_live_session(&session_id).await;
+                    runtime_adapter.unregister_session(&session_id).await;
+                    promotion_cleanup
+                        .fail_closed_after_unknown_materialization()
+                        .await;
+                    promotion_cleanup.disarm();
+                    let _ = result_tx.send(Err(error));
+                    return;
+                }
+            };
+        if should_restore {
             let restore_result = promotion_cleanup
                 .restore_after_materialized_failure(
                     &service,
                     MachineSessionArchiveProtocol::from_machine(runtime_adapter.as_ref()),
                 )
                 .await;
+            if restore_result.is_ok() {
+                runtime_adapter.unregister_session(&session_id).await;
+                #[cfg(feature = "comms")]
+                runtime_adapter.abort_comms_drain(&session_id).await;
+            }
             promotion_cleanup.disarm();
             let _ = result_tx.send(match restore_result {
                 Ok(()) => result,
@@ -506,9 +592,20 @@ pub fn spawn_recovered_create_and_apply_runtime_turn_with_admission_guard(
                         )),
                     ))
                 });
-                if should_restore_pending_after_apply_runtime_turn(&service, &session_id, &result)
-                    .await
+                let should_restore = match should_restore_pending_after_apply_runtime_turn(
+                    &service,
+                    &session_id,
+                    &result,
+                )
+                .await
                 {
+                    Ok(should_restore) => should_restore,
+                    Err(error) => {
+                        let _ = result_tx.send(Err(error));
+                        return;
+                    }
+                };
+                if should_restore {
                     let _ = service.discard_live_session(&session_id).await;
                     runtime_adapter.unregister_session(&session_id).await;
                 }
@@ -544,13 +641,13 @@ pub fn spawn_pending_create_and_start_turn_with_admission_guard(
     create_req: CreateSessionRequest,
     start_req: StartTurnRequest,
     mut promotion_cleanup: PendingPromotionCleanup,
-    machine_archived_resume_authorized: bool,
+    generated_machine_archived_resume_admission: GeneratedMachineArchivedResumeAdmission,
 ) -> ServiceStartTurnSpawnReceiver {
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let create_result = match (
             promotion_cleanup.take_staged_capacity_admission(),
-            machine_archived_resume_authorized,
+            generated_machine_archived_resume_admission.is_authorized_by_generated_authority(),
         ) {
             (Some(admission), true) => {
                 service
@@ -587,21 +684,8 @@ pub fn spawn_pending_create_and_start_turn_with_admission_guard(
                     let _ = result_tx.send(Err(err));
                     return;
                 }
-                if pending_live_first_turn_is_still_deferred(&service, &session_id).await {
-                    promotion_cleanup.mark_materialized();
-                    finish_pending_promotion_after_service_turn(
-                        staged_sessions.as_ref(),
-                        &session_id,
-                        "create_session",
-                        |starting, current| {
-                            (replay_promoted_system_context)(session_id.clone(), starting, current)
-                        },
-                    )
-                    .await;
-                } else {
-                    let materialized_after_error =
-                        service.has_live_session(&session_id).await.unwrap_or(false);
-                    if materialized_after_error {
+                match pending_live_first_turn_is_still_deferred(&service, &session_id).await {
+                    Ok(true) => {
                         promotion_cleanup.mark_materialized();
                         finish_pending_promotion_after_service_turn(
                             staged_sessions.as_ref(),
@@ -616,18 +700,81 @@ pub fn spawn_pending_create_and_start_turn_with_admission_guard(
                             },
                         )
                         .await;
-                    } else {
-                        if let Err(error) = promotion_cleanup
-                            .replenish_staged_capacity_admission(&service)
+                    }
+                    Ok(false) => {
+                        let materialized_after_error = match service
+                            .has_live_session(&session_id)
                             .await
                         {
-                            tracing::warn!(
-                                session_id = %session_id,
-                                error = %error,
-                                "failed to replenish staged capacity after create_session error"
-                            );
+                            Ok(materialized_after_error) => materialized_after_error,
+                            Err(error) => {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    error = %error,
+                                    "failed to determine live-session materialization after create_session error"
+                                );
+                                let _ = service.discard_live_session(&session_id).await;
+                                runtime_adapter.unregister_session(&session_id).await;
+                                promotion_cleanup
+                                    .fail_closed_after_unknown_materialization()
+                                    .await;
+                                promotion_cleanup.disarm();
+                                let _ = result_tx.send(Err(SessionError::Agent(
+                                        meerkat_core::error::AgentError::InternalError(format!(
+                                            "failed to read live-session materialization authority after create_session error for {session_id}: {error}"
+                                        )),
+                                    )));
+                                return;
+                            }
+                        };
+                        if materialized_after_error {
+                            promotion_cleanup.mark_materialized();
+                            finish_pending_promotion_after_service_turn(
+                                staged_sessions.as_ref(),
+                                &session_id,
+                                "create_session",
+                                |starting, current| {
+                                    (replay_promoted_system_context)(
+                                        session_id.clone(),
+                                        starting,
+                                        current,
+                                    )
+                                },
+                            )
+                            .await;
+                        } else {
+                            if let Err(error) = promotion_cleanup
+                                .replenish_staged_capacity_admission(&service)
+                                .await
+                            {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    error = %error,
+                                    "failed to replenish staged capacity after create_session error"
+                                );
+                            }
+                            promotion_cleanup.restore_now().await;
                         }
-                        promotion_cleanup.restore_now().await;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %error,
+                            create_error = %err,
+                            "failed to determine deferred-first-turn materialization after create_session error"
+                        );
+                        let _ = service.discard_live_session(&session_id).await;
+                        runtime_adapter.unregister_session(&session_id).await;
+                        promotion_cleanup
+                            .fail_closed_after_unknown_materialization()
+                            .await;
+                        promotion_cleanup.disarm();
+                        let _ = result_tx.send(Err(SessionError::Agent(
+                            meerkat_core::error::AgentError::InternalError(format!(
+                                "failed to read deferred-first-turn authority after create_session error for {session_id}: {error}"
+                            )),
+                        )));
+                        return;
                     }
                 }
                 promotion_cleanup.disarm();
@@ -652,13 +799,32 @@ pub fn spawn_pending_create_and_start_turn_with_admission_guard(
                 .map_err(|(error, _admission)| error),
             Err(error) => Err(error),
         };
-        if should_restore_pending_after_start_turn(&service, &session_id, &result).await {
+        let should_restore =
+            match should_restore_pending_after_start_turn(&service, &session_id, &result).await {
+                Ok(should_restore) => should_restore,
+                Err(error) => {
+                    let _ = service.discard_live_session(&session_id).await;
+                    runtime_adapter.unregister_session(&session_id).await;
+                    promotion_cleanup
+                        .fail_closed_after_unknown_materialization()
+                        .await;
+                    promotion_cleanup.disarm();
+                    let _ = result_tx.send(Err(error));
+                    return;
+                }
+            };
+        if should_restore {
             let restore_result = promotion_cleanup
                 .restore_after_materialized_failure(
                     &service,
                     MachineSessionArchiveProtocol::from_machine(runtime_adapter.as_ref()),
                 )
                 .await;
+            if restore_result.is_ok() {
+                runtime_adapter.unregister_session(&session_id).await;
+                #[cfg(feature = "comms")]
+                runtime_adapter.abort_comms_drain(&session_id).await;
+            }
             promotion_cleanup.disarm();
             let _ = result_tx.send(match restore_result {
                 Ok(()) => result,
@@ -710,13 +876,11 @@ pub struct PendingPromotionCleanup {
     pub(crate) session_id: SessionId,
     pub(crate) staged_capacity_admission: Option<ActiveCapacityGuard>,
     pub(crate) build_config: Option<AgentBuildConfig>,
-    pub(crate) effective_llm_identity: SessionLlmIdentity,
     pub(crate) labels: Option<BTreeMap<String, String>>,
     pub(crate) deferred_prompt: Option<ContentInput>,
     pub(crate) created_at_secs: u64,
     pub(crate) updated_at_secs: u64,
     pub(crate) mode: PendingPromotionCleanupMode,
-    pub(crate) machine_archived_resume_authorized: bool,
     pub(crate) armed: bool,
 }
 
@@ -735,13 +899,11 @@ impl PendingPromotionCleanup {
             session_id: session_id.clone(),
             staged_capacity_admission,
             build_config: Some((*slot.build_config).clone()),
-            effective_llm_identity: slot.effective_llm_identity.clone(),
             labels: slot.labels.clone(),
             deferred_prompt: slot.deferred_prompt.clone(),
             created_at_secs: slot.created_at_secs,
             updated_at_secs: slot.updated_at_secs,
             mode: PendingPromotionCleanupMode::Restore,
-            machine_archived_resume_authorized: slot.machine_archived_resume_authorized,
             armed: true,
         }
     }
@@ -751,13 +913,6 @@ impl PendingPromotionCleanup {
     pub fn update_build_config(&mut self, build_config: &AgentBuildConfig) {
         if self.armed {
             self.build_config = Some(build_config.clone());
-        }
-    }
-
-    /// Replace the LLM identity that would be re-staged on rollback.
-    pub fn update_effective_llm_identity(&mut self, effective_llm_identity: SessionLlmIdentity) {
-        if self.armed {
-            self.effective_llm_identity = effective_llm_identity;
         }
     }
 
@@ -817,6 +972,23 @@ impl PendingPromotionCleanup {
         self.armed = false;
     }
 
+    /// Fail closed when materialization state cannot be read: remove the
+    /// promoting staged slot instead of restoring it as if no live session
+    /// exists.
+    pub async fn fail_closed_after_unknown_materialization(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let _ = self
+            .staged_sessions
+            .take_promoting_system_context_state(&self.session_id)
+            .await;
+        let _ = self.staged_sessions.abandon(&self.session_id).await;
+        self.build_config = None;
+        drop(self.staged_capacity_admission.take());
+        self.armed = false;
+    }
+
     /// Restore the staged session after a materialized-side failure
     /// (e.g. a pre-run apply failure on the live session).
     pub async fn restore_after_materialized_failure(
@@ -860,13 +1032,28 @@ impl PendingPromotionCleanup {
         self.armed = false;
     }
 
-    /// Mark the session as authorized to resume from machine-archived
-    /// state on its next promotion attempt.
-    pub fn authorize_machine_archived_resume(&mut self) {
+    /// Mark, through generated staged-session authority, that the session may
+    /// resume once from machine-archived state on its next promotion attempt.
+    pub async fn authorize_machine_archived_resume(&mut self) -> Result<(), SessionError> {
         if !self.armed {
-            return;
+            return Ok(());
         }
-        self.machine_archived_resume_authorized = true;
+        match self
+            .staged_sessions
+            .authorize_machine_archived_resume(&self.session_id)
+            .await
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "staged session {} disappeared during machine-archived resume authorization",
+                    self.session_id
+                )),
+            )),
+            Err(err) => Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(err.to_string()),
+            )),
+        }
     }
 
     /// Copy the current promoting system-context state into
@@ -919,12 +1106,10 @@ impl PendingPromotionCleanup {
             .abandon_promotion(
                 self.session_id.clone(),
                 build_config,
-                self.effective_llm_identity.clone(),
                 self.labels.clone(),
                 self.deferred_prompt.clone(),
                 self.created_at_secs,
                 self.updated_at_secs,
-                self.machine_archived_resume_authorized,
             )
             .await;
         if restored {
@@ -973,12 +1158,10 @@ impl Drop for PendingPromotionCleanup {
                     return;
                 };
                 let staged_capacity_admission = self.staged_capacity_admission.take();
-                let effective_llm_identity = self.effective_llm_identity.clone();
                 let labels = self.labels.clone();
                 let deferred_prompt = self.deferred_prompt.clone();
                 let created_at_secs = self.created_at_secs;
                 let updated_at_secs = self.updated_at_secs;
-                let machine_archived_resume_authorized = self.machine_archived_resume_authorized;
                 tokio::spawn(async move {
                     let Some(admission) = staged_capacity_admission else {
                         tracing::warn!(
@@ -1000,12 +1183,10 @@ impl Drop for PendingPromotionCleanup {
                         .abandon_promotion(
                             session_id.clone(),
                             build_config,
-                            effective_llm_identity,
                             labels,
                             deferred_prompt,
                             created_at_secs,
                             updated_at_secs,
-                            machine_archived_resume_authorized,
                         )
                         .await;
                     if restored {

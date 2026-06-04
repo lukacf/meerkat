@@ -11,8 +11,10 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
 pub mod kennel;
+pub mod generated_comms_trust;
 pub mod machines;
 pub mod rpc_client;
+pub use generated_comms_trust::ExampleGeneratedCommsTrustRouter;
 pub use kennel::*;
 
 // ── Provider auto-detection ───────────────────────────────────────────────────

@@ -1,11 +1,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::McpServerConfig;
 use meerkat_core::event::ToolConfigChangeOperation;
+use meerkat_core::handles::ExternalToolSurfaceHandle;
 use meerkat_mcp::{McpLifecycleAction, McpLifecyclePhase, McpRouter, McpRouterAdapter};
+use meerkat_runtime::RuntimeExternalToolSurfaceHandle;
 
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 fn test_server_path() -> PathBuf {
@@ -48,6 +51,18 @@ fn invalid_server_config(name: &str) -> McpServerConfig {
     )
 }
 
+fn generated_surface_handle() -> Arc<dyn ExternalToolSurfaceHandle> {
+    Arc::new(RuntimeExternalToolSurfaceHandle::ephemeral())
+}
+
+fn generated_router() -> McpRouter {
+    McpRouter::new_with_surface_handle(generated_surface_handle())
+}
+
+fn generated_adapter() -> McpRouterAdapter {
+    McpRouterAdapter::new(generated_router())
+}
+
 fn has_action(
     actions: &[McpLifecycleAction],
     target: &str,
@@ -69,8 +84,8 @@ fn has_action(
 
 #[test]
 #[allow(clippy::expect_used)]
-fn standalone_default_router_accepts_surface_stage_add() {
-    let mut router = McpRouter::new();
+fn standalone_router_with_generated_surface_accepts_surface_stage_add() {
+    let mut router = generated_router();
 
     router
         .stage_add(invalid_server_config("standalone-stage-add"))
@@ -142,7 +157,7 @@ async fn lifecycle_contract_add_and_reload_emit_pending_then_applied_actions() {
         return;
     };
 
-    let adapter = McpRouterAdapter::new(McpRouter::new());
+    let adapter = generated_adapter();
 
     adapter
         .stage_add(test_server_config("lifecycle-add", &server_path))
@@ -205,7 +220,7 @@ async fn lifecycle_contract_remove_emits_draining_then_applied_and_forced_action
         return;
     };
 
-    let adapter = McpRouterAdapter::new(McpRouter::new());
+    let adapter = generated_adapter();
     adapter
         .stage_add(test_server_config("lifecycle-drain", &server_path))
         .await
@@ -263,7 +278,7 @@ async fn lifecycle_contract_remove_emits_draining_then_applied_and_forced_action
         delta.lifecycle_actions
     );
 
-    let forced_adapter = McpRouterAdapter::new(McpRouter::new());
+    let forced_adapter = generated_adapter();
     forced_adapter
         .stage_add(test_server_config("lifecycle-force", &server_path))
         .await
@@ -333,7 +348,7 @@ async fn lifecycle_contract_remove_emits_draining_then_applied_and_forced_action
 #[ignore = "integration-real: real process spawning verifies failure projection through the legacy notice bridge"]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 async fn lifecycle_contract_failed_activation_uses_failed_phase_and_legacy_notice_projection() {
-    let mut router = McpRouter::new();
+    let mut router = generated_router();
     router
         .stage_add(invalid_server_config("lifecycle-fail"))
         .expect("stage invalid server");
@@ -361,7 +376,7 @@ async fn lifecycle_contract_failed_activation_uses_failed_phase_and_legacy_notic
     )
     .await;
 
-    let failed_adapter = McpRouterAdapter::new(McpRouter::new());
+    let failed_adapter = generated_adapter();
     failed_adapter
         .stage_add(invalid_server_config("lifecycle-fail-legacy"))
         .await

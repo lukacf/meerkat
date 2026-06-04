@@ -1333,32 +1333,54 @@ struct AppendSystemContextOptions {
 }
 
 #[cfg(test)]
+fn system_context_request_from_append(
+    append: &meerkat_core::PendingSystemContextAppend,
+) -> meerkat_core::AppendSystemContextRequest {
+    meerkat_core::AppendSystemContextRequest {
+        text: append.text.clone(),
+        source: append.source.clone(),
+        idempotency_key: append.idempotency_key.clone(),
+        source_kind: append.source_kind,
+    }
+}
+
+#[cfg(test)]
 fn merge_runtime_system_context_state(
     mut agent_state: meerkat_core::SessionSystemContextState,
     starting_state: &meerkat_core::SessionSystemContextState,
     current_state: &meerkat_core::SessionSystemContextState,
 ) -> meerkat_core::SessionSystemContextState {
-    for pending in &current_state.pending {
-        if !starting_state.pending.contains(pending) {
-            agent_state.pending.push(pending.clone());
+    let starting_state = starting_state
+        .clone()
+        .restore_from_snapshot()
+        .expect("starting system-context state should restore");
+    let current_state = current_state
+        .clone()
+        .restore_from_snapshot()
+        .expect("current system-context state should restore");
+    agent_state = agent_state
+        .restore_from_snapshot()
+        .expect("agent system-context state should restore");
+
+    for applied in current_state.applied() {
+        if !starting_state.applied().contains(applied) && !agent_state.applied().contains(applied) {
+            let _ = agent_state.record_applied_blocks(std::slice::from_ref(applied), "");
         }
     }
 
-    for applied in &current_state.applied {
-        if !starting_state.applied.contains(applied) && !agent_state.applied.contains(applied) {
-            agent_state.applied.push(applied.clone());
-        }
-    }
-
-    for (key, seen) in &current_state.seen {
-        if !starting_state.seen.contains_key(key) {
-            agent_state.seen.insert(key.clone(), seen.clone());
-        }
-    }
-
-    for key in &current_state.active_turn_pending_keys {
-        if !starting_state.active_turn_pending_keys.contains(key) {
-            agent_state.active_turn_pending_keys.insert(key.clone());
+    for pending in current_state.pending() {
+        if !starting_state.pending().contains(pending) && !agent_state.pending().contains(pending) {
+            let req = system_context_request_from_append(pending);
+            let active_turn_scoped = pending
+                .idempotency_key
+                .as_ref()
+                .is_some_and(|key| current_state.active_turn_pending_keys().contains(key));
+            let result = if active_turn_scoped {
+                agent_state.stage_active_turn_append(&req, pending.accepted_at)
+            } else {
+                agent_state.stage_append(&req, pending.accepted_at)
+            };
+            result.expect("merged system-context append should stage");
         }
     }
 
@@ -1385,6 +1407,8 @@ pub async fn append_system_context(handle: u32, request_json: &str) -> Result<Js
                 text: req.text,
                 source: req.source,
                 idempotency_key: req.idempotency_key,
+                // JS-originated context appends are durable, never steers.
+                source_kind: meerkat_core::session::SystemContextSource::Normal,
             },
         )
         .await
@@ -1755,10 +1779,7 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
         .into_iter()
         .map(|r| match r {
             Ok(spawn_result) => spawn_member_result_payload(&id, &spawn_result),
-            Err(e) => meerkat_contracts::MobSpawnManyResultEntry::failed(
-                e.spawn_many_failure_cause(),
-                e.to_string(),
-            ),
+            Err(e) => meerkat_contracts::MobSpawnManyResultEntry::failed(e.cause(), e.to_string()),
         })
         .collect();
 
@@ -1933,6 +1954,8 @@ pub async fn mob_append_system_context(
                 text: req.text,
                 source: req.source,
                 idempotency_key: req.idempotency_key,
+                // JS-originated context appends are durable, never steers.
+                source_kind: meerkat_core::session::SystemContextSource::Normal,
             },
         )
         .await
@@ -1948,123 +1971,22 @@ pub async fn mob_append_system_context(
     ))
 }
 
-/// Wire bidirectional comms trust between meerkats in DIFFERENT mobs.
+/// Legacy cross-mob bidirectional wire convenience.
 ///
-/// Unlike `mob_wire` (which is intra-mob), this establishes peer trust across
-/// mob boundaries by accessing each member's comms runtime through the shared
-/// session service. Both members must have comms enabled.
+/// No generated composition authority currently owns the two-mob transaction,
+/// so this surface fails closed instead of hand-rolling partial rollback over
+/// two independent MobMachine `WireExternalPeer` commands.
 #[wasm_bindgen]
 pub async fn wire_cross_mob(
-    mob_a: &str,
-    agent_a: &str,
-    mob_b: &str,
-    agent_b: &str,
+    _mob_a: &str,
+    _agent_a: &str,
+    _mob_b: &str,
+    _agent_b: &str,
 ) -> Result<(), JsValue> {
-    let mob_state = with_mob_state(Ok)?;
-
-    // Resolve roster entries and bridge session IDs via mob handles.
-    let identity_a = meerkat_mob::AgentIdentity::from(agent_a);
-    let identity_b = meerkat_mob::AgentIdentity::from(agent_b);
-
-    let handle_a = mob_state
-        .handle_for(&MobId::from(mob_a))
-        .await
-        .map_err(err_mob)?;
-    let entry_a = handle_a
-        .get_member(&identity_a)
-        .await
-        .ok_or_else(|| err_js("no_member", agent_a))?;
-    let sid_a = handle_a
-        .resolve_bridge_session_id(&identity_a)
-        .await
-        .ok_or_else(|| err_js("no_session", agent_a))?;
-
-    let handle_b = mob_state
-        .handle_for(&MobId::from(mob_b))
-        .await
-        .map_err(err_mob)?;
-    let entry_b = handle_b
-        .get_member(&identity_b)
-        .await
-        .ok_or_else(|| err_js("no_member", agent_b))?;
-    let sid_b = handle_b
-        .resolve_bridge_session_id(&identity_b)
-        .await
-        .ok_or_else(|| err_js("no_session", agent_b))?;
-
-    // Get comms runtimes from the shared session service
-    let svc = RUNTIME_STATE.with(|cell| {
-        let borrow = cell.borrow();
-        let state = borrow
-            .as_ref()
-            .ok_or_else(|| err_js("not_initialized", ""))?;
-        Ok::<_, JsValue>(state.session_service.clone())
-    })?;
-
-    let comms_a = svc
-        .comms_runtime(&sid_a)
-        .await
-        .ok_or_else(|| err_js("no_comms", &format!("{agent_a} has no comms runtime")))?;
-    let comms_b = svc
-        .comms_runtime(&sid_b)
-        .await
-        .ok_or_else(|| err_js("no_comms", &format!("{agent_b} has no comms runtime")))?;
-
-    let key_a = comms_a
-        .public_key()
-        .ok_or_else(|| err_js("no_key", agent_a))?;
-    let key_b = comms_b
-        .public_key()
-        .ok_or_else(|| err_js("no_key", agent_b))?;
-
-    // Build peer specs with full mob/profile/meerkat addressing
-    let name_a = format!("{mob_a}/{}/{agent_a}", entry_a.role);
-    let name_b = format!("{mob_b}/{}/{agent_b}", entry_b.role);
-
-    let spec_a = build_inproc_trusted_peer(&name_a, &key_a)?;
-    let spec_b = build_inproc_trusted_peer(&name_b, &key_b)?;
-
-    comms_a
-        .add_trusted_peer(spec_b)
-        .await
-        .map_err(|e| err_str("wire_error", e))?;
-    comms_b
-        .add_trusted_peer(spec_a)
-        .await
-        .map_err(|e| err_str("wire_error", e))?;
-
-    Ok(())
-}
-
-/// Build an inproc [`TrustedPeerDescriptor`] for intra-/cross-mob wire in the
-/// embedded wasm runtime.
-///
-/// V5 dogma: the core seam is keyed by typed [`PeerId`] (a UUIDv5 derived
-/// from the Ed25519 signing pubkey), not by display name. This helper
-/// parses the `ed25519:<base64>` form returned by
-/// [`CommsRuntime::public_key`] back into typed `PubKey` bytes, derives the
-/// canonical `PeerId` via
-/// [`meerkat_comms::router::peer_id_from_pubkey`] so router and trust-store
-/// lookups round-trip, and stamps the 32-byte pubkey on the descriptor so
-/// receiver-side signature verification continues to work.
-fn build_inproc_trusted_peer(
-    name: &str,
-    pubkey_str: &str,
-) -> Result<meerkat_core::comms::TrustedPeerDescriptor, JsValue> {
-    let pubkey = meerkat_comms::identity::PubKey::from_pubkey_string(pubkey_str)
-        .map_err(|e| err_str("wire_error", format!("invalid pubkey `{pubkey_str}`: {e}")))?;
-    let peer_id = meerkat_comms::router::peer_id_from_pubkey(&pubkey);
-    let peer_name = meerkat_core::comms::PeerName::new(name)
-        .map_err(|e| err_str("wire_error", format!("invalid peer name `{name}`: {e}")))?;
-    Ok(meerkat_core::comms::TrustedPeerDescriptor {
-        peer_id,
-        name: peer_name,
-        address: meerkat_core::comms::PeerAddress::new(
-            meerkat_core::comms::PeerTransport::Inproc,
-            name,
-        ),
-        pubkey: *pubkey.as_bytes(),
-    })
+    Err(err_js(
+        "wire_cross_mob_unsupported",
+        "wire_cross_mob requires generated cross-mob composition authority",
+    ))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -2596,8 +2518,7 @@ mod tests {
     use meerkat_core::Config;
     use meerkat_core::time_compat::{Duration, SystemTime};
     use meerkat_core::{
-        PendingSystemContextAppend, SeenSystemContextKey, SeenSystemContextState,
-        SessionSystemContextState,
+        PendingSystemContextAppend, SeenSystemContextState, SessionSystemContextState,
     };
     #[cfg(not(target_arch = "wasm32"))]
     use meerkat_mob::{MobId, SpawnMemberSpec};
@@ -2606,8 +2527,46 @@ mod tests {
     use std::collections::HashMap;
     #[cfg(not(target_arch = "wasm32"))]
     use std::sync::Arc;
-    #[cfg(not(target_arch = "wasm32"))]
-    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn request_from_append(
+        append: &PendingSystemContextAppend,
+    ) -> meerkat_core::AppendSystemContextRequest {
+        meerkat_core::AppendSystemContextRequest {
+            text: append.text.clone(),
+            source: append.source.clone(),
+            idempotency_key: append.idempotency_key.clone(),
+            source_kind: append.source_kind,
+        }
+    }
+
+    fn system_context_state_with_pending(
+        appends: &[PendingSystemContextAppend],
+        active_turn_keys: &[&str],
+    ) -> SessionSystemContextState {
+        let mut state = SessionSystemContextState::default();
+        for append in appends {
+            let req = request_from_append(append);
+            let active_turn_scoped = append
+                .idempotency_key
+                .as_deref()
+                .is_some_and(|key| active_turn_keys.contains(&key));
+            let result = if active_turn_scoped {
+                state.stage_active_turn_append(&req, append.accepted_at)
+            } else {
+                state.stage_append(&req, append.accepted_at)
+            };
+            result.expect("test append should stage");
+        }
+        state
+    }
+
+    fn system_context_state_with_applied(
+        appends: &[PendingSystemContextAppend],
+    ) -> SessionSystemContextState {
+        let mut state = system_context_state_with_pending(appends, &[]);
+        state.mark_pending_applied();
+        state
+    }
 
     fn test_mobpack_bytes(capabilities: &[&str]) -> Vec<u8> {
         let capability_values = capabilities
@@ -2671,89 +2630,10 @@ capabilities = [{capability_values}]
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    struct WebFailClearEventStore {
-        inner: meerkat_mob::store::InMemoryMobEventStore,
-        fail_clear: AtomicBool,
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    impl WebFailClearEventStore {
-        fn new() -> Self {
-            Self {
-                inner: meerkat_mob::store::InMemoryMobEventStore::new(),
-                fail_clear: AtomicBool::new(true),
-            }
-        }
-
-        fn allow_clear(&self) {
-            self.fail_clear.store(false, Ordering::Relaxed);
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[async_trait::async_trait]
-    impl meerkat_mob::store::MobEventStore for WebFailClearEventStore {
-        async fn append(
-            &self,
-            event: meerkat_mob::NewMobEvent,
-        ) -> Result<meerkat_mob::MobEvent, meerkat_mob::store::MobStoreError> {
-            self.inner.append(event).await
-        }
-
-        async fn append_terminal_event_if_absent(
-            &self,
-            event: meerkat_mob::NewMobEvent,
-        ) -> Result<Option<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
-            self.inner.append_terminal_event_if_absent(event).await
-        }
-
-        async fn append_batch(
-            &self,
-            events: Vec<meerkat_mob::NewMobEvent>,
-        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
-            self.inner.append_batch(events).await
-        }
-
-        async fn poll(
-            &self,
-            after_cursor: u64,
-            limit: usize,
-        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
-            self.inner.poll(after_cursor, limit).await
-        }
-
-        async fn replay_all(
-            &self,
-        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
-            self.inner.replay_all().await
-        }
-
-        async fn latest_cursor(&self) -> Result<u64, meerkat_mob::store::MobStoreError> {
-            self.inner.latest_cursor().await
-        }
-
-        fn subscribe(
-            &self,
-        ) -> Result<meerkat_mob::store::MobEventReceiver, meerkat_mob::store::MobStoreError>
-        {
-            self.inner.subscribe()
-        }
-
-        async fn clear(&self) -> Result<(), meerkat_mob::store::MobStoreError> {
-            if self.fail_clear.load(Ordering::Relaxed) {
-                return Err(meerkat_mob::store::MobStoreError::Internal(
-                    "forced web destroy mob cleanup clear failure".to_string(),
-                ));
-            }
-            self.inner.clear().await
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
     async fn insert_web_partial_destroy_mob(
         mob_state: &Arc<meerkat_mob_mcp::MobMcpState>,
         owner_session_id: &str,
-        events: Arc<WebFailClearEventStore>,
+        events: Arc<meerkat_mob::store::InMemoryMobEventStore>,
     ) -> MobId {
         let mob_id = MobId::from("web-session-destroy-partial");
         let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
@@ -2772,9 +2652,11 @@ capabilities = [{capability_values}]
                 provider_params: None,
             }),
         );
-        definition.mark_owner_bridge_session_indexed(owner_session_id);
+        let owner_session_id = meerkat_core::types::SessionId::parse(owner_session_id)
+            .expect("valid owner bridge session id");
         let storage = meerkat_mob::MobStorage::with_events(events);
         let handle = meerkat_mob::MobBuilder::new(definition, storage)
+            .with_owner_bridge_session_create_authority(owner_session_id, true, false)
             .with_session_service(mob_state.session_service())
             .allow_ephemeral_sessions(true)
             .create()
@@ -2792,66 +2674,24 @@ capabilities = [{capability_values}]
             text: "initial".to_string(),
             source: Some("mob".to_string()),
             idempotency_key: Some("ctx-initial".to_string()),
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: base_time,
         };
         let concurrent_pending = PendingSystemContextAppend {
             text: "concurrent".to_string(),
             source: Some("mob".to_string()),
             idempotency_key: Some("ctx-concurrent".to_string()),
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: base_time + Duration::from_secs(1),
         };
 
-        let starting_state = SessionSystemContextState {
-            pending: vec![initial_pending.clone()],
-            applied: Vec::new(),
-            active_turn_pending_keys: std::collections::BTreeSet::new(),
-            seen: std::collections::BTreeMap::from([(
-                "ctx-initial".to_string(),
-                SeenSystemContextKey {
-                    text: initial_pending.text.clone(),
-                    source: initial_pending.source.clone(),
-                    state: SeenSystemContextState::Pending,
-                },
-            )]),
-        };
-        let agent_state = SessionSystemContextState {
-            pending: Vec::new(),
-            applied: vec![initial_pending.clone()],
-            active_turn_pending_keys: std::collections::BTreeSet::new(),
-            seen: std::collections::BTreeMap::from([(
-                "ctx-initial".to_string(),
-                SeenSystemContextKey {
-                    text: initial_pending.text.clone(),
-                    source: initial_pending.source.clone(),
-                    state: SeenSystemContextState::Applied,
-                },
-            )]),
-        };
-        let current_registry_state = SessionSystemContextState {
-            pending: vec![initial_pending, concurrent_pending.clone()],
-            applied: Vec::new(),
-            seen: std::collections::BTreeMap::from([
-                (
-                    "ctx-initial".to_string(),
-                    SeenSystemContextKey {
-                        text: "initial".to_string(),
-                        source: Some("mob".to_string()),
-                        state: SeenSystemContextState::Pending,
-                    },
-                ),
-                (
-                    "ctx-concurrent".to_string(),
-                    SeenSystemContextKey {
-                        text: concurrent_pending.text.clone(),
-                        source: concurrent_pending.source.clone(),
-                        state: SeenSystemContextState::Pending,
-                    },
-                ),
-            ]),
-            active_turn_pending_keys: std::collections::BTreeSet::from([
-                "ctx-concurrent".to_string()
-            ]),
-        };
+        let starting_state =
+            system_context_state_with_pending(std::slice::from_ref(&initial_pending), &[]);
+        let agent_state = system_context_state_with_applied(std::slice::from_ref(&initial_pending));
+        let current_registry_state = system_context_state_with_pending(
+            &[initial_pending, concurrent_pending.clone()],
+            &["ctx-concurrent"],
+        );
 
         let merged = merge_runtime_system_context_state(
             agent_state,
@@ -2859,16 +2699,16 @@ capabilities = [{capability_values}]
             &current_registry_state,
         );
 
-        assert_eq!(merged.pending, vec![concurrent_pending]);
+        assert_eq!(merged.pending(), std::slice::from_ref(&concurrent_pending));
         assert_eq!(
-            merged.seen.get("ctx-initial").map(|seen| seen.state),
+            merged.seen().get("ctx-initial").map(|seen| seen.state),
             Some(SeenSystemContextState::Applied)
         );
         assert_eq!(
-            merged.seen.get("ctx-concurrent").map(|seen| seen.state),
+            merged.seen().get("ctx-concurrent").map(|seen| seen.state),
             Some(SeenSystemContextState::Pending)
         );
-        assert!(merged.active_turn_pending_keys.contains("ctx-concurrent"));
+        assert!(merged.active_turn_pending_keys().contains("ctx-concurrent"));
     }
 
     #[test]
@@ -2970,6 +2810,7 @@ capabilities = [{capability_values}]
                     text: "Prioritize coordinating with the lead.".to_string(),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-worker-1".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await
@@ -2988,13 +2829,13 @@ capabilities = [{capability_values}]
             .system_context_state()
             .expect("system-context state metadata");
 
-        assert_eq!(system_context_state.pending.len(), 1);
+        assert_eq!(system_context_state.pending_len(), 1);
         assert_eq!(
-            system_context_state.pending[0].idempotency_key.as_deref(),
+            system_context_state.pending()[0].idempotency_key.as_deref(),
             Some("ctx-worker-1")
         );
         assert_eq!(
-            system_context_state.pending[0].text,
+            system_context_state.pending()[0].text,
             "Prioritize coordinating with the lead."
         );
     }
@@ -3270,7 +3111,8 @@ capabilities = [{capability_values}]
             .await
             .expect("create deferred web session");
         let session_id = created.session_id;
-        let events = Arc::new(WebFailClearEventStore::new());
+        let events = Arc::new(meerkat_mob::store::InMemoryMobEventStore::new());
+        events.fail_clear_until_allowed();
         let mob_id =
             insert_web_partial_destroy_mob(&mob_state, &session_id.to_string(), events.clone())
                 .await;

@@ -70,6 +70,20 @@ fn named_u64(type_name: &str, value: u64) -> KernelValue {
     }
 }
 
+fn named_variant(enum_name: &str, variant: &str) -> KernelValue {
+    KernelValue::NamedVariant {
+        enum_name: enum_type(enum_name),
+        variant: enum_variant(variant),
+    }
+}
+
+fn option_some(value: KernelValue) -> KernelValue {
+    KernelValue::Map(BTreeMap::from([(
+        KernelValue::String("value".into()),
+        value,
+    )]))
+}
+
 #[test]
 fn applying_typed_input_yields_typed_transition_outcome() {
     let kernel = GeneratedMachineKernel::new(meerkat_machine());
@@ -123,10 +137,50 @@ fn mob_spawn_produces_typed_effect_variants() {
     let kernel = GeneratedMachineKernel::new(mob_machine());
     let state = kernel.initial_state().expect("initial state");
     assert_eq!(state.phase, phase("Running"));
+    let profile_material_digest = "profile.worker.1";
+
+    let authorized: TransitionOutcome = kernel
+        .transition(
+            &state,
+            &KernelInput {
+                variant: input("AuthorizeSpawnProfile"),
+                fields: BTreeMap::from([
+                    (
+                        field("agent_identity"),
+                        named_string("AgentIdentity", "agent.worker"),
+                    ),
+                    (
+                        field("profile_name"),
+                        KernelValue::String("worker".to_owned()),
+                    ),
+                    (field("model"), KernelValue::String("test-model".to_owned())),
+                    (
+                        field("profile_material_digest"),
+                        KernelValue::String(profile_material_digest.to_owned()),
+                    ),
+                    (
+                        field("tool_config_digest"),
+                        KernelValue::String("tool-config.worker.1".to_owned()),
+                    ),
+                    (
+                        field("skills_digest"),
+                        KernelValue::String("skills.worker.1".to_owned()),
+                    ),
+                    (field("provider_params_digest"), KernelValue::None),
+                    (field("output_schema_digest"), KernelValue::None),
+                    (field("external_addressable"), KernelValue::Bool(false)),
+                ]),
+            },
+        )
+        .expect("authorize spawn profile");
+    assert_eq!(
+        authorized.transition,
+        transition("AuthorizeSpawnProfileRunning")
+    );
 
     let outcome: TransitionOutcome = kernel
         .transition(
-            &state,
+            &authorized.next_state,
             &KernelInput {
                 variant: input("Spawn"),
                 fields: BTreeMap::from([
@@ -140,10 +194,18 @@ fn mob_spawn_produces_typed_effect_variants() {
                     ),
                     (field("fence_token"), named_u64("FenceToken", 1)),
                     (field("generation"), named_u64("Generation", 1)),
+                    (
+                        field("profile_material_digest"),
+                        KernelValue::String(profile_material_digest.to_owned()),
+                    ),
                     (field("external_addressable"), KernelValue::Bool(false)),
                     (
+                        field("runtime_mode"),
+                        named_variant("SpawnPolicyRuntimeMode", "AutonomousHost"),
+                    ),
+                    (
                         field("bridge_session_id"),
-                        named_string("SessionId", "bridge.worker.1"),
+                        option_some(named_string("SessionId", "bridge.worker.1")),
                     ),
                     (field("replacing"), KernelValue::None),
                 ]),
@@ -162,6 +224,95 @@ fn mob_spawn_produces_typed_effect_variants() {
             .iter()
             .any(|emitted| emitted.variant == effect("RequestRuntimeBinding"))
     );
+}
+
+#[test]
+fn mob_spawn_rejects_unauthorized_addressability() {
+    let kernel = GeneratedMachineKernel::new(mob_machine());
+    let state = kernel.initial_state().expect("initial state");
+    let profile_material_digest = "profile.worker.1";
+
+    let authorized = kernel
+        .transition(
+            &state,
+            &KernelInput {
+                variant: input("AuthorizeSpawnProfile"),
+                fields: BTreeMap::from([
+                    (
+                        field("agent_identity"),
+                        named_string("AgentIdentity", "agent.worker"),
+                    ),
+                    (
+                        field("profile_name"),
+                        KernelValue::String("worker".to_owned()),
+                    ),
+                    (field("model"), KernelValue::String("test-model".to_owned())),
+                    (
+                        field("profile_material_digest"),
+                        KernelValue::String(profile_material_digest.to_owned()),
+                    ),
+                    (
+                        field("tool_config_digest"),
+                        KernelValue::String("tool-config.worker.1".to_owned()),
+                    ),
+                    (
+                        field("skills_digest"),
+                        KernelValue::String("skills.worker.1".to_owned()),
+                    ),
+                    (field("provider_params_digest"), KernelValue::None),
+                    (field("output_schema_digest"), KernelValue::None),
+                    (field("external_addressable"), KernelValue::Bool(false)),
+                ]),
+            },
+        )
+        .expect("authorize spawn profile");
+
+    let refusal = kernel
+        .transition(
+            &authorized.next_state,
+            &KernelInput {
+                variant: input("Spawn"),
+                fields: BTreeMap::from([
+                    (
+                        field("agent_identity"),
+                        named_string("AgentIdentity", "agent.worker"),
+                    ),
+                    (
+                        field("agent_runtime_id"),
+                        named_string("AgentRuntimeId", "runtime.worker.1"),
+                    ),
+                    (field("fence_token"), named_u64("FenceToken", 1)),
+                    (field("generation"), named_u64("Generation", 1)),
+                    (
+                        field("profile_material_digest"),
+                        KernelValue::String(profile_material_digest.to_owned()),
+                    ),
+                    (field("external_addressable"), KernelValue::Bool(true)),
+                    (
+                        field("runtime_mode"),
+                        named_variant("SpawnPolicyRuntimeMode", "AutonomousHost"),
+                    ),
+                    (
+                        field("bridge_session_id"),
+                        option_some(named_string("SessionId", "bridge.worker.1")),
+                    ),
+                    (field("replacing"), KernelValue::None),
+                ]),
+            },
+        )
+        .expect_err("addressability must match spawn profile authorization");
+
+    match refusal {
+        TransitionRefusal::NoMatchingTransition {
+            phase: refused_phase,
+            trigger: RouteVariantId::Input(variant),
+            ..
+        } => {
+            assert_eq!(refused_phase, phase("Running"));
+            assert_eq!(variant, input("Spawn"));
+        }
+        other => panic!("expected Spawn NoMatchingTransition, got {other:?}"),
+    }
 }
 
 #[test]

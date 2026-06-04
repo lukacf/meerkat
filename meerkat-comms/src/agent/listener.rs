@@ -44,7 +44,8 @@ impl ListenerHandle {
 /// # Arguments
 /// * `path` - Path for the UDS socket
 /// * `keypair` - Our keypair for signing acks
-/// * `trusted` - Trusted peers list for validation (shared for dynamic updates)
+/// * `_trusted` - Legacy parameter retained for API compatibility; admission
+///   reads the classified inbox authority.
 /// * `inbox_sender` - Channel to send validated messages to
 ///
 /// # Returns
@@ -53,7 +54,7 @@ impl ListenerHandle {
 pub async fn spawn_uds_listener(
     path: impl AsRef<Path>,
     keypair: Arc<Keypair>,
-    trusted: Arc<RwLock<TrustedPeers>>,
+    _trusted: Arc<RwLock<TrustedPeers>>,
     inbox_sender: InboxSender,
 ) -> std::io::Result<ListenerHandle> {
     use std::io::ErrorKind;
@@ -75,22 +76,11 @@ pub async fn spawn_uds_listener(
             match listener.accept().await {
                 Ok((stream, _addr)) => {
                     let keypair = keypair.clone();
-                    let trusted = trusted.clone();
                     let inbox_sender = inbox_sender.clone();
 
                     tokio::spawn(async move {
-                        // Share the router-owned trust handle directly — no
-                        // snapshot clone — so the transport trust gate reads
-                        // the same live state that the inbox admission gate
-                        // consults.
-                        if let Err(e) = handle_connection(
-                            stream,
-                            true,
-                            keypair.as_ref(),
-                            &trusted,
-                            &inbox_sender,
-                        )
-                        .await
+                        if let Err(e) =
+                            handle_connection(stream, true, keypair.as_ref(), &inbox_sender).await
                         {
                             tracing::warn!("UDS connection error: {}", e);
                         }
@@ -115,7 +105,8 @@ pub async fn spawn_uds_listener(
 /// # Arguments
 /// * `addr` - Address to bind to (e.g., "127.0.0.1:4200")
 /// * `keypair` - Our keypair for signing acks
-/// * `trusted` - Trusted peers list for validation (shared for dynamic updates)
+/// * `_trusted` - Legacy parameter retained for API compatibility; admission
+///   reads the classified inbox authority.
 /// * `inbox_sender` - Channel to send validated messages to
 ///
 /// # Returns
@@ -123,7 +114,7 @@ pub async fn spawn_uds_listener(
 pub async fn spawn_tcp_listener(
     addr: &str,
     keypair: Arc<Keypair>,
-    trusted: Arc<RwLock<TrustedPeers>>,
+    _trusted: Arc<RwLock<TrustedPeers>>,
     inbox_sender: InboxSender,
 ) -> std::io::Result<ListenerHandle> {
     let listener = TcpListener::bind(addr).await?;
@@ -133,22 +124,11 @@ pub async fn spawn_tcp_listener(
             match listener.accept().await {
                 Ok((stream, _addr)) => {
                     let keypair = keypair.clone();
-                    let trusted = trusted.clone();
                     let inbox_sender = inbox_sender.clone();
 
                     tokio::spawn(async move {
-                        // Share the router-owned trust handle directly — no
-                        // snapshot clone — so the transport trust gate reads
-                        // the same live state that the inbox admission gate
-                        // consults.
-                        if let Err(e) = handle_connection(
-                            stream,
-                            true,
-                            keypair.as_ref(),
-                            &trusted,
-                            &inbox_sender,
-                        )
-                        .await
+                        if let Err(e) =
+                            handle_connection(stream, true, keypair.as_ref(), &inbox_sender).await
                         {
                             tracing::warn!("TCP connection error: {}", e);
                         }
@@ -169,6 +149,7 @@ pub async fn spawn_tcp_listener(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::classify::test_support;
     use crate::{Envelope, Inbox, MessageKind, PubKey, Signature, TrustedPeer};
     use tempfile::TempDir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -179,14 +160,12 @@ mod tests {
     }
 
     fn make_trusted_peers(name: &str, pubkey: &PubKey) -> TrustedPeers {
-        TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: name.to_string(),
-                pubkey: *pubkey,
-                addr: "tcp://127.0.0.1:4200".to_string(),
-                meta: crate::PeerMeta::default(),
-            }],
-        }
+        TrustedPeers::from_peers(vec![TrustedPeer {
+            name: name.to_string(),
+            pubkey: *pubkey,
+            addr: "tcp://127.0.0.1:4200".to_string(),
+            meta: crate::PeerMeta::default(),
+        }])
     }
 
     async fn envelope_to_bytes(envelope: &Envelope) -> Vec<u8> {
@@ -197,6 +176,15 @@ mod tests {
         bytes.extend_from_slice(&len.to_be_bytes());
         bytes.extend_from_slice(&payload);
         bytes
+    }
+
+    fn classified_inbox_with_trust(
+        trusted: TrustedPeers,
+    ) -> (Inbox, InboxSender, Arc<RwLock<TrustedPeers>>) {
+        let trusted = Arc::new(RwLock::new(trusted));
+        let context = test_support::classification_context_shared(trusted.clone(), true);
+        let (inbox, inbox_sender) = Inbox::new_classified(context);
+        (inbox, inbox_sender, trusted)
     }
 
     #[cfg(unix)]
@@ -212,24 +200,18 @@ mod tests {
         let receiver_keypair = Arc::new(receiver_keypair);
         let trusted = make_trusted_peers("sender", &sender_pubkey);
 
-        let (mut inbox, inbox_sender) = Inbox::new();
+        let (mut inbox, inbox_sender, trusted) = classified_inbox_with_trust(trusted);
 
-        let handle = match spawn_uds_listener(
-            &sock_path,
-            receiver_keypair,
-            Arc::new(RwLock::new(trusted)),
-            inbox_sender,
-        )
-        .await
-        {
-            Ok(handle) => handle,
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    return;
+        let handle =
+            match spawn_uds_listener(&sock_path, receiver_keypair, trusted, inbox_sender).await {
+                Ok(handle) => handle,
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::PermissionDenied {
+                        return;
+                    }
+                    panic!("spawn_uds_listener failed: {e}");
                 }
-                panic!("spawn_uds_listener failed: {e}");
-            }
-        };
+            };
 
         // Give listener time to start
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -263,14 +245,9 @@ mod tests {
 
         // Check inbox received the message
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert_eq!(items.len(), 1);
-        match &items[0] {
-            crate::InboxItem::External { envelope } => {
-                assert_eq!(envelope.id, envelope_id);
-            }
-            _ => unreachable!("expected External"),
-        }
+        assert_eq!(items[0].raw_item_id.0, envelope_id);
 
         handle.abort();
     }
@@ -284,7 +261,7 @@ mod tests {
         let receiver_keypair = Arc::new(receiver_keypair);
         let trusted = make_trusted_peers("sender", &sender_pubkey);
 
-        let (mut inbox, inbox_sender) = Inbox::new();
+        let (mut inbox, inbox_sender, trusted) = classified_inbox_with_trust(trusted);
 
         // Use port 0 to get a random available port
         let listener = match TcpListener::bind("127.0.0.1:0").await {
@@ -299,22 +276,18 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         drop(listener); // Release the port
 
-        let handle = match spawn_tcp_listener(
-            &addr.to_string(),
-            receiver_keypair,
-            Arc::new(RwLock::new(trusted)),
-            inbox_sender,
-        )
-        .await
-        {
-            Ok(handle) => handle,
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    return;
+        let handle =
+            match spawn_tcp_listener(&addr.to_string(), receiver_keypair, trusted, inbox_sender)
+                .await
+            {
+                Ok(handle) => handle,
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::PermissionDenied {
+                        return;
+                    }
+                    panic!("spawn_tcp_listener failed: {e}");
                 }
-                panic!("spawn_tcp_listener failed: {e}");
-            }
-        };
+            };
 
         // Give listener time to start
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -348,14 +321,9 @@ mod tests {
 
         // Check inbox received the message
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert_eq!(items.len(), 1);
-        match &items[0] {
-            crate::InboxItem::External { envelope } => {
-                assert_eq!(envelope.id, envelope_id);
-            }
-            _ => unreachable!("expected External"),
-        }
+        assert_eq!(items[0].raw_item_id.0, envelope_id);
 
         handle.abort();
     }
@@ -421,18 +389,15 @@ mod tests {
         let bytes = envelope_to_bytes(&envelope).await;
         stream.write_all(&bytes).await.unwrap();
 
-        // Read the ack
+        // Raw CommsManager inboxes no longer own semantic ingress authority,
+        // so the listener closes without acking or enqueueing.
         let mut len_bytes = [0u8; 4];
-        stream.read_exact(&mut len_bytes).await.unwrap();
-        let len = u32::from_be_bytes(len_bytes);
-        let mut ack_payload = vec![0u8; len as usize];
-        stream.read_exact(&mut ack_payload).await.unwrap();
+        assert!(stream.read_exact(&mut len_bytes).await.is_err());
 
         // Check manager received the message
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         let messages = manager.drain_messages();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].from_peer, "sender");
+        assert!(messages.is_empty());
 
         handle.abort();
     }

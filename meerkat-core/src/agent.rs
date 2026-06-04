@@ -12,12 +12,14 @@ mod hooks_behavior_tests;
 mod runner;
 pub mod skills;
 mod state;
+#[cfg(test)]
 #[doc(hidden)]
-pub mod test_turn_state_handle;
+pub(crate) mod test_turn_state_handle;
 use crate::budget::Budget;
 use crate::comms::{
-    CommsCommand, EventStream, PeerDirectoryEntry, PeerId, SendAndStreamError, SendError,
-    SendReceipt, StreamError, StreamScope, TrustedPeerDescriptor,
+    CommsCommand, CommsTrustMutation, CommsTrustMutationResult, EventStream, PeerDirectoryEntry,
+    PeerId, SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope,
+    TrustedPeerDescriptor,
 };
 use crate::compact::SessionCompactionCadence;
 use crate::completion_feed::CompletionSeq;
@@ -145,6 +147,12 @@ impl LlmStreamResult {
 pub struct AgentExecutionSnapshot {
     pub loop_state: LoopState,
     pub turn_phase: TurnPhase,
+    /// Machine-owned turn-terminality verdict.
+    ///
+    /// The `TurnTerminalityClassified.terminal` verdict emitted by the canonical
+    /// MeerkatMachine `ClassifyTurnTerminality` input. Consumers mirror this bool
+    /// and must not reclassify [`TurnPhase`] locally.
+    pub turn_terminal: bool,
     pub active_run_id: Option<RunId>,
     pub primitive_kind: TurnPrimitiveKind,
     pub admitted_content_shape: Option<ContentShape>,
@@ -173,8 +181,6 @@ pub struct ExternalToolUpdate {
     pub notices: Vec<ExternalToolDelta>,
     /// Names of servers still connecting in the background.
     pub pending: Vec<String>,
-    /// Detached background operation completions since last poll.
-    pub background_completions: Vec<DetachedOpCompletion>,
 }
 
 /// Typed context supplied by the agent loop when dispatching a tool call.
@@ -765,25 +771,88 @@ pub trait CommsRuntime: Send + Sync {
         None
     }
 
-    /// Register a trusted peer for future peer sends.
+    /// Apply a comms trust projection mutation authorized by generated
+    /// machine/composition authority.
     ///
-    /// Runtimes that manage trust dynamically should accept this as a mutable
-    /// control-plane operation and return `SendError::Unsupported` if not
-    /// available.
-    async fn add_trusted_peer(&self, _peer: TrustedPeerDescriptor) -> Result<(), SendError> {
+    /// This is the only mutable trust-store seam. The compatibility
+    /// add/remove helpers below intentionally fail closed when no generated
+    /// handoff is provided.
+    async fn apply_trust_mutation(
+        &self,
+        _mutation: CommsTrustMutation,
+    ) -> Result<CommsTrustMutationResult, SendError> {
         Err(SendError::Unsupported(
-            "add_trusted_peer not supported for this CommsRuntime".to_string(),
+            "apply_trust_mutation not supported for this CommsRuntime".to_string(),
         ))
     }
 
-    /// Remove a previously trusted peer by peer ID.
+    /// Bind this target runtime to the generated MobMachine owner token whose
+    /// trust handoffs may mutate mob-owned trust rows.
     ///
-    /// Returns `true` if the peer was found and removed, `false` if it
-    /// was not present. After removal, messages from this peer should be
-    /// rejected and `peers()` should no longer return it.
+    /// Mob runtimes call this before submitting a generated mob trust mutation.
+    /// Implementations must fail closed when they cannot remember and compare
+    /// the owner token during [`Self::apply_trust_mutation`].
+    async fn install_generated_mob_trust_owner(
+        &self,
+        _owner: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unsupported(
+            "generated mob trust owner binding not supported for this CommsRuntime".to_string(),
+        ))
+    }
+
+    /// Read-only preflight for binding this target runtime to a recovered
+    /// MobMachine owner token.
+    ///
+    /// Resume uses this to validate every generated trust repair target before
+    /// mutating any trust projection row. Implementations must not change the
+    /// stored owner token here; [`Self::install_recovered_generated_mob_trust_owner`]
+    /// performs the actual binding after the full batch has passed preflight.
+    async fn validate_recovered_generated_mob_trust_owner(
+        &self,
+        _owner: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unsupported(
+            "recovered generated mob trust owner validation not supported for this CommsRuntime"
+                .to_string(),
+        ))
+    }
+
+    /// Rebind this target runtime to the owner token of a recovered
+    /// MobMachine authority.
+    ///
+    /// Recovery reconstructs generated authority from persisted machine state,
+    /// which gives it a fresh process-local owner token. Implementations may
+    /// bind this owner only when no generated MobMachine owner is already
+    /// installed, or when it is the same owner token. They must fail closed
+    /// rather than replacing a different live owner through recovery plumbing.
+    async fn install_recovered_generated_mob_trust_owner(
+        &self,
+        _owner: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unsupported(
+            "recovered generated mob trust owner binding not supported for this CommsRuntime"
+                .to_string(),
+        ))
+    }
+
+    /// Compatibility helper for legacy callers without generated authority.
+    ///
+    /// This fails closed by default so public surfaces cannot mutate trust
+    /// without the generated handoff required by [`Self::apply_trust_mutation`].
+    async fn add_trusted_peer(&self, _peer: TrustedPeerDescriptor) -> Result<(), SendError> {
+        Err(SendError::Unsupported(
+            "generated comms trust mutation authority required".to_string(),
+        ))
+    }
+
+    /// Compatibility helper for legacy callers without generated authority.
+    ///
+    /// This fails closed by default so public surfaces cannot mutate trust
+    /// without the generated handoff required by [`Self::apply_trust_mutation`].
     async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
         Err(SendError::Unsupported(
-            "remove_trusted_peer not supported for this CommsRuntime".to_string(),
+            "generated comms trust mutation authority required".to_string(),
         ))
     }
 
@@ -802,7 +871,7 @@ pub trait CommsRuntime: Send + Sync {
         _peer: TrustedPeerDescriptor,
     ) -> Result<(), SendError> {
         Err(SendError::Unsupported(
-            "add_private_trusted_peer not supported for this CommsRuntime".to_string(),
+            "generated comms private trust mutation authority required".to_string(),
         ))
     }
 
@@ -812,7 +881,7 @@ pub trait CommsRuntime: Send + Sync {
     /// was not.
     async fn remove_private_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
         Err(SendError::Unsupported(
-            "remove_private_trusted_peer not supported for this CommsRuntime".to_string(),
+            "generated comms private trust mutation authority required".to_string(),
         ))
     }
 
@@ -1007,6 +1076,35 @@ pub trait CommsRuntime: Send + Sync {
         ))
     }
 
+    /// Snapshot only the public trust projection owned by generated public
+    /// peer authority.
+    ///
+    /// Private/control-plane trust edges are admitted by separate generated
+    /// private authority and must not be reconciled or removed by public peer
+    /// projection owners.
+    async fn public_trusted_peer_projection_snapshot(
+        &self,
+    ) -> Result<Vec<crate::comms::TrustedPeerDescriptor>, CommsCapabilityError> {
+        Err(CommsCapabilityError::Unsupported(
+            "public_trusted_peer_projection_snapshot".to_string(),
+        ))
+    }
+
+    /// Snapshot the public trust projection owned by one generated source.
+    ///
+    /// This is the behavior-authority read used by generated trust
+    /// reconciliation. Compatibility/public snapshots may still union public
+    /// rows for display, but generated removals must diff only against rows
+    /// previously installed by the same generated owner.
+    async fn trusted_peer_projection_snapshot_for_source(
+        &self,
+        _source_kind: crate::comms::GeneratedCommsTrustAuthoritySourceKind,
+    ) -> Result<Vec<crate::comms::TrustedPeerDescriptor>, CommsCapabilityError> {
+        Err(CommsCapabilityError::Unsupported(
+            "trusted_peer_projection_snapshot_for_source".to_string(),
+        ))
+    }
+
     /// Get a notification that fires only for actionable peer input.
     ///
     /// Default returns `Unsupported`. Comms-enabled runtimes must override.
@@ -1107,7 +1205,7 @@ where
     /// by the session runtime bindings.
     pub(crate) external_tool_surface_handle: Option<Arc<dyn crate::ExternalToolSurfaceHandle>>,
     /// Runtime-backed auth lease handle (Phase 1.5-rev).
-    pub(crate) auth_lease_handle: Option<Arc<dyn crate::handles::AuthLeaseHandle>>,
+    pub(crate) auth_lease_handle: Option<crate::handles::GeneratedAuthLeaseHandle>,
     /// Runtime-backed MCP server lifecycle handle (Phase 5G / T5g). When set,
     /// the agent loop reads `pending_server_ids()` at each CallingLlm boundary
     /// to decide whether to emit the `[MCP_PENDING]` system notice.
@@ -1284,23 +1382,6 @@ mod tests {
             InlinePeerNotificationPolicy::try_from_raw(Some(-42)),
             Err(-42)
         );
-    }
-
-    /// UNIT-001: OperationStatus::is_terminal() returns true for all terminal
-    /// variants and false for non-terminal ones.
-    #[test]
-    fn unit_001_terminal_status_values() {
-        use crate::ops_lifecycle::OperationStatus;
-        assert!(OperationStatus::Completed.is_terminal());
-        assert!(OperationStatus::Failed.is_terminal());
-        assert!(OperationStatus::Cancelled.is_terminal());
-        assert!(OperationStatus::Aborted.is_terminal());
-        assert!(OperationStatus::Retired.is_terminal());
-        assert!(OperationStatus::Terminated.is_terminal());
-        assert!(!OperationStatus::Running.is_terminal());
-        assert!(!OperationStatus::Provisioning.is_terminal());
-        assert!(!OperationStatus::Retiring.is_terminal());
-        assert!(!OperationStatus::Absent.is_terminal());
     }
 
     /// UNIT-002: DetachedOpCompletion serializes without operation_id.

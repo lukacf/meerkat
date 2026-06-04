@@ -15,13 +15,12 @@ use tokio::sync::Mutex;
 use tokio_with_wasm::alias::sync::Mutex;
 
 use super::{
-    AuthOAuthFlowSnapshotUpdate, MachineLifecycleCommit, RuntimeStore, RuntimeStoreError,
-    SessionDelta,
+    AuthOAuthFlowSnapshotUpdate, MachineLifecycleCommit, MachineLifecycleSnapshot,
+    MachineLifecycleStoreRecord, RuntimeStore, RuntimeStoreError, SessionDelta,
 };
 use crate::identifiers::LogicalRuntimeId;
-use crate::input_state::StoredInputState;
+use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
 use crate::ops_lifecycle::PersistedOpsSnapshot;
-use crate::runtime_state::RuntimeState;
 
 /// Receipt key: (runtime_id, run_id, sequence).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -40,8 +39,8 @@ struct Inner {
     receipts: HashMap<ReceiptKey, RunBoundaryReceipt>,
     /// Runtime session snapshots keyed by canonical runtime id.
     sessions: HashMap<String, Vec<u8>>,
-    /// Persisted runtime state.
-    runtime_states: HashMap<String, RuntimeState>,
+    /// Persisted machine lifecycle snapshots.
+    runtime_lifecycle: HashMap<String, MachineLifecycleSnapshot>,
     /// Persisted ops lifecycle snapshots.
     ops_lifecycle_snapshots: HashMap<String, PersistedOpsSnapshot>,
 }
@@ -66,6 +65,14 @@ impl Default for InMemoryRuntimeStore {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn is_runtime_placeholder_session(session: &meerkat_core::Session) -> bool {
+    session.transcript_history_state().ok().flatten().is_none()
+        && matches!(
+            session.messages(),
+            [] | [meerkat_core::types::Message::System(_)]
+        )
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -108,9 +115,20 @@ impl RuntimeStore for InMemoryRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         session_delta: SessionDelta,
     ) -> Result<(), RuntimeStoreError> {
-        let _: meerkat_core::Session = serde_json::from_slice(&session_delta.session_snapshot)
-            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+        let incoming: meerkat_core::Session =
+            serde_json::from_slice(&session_delta.session_snapshot)
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
         let mut inner = self.inner.lock().await;
+        let previous = inner
+            .sessions
+            .get(&runtime_id.0)
+            .map(|snapshot| {
+                serde_json::from_slice::<meerkat_core::Session>(snapshot)
+                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+            })
+            .transpose()?;
+        meerkat_core::session_store::run_boundary_snapshot_save_guard(&incoming, previous.as_ref())
+            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
         inner
             .sessions
             .insert(runtime_id.0.clone(), session_delta.session_snapshot);
@@ -159,7 +177,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         session_delta: Option<SessionDelta>,
         receipt: RunBoundaryReceipt,
-        input_updates: Vec<StoredInputState>,
+        input_updates: Vec<InputStatePersistenceRecord>,
         session_store_key: Option<meerkat_core::types::SessionId>,
     ) -> Result<(), RuntimeStoreError> {
         let mut inner = self.inner.lock().await;
@@ -171,6 +189,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         if let Some(delta) = session_delta {
             let incoming_session =
                 serde_json::from_slice::<meerkat_core::Session>(&delta.session_snapshot);
+            let mut persist_session_snapshot = true;
             match (incoming_session, session_store_key) {
                 (Ok(incoming_session), session_store_key) => {
                     if let Some(session_store_key) = session_store_key
@@ -184,11 +203,27 @@ impl RuntimeStore for InMemoryRuntimeStore {
                     let previous_session = inner.sessions.get(&rid).and_then(|snapshot| {
                         serde_json::from_slice::<meerkat_core::Session>(snapshot).ok()
                     });
-                    meerkat_core::session_store::run_boundary_snapshot_save_guard(
+                    if let Err(err) = meerkat_core::session_store::run_boundary_snapshot_save_guard(
                         &incoming_session,
                         previous_session.as_ref(),
-                    )
-                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                    ) {
+                        if previous_session
+                            .as_ref()
+                            .is_some_and(is_runtime_placeholder_session)
+                        {
+                            persist_session_snapshot = true;
+                        } else if previous_session.as_ref().is_some_and(|previous_session| {
+                            meerkat_core::session_store::run_boundary_snapshot_save_guard(
+                                previous_session,
+                                Some(&incoming_session),
+                            )
+                            .is_ok()
+                        }) {
+                            persist_session_snapshot = false;
+                        } else {
+                            return Err(RuntimeStoreError::WriteFailed(err.to_string()));
+                        }
+                    }
                 }
                 (Err(err), Some(session_store_key)) => {
                     return Err(RuntimeStoreError::WriteFailed(format!(
@@ -197,7 +232,9 @@ impl RuntimeStore for InMemoryRuntimeStore {
                 }
                 (Err(_), None) => {}
             }
-            inner.sessions.insert(rid.clone(), delta.session_snapshot);
+            if persist_session_snapshot {
+                inner.sessions.insert(rid.clone(), delta.session_snapshot);
+            }
         }
 
         // Receipt
@@ -210,7 +247,8 @@ impl RuntimeStore for InMemoryRuntimeStore {
 
         // Input states
         let states = inner.input_states.entry(rid).or_default();
-        for bundle in input_updates {
+        for record in input_updates {
+            let bundle = record.into_stored();
             states.insert(bundle.state.input_id.clone(), bundle);
         }
 
@@ -300,11 +338,12 @@ impl RuntimeStore for InMemoryRuntimeStore {
     async fn persist_input_state(
         &self,
         runtime_id: &LogicalRuntimeId,
-        state: &StoredInputState,
+        state: &InputStatePersistenceRecord,
     ) -> Result<(), RuntimeStoreError> {
         let mut inner = self.inner.lock().await;
         let states = inner.input_states.entry(runtime_id.0.clone()).or_default();
-        states.insert(state.state.input_id.clone(), state.clone());
+        let bundle = state.as_stored();
+        states.insert(bundle.state.input_id.clone(), bundle.clone());
         Ok(())
     }
 
@@ -321,29 +360,34 @@ impl RuntimeStore for InMemoryRuntimeStore {
         Ok(state)
     }
 
-    async fn load_runtime_state(
+    async fn load_machine_lifecycle_record(
         &self,
         runtime_id: &LogicalRuntimeId,
-    ) -> Result<Option<RuntimeState>, RuntimeStoreError> {
+    ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
         let inner = self.inner.lock().await;
-        Ok(inner.runtime_states.get(&runtime_id.0).copied())
+        inner
+            .runtime_lifecycle
+            .get(&runtime_id.0)
+            .map(|snapshot| MachineLifecycleStoreRecord::from_snapshot(snapshot).encode())
+            .transpose()
     }
 
     async fn commit_machine_lifecycle(
         &self,
         runtime_id: &LogicalRuntimeId,
         commit: MachineLifecycleCommit,
-        input_states: &[StoredInputState],
+        input_states: &[InputStatePersistenceRecord],
     ) -> Result<(), RuntimeStoreError> {
         let mut inner = self.inner.lock().await;
         let rid = runtime_id.0.clone();
 
         // Single lock acquisition — atomic for in-memory
         inner
-            .runtime_states
-            .insert(rid.clone(), commit.runtime_state());
+            .runtime_lifecycle
+            .insert(rid.clone(), commit.into_snapshot());
         let states = inner.input_states.entry(rid).or_default();
-        for bundle in input_states {
+        for record in input_states {
+            let bundle = record.as_stored();
             states.insert(bundle.state.input_id.clone(), bundle.clone());
         }
 
@@ -369,12 +413,22 @@ impl RuntimeStore for InMemoryRuntimeStore {
         let inner = self.inner.lock().await;
         Ok(inner.ops_lifecycle_snapshots.get(&runtime_id.0).cloned())
     }
+
+    async fn delete_ops_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<(), RuntimeStoreError> {
+        let mut inner = self.inner.lock().await;
+        inner.ops_lifecycle_snapshots.remove(&runtime_id.0);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::store::MachineLifecycleBindingFacts;
     use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 
     fn make_receipt(run_id: RunId, seq: u64) -> RunBoundaryReceipt {
@@ -386,6 +440,18 @@ mod tests {
             message_count: 0,
             sequence: seq,
         }
+    }
+
+    fn persistable(bundle: StoredInputState) -> InputStatePersistenceRecord {
+        InputStatePersistenceRecord::from_machine_snapshot(bundle).unwrap()
+    }
+
+    fn session_with_user(content: &str) -> meerkat_core::Session {
+        let mut session = meerkat_core::Session::new();
+        session.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text(content.to_string()),
+        ));
+        session
     }
 
     #[tokio::test]
@@ -405,7 +471,7 @@ mod tests {
                     session_snapshot: b"session-data".to_vec(),
                 }),
                 receipt.clone(),
-                vec![bundle],
+                vec![persistable(bundle)],
                 None,
             )
             .await
@@ -428,7 +494,10 @@ mod tests {
         let input_id = InputId::new();
         let bundle = StoredInputState::new_accepted(input_id.clone());
 
-        store.persist_input_state(&rid, &bundle).await.unwrap();
+        store
+            .persist_input_state(&rid, &persistable(bundle))
+            .await
+            .unwrap();
 
         let loaded = store.load_input_state(&rid, &input_id).await.unwrap();
         assert!(loaded.is_some());
@@ -466,7 +535,7 @@ mod tests {
                 &rid,
                 None,
                 make_receipt(RunId::new(), 0),
-                vec![bundle1],
+                vec![persistable(bundle1)],
                 None,
             )
             .await
@@ -480,7 +549,7 @@ mod tests {
                 &rid,
                 None,
                 make_receipt(RunId::new(), 1),
-                vec![bundle2],
+                vec![persistable(bundle2)],
                 None,
             )
             .await
@@ -578,7 +647,7 @@ mod tests {
                     session_snapshot: snapshot,
                 }),
                 receipt.clone(),
-                vec![StoredInputState::new_accepted(input_id)],
+                vec![persistable(StoredInputState::new_accepted(input_id))],
                 None,
             )
             .await
@@ -604,15 +673,24 @@ mod tests {
         let rid2 = LogicalRuntimeId::new("runtime-2");
 
         store
-            .persist_input_state(&rid1, &StoredInputState::new_accepted(InputId::new()))
+            .persist_input_state(
+                &rid1,
+                &persistable(StoredInputState::new_accepted(InputId::new())),
+            )
             .await
             .unwrap();
         store
-            .persist_input_state(&rid2, &StoredInputState::new_accepted(InputId::new()))
+            .persist_input_state(
+                &rid2,
+                &persistable(StoredInputState::new_accepted(InputId::new())),
+            )
             .await
             .unwrap();
         store
-            .persist_input_state(&rid2, &StoredInputState::new_accepted(InputId::new()))
+            .persist_input_state(
+                &rid2,
+                &persistable(StoredInputState::new_accepted(InputId::new())),
+            )
             .await
             .unwrap();
 
@@ -643,5 +721,288 @@ mod tests {
 
         let loaded = store.load_session_snapshot(&rid).await.unwrap();
         assert_eq!(loaded, Some(snapshot));
+    }
+
+    #[tokio::test]
+    async fn commit_session_snapshot_rejects_stale_runtime_parent() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("runtime-stale-parent");
+        let accepted = session_with_user("accepted runtime turn");
+        let mut stale = meerkat_core::Session::with_id(accepted.id().clone());
+        stale.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text("stale runtime turn".to_string()),
+        ));
+        let accepted_snapshot = serde_json::to_vec(&accepted).unwrap();
+
+        store
+            .commit_session_snapshot(
+                &rid,
+                SessionDelta {
+                    session_snapshot: accepted_snapshot.clone(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let err = store
+            .commit_session_snapshot(
+                &rid,
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(&stale).unwrap(),
+                },
+            )
+            .await
+            .expect_err("stale non-continuation must not overwrite runtime snapshot");
+
+        assert!(matches!(err, RuntimeStoreError::WriteFailed(_)));
+        assert_eq!(
+            store.load_session_snapshot(&rid).await.unwrap(),
+            Some(accepted_snapshot)
+        );
+    }
+
+    #[tokio::test]
+    async fn atomic_apply_keeps_current_snapshot_when_incoming_is_superseded() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("runtime-superseded-terminal");
+        let incoming = session_with_user("turn input");
+        let mut current = incoming.clone();
+        current.push(meerkat_core::types::Message::Assistant(
+            meerkat_core::types::AssistantMessage {
+                content: "peer response already applied".to_string(),
+                tool_calls: Vec::new(),
+                stop_reason: meerkat_core::types::StopReason::EndTurn,
+                usage: meerkat_core::types::Usage::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
+            },
+        ));
+        let current_snapshot = serde_json::to_vec(&current).unwrap();
+        let receipt = make_receipt(RunId::new(), 11);
+
+        store
+            .commit_session_snapshot(
+                &rid,
+                SessionDelta {
+                    session_snapshot: current_snapshot.clone(),
+                },
+            )
+            .await
+            .unwrap();
+
+        store
+            .atomic_apply(
+                &rid,
+                Some(SessionDelta {
+                    session_snapshot: serde_json::to_vec(&incoming).unwrap(),
+                }),
+                receipt.clone(),
+                vec![],
+                Some(incoming.id().clone()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.load_session_snapshot(&rid).await.unwrap(),
+            Some(current_snapshot)
+        );
+        assert_eq!(
+            store
+                .load_boundary_receipt(&rid, &receipt.run_id, receipt.sequence)
+                .await
+                .unwrap(),
+            Some(receipt)
+        );
+    }
+
+    #[tokio::test]
+    async fn atomic_apply_allows_first_generated_snapshot_after_placeholder() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("runtime-placeholder");
+        let mut placeholder = meerkat_core::Session::new();
+        placeholder.set_system_prompt("base system".to_string());
+        let mut incoming = meerkat_core::Session::with_id(placeholder.id().clone());
+        incoming.set_system_prompt("base system".to_string());
+        incoming.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text("verbose first turn".to_string()),
+        ));
+        let parent_revision = incoming.transcript_revision().unwrap();
+        incoming
+            .commit_transcript_rewrite(
+                meerkat_core::TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![meerkat_core::types::Message::User(
+                    meerkat_core::types::UserMessage::compaction_summary(
+                        "[Context compacted] first turn",
+                    ),
+                )],
+                meerkat_core::TranscriptRewriteReason::new("compaction"),
+                Some("meerkat-core".to_string()),
+                Some(parent_revision),
+            )
+            .unwrap();
+        let incoming_snapshot = serde_json::to_vec(&incoming).unwrap();
+        let receipt = make_receipt(RunId::new(), 12);
+
+        store
+            .commit_session_snapshot(
+                &rid,
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(&placeholder).unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+
+        store
+            .atomic_apply(
+                &rid,
+                Some(SessionDelta {
+                    session_snapshot: incoming_snapshot.clone(),
+                }),
+                receipt.clone(),
+                vec![],
+                Some(incoming.id().clone()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.load_session_snapshot(&rid).await.unwrap(),
+            Some(incoming_snapshot)
+        );
+        assert_eq!(
+            store
+                .load_boundary_receipt(&rid, &receipt.run_id, receipt.sequence)
+                .await
+                .unwrap(),
+            Some(receipt)
+        );
+    }
+
+    #[tokio::test]
+    async fn atomic_apply_allows_generated_compaction_before_retained_tail() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("runtime-compaction-tail");
+        let mut previous = meerkat_core::Session::new();
+        previous.set_system_prompt("runtime system before context refresh".to_string());
+        previous.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text("Turn 1 request".to_string()),
+        ));
+        previous.push(meerkat_core::types::Message::Assistant(
+            meerkat_core::types::AssistantMessage {
+                content: "Turn 1 answer".to_string(),
+                tool_calls: Vec::new(),
+                stop_reason: meerkat_core::types::StopReason::EndTurn,
+                usage: meerkat_core::types::Usage::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
+            },
+        ));
+
+        let mut incoming = meerkat_core::Session::with_id(previous.id().clone());
+        incoming.set_system_prompt("runtime system after context refresh".to_string());
+        incoming.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text(
+                "Verbose context that will be compacted".to_string(),
+            ),
+        ));
+        for message in previous.messages()[1..].iter().cloned() {
+            incoming.push(message);
+        }
+        incoming.push(meerkat_core::types::Message::Assistant(
+            meerkat_core::types::AssistantMessage {
+                content: "Turn 2 generated answer".to_string(),
+                tool_calls: Vec::new(),
+                stop_reason: meerkat_core::types::StopReason::EndTurn,
+                usage: meerkat_core::types::Usage::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
+            },
+        ));
+        let parent_revision = incoming.transcript_revision().unwrap();
+        incoming
+            .commit_transcript_rewrite(
+                meerkat_core::TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![meerkat_core::types::Message::User(
+                    meerkat_core::types::UserMessage::compaction_summary(
+                        "[Context compacted] Earlier runtime context".to_string(),
+                    ),
+                )],
+                meerkat_core::TranscriptRewriteReason::new("compaction"),
+                Some("meerkat-core".to_string()),
+                Some(parent_revision),
+            )
+            .unwrap();
+        let incoming_snapshot = serde_json::to_vec(&incoming).unwrap();
+        let receipt = make_receipt(RunId::new(), 13);
+
+        store
+            .commit_session_snapshot(
+                &rid,
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(&previous).unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+
+        store
+            .atomic_apply(
+                &rid,
+                Some(SessionDelta {
+                    session_snapshot: incoming_snapshot.clone(),
+                }),
+                receipt.clone(),
+                vec![],
+                Some(incoming.id().clone()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.load_session_snapshot(&rid).await.unwrap(),
+            Some(incoming_snapshot)
+        );
+        assert_eq!(
+            store
+                .load_boundary_receipt(&rid, &receipt.run_id, receipt.sequence)
+                .await
+                .unwrap(),
+            Some(receipt)
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_machine_lifecycle_persists_binding_facts() {
+        use crate::runtime_state::RuntimeState;
+
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("runtime-binding");
+        let binding = MachineLifecycleBindingFacts::new(
+            Some("rt:session:abc".to_string()),
+            Some(7),
+            Some(3),
+            Some("epoch-1".to_string()),
+        );
+
+        store
+            .commit_machine_lifecycle(
+                &rid,
+                MachineLifecycleCommit::new_with_binding(RuntimeState::Retired, binding.clone()),
+                &[],
+            )
+            .await
+            .unwrap();
+
+        let lifecycle = crate::store::load_machine_lifecycle(&store, &rid)
+            .await
+            .unwrap()
+            .expect("machine lifecycle snapshot");
+        assert_eq!(lifecycle.runtime_state(), RuntimeState::Retired);
+        assert_eq!(lifecycle.binding(), &binding);
+        assert_eq!(
+            crate::store::load_runtime_state(&store, &rid)
+                .await
+                .unwrap(),
+            Some(RuntimeState::Retired)
+        );
     }
 }

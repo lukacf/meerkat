@@ -86,13 +86,3 @@ pub trait MobMemberRuntimeBridge: MobBoundMemberRuntimeBridge {
         expected_address: &str,
     ) -> Result<BridgeBindResponse, MobError>;
 }
-
-/// Observe whether a member is in a terminal runtime state.
-pub fn observation_is_terminal(observation: &BridgeObservationResponse) -> bool {
-    matches!(
-        observation.state,
-        super::bridge_protocol::BridgeMemberRuntimeState::Retired
-            | super::bridge_protocol::BridgeMemberRuntimeState::Stopped
-            | super::bridge_protocol::BridgeMemberRuntimeState::Destroyed
-    )
-}

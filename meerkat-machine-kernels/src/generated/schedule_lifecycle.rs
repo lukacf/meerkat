@@ -5,7 +5,8 @@
     clippy::panic,
     clippy::implicit_clone,
     clippy::unnecessary_cast,
-    clippy::redundant_clone
+    clippy::redundant_clone,
+    clippy::zero_sized_map_values
 )]
 
 pub fn schema() -> meerkat_machine_schema::MachineSchema {
@@ -190,6 +191,34 @@ impl std::fmt::Display for OverlapPolicy {
         f.write_str(self.as_str())
     }
 }
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct ScheduleId(pub String);
+impl From<String> for ScheduleId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for ScheduleId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for ScheduleId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 #[allow(non_camel_case_types)]
 #[derive(
     Debug,
@@ -260,12 +289,18 @@ pub enum Phase {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct State {
     pub phase: Phase,
+    pub schedule_id: ScheduleId,
     pub revision: u64,
     pub trigger_key: String,
     pub target_binding_key: String,
     pub misfire_policy: MisfirePolicy,
+    pub misfire_policy_key: String,
     pub overlap_policy: OverlapPolicy,
+    pub overlap_policy_key: String,
     pub missing_target_policy: MissingTargetPolicy,
+    pub missing_target_policy_key: String,
+    pub planning_horizon_days: u64,
+    pub planning_horizon_occurrences: u64,
     pub planning_cursor_utc_ms: Option<u64>,
     pub next_occurrence_ordinal: u64,
     pub superseded_ack_ids: std::collections::BTreeSet<OccurrenceId>,
@@ -281,24 +316,45 @@ pub mod inputs {
     use super::*;
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Create {
+        pub schedule_id: ScheduleId,
         pub trigger_key: String,
         pub target_binding_key: String,
         pub misfire_policy: MisfirePolicy,
+        pub misfire_policy_key: String,
         pub overlap_policy: OverlapPolicy,
+        pub overlap_policy_key: String,
         pub missing_target_policy: MissingTargetPolicy,
+        pub missing_target_policy_key: String,
+        pub planning_horizon_days: Option<u64>,
+        pub planning_horizon_occurrences: Option<u64>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Revise {
         pub trigger_key: String,
         pub target_binding_key: String,
         pub misfire_policy: MisfirePolicy,
+        pub misfire_policy_key: String,
         pub overlap_policy: OverlapPolicy,
+        pub overlap_policy_key: String,
         pub missing_target_policy: MissingTargetPolicy,
+        pub missing_target_policy_key: String,
+        pub planning_horizon_days: u64,
+        pub planning_horizon_occurrences: u64,
+        pub at_utc_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct UpdatePlanningConfig {
+        pub planning_horizon_days: u64,
+        pub planning_horizon_occurrences: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordPlanningWindow {
         pub planning_cursor_utc_ms: u64,
         pub next_occurrence_ordinal: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SyncTargetSnapshot {
+        pub target_binding_key: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Pause {
@@ -323,7 +379,9 @@ pub mod inputs {
 pub enum Input {
     Create(inputs::Create),
     Revise(inputs::Revise),
+    UpdatePlanningConfig(inputs::UpdatePlanningConfig),
     RecordPlanningWindow(inputs::RecordPlanningWindow),
+    SyncTargetSnapshot(inputs::SyncTargetSnapshot),
     Pause(inputs::Pause),
     Resume(inputs::Resume),
     Delete(inputs::Delete),
@@ -334,7 +392,9 @@ impl Input {
         match self {
             Self::Create(_) => InputKind::Create,
             Self::Revise(_) => InputKind::Revise,
+            Self::UpdatePlanningConfig(_) => InputKind::UpdatePlanningConfig,
             Self::RecordPlanningWindow(_) => InputKind::RecordPlanningWindow,
+            Self::SyncTargetSnapshot(_) => InputKind::SyncTargetSnapshot,
             Self::Pause(_) => InputKind::Pause,
             Self::Resume(_) => InputKind::Resume,
             Self::Delete(_) => InputKind::Delete,
@@ -346,7 +406,9 @@ impl Input {
 pub enum InputKind {
     Create,
     Revise,
+    UpdatePlanningConfig,
     RecordPlanningWindow,
+    SyncTargetSnapshot,
     Pause,
     Resume,
     Delete,
@@ -364,6 +426,7 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SupersedePendingOccurrences {
         pub superseding_revision: u64,
+        pub at_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PlanningWindowRecorded {
@@ -391,7 +454,11 @@ pub enum TransitionId {
     CreateSchedule,
     ReviseActive,
     RevisePaused,
+    UpdatePlanningConfigActive,
+    UpdatePlanningConfigPaused,
     RecordPlanningWindowActive,
+    SyncTargetSnapshotActive,
+    SyncTargetSnapshotPaused,
     PauseActiveOrPaused,
     ResumeActiveOrPaused,
     DeleteActive,
@@ -472,12 +539,18 @@ pub mod helpers {
 pub fn initial_state() -> State {
     State {
         phase: Phase::Active,
+        schedule_id: ScheduleId("schedule-0".to_string()),
         revision: 1,
         trigger_key: "trigger-0".to_string(),
         target_binding_key: "target-0".to_string(),
         misfire_policy: MisfirePolicy::Skip,
+        misfire_policy_key: "misfire:skip".to_string(),
         overlap_policy: OverlapPolicy::SkipIfRunning,
+        overlap_policy_key: "overlap:skip_if_running".to_string(),
         missing_target_policy: MissingTargetPolicy::MarkMisfired,
+        missing_target_policy_key: "missing_target:mark_misfired".to_string(),
+        planning_horizon_days: 30,
+        planning_horizon_occurrences: 64,
         planning_cursor_utc_ms: None,
         next_occurrence_ordinal: 0,
         superseded_ack_ids: Default::default(),

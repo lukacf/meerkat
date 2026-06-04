@@ -142,8 +142,14 @@ async fn attention_pause_is_machine_owned_and_does_not_snooze_item() {
             until: Some(paused_until)
         }
     );
-    assert!(!WorkAttentionMachine::is_eligible_at(&paused, now));
-    assert!(WorkAttentionMachine::is_eligible_at(&paused, paused_until));
+    assert!(
+        !WorkAttentionMachine::classify_eligibility_at(&paused, now)
+            .expect("machine classifies eligibility")
+    );
+    assert!(
+        WorkAttentionMachine::classify_eligibility_at(&paused, paused_until)
+            .expect("machine classifies eligibility")
+    );
     assert!(item.snoozed_until.is_none());
 }
 
@@ -365,6 +371,8 @@ async fn goal_confirmation_and_close_are_policy_gated() {
                 id: "acceptance-1".to_string(),
                 label: Some("accepted".to_string()),
                 summary: Some("Host accepted the result".to_string()),
+                confirmation_kind: None,
+                confirming_owner_key: None,
             },
             principal: None,
             trusted_principal: None,
@@ -443,6 +451,8 @@ async fn goal_confirm_and_request_close_reject_stale_item_revision() {
                 id: "acceptance-1".to_string(),
                 label: None,
                 summary: None,
+                confirmation_kind: None,
+                confirming_owner_key: None,
             },
             principal: None,
             trusted_principal: None,
@@ -577,6 +587,8 @@ async fn raw_evidence_cannot_satisfy_reserved_completion_policy() {
                 id: "spoofed".to_string(),
                 label: None,
                 summary: None,
+                confirmation_kind: None,
+                confirming_owner_key: None,
             },
         })
         .await
@@ -622,6 +634,8 @@ async fn public_self_attest_confirm_rejects_reserved_completion_evidence() {
                 id: "spoofed".to_string(),
                 label: None,
                 summary: None,
+                confirmation_kind: None,
+                confirming_owner_key: None,
             },
         })
         .await
@@ -647,6 +661,8 @@ async fn create_rejects_reserved_completion_evidence() {
                 id: "spoofed".to_string(),
                 label: None,
                 summary: None,
+                confirmation_kind: None,
+                confirming_owner_key: None,
             }],
             ..CreateWorkItemRequest::default()
         })
@@ -743,6 +759,112 @@ async fn attention_bound_update_cannot_change_completion_policy() {
 }
 
 #[tokio::test]
+async fn update_with_unchanged_completion_policy_is_admitted_by_machine() {
+    // The completion-policy immutability verdict is owned by
+    // WorkGraphLifecycleMachine's ClassifyCompletionPolicyMutationAdmission, not
+    // a shell reducer. A request that carries the SAME completion policy is a
+    // no-op on policy and must be admitted (the rest of the update applies).
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000118").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Stable policy".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::HostConfirmed,
+            delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+
+    let updated = service
+        .update(UpdateWorkItemRequest {
+            id: goal.item.id,
+            realm_id: None,
+            namespace: None,
+            expected_revision: goal.item.revision,
+            title: Some("Stable policy (renamed)".to_string()),
+            description: None,
+            priority: None,
+            completion_policy: Some(WorkCompletionPolicy::HostConfirmed),
+            labels: None,
+            due_at: None,
+            not_before: None,
+            snoozed_until: None,
+            external_refs: Vec::new(),
+        })
+        .await
+        .expect("update with unchanged completion policy is admitted");
+    assert_eq!(
+        updated.completion_policy,
+        WorkCompletionPolicy::HostConfirmed
+    );
+    assert_eq!(updated.title, "Stable policy (renamed)");
+    assert_eq!(updated.revision, goal.item.revision + 1);
+}
+
+#[tokio::test]
+async fn update_changing_supervisor_owner_key_is_denied_by_machine() {
+    // The immutability verdict compares the completion policy IN FULL — the
+    // machine-owned variant AND its payload (supervisor owner key / reviewer
+    // quorum threshold). A request that keeps the Supervisor variant but mutates
+    // the supervisor owner key still changes the policy and must be denied.
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000119").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Supervised goal".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::Supervisor {
+                owner_key: WorkOwnerKey::principal("supervisor-original").expect("principal"),
+            },
+            delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+
+    let err = service
+        .update(UpdateWorkItemRequest {
+            id: goal.item.id,
+            realm_id: None,
+            namespace: None,
+            expected_revision: goal.item.revision,
+            title: None,
+            description: None,
+            priority: None,
+            completion_policy: Some(WorkCompletionPolicy::Supervisor {
+                owner_key: WorkOwnerKey::principal("supervisor-replacement").expect("principal"),
+            }),
+            labels: None,
+            due_at: None,
+            not_before: None,
+            snoozed_until: None,
+            external_refs: Vec::new(),
+        })
+        .await
+        .expect_err("changing the supervisor owner key changes the completion policy");
+    assert!(matches!(
+        err,
+        meerkat_workgraph::WorkGraphError::InvalidInput(_)
+    ));
+}
+
+#[tokio::test]
 async fn direct_terminal_close_stops_attention_bindings_for_item() {
     let service = WorkGraphService::new(std::sync::Arc::new(
         meerkat_workgraph::MemoryWorkGraphStore::new(),
@@ -823,6 +945,8 @@ async fn supervisor_goal_confirmation_requires_named_supervisor() {
                 id: "approval".to_string(),
                 label: None,
                 summary: None,
+                confirmation_kind: None,
+                confirming_owner_key: None,
             },
             principal: Some(WorkOwnerKey::principal("other").expect("principal")),
             trusted_principal: Some(WorkOwnerKey::principal("other").expect("principal")),
@@ -845,6 +969,8 @@ async fn supervisor_goal_confirmation_requires_named_supervisor() {
                 id: "approval".to_string(),
                 label: None,
                 summary: None,
+                confirmation_kind: None,
+                confirming_owner_key: None,
             },
             principal: Some(supervisor.clone()),
             trusted_principal: Some(supervisor.clone()),
@@ -908,7 +1034,13 @@ async fn attention_projection_is_eligible_bounded_and_role_aware() {
     );
     assert!(projection.text.rendered.len() <= 96);
     assert!(projection.authority.can_add_evidence);
-    assert!(!projection.authority.can_close_parent);
+    assert!(projection.authority.can_get);
+    // A Falsify stance carries no graph-mutation or closure authority.
+    assert!(!projection.authority.can_create);
+    assert!(!projection.authority.can_link);
+    assert!(!projection.authority.can_update);
+    assert!(!projection.authority.can_release);
+    assert!(!projection.authority.can_block);
     assert!(!projection.authority.can_close_if_policy_allows);
 
     service
@@ -1369,7 +1501,7 @@ async fn attention_continuation_supersession_is_binding_scoped_not_projection_sc
 }
 
 #[tokio::test]
-async fn request_closure_projects_request_only_authority() {
+async fn request_closure_delegation_does_not_grant_close_authority() {
     let service = WorkGraphService::new(std::sync::Arc::new(
         meerkat_workgraph::MemoryWorkGraphStore::new(),
     ));
@@ -1400,13 +1532,19 @@ async fn request_closure_projects_request_only_authority() {
         .expect("project attention")
         .projection;
 
-    assert!(projection.authority.can_request_closure);
+    // A Pursue stance carries its full mutation profile, but the RequestClosure
+    // delegation grants no closure authority (only CloseIfPolicyAllows does).
+    assert!(projection.authority.can_get);
+    assert!(projection.authority.can_add_evidence);
+    assert!(projection.authority.can_release);
+    assert!(projection.authority.can_update);
+    assert!(projection.authority.can_block);
     assert!(!projection.authority.can_close_if_policy_allows);
-    assert!(!projection.authority.can_close_parent);
+    assert!(!projection.authority.can_close_own_review_item);
 }
 
 #[tokio::test]
-async fn close_if_policy_projection_does_not_advertise_parent_close_without_parent_handler() {
+async fn close_if_policy_projection_grants_self_close_without_parent_mutation() {
     let service = WorkGraphService::new(std::sync::Arc::new(
         meerkat_workgraph::MemoryWorkGraphStore::new(),
     ));
@@ -1437,9 +1575,11 @@ async fn close_if_policy_projection_does_not_advertise_parent_close_without_pare
         .expect("project attention")
         .projection;
 
-    assert!(projection.authority.can_request_closure);
+    // CloseIfPolicyAllows grants policy-gated self-close; the Pursue stance still
+    // carries no create/link authority (the only parent-mutation paths).
     assert!(projection.authority.can_close_if_policy_allows);
-    assert!(!projection.authority.can_close_parent);
+    assert!(!projection.authority.can_create);
+    assert!(!projection.authority.can_link);
 }
 
 #[tokio::test]
@@ -1751,6 +1891,8 @@ fn narrow_goal_and_attention_control_contracts_round_trip() {
             id: "confirmation-1".to_string(),
             label: Some("accepted".to_string()),
             summary: None,
+            confirmation_kind: None,
+            confirming_owner_key: None,
         },
         principal: Some(WorkOwnerKey::principal("user").expect("principal")),
         trusted_principal: Some(WorkOwnerKey::principal("user").expect("principal")),

@@ -41,7 +41,7 @@ struct MockAgent {
     should_fail: bool,
     total_input_tokens: u64,
     total_output_tokens: u64,
-    system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+    system_context_state: meerkat_core::SystemContextStateHandle,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,7 +53,7 @@ struct RecordedTurnMetadata {
 struct RecordingTurnAgent {
     session_id: SessionId,
     recorded: Arc<std::sync::Mutex<Vec<RecordedTurnMetadata>>>,
-    system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+    system_context_state: meerkat_core::SystemContextStateHandle,
 }
 
 struct SnapshotAgent {
@@ -61,7 +61,14 @@ struct SnapshotAgent {
     execution_snapshot: AgentExecutionSnapshot,
     tool_scope_snapshot: meerkat_core::ToolScopeSnapshot,
     external_tool_surface_snapshot: Option<meerkat_core::ExternalToolSurfaceSnapshot>,
-    system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+    system_context_state: meerkat_core::SystemContextStateHandle,
+}
+
+fn system_context_handle_for_test(
+    state: meerkat_core::SessionSystemContextState,
+) -> meerkat_core::SystemContextStateHandle {
+    meerkat_core::SystemContextStateHandle::new(state)
+        .expect("test system-context state should restore")
 }
 
 #[async_trait]
@@ -176,14 +183,17 @@ impl SessionAgent for MockAgent {
     fn session_clone(&self) -> meerkat_core::Session {
         let mut session = meerkat_core::Session::with_id(self.session_id.clone());
         session
-            .set_system_context_state(
-                self.system_context_state
-                    .lock()
-                    .expect("system-context lock poisoned")
-                    .clone(),
-            )
+            .set_system_context_state(self.system_context_state.snapshot())
             .expect("serialize system-context state");
         session
+    }
+
+    fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
+        Some(test_llm_identity("mock"))
+    }
+
+    fn observed_session_tail(&self) -> meerkat_core::pending_continuation::ObservedSessionTailKind {
+        meerkat_core::pending_continuation::observe_session_tail(self.session_clone().messages())
     }
 
     fn apply_runtime_system_context(
@@ -193,12 +203,13 @@ impl SessionAgent for MockAgent {
         let mut session = self.session_clone();
         session.append_system_context_blocks(appends);
         self.message_count = session.messages().len();
+        self.system_context_state
+            .replace_from_generated_restore(session.system_context_state().unwrap_or_default())
+            .expect("test system-context state should restore");
     }
 
-    fn system_context_state(
-        &self,
-    ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
-        Arc::clone(&self.system_context_state)
+    fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
+        self.system_context_state.clone()
     }
 }
 
@@ -273,14 +284,17 @@ impl SessionAgent for SnapshotAgent {
     fn session_clone(&self) -> meerkat_core::Session {
         let mut session = meerkat_core::Session::with_id(self.session_id.clone());
         session
-            .set_system_context_state(
-                self.system_context_state
-                    .lock()
-                    .expect("system-context lock poisoned")
-                    .clone(),
-            )
+            .set_system_context_state(self.system_context_state.snapshot())
             .expect("serialize system-context state");
         session
+    }
+
+    fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
+        Some(test_llm_identity("mock"))
+    }
+
+    fn observed_session_tail(&self) -> meerkat_core::pending_continuation::ObservedSessionTailKind {
+        meerkat_core::pending_continuation::observe_session_tail(self.session_clone().messages())
     }
 
     fn apply_runtime_system_context(
@@ -289,10 +303,8 @@ impl SessionAgent for SnapshotAgent {
     ) {
     }
 
-    fn system_context_state(
-        &self,
-    ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
-        Arc::clone(&self.system_context_state)
+    fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
+        self.system_context_state.clone()
     }
 }
 
@@ -318,7 +330,7 @@ impl SessionAgentBuilder for MockAgentBuilder {
             should_fail: false,
             total_input_tokens: 0,
             total_output_tokens: 0,
-            system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
+            system_context_state: system_context_handle_for_test(Default::default()),
         })
     }
 }
@@ -343,7 +355,7 @@ impl SessionAgentBuilder for SnapshotAgentBuilder {
             execution_snapshot: self.execution_snapshot.clone(),
             tool_scope_snapshot: self.tool_scope_snapshot.clone(),
             external_tool_surface_snapshot: self.external_tool_surface_snapshot.clone(),
-            system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
+            system_context_state: system_context_handle_for_test(Default::default()),
         })
     }
 }
@@ -369,7 +381,7 @@ impl SessionAgentBuilder for SlowMockAgentBuilder {
             should_fail: false,
             total_input_tokens: 0,
             total_output_tokens: 0,
-            system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
+            system_context_state: system_context_handle_for_test(Default::default()),
         })
     }
 }
@@ -393,7 +405,7 @@ impl SessionAgentBuilder for FailingMockAgentBuilder {
             should_fail: true,
             total_input_tokens: 0,
             total_output_tokens: 0,
-            system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
+            system_context_state: system_context_handle_for_test(Default::default()),
         })
     }
 }
@@ -414,7 +426,7 @@ impl SessionAgentBuilder for RecordingTurnAgentBuilder {
         Ok(RecordingTurnAgent {
             session_id: SessionId::new(),
             recorded: Arc::clone(&self.recorded),
-            system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
+            system_context_state: system_context_handle_for_test(Default::default()),
         })
     }
 }
@@ -508,14 +520,17 @@ impl SessionAgent for RecordingTurnAgent {
     fn session_clone(&self) -> meerkat_core::Session {
         let mut session = meerkat_core::Session::with_id(self.session_id.clone());
         session
-            .set_system_context_state(
-                self.system_context_state
-                    .lock()
-                    .expect("system-context lock poisoned")
-                    .clone(),
-            )
+            .set_system_context_state(self.system_context_state.snapshot())
             .expect("serialize system-context state");
         session
+    }
+
+    fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
+        Some(test_llm_identity("mock"))
+    }
+
+    fn observed_session_tail(&self) -> meerkat_core::pending_continuation::ObservedSessionTailKind {
+        meerkat_core::pending_continuation::observe_session_tail(self.session_clone().messages())
     }
 
     fn apply_runtime_system_context(
@@ -524,16 +539,24 @@ impl SessionAgent for RecordingTurnAgent {
     ) {
     }
 
-    fn system_context_state(
-        &self,
-    ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
-        Arc::clone(&self.system_context_state)
+    fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
+        self.system_context_state.clone()
     }
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn test_llm_identity(model: &str) -> meerkat_core::SessionLlmIdentity {
+    meerkat_core::SessionLlmIdentity {
+        model: model.to_string(),
+        provider: meerkat_core::Provider::Other,
+        self_hosted_server_id: None,
+        provider_params: None,
+        auth_binding: None,
+    }
+}
 
 fn make_service(builder: MockAgentBuilder) -> Arc<EphemeralSessionService<MockAgentBuilder>> {
     Arc::new(EphemeralSessionService::new(builder, 10))
@@ -1110,6 +1133,7 @@ async fn inject_context_applied_when_idle() {
                 text: "New runtime context".to_string(),
                 source: Some("test".to_string()),
                 idempotency_key: Some("ctx-idle-1".to_string()),
+                source_kind: meerkat_core::session::SystemContextSource::Normal,
             },
         )
         .await
@@ -1141,6 +1165,7 @@ async fn inject_context_duplicate_idempotent() {
         text: "Idempotent context".to_string(),
         source: Some("test".to_string()),
         idempotency_key: Some("ctx-dedup-1".to_string()),
+        source_kind: meerkat_core::session::SystemContextSource::Normal,
     };
 
     // First append
@@ -1242,6 +1267,7 @@ async fn execution_snapshot_returns_live_agent_execution_state() {
     let expected = AgentExecutionSnapshot {
         loop_state: meerkat_core::state::LoopState::WaitingForOps,
         turn_phase: meerkat_core::turn_execution_authority::TurnPhase::WaitingForOps,
+        turn_terminal: false,
         active_run_id: Some(RunId::new()),
         primitive_kind: meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
         admitted_content_shape: Some(
@@ -1299,6 +1325,7 @@ async fn tool_scope_snapshot_returns_live_agent_tool_scope_state() {
     let expected_execution = AgentExecutionSnapshot {
         loop_state: meerkat_core::state::LoopState::CallingLlm,
         turn_phase: meerkat_core::turn_execution_authority::TurnPhase::Ready,
+        turn_terminal: false,
         active_run_id: None,
         primitive_kind: meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
         admitted_content_shape: None,
@@ -1360,6 +1387,7 @@ async fn external_tool_surface_snapshot_returns_live_agent_tool_surface_state() 
     let expected_execution = AgentExecutionSnapshot {
         loop_state: meerkat_core::state::LoopState::CallingLlm,
         turn_phase: meerkat_core::turn_execution_authority::TurnPhase::Ready,
+        turn_terminal: false,
         active_run_id: None,
         primitive_kind: meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
         admitted_content_shape: None,
@@ -1472,7 +1500,7 @@ async fn persistent_start_turn_recovers_after_discarding_stale_live_session() {
 
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 #[tokio::test]
-async fn persistent_start_turn_rejects_archived_stored_only_session() {
+async fn persistent_archive_rejects_stored_only_session() {
     let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
     let service = PersistentSessionService::new(
         MockAgentBuilder,
@@ -1487,23 +1515,41 @@ async fn persistent_start_turn_rejects_archived_stored_only_session() {
         .await
         .expect("create deferred session");
     let session_id = created.session_id.clone();
-
     service
-        .archive(&session_id)
+        .discard_live_session(&session_id)
         .await
-        .expect("archive should succeed");
-
-    let err = service
-        .start_turn(&session_id, turn_req("after archive"))
-        .await
-        .expect_err("archived stored-only sessions must stay read-only");
-    assert_eq!(err.code(), "SESSION_NOT_FOUND");
+        .expect("test should leave only the persisted compatibility projection");
     assert!(
         !service
             .has_live_session(&session_id)
             .await
             .expect("live session query should succeed"),
-        "archived session must not be recreated as live",
+        "test setup must start from a stored-only compatibility projection",
+    );
+
+    service
+        .archive(&session_id)
+        .await
+        .expect("runtime-less compatibility archive should remain supported");
+    let archived = store
+        .load(&session_id)
+        .await
+        .expect("raw store load should succeed")
+        .expect("archive should retain a compatibility projection");
+    assert_eq!(
+        archived
+            .metadata()
+            .get("session_archived")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "compatibility archive should mark the stored projection archived"
+    );
+    assert!(
+        !service
+            .has_live_session(&session_id)
+            .await
+            .expect("live session query should succeed"),
+        "compatibility archive must not recreate the stored-only session as live",
     );
 }
 

@@ -8,15 +8,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::routing::post;
-use axum::{Json, Router};
+use axum::Router;
 use bytes::Bytes;
 use meerkat_contracts::WireLiveAdapterObservation;
-use meerkat_core::live_adapter::{LiveAdapterErrorCode, LiveAdapterObservation, LiveInputChunk};
+use meerkat_core::live_adapter::{LiveAdapterObservation, LiveInputChunk};
 use opus::{Application, Channels, Decoder, Encoder};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Resampler};
@@ -35,9 +32,13 @@ use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSampl
 use webrtc::track::track_remote::TrackRemote;
 use webrtc_media::Sample;
 
-use crate::host::{LiveAdapterHost, LiveChannelId, ObservationOutcome};
-use crate::transport::{LiveTokenString, LiveWsState, TokenConsumeError, live_ws_router};
-use meerkat_contracts::{LiveWebrtcAnswerParams, LiveWebrtcAnswerResult};
+use crate::host::{
+    LiveAdapterHost, LiveAdapterHostError, LiveChannelId, ObservationOutcome, ObservationRouting,
+};
+use crate::transport::{
+    LiveChannelCloseFeedback, LiveChannelStatusFeedback, LiveTokenString, LiveWsState,
+    live_ws_router,
+};
 
 /// Canonical JSON-RPC signaling method for browser-offer WebRTC.
 pub const LIVE_WEBRTC_ANSWER_METHOD: &str = "live/webrtc/answer";
@@ -98,8 +99,6 @@ impl OutgoingAudioControl {
 /// Errors returned by the WebRTC transport/signaling layer.
 #[derive(Debug, thiserror::Error)]
 pub enum LiveWebrtcError {
-    #[error("invalid token: {0}")]
-    InvalidToken(TokenConsumeError),
     #[error("channel not found: {0}")]
     ChannelNotFound(String),
     #[error("WebRTC error: {0}")]
@@ -118,17 +117,30 @@ impl From<serde_json::Error> for LiveWebrtcError {
     }
 }
 
-struct PendingToken {
-    channel_id: LiveChannelId,
-    expires_at: Instant,
-}
-
 struct LiveWebrtcPeer {
     peer: Arc<RTCPeerConnection>,
     outgoing_audio: Arc<OutgoingAudioControl>,
 }
 
 type LiveWebrtcPeerRegistry = Arc<Mutex<HashMap<LiveChannelId, LiveWebrtcPeer>>>;
+
+fn observation_requires_generated_close(observation: &LiveAdapterObservation) -> bool {
+    match observation {
+        LiveAdapterObservation::Error { .. } => true,
+        LiveAdapterObservation::StatusChanged { status } => status.is_terminal(),
+        _ => false,
+    }
+}
+
+/// Transport evidence that a WebRTC answer was materialized.
+///
+/// The SDP is transport payload. The sequence is monotonic evidence consumed
+/// by MeerkatMachine before the RPC surface projects a public success result.
+#[derive(Debug, Clone)]
+pub struct LiveWebrtcAnswerAccepted {
+    pub answer_sdp: String,
+    pub answer_observation_sequence: u64,
+}
 
 /// Shared state for the live WebRTC transport.
 ///
@@ -137,20 +149,18 @@ type LiveWebrtcPeerRegistry = Arc<Mutex<HashMap<LiveChannelId, LiveWebrtcPeer>>>
 /// browser peer after `live/open` has created the channel and provider adapter.
 pub struct LiveWebrtcState {
     host: Arc<LiveAdapterHost>,
-    pending_tokens: Mutex<HashMap<LiveTokenString, PendingToken>>,
+    close_feedback: Arc<dyn LiveChannelCloseFeedback>,
+    status_feedback: Arc<dyn LiveChannelStatusFeedback>,
     peers: LiveWebrtcPeerRegistry,
     token_ttl: Duration,
+    answer_observation_sequence: AtomicU64,
 }
 
-#[derive(Debug, serde::Serialize)]
-struct WebrtcHttpError {
-    error: String,
-}
-
-pub fn live_webrtc_router(state: Arc<LiveWebrtcState>) -> Router {
+pub fn live_webrtc_router(_state: Arc<LiveWebrtcState>) -> Router {
+    // HTTP signaling has no runtime machine authority handle here, so it must
+    // not answer offers or classify errors. JSON-RPC `live/webrtc/answer` is
+    // the authority-backed signaling surface.
     Router::new()
-        .route(LIVE_WEBRTC_ANSWER_PATH, post(webrtc_answer_http))
-        .with_state(state)
 }
 
 pub async fn serve_live_ws_and_webrtc_listener(
@@ -162,37 +172,40 @@ pub async fn serve_live_ws_and_webrtc_listener(
     axum::serve(listener, app).await
 }
 
-async fn webrtc_answer_http(
-    State(state): State<Arc<LiveWebrtcState>>,
-    Json(params): Json<LiveWebrtcAnswerParams>,
-) -> Result<Json<LiveWebrtcAnswerResult>, (StatusCode, Json<WebrtcHttpError>)> {
-    let channel_id = LiveChannelId::new(params.channel_id.clone());
-    state
-        .answer_offer(channel_id, &params.token, params.offer_sdp)
-        .await
-        .map(|answer_sdp| Json(LiveWebrtcAnswerResult { answer_sdp }))
-        .map_err(|err| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(WebrtcHttpError {
-                    error: err.to_string(),
-                }),
-            )
-        })
-}
-
 impl LiveWebrtcState {
-    pub fn new(host: Arc<LiveAdapterHost>) -> Self {
-        Self::with_token_ttl(host, WEBRTC_TOKEN_TTL)
+    pub fn new(
+        host: Arc<LiveAdapterHost>,
+        close_feedback: Arc<dyn LiveChannelCloseFeedback>,
+        status_feedback: Arc<dyn LiveChannelStatusFeedback>,
+    ) -> Self {
+        Self::with_token_ttl(host, close_feedback, status_feedback, WEBRTC_TOKEN_TTL)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test_with_generated_close_feedback(host: Arc<LiveAdapterHost>) -> Self {
+        let close_feedback = Arc::new(
+            crate::transport::GeneratedTestMachineLiveChannelCloseFeedback::new(Arc::clone(&host)),
+        );
+        let status_feedback = Arc::new(
+            crate::transport::GeneratedTestMachineLiveChannelStatusFeedback::new(Arc::clone(&host)),
+        );
+        Self::new(host, close_feedback, status_feedback)
     }
 
     /// Construct with a custom token TTL — primarily for tests.
-    pub fn with_token_ttl(host: Arc<LiveAdapterHost>, token_ttl: Duration) -> Self {
+    pub fn with_token_ttl(
+        host: Arc<LiveAdapterHost>,
+        close_feedback: Arc<dyn LiveChannelCloseFeedback>,
+        status_feedback: Arc<dyn LiveChannelStatusFeedback>,
+        token_ttl: Duration,
+    ) -> Self {
         Self {
             host,
-            pending_tokens: Mutex::new(HashMap::new()),
+            close_feedback,
+            status_feedback,
             peers: Arc::new(Mutex::new(HashMap::new())),
             token_ttl,
+            answer_observation_sequence: AtomicU64::new(0),
         }
     }
 
@@ -200,32 +213,28 @@ impl LiveWebrtcState {
         &self.host
     }
 
-    /// Mint a single-use WebRTC signaling token for a channel.
-    pub async fn mint_token(&self, channel_id: LiveChannelId) -> LiveTokenString {
-        let token = LiveTokenString::random();
-        let expires_at = Instant::now() + self.token_ttl;
-        let mut guard = self.pending_tokens.lock().await;
-        reap_expired(&mut guard);
-        guard.insert(
-            token.clone(),
-            PendingToken {
-                channel_id,
-                expires_at,
-            },
-        );
-        token
+    pub fn token_ttl(&self) -> Duration {
+        self.token_ttl
     }
 
-    /// Consume a token and answer a browser-created SDP offer.
+    /// Mint random bearer material for a WebRTC signaling token.
+    ///
+    /// This transport does not store token binding, expiry, or consume state.
+    /// `live/open` records those facts in MeerkatMachine before returning the
+    /// token, and `live/webrtc/answer` must receive generated admission before
+    /// calling [`Self::answer_offer`].
+    pub async fn mint_token(&self, _channel_id: LiveChannelId) -> LiveTokenString {
+        LiveTokenString::random()
+    }
+
+    /// Answer a browser-created SDP offer after generated token admission.
     pub async fn answer_offer(
         &self,
         channel_id: LiveChannelId,
-        token: &str,
         offer_sdp: String,
-    ) -> Result<String, LiveWebrtcError> {
-        self.consume_token(token, &channel_id).await?;
+    ) -> Result<LiveWebrtcAnswerAccepted, LiveWebrtcError> {
         self.host
-            .channel_status(&channel_id)
+            .channel_session(&channel_id)
             .await
             .map_err(|_| LiveWebrtcError::ChannelNotFound(channel_id.to_string()))?;
 
@@ -264,14 +273,16 @@ impl LiveWebrtcState {
             Arc::clone(&outgoing_audio_control),
         );
 
-        install_data_channel_handler(
-            Arc::clone(&self.host),
-            channel_id.clone(),
-            Arc::clone(&peer),
-            Arc::clone(&self.peers),
+        install_data_channel_handler(DataChannelPumpContext {
+            host: Arc::clone(&self.host),
+            channel_id: channel_id.clone(),
+            peer: Arc::clone(&peer),
+            peer_registry: Arc::clone(&self.peers),
+            close_feedback: Arc::clone(&self.close_feedback),
+            status_feedback: Arc::clone(&self.status_feedback),
             outgoing_audio_tx,
-            Arc::clone(&outgoing_audio_control),
-        );
+            outgoing_audio_control: Arc::clone(&outgoing_audio_control),
+        });
         install_incoming_audio_handler(
             Arc::clone(&self.host),
             channel_id.clone(),
@@ -307,7 +318,13 @@ impl LiveWebrtcState {
             },
         );
 
-        Ok(answer_sdp)
+        Ok(LiveWebrtcAnswerAccepted {
+            answer_sdp,
+            answer_observation_sequence: self
+                .answer_observation_sequence
+                .fetch_add(1, Ordering::Relaxed)
+                + 1,
+        })
     }
 
     pub async fn close_peer(&self, channel_id: &LiveChannelId) {
@@ -332,66 +349,41 @@ impl LiveWebrtcState {
         }
     }
 
-    async fn consume_token(
-        &self,
-        token: &str,
-        expected_channel: &LiveChannelId,
-    ) -> Result<LiveChannelId, LiveWebrtcError> {
-        let key = LiveTokenString::new(token)
-            .map_err(|_| LiveWebrtcError::InvalidToken(TokenConsumeError::NotFound))?;
-        let mut guard = self.pending_tokens.lock().await;
-        reap_expired(&mut guard);
-        match guard.remove(&key) {
-            Some(pending) => {
-                if pending.expires_at <= Instant::now() {
-                    Err(LiveWebrtcError::InvalidToken(TokenConsumeError::Expired))
-                } else if &pending.channel_id != expected_channel {
-                    Err(LiveWebrtcError::InvalidToken(
-                        TokenConsumeError::ChannelMismatch,
-                    ))
-                } else {
-                    Ok(pending.channel_id)
-                }
-            }
-            None => Err(LiveWebrtcError::InvalidToken(TokenConsumeError::NotFound)),
-        }
-    }
-
-    #[cfg(test)]
-    async fn pending_token_count(&self) -> usize {
-        self.pending_tokens.lock().await.len()
-    }
-
     #[cfg(test)]
     async fn peer_count(&self) -> usize {
         self.peers.lock().await.len()
     }
 }
 
-fn reap_expired(map: &mut HashMap<LiveTokenString, PendingToken>) {
-    let now = Instant::now();
-    map.retain(|_, p| p.expires_at > now);
-}
-
-fn install_data_channel_handler(
+#[derive(Clone)]
+struct DataChannelPumpContext {
     host: Arc<LiveAdapterHost>,
     channel_id: LiveChannelId,
     peer: Arc<RTCPeerConnection>,
     peer_registry: LiveWebrtcPeerRegistry,
+    close_feedback: Arc<dyn LiveChannelCloseFeedback>,
+    status_feedback: Arc<dyn LiveChannelStatusFeedback>,
     outgoing_audio_tx: mpsc::Sender<OutgoingAudioPacket>,
     outgoing_audio_control: Arc<OutgoingAudioControl>,
-) {
-    let peer_for_callback = Arc::clone(&peer);
-    peer.on_data_channel(Box::new(move |channel: Arc<RTCDataChannel>| {
-        let host_for_messages = Arc::clone(&host);
-        let channel_for_messages = channel_id.clone();
+}
+
+fn install_data_channel_handler(context: DataChannelPumpContext) {
+    let peer_for_handler = Arc::clone(&context.peer);
+    let peer_for_callback = Arc::clone(&context.peer);
+    peer_for_handler.on_data_channel(Box::new(move |channel: Arc<RTCDataChannel>| {
+        let host_for_messages = Arc::clone(&context.host);
+        let channel_for_messages = context.channel_id.clone();
         let channel_for_open = Arc::clone(&channel);
-        let host_for_observations = Arc::clone(&host);
-        let channel_for_observations = channel_id.clone();
-        let peer_for_observations = Arc::clone(&peer_for_callback);
-        let peer_registry_for_observations = Arc::clone(&peer_registry);
-        let outgoing_audio_for_observations = outgoing_audio_tx.clone();
-        let outgoing_audio_control_for_observations = Arc::clone(&outgoing_audio_control);
+        let observation_context = DataChannelPumpContext {
+            host: Arc::clone(&context.host),
+            channel_id: context.channel_id.clone(),
+            peer: Arc::clone(&peer_for_callback),
+            peer_registry: Arc::clone(&context.peer_registry),
+            close_feedback: Arc::clone(&context.close_feedback),
+            status_feedback: Arc::clone(&context.status_feedback),
+            outgoing_audio_tx: context.outgoing_audio_tx.clone(),
+            outgoing_audio_control: Arc::clone(&context.outgoing_audio_control),
+        };
 
         Box::pin(async move {
             channel.on_message(Box::new(move |message: DataChannelMessage| {
@@ -423,24 +415,10 @@ fn install_data_channel_handler(
 
             channel.on_open(Box::new(move || {
                 let data_channel = Arc::clone(&channel_for_open);
-                let host = Arc::clone(&host_for_observations);
-                let channel_id = channel_for_observations.clone();
-                let peer = Arc::clone(&peer_for_observations);
-                let peer_registry = Arc::clone(&peer_registry_for_observations);
-                let outgoing_audio_tx = outgoing_audio_for_observations.clone();
-                let outgoing_audio_control = Arc::clone(&outgoing_audio_control_for_observations);
+                let context = observation_context.clone();
                 Box::pin(async move {
                     tokio::spawn(async move {
-                        pump_observations_to_data_channel(
-                            host,
-                            channel_id,
-                            data_channel,
-                            peer,
-                            peer_registry,
-                            outgoing_audio_tx,
-                            outgoing_audio_control,
-                        )
-                        .await;
+                        pump_observations_to_data_channel(context, data_channel).await;
                     });
                 })
             }));
@@ -511,22 +489,34 @@ fn install_incoming_audio_handler(
 }
 
 async fn pump_observations_to_data_channel(
-    host: Arc<LiveAdapterHost>,
-    channel_id: LiveChannelId,
+    context: DataChannelPumpContext,
     data_channel: Arc<RTCDataChannel>,
-    peer: Arc<RTCPeerConnection>,
-    peer_registry: LiveWebrtcPeerRegistry,
-    outgoing_audio_tx: mpsc::Sender<OutgoingAudioPacket>,
-    outgoing_audio_control: Arc<OutgoingAudioControl>,
 ) {
+    let DataChannelPumpContext {
+        host,
+        channel_id,
+        peer,
+        peer_registry,
+        close_feedback,
+        status_feedback,
+        outgoing_audio_tx,
+        outgoing_audio_control,
+    } = context;
     let mut bridge = match WebrtcAudioBridge::new() {
         Ok(bridge) => bridge,
         Err(err) => {
             tracing::warn!(channel = %channel_id, error = %err, "failed to initialize WebRTC output audio bridge");
+            close_channel_with_generated_feedback(
+                host.as_ref(),
+                close_feedback.as_ref(),
+                &channel_id,
+            )
+            .await;
             close_and_deregister_peer(&peer_registry, &channel_id, &data_channel, &peer).await;
             return;
         }
     };
+    let mut close_feedback_recorded = false;
     loop {
         let observation = match host.next_observation_raw(&channel_id).await {
             Ok(Some(obs)) => obs,
@@ -537,7 +527,41 @@ async fn pump_observations_to_data_channel(
             }
         };
 
-        if let Err(err) = forward_observation_json(&data_channel, &observation).await {
+        let close_observation = observation_requires_generated_close(&observation);
+        let publish_observation = !matches!(&observation, &LiveAdapterObservation::Error { .. });
+        if close_observation {
+            if !close_channel_with_generated_feedback(
+                host.as_ref(),
+                close_feedback.as_ref(),
+                &channel_id,
+            )
+            .await
+            {
+                break;
+            }
+            close_feedback_recorded = true;
+        } else if !commit_status_with_generated_feedback(
+            host.as_ref(),
+            status_feedback.as_ref(),
+            &channel_id,
+            &observation,
+        )
+        .await
+        {
+            break;
+        }
+
+        let outcome = match host.apply_observation(&channel_id, &observation).await {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                tracing::warn!(channel = %channel_id, error = %err, "apply_observation failed");
+                break;
+            }
+        };
+
+        if publish_observation
+            && let Err(err) = forward_observation_json(&data_channel, &observation).await
+        {
             tracing::warn!(channel = %channel_id, error = %err, "failed to send WebRTC data-channel observation");
             break;
         }
@@ -576,16 +600,16 @@ async fn pump_observations_to_data_channel(
             }
         }
 
-        match host.apply_observation(&channel_id, &observation).await {
-            Ok(ObservationOutcome::Terminal { code }) => {
+        match outcome {
+            ObservationOutcome::Terminal { code } => {
                 tracing::info!(
                     channel = %channel_id,
-                    reason = %live_adapter_error_code_slug(&code),
+                    ?code,
                     "WebRTC live channel reached terminal observation"
                 );
                 break;
             }
-            Ok(ObservationOutcome::CommandRejected { code, message }) => {
+            ObservationOutcome::CommandRejected { code, message } => {
                 tracing::info!(
                     channel = %channel_id,
                     ?code,
@@ -593,9 +617,7 @@ async fn pump_observations_to_data_channel(
                     "live command rejected; WebRTC peer remains open"
                 );
             }
-            Ok(
-                ObservationOutcome::InterruptSignalled | ObservationOutcome::TranscriptTruncated,
-            ) => {
+            ObservationOutcome::InterruptSignalled | ObservationOutcome::TranscriptTruncated => {
                 let generation = outgoing_audio_control.discard_queued();
                 tracing::debug!(
                     channel = %channel_id,
@@ -603,15 +625,139 @@ async fn pump_observations_to_data_channel(
                     "discarding queued WebRTC output audio after live interruption"
                 );
             }
-            Ok(_) => {}
-            Err(err) => {
-                tracing::warn!(channel = %channel_id, error = %err, "apply_observation failed");
-                break;
-            }
+            _ => {}
+        }
+        if close_observation {
+            break;
         }
     }
 
+    if !close_feedback_recorded {
+        close_channel_with_generated_feedback(host.as_ref(), close_feedback.as_ref(), &channel_id)
+            .await;
+    }
     close_and_deregister_peer(&peer_registry, &channel_id, &data_channel, &peer).await;
+}
+
+async fn commit_status_with_generated_feedback(
+    host: &LiveAdapterHost,
+    status_feedback: &dyn LiveChannelStatusFeedback,
+    channel_id: &LiveChannelId,
+    observation: &LiveAdapterObservation,
+) -> bool {
+    let status = match LiveAdapterHost::classify_observation(observation) {
+        ObservationRouting::UpdateStatus(status) => status,
+        _ => return true,
+    };
+    if status.is_terminal() {
+        return true;
+    }
+
+    let status_observation = match host
+        .reserve_channel_status_observation(channel_id, status)
+        .await
+    {
+        Ok(observation) => observation,
+        Err(LiveAdapterHostError::ChannelNotFound(_)) => return false,
+        Err(err) => {
+            tracing::warn!(
+                channel = %channel_id,
+                error = %err,
+                "live WebRTC transport host status observation reservation failed"
+            );
+            return false;
+        }
+    };
+    let authority = match status_feedback
+        .record_live_channel_status(channel_id, &status_observation)
+        .await
+    {
+        Ok(authority) => authority,
+        Err(err) => {
+            tracing::warn!(
+                channel = %channel_id,
+                error = %err,
+                "generated live status feedback rejected WebRTC transport status"
+            );
+            return false;
+        }
+    };
+    if let Err(err) = host
+        .commit_channel_status_observation(&status_observation, &authority)
+        .await
+    {
+        tracing::warn!(
+            channel = %channel_id,
+            error = %err,
+            "live WebRTC transport host status commit failed after generated feedback"
+        );
+        return false;
+    }
+    true
+}
+
+async fn close_channel_with_generated_feedback(
+    host: &LiveAdapterHost,
+    close_feedback: &dyn LiveChannelCloseFeedback,
+    channel_id: &LiveChannelId,
+) -> bool {
+    // Runtime-initiated terminal paths can commit generated close authority
+    // before the WebRTC pump drains the staged terminal observation. In that
+    // case the committed host status is the generated close handoff result;
+    // asking close feedback for a second decision would route through an
+    // already-cleared active binding.
+    match host.generated_close_has_committed(channel_id).await {
+        Ok(true) => return true,
+        Ok(false) => {}
+        Err(LiveAdapterHostError::ChannelNotFound(_)) => return false,
+        Err(err) => {
+            tracing::warn!(
+                channel = %channel_id,
+                error = %err,
+                "live WebRTC transport generated close status check failed"
+            );
+            return false;
+        }
+    }
+
+    let observation = match host.reserve_channel_close_observation(channel_id).await {
+        Ok(observation) => observation,
+        Err(LiveAdapterHostError::ChannelNotFound(_)) => return false,
+        Err(err) => {
+            tracing::warn!(
+                channel = %channel_id,
+                error = %err,
+                "live WebRTC transport host close observation reservation failed"
+            );
+            return false;
+        }
+    };
+    let authority = match close_feedback
+        .record_live_channel_closed(channel_id, &observation)
+        .await
+    {
+        Ok(authority) => authority,
+        Err(err) => {
+            tracing::warn!(
+                channel = %channel_id,
+                error = %err,
+                "generated live close feedback rejected WebRTC transport close"
+            );
+            return false;
+        }
+    };
+    if let Err(err) = host
+        .commit_channel_close_observation(&observation, &authority)
+        .await
+    {
+        tracing::warn!(
+            channel = %channel_id,
+            error = %err,
+            "live WebRTC transport host close commit failed after generated feedback"
+        );
+        return false;
+    }
+    true
 }
 
 async fn close_and_deregister_peer(
@@ -668,13 +814,6 @@ async fn forward_observation_json(
         .await
         .map(|_| ())
         .map_err(|err| LiveWebrtcError::Webrtc(err.to_string()))
-}
-
-fn live_adapter_error_code_slug(code: &LiveAdapterErrorCode) -> String {
-    serde_json::to_value(code)
-        .ok()
-        .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_owned))
-        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 /// Stateful Opus/resampling bridge for browser WebRTC audio and provider PCM.
@@ -867,7 +1006,23 @@ mod tests {
     use meerkat_core::types::SessionId;
     use tokio::sync::mpsc;
 
+    /// rustls 0.23 requires a process-global default `CryptoProvider`. webrtc's
+    /// DTLS handshake (driven at connect time by these tests) panics without one
+    /// whenever more than one provider feature is active in the build graph —
+    /// e.g. under a full `--workspace --all-features` union that pulls both
+    /// `ring` and `aws-lc-rs` through other crates, which disables rustls's
+    /// implicit single-provider default. Install `ring` explicitly, idempotently,
+    /// so the webrtc tests are robust across feature combinations.
+    fn ensure_test_crypto_provider() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+    }
+
     async fn new_browser_peer() -> RTCPeerConnection {
+        ensure_test_crypto_provider();
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs().unwrap();
         APIBuilder::new()
@@ -882,51 +1037,42 @@ mod tests {
         browser_peer: &RTCPeerConnection,
         state: &LiveWebrtcState,
         channel_id: &LiveChannelId,
-        token: &LiveTokenString,
     ) {
         let offer = browser_peer.create_offer(None).await.unwrap();
         let mut gathering_complete = browser_peer.gathering_complete_promise().await;
         browser_peer.set_local_description(offer).await.unwrap();
         let _ = gathering_complete.recv().await;
         let offer_sdp = browser_peer.local_description().await.unwrap().sdp;
-        let answer_sdp = state
-            .answer_offer(channel_id.clone(), token.as_str(), offer_sdp)
+        let answer = state
+            .answer_offer(channel_id.clone(), offer_sdp)
             .await
             .unwrap();
         browser_peer
-            .set_remote_description(RTCSessionDescription::answer(answer_sdp).unwrap())
+            .set_remote_description(RTCSessionDescription::answer(answer.answer_sdp).unwrap())
             .await
             .unwrap();
     }
 
     #[tokio::test]
-    async fn mint_and_consume_webrtc_token_is_channel_bound() {
+    async fn webrtc_token_ttl_is_transport_configuration_only() {
         let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
-        let state = LiveWebrtcState::new(host);
-        let channel = LiveChannelId::new("ch_a");
-        let token = state.mint_token(channel.clone()).await;
-
-        let consumed = state.consume_token(token.as_str(), &channel).await.unwrap();
-        assert_eq!(consumed, channel);
-        assert!(matches!(
-            state
-                .consume_token(token.as_str(), &channel)
-                .await
-                .unwrap_err(),
-            LiveWebrtcError::InvalidToken(TokenConsumeError::NotFound)
-        ));
-    }
-
-    #[tokio::test]
-    async fn expired_webrtc_tokens_are_reaped() {
-        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
-        let state = LiveWebrtcState::with_token_ttl(host, Duration::from_millis(20));
-        let _stale = state.mint_token(LiveChannelId::new("stale")).await;
-        assert_eq!(state.pending_token_count().await, 1);
-
-        tokio::time::sleep(Duration::from_millis(60)).await;
-        let _fresh = state.mint_token(LiveChannelId::new("fresh")).await;
-        assert_eq!(state.pending_token_count().await, 1);
+        let state = LiveWebrtcState::with_token_ttl(
+            Arc::clone(&host),
+            Arc::new(
+                crate::transport::GeneratedTestMachineLiveChannelCloseFeedback::new(Arc::clone(
+                    &host,
+                )),
+            ),
+            Arc::new(
+                crate::transport::GeneratedTestMachineLiveChannelStatusFeedback::new(Arc::clone(
+                    &host,
+                )),
+            ),
+            Duration::from_millis(20),
+        );
+        let token = state.mint_token(LiveChannelId::new("ch")).await;
+        assert!(!token.as_str().is_empty());
+        assert_eq!(state.token_ttl(), Duration::from_millis(20));
     }
 
     #[test]
@@ -978,15 +1124,20 @@ mod tests {
     #[tokio::test]
     async fn webrtc_peer_data_channel_and_audio_reach_live_adapter_host() {
         let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
-        let channel_id = host.open_channel(SessionId::new()).await.unwrap();
-        let (adapter, mut command_rx, observation_tx) = RecordingAdapter::new();
-        host.attach_adapter(&channel_id, adapter).await.unwrap();
-        host.apply_status_update(&channel_id, LiveAdapterStatus::Ready)
+        let channel_id = host
+            .open_channel_with_generated_test_machine_authority(SessionId::new())
             .await
             .unwrap();
+        let (adapter, mut command_rx, observation_tx) = RecordingAdapter::new();
+        host.attach_adapter(&channel_id, adapter).await.unwrap();
+        host.commit_status_with_generated_test_machine_authority(
+            &channel_id,
+            LiveAdapterStatus::Ready,
+        )
+        .await
+        .unwrap();
 
-        let state = LiveWebrtcState::new(Arc::clone(&host));
-        let token = state.mint_token(channel_id.clone()).await;
+        let state = LiveWebrtcState::new_for_test_with_generated_close_feedback(Arc::clone(&host));
         let browser_peer = new_browser_peer().await;
 
         let (data_tx, mut data_rx) = mpsc::channel::<String>(4);
@@ -1039,7 +1190,7 @@ mod tests {
             .await
             .unwrap();
 
-        connect_browser_peer(&browser_peer, &state, &channel_id, &token).await;
+        connect_browser_peer(&browser_peer, &state, &channel_id).await;
         tokio::time::timeout(Duration::from_secs(5), open_rx.recv())
             .await
             .unwrap()
@@ -1121,15 +1272,20 @@ mod tests {
     #[tokio::test]
     async fn webrtc_peer_deregisters_when_observation_stream_closes() {
         let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
-        let channel_id = host.open_channel(SessionId::new()).await.unwrap();
-        let (adapter, _command_rx, observation_tx) = RecordingAdapter::new();
-        host.attach_adapter(&channel_id, adapter).await.unwrap();
-        host.apply_status_update(&channel_id, LiveAdapterStatus::Ready)
+        let channel_id = host
+            .open_channel_with_generated_test_machine_authority(SessionId::new())
             .await
             .unwrap();
+        let (adapter, _command_rx, observation_tx) = RecordingAdapter::new();
+        host.attach_adapter(&channel_id, adapter).await.unwrap();
+        host.commit_status_with_generated_test_machine_authority(
+            &channel_id,
+            LiveAdapterStatus::Ready,
+        )
+        .await
+        .unwrap();
 
-        let state = LiveWebrtcState::new(Arc::clone(&host));
-        let token = state.mint_token(channel_id.clone()).await;
+        let state = LiveWebrtcState::new_for_test_with_generated_close_feedback(Arc::clone(&host));
         let browser_peer = new_browser_peer().await;
 
         let data_channel = browser_peer
@@ -1160,7 +1316,7 @@ mod tests {
             .await
             .unwrap();
 
-        connect_browser_peer(&browser_peer, &state, &channel_id, &token).await;
+        connect_browser_peer(&browser_peer, &state, &channel_id).await;
         tokio::time::timeout(Duration::from_secs(5), open_rx.recv())
             .await
             .unwrap()

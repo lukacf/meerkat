@@ -95,9 +95,12 @@ impl SessionDefaults {
         let metadata = session.session_metadata().ok_or_else(|| {
             SurfaceSessionRecoveryError::MissingSessionMetadata(session.id().to_string())
         })?;
+        let build_state = session.build_state().ok_or_else(|| {
+            SurfaceSessionRecoveryError::MissingSessionBuildState(session.id().to_string())
+        })?;
         Ok(Self {
             metadata,
-            build_state: session.build_state().unwrap_or_default(),
+            build_state,
             allows_first_turn_build_overrides: session_allows_first_turn_build_overrides(session),
         })
     }
@@ -188,6 +191,8 @@ impl From<EffectiveTurnConfig> for RecoveredSessionBuild {
 pub enum SurfaceSessionRecoveryError {
     #[error("persisted session {0} is missing session metadata")]
     MissingSessionMetadata(String),
+    #[error("persisted session {0} is missing session build state")]
+    MissingSessionBuildState(String),
     #[error("{0}")]
     MissingRuntimeBuildMode(String),
     #[error("{0}")]
@@ -234,30 +239,133 @@ pub fn session_allows_first_turn_build_overrides(session: &Session) -> bool {
         .is_some_and(SessionDeferredTurnState::allows_initial_turn_overrides)
 }
 
+/// Mirror the canonical resume LLM-binding selection from the
+/// [`SessionDocumentMachine`](crate::generated::session_document).
+///
+/// This is the binding-only entry point for surfaces (e.g. the REST resume
+/// path) that do not run the full deferred-first-turn override admission: it
+/// drives the same canonical transition with an `Inactive` first-turn phase and
+/// no build-only overrides, so only the binding-relevant rules apply. The
+/// machine still owns the `provider-requires-model` and clear/set conflict
+/// verdicts; the shell mirrors the selection.
 pub fn resolve_resume_llm_binding(
     stored_provider: Provider,
     stored_self_hosted_server_id: Option<String>,
     model_override: Option<&str>,
     provider_override: Option<Provider>,
-) -> ResumeLlmBinding {
-    let model_changed = model_override.is_some();
-    let provider_overridden = provider_override.is_some() || model_changed;
-    let provider = if model_changed && provider_override.is_none() {
-        None
-    } else {
-        Some(provider_override.unwrap_or(stored_provider))
+) -> Result<ResumeLlmBinding, SurfaceSessionRecoveryError> {
+    let overrides = SurfaceSessionRecoveryOverrides {
+        model: model_override.map(str::to_string),
+        provider: provider_override,
+        ..Default::default()
     };
-    let self_hosted_server_id = if model_changed {
-        None
-    } else {
-        stored_self_hosted_server_id
+    authorize_resume_overrides(
+        stored_provider,
+        stored_self_hosted_server_id,
+        &overrides,
+        crate::generated::session_document::SessionFirstTurnPhase::Inactive,
+    )
+}
+
+/// Mirror the canonical resume-override admission verdict from the
+/// [`SessionDocumentMachine`](crate::generated::session_document) onto a typed
+/// [`ResumeLlmBinding`].
+///
+/// This shell does NOT decide admission or binding: it feeds typed
+/// presence/override observations and the RAW first-turn phase to the machine,
+/// then mirrors the machine's accept verdict (with the LLM-binding selection
+/// the machine chose) or maps the machine's typed rejection reason to the
+/// existing recovery-error message. No verdict is pre-reduced before the
+/// machine sees it.
+fn authorize_resume_overrides(
+    stored_provider: Provider,
+    stored_self_hosted_server_id: Option<String>,
+    overrides: &TurnOverrides,
+    first_turn_phase: crate::generated::session_document::SessionFirstTurnPhase,
+) -> Result<ResumeLlmBinding, SurfaceSessionRecoveryError> {
+    use crate::generated::session_document::{
+        self, ResumeOverrideRejection, ResumeProviderSelection, ResumeSelfHostedSelection,
+        SessionDocumentEffect,
     };
 
-    ResumeLlmBinding {
+    let mut authority = session_document::SessionDocumentMachineAuthority::new();
+    let effects = authority
+        .authorize_session_resume_overrides(
+            overrides.provider.is_some(),
+            overrides.model.is_some(),
+            overrides.clear_provider_params,
+            overrides.provider_params.is_some(),
+            overrides.clear_auth_binding,
+            overrides.auth_binding.is_some(),
+            has_build_only_turn_overrides(overrides),
+            first_turn_phase,
+        )
+        .map_err(|err| {
+            SurfaceSessionRecoveryError::InvalidOverride(format!(
+                "generated session document authority rejected resume override admission: {err}"
+            ))
+        })?;
+
+    // Reject verdict: map the typed rejection reason to the existing recovery
+    // error message. The verdict is the machine's; the shell only translates.
+    if let Some(reason) = effects.iter().find_map(|effect| match effect {
+        SessionDocumentEffect::SessionResumeOverridesRejected { reason } => Some(*reason),
+        _ => None,
+    }) {
+        let message = match reason {
+            ResumeOverrideRejection::ProviderRequiresModel => {
+                "provider override requires model on a session turn".to_string()
+            }
+            ResumeOverrideRejection::ClearAndSetProviderParams => {
+                "clear_provider_params cannot be combined with provider_params".to_string()
+            }
+            ResumeOverrideRejection::ClearAndSetAuthBinding => {
+                "clear_auth_binding cannot be combined with auth_binding".to_string()
+            }
+            ResumeOverrideRejection::BuildOnlyAfterFirstTurn => {
+                BUILD_ONLY_RECOVERY_OVERRIDE_ERROR.to_string()
+            }
+        };
+        return Err(SurfaceSessionRecoveryError::InvalidOverride(message));
+    }
+
+    // Accept verdict: mirror the machine's LLM-binding selection onto concrete
+    // values. The shell supplies the concrete provider/server values the typed
+    // selection points at; it does not re-derive the selection.
+    let Some((provider_selection, self_hosted_selection, provider_overridden)) =
+        effects.iter().find_map(|effect| match effect {
+            SessionDocumentEffect::SessionResumeOverridesAuthorized {
+                provider_selection,
+                self_hosted_selection,
+                provider_overridden,
+            } => Some((
+                *provider_selection,
+                *self_hosted_selection,
+                *provider_overridden,
+            )),
+            _ => None,
+        })
+    else {
+        return Err(SurfaceSessionRecoveryError::InvalidOverride(
+            "generated session document authority returned no resume override verdict".to_string(),
+        ));
+    };
+
+    let provider = match provider_selection {
+        ResumeProviderSelection::RecomputeFromModel => None,
+        ResumeProviderSelection::UseOverride => overrides.provider.or(Some(stored_provider)),
+        ResumeProviderSelection::UseStored => Some(stored_provider),
+    };
+    let self_hosted_server_id = match self_hosted_selection {
+        ResumeSelfHostedSelection::Clear => None,
+        ResumeSelfHostedSelection::Retain => stored_self_hosted_server_id,
+    };
+
+    Ok(ResumeLlmBinding {
         provider,
         self_hosted_server_id,
         provider_overridden,
-    }
+    })
 }
 
 pub fn build_recovered_session(
@@ -281,38 +389,34 @@ pub fn resolve_effective_turn_config(
         allows_first_turn_build_overrides,
     } = SessionDefaults::from_session(&session)?;
 
-    if overrides.provider.is_some() && overrides.model.is_none() {
-        return Err(SurfaceSessionRecoveryError::InvalidOverride(
-            "provider override requires model on a session turn".to_string(),
-        ));
-    }
-    if overrides.clear_provider_params && overrides.provider_params.is_some() {
-        return Err(SurfaceSessionRecoveryError::InvalidOverride(
-            "clear_provider_params cannot be combined with provider_params".to_string(),
-        ));
-    }
-    if overrides.clear_auth_binding && overrides.auth_binding.is_some() {
-        return Err(SurfaceSessionRecoveryError::InvalidOverride(
-            "clear_auth_binding cannot be combined with auth_binding".to_string(),
-        ));
-    }
-    if has_build_only_turn_overrides(overrides) && !allows_first_turn_build_overrides {
-        return Err(SurfaceSessionRecoveryError::InvalidOverride(
-            BUILD_ONLY_RECOVERY_OVERRIDE_ERROR.to_string(),
-        ));
-    }
+    // The resume-override admission verdict (provider-requires-model,
+    // clear+set conflicts, build-only-after-first-turn) AND the effective
+    // LLM-binding selection are owned by the canonical SessionDocumentMachine.
+    // The shell feeds the RAW first-turn phase (not the already-reduced
+    // overrides-allowed bool) and mirrors the verdict. A rejection surfaces as
+    // a typed `InvalidOverride` here.
+    let first_turn_phase: crate::generated::session_document::SessionFirstTurnPhase = session
+        .deferred_turn_state()
+        .map(|state| state.first_turn_phase())
+        .unwrap_or_default()
+        .into();
+    let llm_binding = authorize_resume_overrides(
+        metadata.provider,
+        metadata.self_hosted_server_id.clone(),
+        overrides,
+        first_turn_phase,
+    )?;
+
+    // Runtime-binding presence is host plumbing, not a session-document
+    // semantic: it asserts the caller supplied canonical SessionRuntimeBindings
+    // for a runtime-backed recovery. It stays a pure shell guard because there
+    // is no facts->verdict reduction over session-document state — it is a
+    // single presence assertion over caller-supplied transport context.
     if context.require_runtime_build_mode && context.runtime_build_mode.is_none() {
         return Err(SurfaceSessionRecoveryError::MissingRuntimeBuildMode(
             "runtime-backed session recovery requires canonical SessionRuntimeBindings; refusing StandaloneEphemeral fallback".to_string(),
         ));
     }
-
-    let llm_binding = resolve_resume_llm_binding(
-        metadata.provider,
-        metadata.self_hosted_server_id.clone(),
-        overrides.model.as_deref(),
-        overrides.provider,
-    );
     let resume_override_mask = ResumeOverrideMask {
         model: overrides.model.is_some(),
         provider: llm_binding.provider_overridden,
@@ -471,13 +575,16 @@ pub fn resolve_effective_turn_config(
             .unwrap_or(RuntimeBuildMode::StandaloneEphemeral),
         initial_turn_metadata: None,
     };
-    build.apply_persisted_mob_operator_access(
-        overrides
-            .override_mob
-            .map(ToolCategoryOverride::from_effective)
-            .unwrap_or(metadata.tooling.mob),
-        build_state.mob_tool_authority_context,
-    );
+    if let Some(override_mob) = overrides.override_mob {
+        build.apply_generated_create_only_mob_operator_access(
+            ToolCategoryOverride::from_effective(override_mob),
+        );
+    } else {
+        build.apply_persisted_mob_operator_access(
+            metadata.tooling.mob,
+            build_state.mob_tool_authority_context,
+        );
+    }
 
     Ok(EffectiveTurnConfig {
         model,
@@ -522,7 +629,7 @@ mod tests {
         let mut session = Session::new();
         session
             .set_session_metadata(SessionMetadata {
-                schema_version: crate::SESSION_METADATA_SCHEMA_VERSION,
+                schema_version: crate::session_metadata_schema_version(),
                 model: "claude-sonnet-4-5".to_string(),
                 max_tokens: 4096,
                 structured_output_retries: 3,
@@ -588,11 +695,15 @@ mod tests {
                     "test".to_string(),
                 )])),
                 mob_tool_authority_context: Some(
-                    crate::service::MobToolAuthorityContext::new(
+                    crate::service::MobToolAuthorityContext::generated_for_test(
                         crate::service::OpaquePrincipalToken::new("persisted-authority"),
                         false,
-                    )
-                    .grant_manage_mob("mob-a"),
+                        false,
+                        std::collections::BTreeSet::from(["mob-a".to_string()]),
+                        std::collections::BTreeMap::new(),
+                        None,
+                        None,
+                    ),
                 ),
                 call_timeout_override: CallTimeoutOverride::Value(Duration::from_secs(42)),
             })
@@ -612,6 +723,7 @@ mod tests {
         let mut metadata = session.session_metadata().expect("session metadata");
         metadata.auth_binding = Some(persisted_ref.clone());
         metadata.keep_alive = true;
+        metadata.tooling.mob = ToolCategoryOverride::Enable;
         session
             .set_session_metadata(metadata.clone())
             .expect("updated session metadata");
@@ -645,10 +757,13 @@ mod tests {
         );
         assert_eq!(
             effective.build.override_mob,
-            ToolCategoryOverride::Enable,
-            "persisted mob authority is durable session state and rehydrates mob access"
+            ToolCategoryOverride::Inherit,
+            "metadata-only mob enablement must not become behavior authority"
         );
-        assert!(effective.build.mob_tool_authority_context.is_some());
+        assert!(
+            effective.build.mob_tool_authority_context.is_none(),
+            "projection-only mob authority must not restore behavior authority"
+        );
         assert_eq!(
             effective.build.preload_skills,
             metadata.tooling.active_skills
@@ -717,14 +832,11 @@ mod tests {
         assert!(build.keep_alive);
         assert_eq!(build.override_builtins, ToolCategoryOverride::Disable);
         assert_eq!(build.override_shell, ToolCategoryOverride::Enable);
-        assert_eq!(build.override_mob, ToolCategoryOverride::Enable);
+        assert_eq!(build.override_mob, ToolCategoryOverride::Inherit);
         assert_eq!(build.override_memory, ToolCategoryOverride::Enable);
-        assert_eq!(
-            build
-                .mob_tool_authority_context
-                .as_ref()
-                .map(|authority| authority.managed_mob_scope().clone()),
-            Some(std::collections::BTreeSet::from([String::from("mob-a")]))
+        assert!(
+            build.mob_tool_authority_context.is_none(),
+            "core recovery must not forward projection-only mob authority as behavior authority"
         );
         assert_eq!(build.silent_comms_intents, vec!["peer-b".to_string()]);
         assert_eq!(build.max_inline_peer_notifications, Some(4));
@@ -1023,6 +1135,46 @@ mod tests {
                 SurfaceSessionRecoveryError::MissingRuntimeBuildMode(_)
             ),
             "missing runtime bindings should be called out explicitly"
+        );
+    }
+
+    #[test]
+    fn build_recovered_session_rejects_missing_build_state() {
+        let mut session = Session::new();
+        session
+            .set_session_metadata(SessionMetadata {
+                schema_version: crate::session_metadata_schema_version(),
+                model: "claude-sonnet-4-5".to_string(),
+                max_tokens: 4096,
+                structured_output_retries: 3,
+                provider: Provider::Anthropic,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                auth_binding: None,
+            })
+            .expect("session metadata");
+
+        let error = build_recovered_session(
+            session,
+            &SurfaceSessionRecoveryOverrides::default(),
+            SurfaceSessionRecoveryContext::default(),
+        )
+        .expect_err("recovery must fail closed without durable build state");
+
+        assert!(
+            matches!(
+                error,
+                SurfaceSessionRecoveryError::MissingSessionBuildState(_)
+            ),
+            "missing build state should be reported explicitly"
         );
     }
 

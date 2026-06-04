@@ -58,6 +58,7 @@ tracing-wasm = "0.2"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+meerkat-mob = { workspace = true, features = ["test-support"] }
 
 [package.metadata.cargo-machete]
 ignored = [

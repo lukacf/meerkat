@@ -3,10 +3,12 @@
 //! Canonical lifecycle truth for every input lives in the MeerkatMachine DSL
 //! (`input_phases`, `input_run_associations`, `input_boundary_sequences` plus
 //! the `QueueAccepted` / `StageForRun` / `RecordBoundarySeq` / etc.
-//! transitions). This module owns ONLY the per-input shell metadata that has
-//! no DSL home today: a history log, timestamps, policy snapshot, durability
-//! class, idempotency key, and the cached payload needed to rebuild queued
-//! work after recovery.
+//! transitions). This module owns ONLY the per-input shell metadata needed for
+//! persistence/projection: a history log, timestamps, compatibility policy
+//! snapshot, durability observation, idempotency key, and the cached payload
+//! needed to rebuild queued work after recovery. Durability admission validity
+//! and recovered keep/drop behavior are emitted by generated MeerkatMachine
+//! inputs/effects.
 //!
 //! `InputState` still caches terminal outcome and attempt count for persistence,
 //! recovery normalization, and compatibility reads, but the authoritative live
@@ -14,6 +16,7 @@
 
 use chrono::{DateTime, Utc};
 use meerkat_core::lifecycle::{InputId, RunId};
+use meerkat_core::types::HandlingMode;
 use serde::{Deserialize, Serialize};
 
 use crate::identifiers::PolicyVersion;
@@ -35,15 +38,6 @@ pub enum InputLifecycleState {
     Superseded,
     Coalesced,
     Abandoned,
-}
-
-impl InputLifecycleState {
-    pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            Self::Consumed | Self::Superseded | Self::Coalesced | Self::Abandoned
-        )
-    }
 }
 
 /// Why an input was abandoned.
@@ -113,28 +107,25 @@ pub struct InputStateEvent {
     pub detail: Option<String>,
 }
 
-/// Maximum stage → rollback cycles before the shell chooses Abandon instead
-/// of RollbackStaged at the callsite. Shell retry-policy mechanic; not a DSL
-/// guard.
-pub const MAX_STAGE_ATTEMPTS: u32 = 3;
-
 /// DSL-owned lifecycle projection for an input.
 ///
 /// Carries the fields that are authoritative in the MeerkatMachine DSL
 /// (`input_phases`, `input_run_associations`, `input_boundary_sequences`,
 /// `input_terminal_kind` + `input_superseded_by` / `input_aggregate_id` /
 /// `input_abandon_reason` / `input_abandon_attempt_count`, and
-/// `input_attempt_counts`) so they can travel alongside a persisted
-/// [`InputState`] at the store boundary, where no live DSL is available to
-/// query. Inside a running driver, these values are always read from the DSL
-/// directly, never from the seed.
+/// `input_attempt_counts` / `input_admission_seq` / `input_recovery_lanes`) so
+/// they can travel alongside a persisted [`InputState`] at the store boundary,
+/// where no live DSL is available to query. Inside a running driver, these
+/// values are always read from the DSL directly, never from the seed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputStateSeed {
     pub phase: InputLifecycleState,
     pub last_run_id: Option<RunId>,
     pub last_boundary_sequence: Option<u64>,
+    pub admission_sequence: Option<u64>,
     pub terminal_outcome: Option<InputTerminalOutcome>,
     pub attempt_count: u32,
+    pub recovery_lane: Option<HandlingMode>,
 }
 
 impl InputStateSeed {
@@ -145,8 +136,10 @@ impl InputStateSeed {
             phase: InputLifecycleState::Accepted,
             last_run_id: None,
             last_boundary_sequence: None,
+            admission_sequence: None,
             terminal_outcome: None,
             attempt_count: 0,
+            recovery_lane: None,
         }
     }
 }
@@ -173,15 +166,51 @@ impl StoredInputState {
     }
 }
 
+/// Store-write wrapper for an input-state bundle whose DSL-owned seed facts
+/// came from a generated MeerkatMachine-owned snapshot.
+#[derive(Debug, Clone)]
+pub struct InputStatePersistenceRecord {
+    bundle: StoredInputState,
+}
+
+impl InputStatePersistenceRecord {
+    /// Package a store-bound input-state bundle that was read from generated
+    /// MeerkatMachine authority. This is intentionally crate-private so
+    /// callers cannot mint persistence records from handwritten seed facts.
+    pub(crate) fn from_machine_snapshot(bundle: StoredInputState) -> Result<Self, String> {
+        crate::meerkat_machine::authorize_stored_input_state_seed(
+            &bundle.state.input_id,
+            &bundle.seed,
+        )?;
+        Ok(Self { bundle })
+    }
+
+    /// Raw bundle approved for durable persistence.
+    pub fn as_stored(&self) -> &StoredInputState {
+        &self.bundle
+    }
+
+    /// Clone the approved raw bundle.
+    pub fn clone_stored(&self) -> StoredInputState {
+        self.bundle.clone()
+    }
+
+    /// Consume the approved record into its raw bundle.
+    pub fn into_stored(self) -> StoredInputState {
+        self.bundle
+    }
+}
+
 /// Per-input shell data. Plain fields, no hidden state machine.
 ///
 /// All DSL-owned lifecycle fields (`phase`, `last_run_id`,
-/// `last_boundary_sequence`, `terminal_outcome`, `attempt_count`) are
+/// `last_boundary_sequence`, `terminal_outcome`, `attempt_count`,
+/// `recovery_lane`) are
 /// authoritative in the DSL. Live code reads them via
 /// `EphemeralRuntimeDriver::input_phase` / `input_last_run_id` /
 /// `input_last_boundary_sequence` / `input_terminal_outcome` /
-/// `input_attempt_count`. Persistence callsites serialize them via
-/// [`InputStateSeed`] bundled on [`StoredInputState`].
+/// `input_attempt_count` / `input_recovery_lane`. Persistence callsites
+/// serialize them via [`InputStateSeed`] bundled on [`StoredInputState`].
 #[derive(Debug, Clone)]
 pub struct InputState {
     pub input_id: InputId,
@@ -261,6 +290,8 @@ impl InputState {
 
 #[derive(Serialize, Deserialize)]
 struct InputStateSerde {
+    #[serde(default = "default_stored_input_state_version")]
+    stored_input_state_version: u32,
     input_id: InputId,
     current_state: InputLifecycleState,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -287,13 +318,25 @@ struct InputStateSerde {
     last_run_id: Option<RunId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_boundary_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    admission_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery_lane: Option<HandlingMode>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+fn default_stored_input_state_version() -> u32 {
+    meerkat_core::generated::session_persistence_version_authority::legacy_stored_input_state_version(
+    )
 }
 
 impl Serialize for StoredInputState {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let helper = InputStateSerde {
+            stored_input_state_version:
+                meerkat_core::generated::session_persistence_version_authority::stored_input_state_version(
+                ),
             input_id: self.state.input_id.clone(),
             current_state: self.seed.phase,
             policy: self.state.policy.clone(),
@@ -308,6 +351,8 @@ impl Serialize for StoredInputState {
             persisted_input: self.state.persisted_input.clone(),
             last_run_id: self.seed.last_run_id.clone(),
             last_boundary_sequence: self.seed.last_boundary_sequence,
+            admission_sequence: self.seed.admission_sequence,
+            recovery_lane: self.seed.recovery_lane,
             created_at: self.state.created_at,
             updated_at: self.state.updated_at,
         };
@@ -318,6 +363,11 @@ impl Serialize for StoredInputState {
 impl<'de> Deserialize<'de> for StoredInputState {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let helper = InputStateSerde::deserialize(deserializer)?;
+        let _stored_input_state_version =
+            meerkat_core::generated::session_persistence_version_authority::restore_stored_input_state_version(
+                helper.stored_input_state_version,
+            )
+            .map_err(<D::Error as serde::de::Error>::custom)?;
         let state = InputState {
             input_id: helper.input_id,
             terminal_outcome: helper.terminal_outcome.clone(),
@@ -337,8 +387,10 @@ impl<'de> Deserialize<'de> for StoredInputState {
             phase: helper.current_state,
             last_run_id: helper.last_run_id,
             last_boundary_sequence: helper.last_boundary_sequence,
+            admission_sequence: helper.admission_sequence,
             terminal_outcome: helper.terminal_outcome,
             attempt_count: helper.attempt_count,
+            recovery_lane: helper.recovery_lane,
         };
         Ok(StoredInputState { state, seed })
     }
@@ -367,22 +419,9 @@ mod tests {
         assert_eq!(seed.phase, InputLifecycleState::Accepted);
         assert!(seed.last_run_id.is_none());
         assert!(seed.last_boundary_sequence.is_none());
+        assert!(seed.admission_sequence.is_none());
         assert!(seed.terminal_outcome.is_none());
         assert_eq!(seed.attempt_count, 0);
-    }
-
-    #[test]
-    fn lifecycle_state_terminal() {
-        assert!(InputLifecycleState::Consumed.is_terminal());
-        assert!(InputLifecycleState::Superseded.is_terminal());
-        assert!(InputLifecycleState::Coalesced.is_terminal());
-        assert!(InputLifecycleState::Abandoned.is_terminal());
-
-        assert!(!InputLifecycleState::Accepted.is_terminal());
-        assert!(!InputLifecycleState::Queued.is_terminal());
-        assert!(!InputLifecycleState::Staged.is_terminal());
-        assert!(!InputLifecycleState::Applied.is_terminal());
-        assert!(!InputLifecycleState::AppliedPendingConsumption.is_terminal());
     }
 
     #[test]
@@ -422,10 +461,14 @@ mod tests {
             version: PolicyVersion(1),
             decision: policy.clone(),
         });
-        state.runtime_semantics = Some(RuntimeInputSemantics::from_policy_and_kind(
-            &policy,
-            crate::identifiers::InputKind::Prompt,
-        ));
+        state.runtime_semantics = Some(
+            crate::policy_table::generated_admission_projection_for_kind(
+                crate::identifiers::KindId::new(crate::identifiers::InputKind::Prompt),
+                true,
+            )
+            .expect("generated admission projection")
+            .runtime_semantics,
+        );
         state.history.push(InputStateHistoryEntry {
             timestamp: state.updated_at,
             from: InputLifecycleState::Accepted,
@@ -438,8 +481,10 @@ mod tests {
                 phase: InputLifecycleState::Queued,
                 last_run_id: None,
                 last_boundary_sequence: None,
+                admission_sequence: Some(42),
                 terminal_outcome: None,
                 attempt_count: 0,
+                recovery_lane: Some(HandlingMode::Queue),
             },
         };
 
@@ -447,6 +492,11 @@ mod tests {
         let parsed: StoredInputState = serde_json::from_value(json).unwrap();
         assert_eq!(parsed.state.input_id, bundle.state.input_id);
         assert_eq!(parsed.seed.phase, bundle.seed.phase);
+        assert_eq!(
+            parsed.seed.admission_sequence,
+            bundle.seed.admission_sequence
+        );
+        assert_eq!(parsed.seed.recovery_lane, bundle.seed.recovery_lane);
         assert_eq!(
             parsed.state.runtime_semantics,
             bundle.state.runtime_semantics

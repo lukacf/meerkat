@@ -68,6 +68,7 @@ async-stream = { workspace = true }
 reqwest = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 meerkat-core = { workspace = true }
+meerkat-runtime = { workspace = true, features = ["test-support"] }
 meerkat-store = { workspace = true, features = ["jsonl"] }
 meerkat-machine-schema.workspace = true
 meerkat-machine-kernels = { workspace = true, features = ["test-oracle"] }
@@ -92,6 +93,7 @@ default = ["runtime-adapter"]
 # is empty because the dep is always present.
 runtime-adapter = []
 integration-real-tests = []
+test-support = []
 
 [package.metadata.cargo-machete]
 ignored = [

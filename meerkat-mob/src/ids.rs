@@ -198,6 +198,15 @@ string_newtype!(
     AgentIdentity
 );
 
+string_newtype!(
+    /// Canonical peer identity carried in respawn topology-restore feedback.
+    ///
+    /// Local member edges use the member's [`AgentIdentity`] string. External
+    /// peer edges use the comms [`meerkat_core::comms::PeerId`] string, never
+    /// the display-only peer name.
+    RespawnTopologyPeerId
+);
+
 // DELETE_ME A5 DSL-schema migration: `MeerkatId` is now a type alias
 // for `AgentIdentity` (declared above the `AgentIdentity` definition
 // at the top of the "identity-first" section). The previous explicit

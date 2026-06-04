@@ -15,7 +15,9 @@ use meerkat_core::types::{
     AssistantBlock, HandlingMode, Message, RenderMetadata, RunResult, SessionId, StopReason, Usage,
 };
 use meerkat_session::EphemeralSessionService;
-use meerkat_session::ephemeral::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
+use meerkat_session::ephemeral::{
+    ObservedSessionTailKind, SessionAgent, SessionAgentBuilder, SessionSnapshot,
+};
 use std::sync::Arc;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -252,19 +254,46 @@ impl SessionAgent for FactoryAgent {
                 ))
             })?;
         if let Some(state) = state {
+            let authorized_state = self
+                .agent
+                .tool_scope()
+                .authorized_visibility_state()
+                .map_err(|err| {
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "failed to authorize tool visibility state for persistence: {err}"
+                    ))
+                })?;
+            debug_assert_eq!(authorized_state.as_state(), &state);
             self.agent
                 .session_mut()
-                .set_tool_visibility_state(state)
+                .set_tool_visibility_state(authorized_state)
                 .map_err(|err| {
                     meerkat_core::error::AgentError::InternalError(format!(
                         "failed to persist tool visibility state into session metadata: {err}"
                     ))
                 })
         } else {
+            let authorized_state = self
+                .agent
+                .tool_scope()
+                .authorized_visibility_state()
+                .map_err(|err| {
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "failed to authorize default tool visibility state for persistence: {err}"
+                    ))
+                })?;
+            debug_assert_eq!(
+                authorized_state.as_state(),
+                &meerkat_core::SessionToolVisibilityState::default()
+            );
             self.agent
                 .session_mut()
-                .remove_metadata(meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY);
-            Ok(())
+                .set_tool_visibility_state(authorized_state)
+                .map_err(|err| {
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "failed to persist default tool visibility state into session metadata: {err}"
+                    ))
+                })
         }
     }
 
@@ -292,7 +321,7 @@ impl SessionAgent for FactoryAgent {
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     fn sync_session_from_durable_snapshot(
         &mut self,
-        session: Session,
+        mut session: Session,
     ) -> Result<(), meerkat_core::error::AgentError> {
         if session.id() != self.agent.session().id() {
             return Err(meerkat_core::error::AgentError::InternalError(format!(
@@ -302,7 +331,26 @@ impl SessionAgent for FactoryAgent {
             )));
         }
 
-        let system_context_state = session.system_context_state().unwrap_or_default();
+        let system_context_state = session
+            .try_system_context_state()
+            .map_err(|err| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to restore durable system-context state during live session sync: {err}"
+                ))
+            })?
+            .unwrap_or_default();
+        let deferred_turn_state = session.try_deferred_turn_state().map_err(|err| {
+            meerkat_core::error::AgentError::InternalError(format!(
+                "failed to restore durable deferred-turn state during live session sync: {err}"
+            ))
+        })?;
+        if let Some(state) = deferred_turn_state {
+            session.set_deferred_turn_state(state).map_err(|err| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to serialize restored durable deferred-turn state during live session sync: {err}"
+                ))
+            })?;
+        }
         let visibility_state = session
             .tool_visibility_state()
             .map_err(|err| {
@@ -322,17 +370,13 @@ impl SessionAgent for FactoryAgent {
         *self.agent.session_mut() = session;
 
         let state_handle = self.agent.system_context_state();
-        match state_handle.lock() {
-            Ok(mut guard) => {
-                *guard = system_context_state;
-            }
-            Err(poisoned) => {
-                tracing::warn!(
-                    "system-context state lock poisoned while synchronizing durable session"
-                );
-                *poisoned.into_inner() = system_context_state;
-            }
-        }
+        state_handle
+            .replace_from_generated_restore(system_context_state)
+            .map_err(|err| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "generated system-context authority rejected durable session sync: {err}"
+                ))
+            })?;
         Ok(())
     }
 
@@ -402,8 +446,8 @@ impl SessionAgent for FactoryAgent {
             .map(|metadata| metadata.llm_identity())
     }
 
-    fn has_pending_boundary(&self) -> bool {
-        self.agent.session().has_pending_boundary()
+    fn observed_session_tail(&self) -> ObservedSessionTailKind {
+        meerkat_core::pending_continuation::observe_session_tail(self.agent.session().messages())
     }
 
     fn apply_runtime_system_context(
@@ -419,14 +463,11 @@ impl SessionAgent for FactoryAgent {
             .system_context_state()
             .unwrap_or_default();
         let state_handle = self.agent.system_context_state();
-        match state_handle.lock() {
-            Ok(mut guard) => {
-                *guard = state;
-            }
-            Err(poisoned) => {
-                tracing::warn!("system-context state lock poisoned while applying runtime context");
-                *poisoned.into_inner() = state;
-            }
+        if let Err(err) = state_handle.replace_from_generated_restore(state) {
+            tracing::warn!(
+                error = %err,
+                "generated system-context authority rejected runtime context restore"
+            );
         }
     }
 
@@ -474,9 +515,7 @@ impl SessionAgent for FactoryAgent {
         Ok(outcome)
     }
 
-    fn system_context_state(
-        &self,
-    ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
+    fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
         self.agent.system_context_state()
     }
 
@@ -977,7 +1016,8 @@ mod tests {
         ) -> Result<ProviderImageGenerationOutput, meerkat_llm_core::LlmError> {
             Ok(ProviderImageGenerationOutput {
                 operation_id: request.operation_id,
-                terminal: meerkat_core::ImageOperationTerminalClass::Failed,
+                terminal_observation:
+                    meerkat_core::ImageProviderTerminalObservation::ExecutionFailed,
                 images: Vec::new(),
                 provider_text: None,
                 revised_prompt: meerkat_core::RevisedPromptDisposition::NotRequested,
@@ -1129,6 +1169,50 @@ mod tests {
             agent,
             session_context: None,
         })
+    }
+
+    fn session_with_raw_metadata(
+        session: Session,
+        key: &'static str,
+        value: serde_json::Value,
+    ) -> Session {
+        let mut raw = serde_json::to_value(session).expect("session should serialize");
+        raw.get_mut("metadata")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("session metadata should be an object")
+            .insert(key.to_string(), value);
+        serde_json::from_value(raw).expect("session should deserialize with raw metadata")
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn factory_agent_sync_rejects_malformed_deferred_turn_state() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let mut agent = build_factory_agent_with_mock(
+            &temp,
+            AgentBuildConfig {
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+        )
+        .await?;
+        let durable = session_with_raw_metadata(
+            agent.session().clone(),
+            meerkat_core::SESSION_DEFERRED_TURN_STATE_KEY,
+            serde_json::json!("not-a-deferred-turn-state"),
+        );
+
+        let err = SessionAgent::sync_session_from_durable_snapshot(&mut agent, durable)
+            .expect_err("malformed deferred-turn state must fail closed");
+
+        assert!(
+            err.to_string().contains("deferred-turn state"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            agent.session().try_deferred_turn_state().unwrap().is_none(),
+            "failed sync must not install raw deferred-turn metadata into the live session"
+        );
+        Ok(())
     }
 
     #[tokio::test]

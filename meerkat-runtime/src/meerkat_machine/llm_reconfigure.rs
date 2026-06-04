@@ -1,5 +1,37 @@
 use super::*;
 
+pub(super) struct SessionLlmReconfigureApplyError {
+    pub error: RuntimeDriverError,
+    pub clear_generated_llm_state: bool,
+}
+
+pub(super) struct SessionLlmVisibilityPlanProposal {
+    pub next_visibility_state: SessionToolVisibilityState,
+    pub view_image_tool_available: bool,
+    pub previous_view_image_visible: bool,
+    pub next_view_image_visible: bool,
+    pub previous_active_visibility_revision: u64,
+    pub previous_staged_visibility_revision: u64,
+    pub next_active_visibility_revision: u64,
+    pub tool_visibility_delta: SessionToolVisibilityDelta,
+}
+
+pub(super) struct SessionLlmReconfigureAuthorityPlan {
+    pub capability_delta: SessionLlmCapabilityDelta,
+    pub tool_visibility_delta: SessionToolVisibilityDelta,
+    pub next_capability_base_filter: meerkat_core::ToolFilter,
+    pub next_active_visibility_revision: u64,
+}
+
+impl From<RuntimeDriverError> for SessionLlmReconfigureApplyError {
+    fn from(error: RuntimeDriverError) -> Self {
+        Self {
+            error,
+            clear_generated_llm_state: false,
+        }
+    }
+}
+
 impl MeerkatMachine {
     pub(super) fn llm_reconfigure_host(
         &self,
@@ -13,17 +45,6 @@ impl MeerkatMachine {
                     "session llm reconfigure host is not configured".to_string(),
                 )
             })
-    }
-
-    pub(super) fn capability_delta(
-        previous: Option<SessionLlmCapabilitySurface>,
-        current: Option<SessionLlmCapabilitySurface>,
-    ) -> SessionLlmCapabilityDelta {
-        SessionLlmCapabilityDelta {
-            changed: previous != current,
-            previous,
-            current,
-        }
     }
 
     pub(super) fn committed_visibility_allows(
@@ -43,12 +64,19 @@ impl MeerkatMachine {
         .allows(tool_name)
     }
 
-    pub(super) fn derive_reconfigured_visibility_state(
+    /// Build the shell's proposed visibility witness for generated authority.
+    ///
+    /// The generated `ReconfigureSessionLlmIdentity*` transition validates
+    /// this proposal and emits the authoritative report facts; callers must
+    /// not publish these proposed deltas directly.
+    pub(super) fn propose_reconfigured_visibility_plan(
         current: &SessionToolVisibilityState,
         target_capability_surface: &SessionLlmCapabilitySurface,
         base_tool_names: &std::collections::BTreeSet<String>,
-    ) -> (SessionToolVisibilityState, SessionToolVisibilityDelta) {
+    ) -> SessionLlmVisibilityPlanProposal {
         let previous_capability_base_filter = current.capability_base_filter.clone();
+        let view_image_tool_available =
+            base_tool_names.contains(meerkat_core::VIEW_IMAGE_TOOL_NAME);
         let current_view_image_visible = Self::committed_visibility_allows(
             base_tool_names,
             current,
@@ -71,30 +99,74 @@ impl MeerkatMachine {
             next.active_revision = current.active_revision.max(current.staged_revision) + 1;
         }
 
-        (
-            next.clone(),
-            SessionToolVisibilityDelta {
+        SessionLlmVisibilityPlanProposal {
+            next_active_visibility_revision: next.active_revision,
+            next_visibility_state: next.clone(),
+            view_image_tool_available,
+            previous_view_image_visible: current_view_image_visible,
+            next_view_image_visible,
+            previous_active_visibility_revision: current.active_revision,
+            previous_staged_visibility_revision: current.staged_revision,
+            tool_visibility_delta: SessionToolVisibilityDelta {
                 previous_capability_base_filter,
                 current_capability_base_filter: next.capability_base_filter,
                 committed_visible_set_changed,
                 revision_bumped,
             },
-        )
+        }
     }
 
-    pub(super) async fn set_cached_session_llm_state(
-        &self,
-        session_id: &SessionId,
-        current_identity: Option<meerkat_core::SessionLlmIdentity>,
-        current_capability_surface: Option<SessionLlmCapabilitySurface>,
-        capability_surface_status: SessionLlmCapabilitySurfaceStatus,
-    ) {
-        let mut sessions = self.sessions.write().await;
-        if let Some(entry) = sessions.get_mut(session_id) {
-            entry.current_llm_identity = current_identity;
-            entry.current_capability_surface = current_capability_surface;
-            entry.capability_surface_status = capability_surface_status;
+    pub(super) fn session_llm_reconfigure_authority_plan(
+        effects: &DslTransitionEffects,
+    ) -> Result<SessionLlmReconfigureAuthorityPlan, RuntimeDriverError> {
+        let mut resolved = None;
+        for effect in effects.as_slice() {
+            let dsl::MeerkatMachineEffect::SessionLlmReconfigurePlanResolved {
+                previous_capability_surface,
+                current_capability_surface,
+                capability_changed,
+                previous_capability_base_filter,
+                current_capability_base_filter,
+                committed_visible_set_changed,
+                revision_bumped,
+                active_visibility_revision,
+            } = effect
+            else {
+                continue;
+            };
+
+            let capability_delta = SessionLlmCapabilityDelta {
+                previous: (*previous_capability_surface).map(Into::into),
+                current: (*current_capability_surface).map(Into::into),
+                changed: *capability_changed,
+            };
+            let previous_capability_base_filter: meerkat_core::ToolFilter =
+                previous_capability_base_filter.clone().into();
+            let current_capability_base_filter: meerkat_core::ToolFilter =
+                current_capability_base_filter.clone().into();
+            let tool_visibility_delta = SessionToolVisibilityDelta {
+                previous_capability_base_filter,
+                current_capability_base_filter: current_capability_base_filter.clone(),
+                committed_visible_set_changed: *committed_visible_set_changed,
+                revision_bumped: *revision_bumped,
+            };
+            let plan = SessionLlmReconfigureAuthorityPlan {
+                capability_delta,
+                tool_visibility_delta,
+                next_capability_base_filter: current_capability_base_filter,
+                next_active_visibility_revision: *active_visibility_revision,
+            };
+            if resolved.replace(plan).is_some() {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason:
+                        "generated SessionLlmReconfigurePlanResolved effect emitted more than once"
+                            .to_string(),
+                });
+            }
         }
+        resolved.ok_or_else(|| RuntimeDriverError::ValidationFailed {
+            reason: "generated SessionLlmReconfigurePlanResolved effect was absent".to_string(),
+        })
     }
 
     pub(super) async fn cache_hydrated_session_llm_state(
@@ -102,19 +174,49 @@ impl MeerkatMachine {
         session_id: &SessionId,
         hydrated: &HydratedSessionLlmState,
     ) -> Result<(), RuntimeDriverError> {
+        use crate::meerkat_machine::dsl as mm_dsl;
+        let previous_dsl_state = self
+            .stage_session_dsl_input(
+                session_id,
+                mm_dsl::MeerkatMachineInput::HydrateSessionLlmState {
+                    current_identity: mm_dsl::SessionLlmIdentity::from_domain(
+                        &hydrated.current_identity,
+                    ),
+                    current_capability_surface: hydrated
+                        .current_capability_surface
+                        .as_ref()
+                        .map(mm_dsl::SessionLlmCapabilitySurface::from_domain),
+                    current_capability_surface_status:
+                        mm_dsl::SessionLlmCapabilitySurfaceStatus::from_domain(
+                            &hydrated.capability_surface_status,
+                        ),
+                    current_capability_base_filter: mm_dsl::ToolFilter::from_domain(
+                        &hydrated.current_visibility_state.capability_base_filter,
+                    ),
+                },
+                "HydrateSessionLlmState",
+            )
+            .await
+            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+
         let mut sessions = self.sessions.write().await;
-        let entry = sessions
-            .get_mut(session_id)
-            .ok_or(RuntimeDriverError::NotReady {
+        let Some(entry) = sessions.get_mut(session_id) else {
+            drop(sessions);
+            self.restore_session_dsl_state(session_id, previous_dsl_state)
+                .await;
+            return Err(RuntimeDriverError::NotReady {
                 state: RuntimeState::Destroyed,
-            })?;
-        entry
+            });
+        };
+        if let Err(err) = entry
             .tool_visibility_owner
             .replace_visibility_state(hydrated.current_visibility_state.clone())
-            .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
-        entry.current_llm_identity = Some(hydrated.current_identity.clone());
-        entry.current_capability_surface = hydrated.current_capability_surface.clone();
-        entry.capability_surface_status = hydrated.capability_surface_status;
+        {
+            drop(sessions);
+            self.restore_session_dsl_state(session_id, previous_dsl_state)
+                .await;
+            return Err(RuntimeDriverError::Internal(err.to_string()));
+        }
         Ok(())
     }
 
@@ -142,10 +244,8 @@ impl MeerkatMachine {
         session_id: &SessionId,
         previous_identity: &meerkat_core::SessionLlmIdentity,
         previous_visibility_state: &SessionToolVisibilityState,
-        previous_capability_surface: Option<SessionLlmCapabilitySurface>,
-        previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus,
         original_error: RuntimeDriverError,
-    ) -> Result<SessionLlmReconfigureReport, RuntimeDriverError> {
+    ) -> Result<SessionLlmReconfigureReport, SessionLlmReconfigureApplyError> {
         let rollback_result = async {
             host.apply_live_session_llm_identity(session_id, previous_identity)
                 .await?;
@@ -159,28 +259,18 @@ impl MeerkatMachine {
         .await;
 
         match rollback_result {
-            Ok(()) => {
-                self.set_cached_session_llm_state(
-                    session_id,
-                    Some(previous_identity.clone()),
-                    previous_capability_surface,
-                    previous_capability_surface_status,
-                )
-                .await;
-                Err(original_error)
-            }
+            Ok(()) => Err(SessionLlmReconfigureApplyError {
+                error: original_error,
+                clear_generated_llm_state: false,
+            }),
             Err(rollback_error) => {
                 let _ = host.discard_live_session(session_id).await;
-                self.set_cached_session_llm_state(
-                    session_id,
-                    None,
-                    None,
-                    SessionLlmCapabilitySurfaceStatus::Unresolved,
-                )
-                .await;
-                Err(RuntimeDriverError::Internal(format!(
-                    "failed to rollback live llm reconfiguration after error ({original_error}): {rollback_error}"
-                )))
+                Err(SessionLlmReconfigureApplyError {
+                    error: RuntimeDriverError::Internal(format!(
+                        "failed to rollback live llm reconfiguration after error ({original_error}): {rollback_error}"
+                    )),
+                    clear_generated_llm_state: true,
+                })
             }
         }
     }
@@ -199,7 +289,7 @@ impl MeerkatMachine {
             })?;
         if !matches!(
             runtime_state,
-            RuntimeState::Attached | RuntimeState::Running
+            RuntimeState::Idle | RuntimeState::Attached | RuntimeState::Running
         ) {
             return Err(RuntimeDriverError::NotReady {
                 state: runtime_state,
@@ -214,14 +304,16 @@ impl MeerkatMachine {
             .resolve_target_session_llm_identity(&request, &hydrated.current_identity)
             .await?;
 
-        let (next_visibility_state, tool_visibility_delta) =
-            Self::derive_reconfigured_visibility_state(
-                &hydrated.current_visibility_state,
-                &resolved.target_capability_surface,
-                &hydrated.base_tool_names,
-            );
-        let next_capability_base_filter = next_visibility_state.capability_base_filter.clone();
-        let next_active_visibility_revision = next_visibility_state.active_revision;
+        let visibility_plan = Self::propose_reconfigured_visibility_plan(
+            &hydrated.current_visibility_state,
+            &resolved.target_capability_surface,
+            &hydrated.base_tool_names,
+        );
+        let next_capability_base_filter = visibility_plan
+            .next_visibility_state
+            .capability_base_filter
+            .clone();
+        let next_active_visibility_revision = visibility_plan.next_active_visibility_revision;
 
         Ok(MeerkatMachineCommand::ReconfigureSessionLlmIdentity {
             session_id: session_id.clone(),
@@ -229,12 +321,19 @@ impl MeerkatMachine {
             previous_visibility_state: Box::new(hydrated.current_visibility_state),
             previous_capability_surface: hydrated.current_capability_surface,
             previous_capability_surface_status: hydrated.capability_surface_status,
+            view_image_tool_available: visibility_plan.view_image_tool_available,
+            previous_view_image_visible: visibility_plan.previous_view_image_visible,
+            next_view_image_visible: visibility_plan.next_view_image_visible,
+            previous_active_visibility_revision: visibility_plan
+                .previous_active_visibility_revision,
+            previous_staged_visibility_revision: visibility_plan
+                .previous_staged_visibility_revision,
             target_identity: Box::new(resolved.target_identity),
             target_capability_surface: Box::new(resolved.target_capability_surface),
-            next_visibility_state: Box::new(next_visibility_state),
+            next_visibility_state: Box::new(visibility_plan.next_visibility_state),
             next_capability_base_filter,
             next_active_visibility_revision,
-            tool_visibility_delta: Box::new(tool_visibility_delta),
+            tool_visibility_delta: Box::new(visibility_plan.tool_visibility_delta),
         })
     }
 
@@ -244,13 +343,10 @@ impl MeerkatMachine {
         session_id: &SessionId,
         previous_identity: meerkat_core::SessionLlmIdentity,
         previous_visibility_state: SessionToolVisibilityState,
-        previous_capability_surface: Option<SessionLlmCapabilitySurface>,
-        previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus,
         target_identity: meerkat_core::SessionLlmIdentity,
-        target_capability_surface: SessionLlmCapabilitySurface,
         next_visibility_state: SessionToolVisibilityState,
-        tool_visibility_delta: SessionToolVisibilityDelta,
-    ) -> Result<SessionLlmReconfigureReport, RuntimeDriverError> {
+        authority_plan: SessionLlmReconfigureAuthorityPlan,
+    ) -> Result<SessionLlmReconfigureReport, SessionLlmReconfigureApplyError> {
         let host = self.llm_reconfigure_host()?;
         let runtime_state = self
             .existing_session_runtime_state(session_id)
@@ -260,24 +356,26 @@ impl MeerkatMachine {
             })?;
         if !matches!(
             runtime_state,
-            RuntimeState::Attached | RuntimeState::Running
+            RuntimeState::Idle | RuntimeState::Attached | RuntimeState::Running
         ) {
             return Err(RuntimeDriverError::NotReady {
                 state: runtime_state,
-            });
+            }
+            .into());
         }
 
-        let capability_delta = Self::capability_delta(
-            previous_capability_surface.clone(),
-            Some(target_capability_surface.clone()),
-        );
+        let mut authorized_next_visibility_state = next_visibility_state;
+        authorized_next_visibility_state.capability_base_filter =
+            authority_plan.next_capability_base_filter.clone();
+        authorized_next_visibility_state.active_revision =
+            authority_plan.next_active_visibility_revision;
 
         host.apply_live_session_llm_identity(session_id, &target_identity)
             .await?;
         if let Err(error) = host
             .apply_live_session_tool_visibility_state(
                 session_id,
-                Some(next_visibility_state.clone()),
+                Some(authorized_next_visibility_state.clone()),
             )
             .await
         {
@@ -287,8 +385,6 @@ impl MeerkatMachine {
                     session_id,
                     &previous_identity,
                     &previous_visibility_state,
-                    previous_capability_surface.clone(),
-                    previous_capability_surface_status,
                     error,
                 )
                 .await;
@@ -301,28 +397,19 @@ impl MeerkatMachine {
                     session_id,
                     &previous_identity,
                     &previous_visibility_state,
-                    previous_capability_surface.clone(),
-                    previous_capability_surface_status,
                     error,
                 )
                 .await;
         }
 
-        self.replace_machine_visibility_state(session_id, next_visibility_state)
+        self.replace_machine_visibility_state(session_id, authorized_next_visibility_state)
             .await?;
-        self.set_cached_session_llm_state(
-            session_id,
-            Some(target_identity.clone()),
-            Some(target_capability_surface.clone()),
-            SessionLlmCapabilitySurfaceStatus::Resolved,
-        )
-        .await;
 
         Ok(SessionLlmReconfigureReport {
             previous_identity,
             new_identity: target_identity,
-            capability_delta,
-            tool_visibility_delta,
+            capability_delta: authority_plan.capability_delta,
+            tool_visibility_delta: authority_plan.tool_visibility_delta,
             rollback_occurred: false,
         })
     }

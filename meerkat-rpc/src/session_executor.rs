@@ -270,6 +270,7 @@ fn pending_system_context_appends_from_primitive(
             source: Some(append.key.clone()),
             idempotency_key: Some(append.key.clone()),
             accepted_at,
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
         })
         .collect()
 }
@@ -319,23 +320,6 @@ impl CoreExecutor for SessionRuntimeExecutor {
         run_id: meerkat_core::lifecycle::RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        if let Some(projection) = primitive.turn_metadata().and_then(|metadata| {
-            meerkat::workgraph_attention_projection_from_overlay(
-                metadata.flow_tool_overlay.as_ref(),
-            )
-        }) {
-            meerkat::validate_workgraph_attention_projection_current(
-                &self.runtime.workgraph_service(),
-                &projection,
-            )
-            .await
-            .map_err(|error| {
-                CoreExecutorError::apply_failed_primitive_rejected(format!(
-                    "stale or inactive WorkGraph attention projection: {error}"
-                ))
-            })?;
-        }
-
         if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
             return Err(CoreExecutorError::apply_failed_primitive_rejected(
                 reason.to_string(),
@@ -528,7 +512,9 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
 
         let prompt = primitive.extract_content_input();
         let pre_turn_context_appends = match &primitive {
-            RunPrimitive::StagedInput(staged) if !staged.context_appends.is_empty() => {
+            RunPrimitive::StagedInput(staged)
+                if primitive.is_peer_response_terminal_context_and_run() =>
+            {
                 pending_system_context_appends_from_primitive(&staged.context_appends)
             }
             _ => Vec::new(),

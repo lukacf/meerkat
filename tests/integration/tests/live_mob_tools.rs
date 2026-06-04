@@ -869,14 +869,14 @@ async fn e2e_resume_model_override_recreates_implicit_mob() {
     // Call build_mob_tools directly with model B and the same session_id.
     // This is the path that AgentFactory::build_agent() takes on rebuild.
     let factory = meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(Arc::clone(&mob_state));
+    let authority_context =
+        meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority()
+            .expect("generated create-only mob authority should be accepted");
     let _dispatcher = factory
         .build_mob_tools(meerkat_core::service::MobToolsBuildArgs {
             session_id: session_id.clone(),
             model: model_b.clone(),
-            authority_context: Some(meerkat_core::service::MobToolAuthorityContext::new(
-                meerkat_core::service::OpaquePrincipalToken::new("e2e-resume-override"),
-                true,
-            )),
+            authority_context: Some(authority_context),
             effective_authority: None,
             comms_name: None,
             comms_runtime: None,

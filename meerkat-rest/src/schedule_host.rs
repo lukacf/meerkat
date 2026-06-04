@@ -53,14 +53,7 @@ impl RestScheduleContext {
         &self,
         session_id: &SessionId,
     ) -> Result<(), ScheduleDomainError> {
-        // `service.read()` is the single authoritative liveness+presence
-        // check post-wave-c. Archived and genuinely-missing sessions both
-        // fail to read — both map to "session not found".
-        if self.runtime.session_service.read(session_id).await.is_err() {
-            return Err(ScheduleDomainError::InvalidSchedule(format!(
-                "session not found: {session_id}"
-            )));
-        }
+        self.ensure_session_target_exists(session_id).await?;
 
         let executor = Box::new(RestSessionRuntimeExecutor::new(
             self.runtime.clone(),
@@ -69,7 +62,8 @@ impl RestScheduleContext {
         self.runtime
             .runtime_adapter
             .ensure_session_with_executor(session_id.clone(), executor)
-            .await;
+            .await
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
         Ok(())
     }
 
@@ -81,18 +75,37 @@ impl RestScheduleContext {
             return Ok(TargetProbeOutcome::Ready);
         };
 
-        // `service.read()` is the single authoritative liveness+presence
-        // check post-wave-c. Archived sessions and genuinely-missing
-        // sessions both fail to read; the scheduler treats both as
-        // `Missing`.
+        // `service.read()` is the authoritative liveness+presence check.
+        // Only a typed NotFound can become scheduler Missing; other read
+        // failures are authority failures and must not become lifecycle facts.
         match self.runtime.session_service.read(session_id).await {
             Ok(view) if view.state.is_active => Ok(TargetProbeOutcome::Busy {
                 detail: Some(format!("session still running: {session_id}")),
             }),
             Ok(_) => Ok(TargetProbeOutcome::Ready),
-            Err(_) => Ok(TargetProbeOutcome::Missing {
-                detail: Some(format!("session not found: {session_id}")),
-            }),
+            Err(meerkat_core::service::SessionError::NotFound { .. }) => {
+                Ok(TargetProbeOutcome::Missing {
+                    detail: Some(format!("session not found: {session_id}")),
+                })
+            }
+            Err(error) => Err(ScheduleDomainError::Internal(format!(
+                "failed to read session target {session_id}: {error}"
+            ))),
+        }
+    }
+
+    async fn ensure_session_target_exists(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), ScheduleDomainError> {
+        match self.runtime.session_service.read(session_id).await {
+            Ok(_) => Ok(()),
+            Err(meerkat_core::service::SessionError::NotFound { .. }) => Err(
+                ScheduleDomainError::InvalidSchedule(format!("session not found: {session_id}")),
+            ),
+            Err(error) => Err(ScheduleDomainError::Internal(format!(
+                "failed to read session target {session_id}: {error}"
+            ))),
         }
     }
 
@@ -187,6 +200,28 @@ impl RestScheduleContext {
                 return Err(ScheduleDomainError::Internal(error.to_string()));
             }
         };
+        if let Err(error) = update_peer_ingress_context(self, &result.session_id).await {
+            if let Err(archive_error) = self
+                .runtime
+                .session_service
+                .archive_with_machine_protocol(
+                    &result.session_id,
+                    meerkat::MachineSessionArchiveProtocol::from_machine(
+                        self.runtime.runtime_adapter.as_ref(),
+                    ),
+                )
+                .await
+            {
+                return Err(ScheduleDomainError::Internal(format!(
+                    "schedule create peer ingress update failed ({error}); machine archive cleanup failed: {archive_error}"
+                )));
+            }
+            self.runtime
+                .runtime_adapter
+                .unregister_session(&result.session_id)
+                .await;
+            return Err(error);
+        }
         Ok(result.session_id)
     }
 }
@@ -341,14 +376,27 @@ async fn deliver_scheduled_event(
 }
 
 #[cfg(feature = "comms")]
-async fn update_peer_ingress_context(context: &RestScheduleContext, session_id: &SessionId) {
-    // Post-wave-c the raw `load_persisted` escape hatch is gone.
-    // `SessionInfo` (returned by `service.read()`) does not surface
-    // `keep_alive`, so we default to `false` — matches the pre-retype
-    // `.unwrap_or(false)` fallback. Sessions that need comms-driven
-    // keep-alive configure it through the canonical
-    // `SessionBuildOptions.keep_alive` on create.
-    let keep_alive = false;
+async fn update_peer_ingress_context(
+    context: &RestScheduleContext,
+    session_id: &SessionId,
+) -> Result<(), ScheduleDomainError> {
+    let session = context
+        .runtime
+        .session_service
+        .load_authoritative_session(session_id)
+        .await
+        .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
+        .ok_or_else(|| {
+            ScheduleDomainError::InvalidSchedule(format!("session not found: {session_id}"))
+        })?;
+    let keep_alive = session
+        .session_metadata()
+        .ok_or_else(|| {
+            ScheduleDomainError::Internal(format!(
+                "session {session_id} is missing session metadata"
+            ))
+        })?
+        .keep_alive;
     let comms_rt = context
         .runtime
         .session_service
@@ -359,10 +407,16 @@ async fn update_peer_ingress_context(context: &RestScheduleContext, session_id: 
         .runtime_adapter
         .update_peer_ingress_context(session_id, keep_alive, comms_rt)
         .await;
+    Ok(())
 }
 
 #[cfg(not(feature = "comms"))]
-async fn update_peer_ingress_context(_context: &RestScheduleContext, _session_id: &SessionId) {}
+async fn update_peer_ingress_context(
+    _context: &RestScheduleContext,
+    _session_id: &SessionId,
+) -> Result<(), ScheduleDomainError> {
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {

@@ -131,11 +131,20 @@ impl meerkat_core::event_injector::SubscribableInjector for CommsEventInjector {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::classify::test_support;
     use crate::inbox::Inbox;
+    use crate::trust::TrustedPeers;
+
+    fn classified_inbox() -> (Inbox, InboxSender) {
+        Inbox::new_classified(test_support::classification_context(
+            TrustedPeers::new(),
+            false,
+        ))
+    }
 
     #[test]
     fn test_comms_event_injector_sends_to_inbox() {
-        let (mut inbox, sender) = Inbox::new();
+        let (mut inbox, sender) = classified_inbox();
         let injector = CommsEventInjector::new(sender, new_subscriber_registry());
 
         injector
@@ -147,9 +156,9 @@ mod tests {
             )
             .unwrap();
 
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert_eq!(items.len(), 1);
-        match &items[0] {
+        match &items[0].item {
             InboxItem::PlainEvent { body, source, .. } => {
                 assert_eq!(body, "hello");
                 assert_eq!(*source, PlainEventSource::Tcp);
@@ -160,8 +169,10 @@ mod tests {
 
     #[test]
     fn test_comms_event_injector_reports_full() {
-        // Create inbox with capacity 1 and fill it
-        let (_inbox, sender) = Inbox::new_with_capacity(1);
+        let (_inbox, sender) = Inbox::new_classified_with_capacity_for_test(
+            test_support::classification_context(TrustedPeers::new(), false),
+            1,
+        );
         let injector = CommsEventInjector::new(sender, new_subscriber_registry());
 
         // First should succeed
@@ -191,7 +202,7 @@ mod tests {
     fn test_comms_event_injector_as_dyn() {
         use std::sync::Arc;
 
-        let (mut inbox, sender) = Inbox::new();
+        let (mut inbox, sender) = classified_inbox();
         let injector: Arc<dyn EventInjector> =
             Arc::new(CommsEventInjector::new(sender, new_subscriber_registry()));
 
@@ -204,7 +215,7 @@ mod tests {
             )
             .unwrap();
 
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert_eq!(items.len(), 1);
     }
 
@@ -213,7 +224,7 @@ mod tests {
         use meerkat_core::event_injector::SubscribableInjector;
 
         let registry = new_subscriber_registry();
-        let (mut inbox, sender) = Inbox::new();
+        let (mut inbox, sender) = classified_inbox();
         let injector = CommsEventInjector::new(sender, registry.clone());
 
         let sub = injector
@@ -226,9 +237,9 @@ mod tests {
             .unwrap();
 
         // Verify item in inbox has interaction_id
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert_eq!(items.len(), 1);
-        match &items[0] {
+        match &items[0].item {
             InboxItem::PlainEvent {
                 body,
                 interaction_id,
@@ -249,7 +260,10 @@ mod tests {
         use meerkat_core::event_injector::SubscribableInjector;
 
         let registry = new_subscriber_registry();
-        let (_inbox, sender) = Inbox::new_with_capacity(1);
+        let (_inbox, sender) = Inbox::new_classified_with_capacity_for_test(
+            test_support::classification_context(TrustedPeers::new(), false),
+            1,
+        );
         let injector = CommsEventInjector::new(sender, registry.clone());
 
         // Fill the inbox

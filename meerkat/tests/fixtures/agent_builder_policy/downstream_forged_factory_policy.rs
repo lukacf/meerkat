@@ -35,11 +35,10 @@ async fn forged_factory_policy_entrypoint() {
         .set_build_state(SessionBuildState::default())
         .expect("compile-only build state serializes");
 
+    let turn_state_handle: Arc<dyn meerkat_core::TurnStateHandle> = fabricated();
     let builder = AgentBuilder::new()
         .resume_session(session)
-        .with_turn_state_handle(Arc::new(
-            meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle::new(),
-        ));
+        .with_turn_state_handle(turn_state_handle);
 
     let client: Arc<dyn AgentLlmClient> = fabricated();
     let tools: Arc<dyn AgentToolDispatcher> = fabricated();

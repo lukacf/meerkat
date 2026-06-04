@@ -130,7 +130,7 @@ async fn inner_test_rest_resume_metadata() {
         #[cfg(feature = "mcp")]
         mcp_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         token_store: Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
-        auth_lease: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new()),
+        auth_lease: runtime_adapter.generated_auth_lease_handle(),
         provider_registry,
     };
 
@@ -257,7 +257,7 @@ async fn inner_test_rest_resume_metadata() {
         config_runtime: config_runtime_resume,
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
         skill_runtime: None,
-        runtime_adapter: runtime_adapter2,
+        runtime_adapter: runtime_adapter2.clone(),
         runtime_pre_admissions: meerkat_rest::default_rest_runtime_pre_admissions(),
         runtime_registration_locks: meerkat_rest::default_rest_runtime_registration_locks(),
         schedule_host: Arc::default(),
@@ -269,7 +269,7 @@ async fn inner_test_rest_resume_metadata() {
         #[cfg(feature = "mcp")]
         mcp_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         token_store: Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
-        auth_lease: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new()),
+        auth_lease: runtime_adapter2.generated_auth_lease_handle(),
         provider_registry: provider_registry2,
     };
 

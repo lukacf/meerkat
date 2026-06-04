@@ -169,6 +169,10 @@ fn peer_endpoint_structural_fields(
                         "PeerEndpoint.{} must be a typed named field, got String",
                         field.name
                     )),
+                    TypePathStructFieldAtom::OptionalNamed(name) => Err(format!(
+                        "PeerEndpoint.{} must be a required named field, got Option<{name}>",
+                        field.name
+                    )),
                 })
                 .collect()
         }

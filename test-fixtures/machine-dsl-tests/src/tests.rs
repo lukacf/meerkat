@@ -94,17 +94,17 @@ mod e2e_tla {
     #[test]
     fn runtime_dispatch_full_cycle() {
         let mut auth = TurnstileAuthority::new();
-        assert_eq!(auth.state.phase(), TurnstilePhase::Locked);
+        assert_eq!(auth.state().phase(), TurnstilePhase::Locked);
 
         // Insert coin → Unlocked
         let r = TurnstileMutator::apply(&mut auth, TurnstileInput::InsertCoin).unwrap();
         assert_eq!(r.to_phase, TurnstilePhase::Unlocked);
-        assert_eq!(auth.state.coin_count, 1);
+        assert_eq!(auth.state().coin_count, 1);
 
         // Push → Locked (person passes)
         let r = TurnstileMutator::apply(&mut auth, TurnstileInput::Push).unwrap();
         assert_eq!(r.to_phase, TurnstilePhase::Locked);
-        assert_eq!(auth.state.pass_count, 1);
+        assert_eq!(auth.state().pass_count, 1);
 
         // Push while locked → stays Locked (rejected)
         let r = TurnstileMutator::apply(&mut auth, TurnstileInput::Push).unwrap();
@@ -361,7 +361,7 @@ mod traffic_light {
     #[test]
     fn initial_state_is_green() {
         let auth = TrafficLightAuthority::new();
-        assert_eq!(auth.state.phase(), TrafficPhase::Green);
+        assert_eq!(auth.state().phase(), TrafficPhase::Green);
     }
 
     #[test]
@@ -388,7 +388,7 @@ mod traffic_light {
         let mut auth = TrafficLightAuthority::new();
         TrafficLightMutator::apply(&mut auth, TrafficInput::Toggle).unwrap();
         TrafficLightMutator::apply(&mut auth, TrafficInput::Toggle).unwrap();
-        assert_eq!(auth.state.phase(), TrafficPhase::Green);
+        assert_eq!(auth.state().phase(), TrafficPhase::Green);
     }
 
     // ---- Schema direction tests ----
@@ -519,7 +519,7 @@ mod counter {
     fn initial_state_is_stopped() {
         // active=false → phase projection returns Stopped
         let auth = CounterAuthority::new();
-        assert_eq!(auth.state.phase(), CounterPhase::Stopped);
+        assert_eq!(auth.state().phase(), CounterPhase::Stopped);
     }
 
     #[test]
@@ -531,7 +531,7 @@ mod counter {
 
         let r = CounterMutator::apply(&mut auth, CounterInput::Increment { amount: 3 }).unwrap();
         assert_eq!(r.to_phase, CounterPhase::Counting);
-        assert_eq!(auth.state.value, 3);
+        assert_eq!(auth.state().value, 3);
     }
 
     #[test]
@@ -540,7 +540,7 @@ mod counter {
         CounterMutator::apply(&mut auth, CounterInput::Start).unwrap();
         let r = CounterMutator::apply(&mut auth, CounterInput::Increment { amount: 15 }).unwrap();
         assert_eq!(r.to_phase, CounterPhase::AtLimit);
-        assert_eq!(auth.state.value, 10); // clamped to limit
+        assert_eq!(auth.state().value, 10); // clamped to limit
         assert_eq!(
             r.effects,
             vec![CounterEffect::LimitReached {
@@ -566,7 +566,7 @@ mod counter {
     #[test]
     fn cannot_increment_when_stopped() {
         let auth = CounterAuthority::new();
-        assert_eq!(auth.state.phase(), CounterPhase::Stopped);
+        assert_eq!(auth.state().phase(), CounterPhase::Stopped);
         let mut auth = auth;
         let r = CounterMutator::apply(&mut auth, CounterInput::Increment { amount: 1 });
         assert!(r.is_err());
@@ -855,10 +855,10 @@ mod order_lifecycle {
     #[test]
     fn initial_state_is_draft() {
         let auth = OrderLifecycleAuthority::new();
-        assert_eq!(auth.state.phase(), OrderPhase::Draft);
-        assert_eq!(auth.state.item_count, 0);
-        assert_eq!(auth.state.tags.len(), 0);
-        assert_eq!(auth.state.metadata.len(), 0);
+        assert_eq!(auth.state().phase(), OrderPhase::Draft);
+        assert_eq!(auth.state().item_count, 0);
+        assert_eq!(auth.state().tags.len(), 0);
+        assert_eq!(auth.state().metadata.len(), 0);
     }
 
     #[test]
@@ -866,8 +866,8 @@ mod order_lifecycle {
         let mut auth = OrderLifecycleAuthority::new();
         OrderLifecycleMutator::apply(&mut auth, OrderInput::AddItem { price: 100 }).unwrap();
         OrderLifecycleMutator::apply(&mut auth, OrderInput::AddItem { price: 200 }).unwrap();
-        assert_eq!(auth.state.item_count, 2);
-        assert_eq!(auth.state.total_price, 300);
+        assert_eq!(auth.state().item_count, 2);
+        assert_eq!(auth.state().total_price, 300);
 
         let r = OrderLifecycleMutator::apply(&mut auth, OrderInput::Submit).unwrap();
         assert_eq!(r.to_phase, OrderPhase::Submitted);
@@ -897,7 +897,7 @@ mod order_lifecycle {
             },
         )
         .unwrap();
-        assert_eq!(auth.state.assigned_to, Some("alice".into()));
+        assert_eq!(auth.state().assigned_to, Some("alice".into()));
 
         OrderLifecycleMutator::apply(
             &mut auth,
@@ -907,9 +907,9 @@ mod order_lifecycle {
             },
         )
         .unwrap();
-        assert_eq!(auth.state.paid_at, Some(1000));
+        assert_eq!(auth.state().paid_at, Some(1000));
         assert_eq!(
-            auth.state.metadata.get("receipt"),
+            auth.state().metadata.get("receipt"),
             Some(&"rcpt-1".to_string())
         );
 
@@ -922,7 +922,7 @@ mod order_lifecycle {
         .unwrap();
         assert_eq!(r.to_phase, OrderPhase::Completed);
         assert_eq!(
-            auth.state.metadata.get("completion_note"),
+            auth.state().metadata.get("completion_note"),
             Some(&"done".to_string())
         );
     }
@@ -948,9 +948,9 @@ mod order_lifecycle {
         )
         .unwrap();
         assert_eq!(r.to_phase, OrderPhase::Cancelled);
-        assert_eq!(auth.state.assigned_to, None);
-        assert_eq!(auth.state.paid_at, None);
-        assert_eq!(auth.state.failure_reason, Some("changed mind".into()));
+        assert_eq!(auth.state().assigned_to, None);
+        assert_eq!(auth.state().paid_at, None);
+        assert_eq!(auth.state().failure_reason, Some("changed mind".into()));
     }
 
     #[test]
@@ -963,7 +963,7 @@ mod order_lifecycle {
             },
         )
         .unwrap();
-        assert!(auth.state.tags.contains("urgent"));
+        assert!(auth.state().tags.contains("urgent"));
 
         // Can't add duplicate
         let r = OrderLifecycleMutator::apply(
@@ -980,13 +980,13 @@ mod order_lifecycle {
         let mut auth = OrderLifecycleAuthority::new();
         OrderLifecycleMutator::apply(&mut auth, OrderInput::AddItem { price: 10 }).unwrap();
         OrderLifecycleMutator::apply(&mut auth, OrderInput::Submit).unwrap();
-        assert_eq!(auth.state.attempt_count, 1);
+        assert_eq!(auth.state().attempt_count, 1);
 
         OrderLifecycleMutator::apply(&mut auth, OrderInput::Retry).unwrap();
-        assert_eq!(auth.state.attempt_count, 2);
+        assert_eq!(auth.state().attempt_count, 2);
 
         OrderLifecycleMutator::apply(&mut auth, OrderInput::Retry).unwrap();
-        assert_eq!(auth.state.attempt_count, 3);
+        assert_eq!(auth.state().attempt_count, 3);
 
         // At limit — should fail
         let r = OrderLifecycleMutator::apply(&mut auth, OrderInput::Retry);
@@ -1005,7 +1005,7 @@ mod order_lifecycle {
         )
         .unwrap();
         assert_eq!(
-            auth.state.metadata.get("priority"),
+            auth.state().metadata.get("priority"),
             Some(&"high".to_string())
         );
     }
@@ -1020,7 +1020,10 @@ mod order_lifecycle {
             .apply_signal(OrderSignal::ExternalValidation { valid: false })
             .unwrap();
         assert_eq!(r.to_phase, OrderPhase::Cancelled);
-        assert_eq!(auth.state.failure_reason, Some("validation_failed".into()));
+        assert_eq!(
+            auth.state().failure_reason,
+            Some("validation_failed".into())
+        );
     }
 
     #[test]

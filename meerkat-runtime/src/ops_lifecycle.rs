@@ -2,20 +2,19 @@
 //!
 //! Per-operation canonical lifecycle state lives in the MeerkatMachine DSL
 //! authority (`op_statuses`, `op_terminal_outcomes`, `op_kinds`,
-//! `op_peer_ready`, `op_progress_counts`, `active_op_count`, `wait_active`,
-//! `wait_operation_ids`). This shell layer owns pure mechanics: watcher
+//! `op_sources`, `op_peer_ready`, `op_progress_counts`, `active_op_count`,
+//! `wait_active`, `wait_operation_ids`). This shell layer owns pure mechanics: watcher
 //! channels, timestamps, peer handles, snapshot assembly, FIFO eviction
-//! bookkeeping, the completion feed buffer, and concurrency-limit / duplicate
-//! / peer-expectation admission checks run BEFORE the DSL apply.
+//! bookkeeping, the completion feed buffer, and typed delivery of generated
+//! admission/rejection feedback.
 //!
 //! Per-transition legality ("is `CompleteOp` legal on a `Provisioning` op?")
 //! is NOT owned by the shell — it lives in the DSL's `from_status_valid`
 //! guards on each op-lifecycle transition. The shell's only job on a
-//! `GuardRejected` rejection is to surface the pre-read status back to the
-//! caller as [`OpsLifecycleError::InvalidTransition`]; see
-//! [`classify_op_rejection`].
+//! `GuardRejected` rejection is to ask the generated rejection resolver for
+//! the public result class.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -29,12 +28,15 @@ use meerkat_core::completion_feed::{
 use crate::tokio;
 use meerkat_core::lifecycle::{RunId, WaitRequestId};
 use meerkat_core::ops_lifecycle::{
-    DEFAULT_MAX_COMPLETED, OperationCompletionWatch, OperationId, OperationKind,
-    OperationLifecycleSnapshot, OperationPeerHandle, OperationProgressUpdate, OperationResult,
-    OperationSpec, OperationStatus, OperationTerminalOutcome, OpsLifecycleError,
-    OpsLifecycleRegistry, WaitAllResult, WaitAllSatisfied,
+    CompletionCursorConsumer, DEFAULT_MAX_COMPLETED, OperationCompletionWakeClass,
+    OperationCompletionWatch, OperationId, OperationKind, OperationLifecycleAction,
+    OperationLifecycleSnapshot, OperationPeerHandle, OperationProgressUpdate,
+    OperationPublicResultClass, OperationResult, OperationSource, OperationSpec, OperationStatus,
+    OperationTerminalOutcome, OpsLifecycleError, OpsLifecycleRegistry, WaitAllResult,
+    WaitAllSatisfied,
 };
 use meerkat_core::time_compat::{Instant, SystemTime, UNIX_EPOCH};
+use meerkat_core::types::SessionId;
 
 use crate::meerkat_machine::dsl as mm_dsl;
 
@@ -42,26 +44,50 @@ use crate::meerkat_machine::dsl as mm_dsl;
 // Serde-only persisted canonical state shells
 // ---------------------------------------------------------------------------
 //
-// These structures preserve the on-disk wire format of `PersistedOpsSnapshot`
-// produced by earlier runtime versions. They are pure serde shells — no
-// methods beyond read-only field accessors, no authority behavior.
+// These structures preserve the persisted fact shape of `PersistedOpsSnapshot`.
+// They are pure serde shells — no methods beyond read-only field accessors,
+// no authority behavior. Optional generated facts that can be explicitly
+// absent still serialize as present `null` so recovery can distinguish
+// generated "none" from a missing persisted fact.
+
+fn deserialize_required_operation_source<'de, D>(
+    deserializer: D,
+) -> Result<Option<OperationSource>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <Option<OperationSource> as serde::Deserialize>::deserialize(deserializer)
+}
 
 /// Canonical per-operation state as captured in persisted snapshots.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OperationCanonicalState {
     status: OperationStatus,
     kind: OperationKind,
+    #[serde(deserialize_with = "deserialize_required_operation_source")]
+    operation_source: Option<OperationSource>,
     peer_ready: bool,
     progress_count: u32,
     watcher_count: u32,
     terminal_outcome: Option<OperationTerminalOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completion_sequence: Option<CompletionSeq>,
     terminal_buffered: bool,
+}
+
+/// Generated-owned public completion feed fact captured from DSL authority.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CompletionFeedCanonicalState {
+    seq: CompletionSeq,
+    kind: OperationKind,
+    terminal_outcome: OperationTerminalOutcome,
 }
 
 /// Canonical registry-level state as captured in persisted snapshots.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RegistryCanonicalState {
     operations: HashMap<OperationId, OperationCanonicalState>,
+    completion_feed_entries: HashMap<OperationId, CompletionFeedCanonicalState>,
     completed_order: VecDeque<OperationId>,
     max_completed: usize,
     max_concurrent: Option<usize>,
@@ -86,6 +112,11 @@ impl RegistryCanonicalState {
     pub fn operation_count(&self) -> usize {
         self.operations.len()
     }
+
+    /// Number of generated-owned public completion feed entries captured.
+    pub fn completion_feed_count(&self) -> usize {
+        self.completion_feed_entries.len()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -106,7 +137,8 @@ pub struct PersistedOpsSnapshot {
     pub authority_state: RegistryCanonicalState,
     /// Per-operation specs for shell record reconstruction.
     pub operation_specs: HashMap<OperationId, meerkat_core::ops_lifecycle::OperationSpec>,
-    /// Persisted completion feed entries (actual contents, not reconstructed).
+    /// Persisted completion feed projection metadata. Canonical feed truth is
+    /// captured in `authority_state.completion_feed_entries`.
     pub completion_entries: Vec<CompletionEntry>,
     /// Consumer cursor snapshot at capture time.
     pub cursors: meerkat_core::EpochCursorSnapshot,
@@ -245,6 +277,36 @@ impl CompletionFeed for RuntimeCompletionFeed {
 // Shell-only per-operation record (not part of canonical machine state)
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
+struct OperationCompletionNotifier {
+    tx: tokio::sync::oneshot::Sender<OperationTerminalOutcome>,
+}
+
+impl OperationCompletionNotifier {
+    fn new(tx: tokio::sync::oneshot::Sender<OperationTerminalOutcome>) -> Self {
+        Self { tx }
+    }
+
+    fn notify_after_generated_terminal(self, outcome: &OperationTerminalOutcome) {
+        let _ = self.tx.send(outcome.clone());
+    }
+}
+
+fn operation_completion_watch_from_receiver(
+    rx: tokio::sync::oneshot::Receiver<OperationTerminalOutcome>,
+) -> OperationCompletionWatch {
+    Box::pin(async move {
+        rx.await
+            .map_err(|_| meerkat_core::ops_lifecycle::OperationCompletionWatchError::ChannelClosed)
+    })
+}
+
+fn resolved_operation_completion_watch(
+    outcome: OperationTerminalOutcome,
+) -> OperationCompletionWatch {
+    Box::pin(async move { Ok(outcome) })
+}
+
 /// Shell-owned data for a single operation. Canonical lifecycle state lives in
 /// the DSL authority; this struct holds I/O concerns that the DSL has no
 /// knowledge of.
@@ -252,7 +314,10 @@ impl CompletionFeed for RuntimeCompletionFeed {
 struct ShellRecord {
     spec: OperationSpec,
     peer_handle: Option<OperationPeerHandle>,
-    watchers: Vec<tokio::sync::oneshot::Sender<OperationTerminalOutcome>>,
+    /// Private waiter plumbing. Notifiers are drained only from
+    /// `finalize_terminal()` after the generated authority has accepted and
+    /// stored a terminal outcome.
+    watchers: Vec<OperationCompletionNotifier>,
     // Monotonic timestamps for elapsed computation
     created_at: Instant,
     started_at: Option<Instant>,
@@ -270,6 +335,12 @@ struct PendingWaitState {
 enum WaitAllAuthorityPlan {
     AlreadySatisfied(WaitAllSatisfied),
     ActivateBarrier,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveredOperationRecordDisposition {
+    Retain,
+    Discard,
 }
 
 impl ShellRecord {
@@ -303,7 +374,7 @@ impl ShellRecord {
     /// Notify all watchers with the given terminal outcome and drain the list.
     fn notify_watchers(&mut self, outcome: &OperationTerminalOutcome) {
         for watcher in std::mem::take(&mut self.watchers) {
-            let _ = watcher.send(outcome.clone());
+            watcher.notify_after_generated_terminal(outcome);
         }
     }
 
@@ -337,8 +408,6 @@ struct ShellState {
     /// are DSL-owned. This field is pure transport mechanics — the identity
     /// the oneshot sender is tagged with so `Drop` can correlate cancellation.
     wait_request_id: Option<WaitRequestId>,
-    /// Monotonic sequence counter for completion feed entries.
-    next_completion_seq: CompletionSeq,
     /// Shared feed buffer for completion events.
     feed_buffer: Arc<FeedBuffer>,
     /// Persistence channel for durable snapshot writes (set via `set_persistence_channel`).
@@ -354,44 +423,52 @@ struct ShellState {
 /// The generated `MeerkatMachineAuthority` does not derive `Debug`, but
 /// `ShellState` requires it. This wrapper delegates to the inner state's
 /// `Debug` impl.
-struct DslAuthority(mm_dsl::MeerkatMachineAuthority);
+struct DslAuthority(Box<mm_dsl::MeerkatMachineAuthority>);
 
 impl std::fmt::Debug for DslAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DslAuthority")
-            .field("state", &self.0.state)
+            .field("state", self.0.state())
             .finish()
     }
 }
 
-/// Create a DSL authority initialized with `lifecycle_phase: Idle` and all
-/// ops-related fields at their defaults. Per-op transitions guard only on
-/// `op_statuses.contains_key(operation_id)`, so the phase stays in `Idle`
-/// permanently (they all `to Idle`).
+/// Create a DSL authority initialized through generated authority. Per-op
+/// transitions guard only on `op_statuses.contains_key(operation_id)`, so the
+/// phase stays in `Idle` permanently (they all `to Idle`).
 fn new_ops_dsl_authority() -> DslAuthority {
-    let state = mm_dsl::MeerkatMachineState {
-        lifecycle_phase: mm_dsl::MeerkatPhase::Idle,
-        ..mm_dsl::MeerkatMachineState::default()
-    };
-    DslAuthority(mm_dsl::MeerkatMachineAuthority::from_state(state))
+    DslAuthority(Box::new(
+        crate::meerkat_machine::dsl_authority::new_initialized_authority(
+            "ops lifecycle DSL Initialize must be accepted",
+        ),
+    ))
 }
 
 impl ShellState {
     fn new(max_completed: usize, max_concurrent: Option<usize>) -> Self {
+        tracing::info!("RuntimeOpsLifecycleRegistry::ShellState creating dsl");
+        let dsl = new_ops_dsl_authority();
+        tracing::info!("RuntimeOpsLifecycleRegistry::ShellState created dsl");
+        let feed_capacity = max_completed.saturating_mul(4).max(1024);
+        tracing::info!(
+            feed_capacity,
+            "RuntimeOpsLifecycleRegistry::ShellState creating feed buffer"
+        );
+        let feed_buffer = Arc::new(FeedBuffer::new(feed_capacity));
+        tracing::info!("RuntimeOpsLifecycleRegistry::ShellState created feed buffer");
         Self {
-            dsl: new_ops_dsl_authority(),
+            dsl,
             records: HashMap::new(),
             pending_wait: None,
             completed_order: VecDeque::new(),
             max_completed,
             max_concurrent,
             wait_request_id: None,
-            next_completion_seq: 0,
             // Feed buffer is larger than max_completed to absorb bursts.
             // Entries are only evicted by buffer capacity, not by consumer cursor,
             // so the buffer must be large enough that consumers drain before
             // the oldest entry is evicted.
-            feed_buffer: Arc::new(FeedBuffer::new(max_completed.saturating_mul(4).max(1024))),
+            feed_buffer,
             persist_tx: None,
             persist_epoch_id: None,
             persist_cursor_state: None,
@@ -417,15 +494,28 @@ impl ShellState {
     /// Apply a DSL input, returning the raw kernel-level rejection so callers
     /// can distinguish `GuardRejected` (a legitimate legality violation, e.g.,
     /// `complete_operation` on a `Provisioning` op) from
-    /// `NoMatchingTransition` (a shell/DSL desync). Every op-lifecycle entry
-    /// point (complete/fail/abort/cancel/start/retire/terminate/progress)
-    /// uses this form and synthesises [`OpsLifecycleError::InvalidTransition`]
-    /// on `GuardRejected`.
+    /// `NoMatchingTransition` (a shell/DSL desync). Op-lifecycle entry points
+    /// feed guard rejections into generated rejection feedback before surfacing
+    /// public result classes.
     fn dsl_apply_raw(
         &mut self,
         input: mm_dsl::MeerkatMachineInput,
     ) -> Result<(), mm_dsl::MeerkatMachineTransitionError> {
-        mm_dsl::MeerkatMachineMutator::apply(&mut self.dsl.0, input).map(|_transition| ())
+        mm_dsl::MeerkatMachineMutator::apply(&mut *self.dsl.0, input).map(|_transition| ())
+    }
+
+    fn dsl_apply_with_effects(
+        &mut self,
+        input: mm_dsl::MeerkatMachineInput,
+        context: &str,
+    ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, OpsLifecycleError> {
+        let transition =
+            mm_dsl::MeerkatMachineMutator::apply(&mut *self.dsl.0, input).map_err(|err| {
+                OpsLifecycleError::Internal(format!(
+                    "DSL rejected ops transition ({context}): {err:?}"
+                ))
+            })?;
+        Ok(transition.into_effects())
     }
 
     /// Split a domain terminal outcome into a `(discriminant, payload)` pair
@@ -471,16 +561,86 @@ impl ShellState {
         }
     }
 
+    fn terminal_outcome_from_parts(
+        kind: mm_dsl::OperationTerminalOutcomeKind,
+        payload: &str,
+        authority: &str,
+        operation_id: &str,
+    ) -> Result<OperationTerminalOutcome, OpsLifecycleError> {
+        match kind {
+            mm_dsl::OperationTerminalOutcomeKind::Completed => {
+                serde_json::from_str::<OperationResult>(payload)
+                    .map(OperationTerminalOutcome::Completed)
+                    .map_err(|error| {
+                        OpsLifecycleError::Internal(format!(
+                            "{authority} has invalid Completed payload for {operation_id}: {error}"
+                        ))
+                    })
+            }
+            mm_dsl::OperationTerminalOutcomeKind::Failed => serde_json::from_str::<String>(payload)
+                .map(|error| OperationTerminalOutcome::Failed { error })
+                .map_err(|error| {
+                    OpsLifecycleError::Internal(format!(
+                        "{authority} has invalid Failed payload for {operation_id}: {error}"
+                    ))
+                }),
+            mm_dsl::OperationTerminalOutcomeKind::Aborted => {
+                serde_json::from_str::<Option<String>>(payload)
+                    .map(|reason| OperationTerminalOutcome::Aborted { reason })
+                    .map_err(|error| {
+                        OpsLifecycleError::Internal(format!(
+                            "{authority} has invalid Aborted payload for {operation_id}: {error}"
+                        ))
+                    })
+            }
+            mm_dsl::OperationTerminalOutcomeKind::Cancelled => {
+                serde_json::from_str::<Option<String>>(payload)
+                    .map(|reason| OperationTerminalOutcome::Cancelled { reason })
+                    .map_err(|error| {
+                        OpsLifecycleError::Internal(format!(
+                            "{authority} has invalid Cancelled payload for {operation_id}: {error}"
+                        ))
+                    })
+            }
+            mm_dsl::OperationTerminalOutcomeKind::Retired => {
+                if payload.is_empty() {
+                    Ok(OperationTerminalOutcome::Retired)
+                } else {
+                    Err(OpsLifecycleError::Internal(format!(
+                        "{authority} has non-empty Retired payload for {operation_id}"
+                    )))
+                }
+            }
+            mm_dsl::OperationTerminalOutcomeKind::Terminated => {
+                serde_json::from_str::<String>(payload)
+                    .map(|reason| OperationTerminalOutcome::Terminated { reason })
+                    .map_err(|error| {
+                        OpsLifecycleError::Internal(format!(
+                            "{authority} has invalid Terminated payload for {operation_id}: {error}"
+                        ))
+                    })
+            }
+        }
+    }
+
     /// Read the DSL operation status for `id`, or `None` if not registered.
     fn status(&self, id: &OperationId) -> Option<OperationStatus> {
         let id_key = mm_dsl::OperationId::from_domain(id).0;
         self.dsl
             .0
-            .state
+            .state()
             .op_statuses
             .get(&id_key)
             .copied()
             .map(OperationStatus::from)
+    }
+
+    fn require_status(&self, id: &OperationId) -> Result<OperationStatus, OpsLifecycleError> {
+        self.status(id).ok_or_else(|| {
+            OpsLifecycleError::Internal(format!(
+                "generated op lifecycle authority missing status for {id}"
+            ))
+        })
     }
 
     /// Read the DSL operation kind for `id`, or `None` if not registered.
@@ -488,17 +648,69 @@ impl ShellState {
         let id_key = mm_dsl::OperationId::from_domain(id).0;
         self.dsl
             .0
-            .state
+            .state()
             .op_kinds
             .get(&id_key)
             .copied()
             .map(OperationKind::from)
     }
 
+    fn require_kind(&self, id: &OperationId) -> Result<OperationKind, OpsLifecycleError> {
+        self.kind(id).ok_or_else(|| {
+            OpsLifecycleError::Internal(format!(
+                "generated op lifecycle authority missing kind for {id}"
+            ))
+        })
+    }
+
+    fn operation_source(
+        &self,
+        id: &OperationId,
+    ) -> Result<Option<OperationSource>, OpsLifecycleError> {
+        let id_key = mm_dsl::OperationId::from_domain(id).0;
+        self.dsl
+            .0
+            .state()
+            .op_sources
+            .get(&id_key)
+            .map(|source| {
+                source.to_domain().map_err(|error| {
+                    OpsLifecycleError::Internal(format!(
+                        "generated operation source authority has invalid source for {id}: {error}"
+                    ))
+                })
+            })
+            .transpose()
+    }
+
+    fn child_session_id_from_operation_source(
+        operation_source: Option<&OperationSource>,
+    ) -> Option<SessionId> {
+        match operation_source {
+            Some(OperationSource::SessionChild { session_id }) => Some(session_id.clone()),
+            Some(OperationSource::BackendPeer { .. }) | None => None,
+        }
+    }
+
+    fn align_spec_child_session_id_to_source(
+        spec: &mut OperationSpec,
+        operation_source: Option<&OperationSource>,
+    ) {
+        spec.child_session_id = Self::child_session_id_from_operation_source(operation_source);
+    }
+
     /// Read the peer-ready flag for `id`.
     fn peer_ready(&self, id: &OperationId) -> Option<bool> {
         let id_key = mm_dsl::OperationId::from_domain(id).0;
-        self.dsl.0.state.op_peer_ready.get(&id_key).copied()
+        self.dsl.0.state().op_peer_ready.get(&id_key).copied()
+    }
+
+    fn require_peer_ready(&self, id: &OperationId) -> Result<bool, OpsLifecycleError> {
+        self.peer_ready(id).ok_or_else(|| {
+            OpsLifecycleError::Internal(format!(
+                "generated op peer wiring authority missing peer-ready fact for {id}"
+            ))
+        })
     }
 
     /// Read the progress counter for `id`.
@@ -506,104 +718,279 @@ impl ShellState {
         let id_key = mm_dsl::OperationId::from_domain(id).0;
         self.dsl
             .0
-            .state
+            .state()
             .op_progress_counts
             .get(&id_key)
             .map(|v| (*v).min(u32::MAX as u64) as u32)
     }
 
+    fn require_progress_count(&self, id: &OperationId) -> Result<u32, OpsLifecycleError> {
+        self.progress_count(id).ok_or_else(|| {
+            OpsLifecycleError::Internal(format!(
+                "generated op progress authority missing progress count for {id}"
+            ))
+        })
+    }
+
     /// Read the terminal outcome for `id` by pairing the DSL's typed
     /// discriminant with the companion payload JSON. Returns `None` when the
     /// op has no recorded terminal discriminant.
-    fn terminal_outcome(&self, id: &OperationId) -> Option<OperationTerminalOutcome> {
+    fn terminal_outcome(
+        &self,
+        id: &OperationId,
+    ) -> Result<Option<OperationTerminalOutcome>, OpsLifecycleError> {
         let id_key = mm_dsl::OperationId::from_domain(id).0;
-        let kind = self
-            .dsl
-            .0
-            .state
-            .op_terminal_outcomes
-            .get(&id_key)
-            .copied()?;
-        let payload = self
-            .dsl
-            .0
-            .state
+        let state = self.dsl.0.state();
+        let status = self.status(id);
+        let terminal = match status {
+            Some(status) => Self::operation_status_is_terminal(id, status)?,
+            None => false,
+        };
+        let kind = state.op_terminal_outcomes.get(&id_key).copied();
+        let Some(kind) = kind else {
+            if terminal {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "generated op terminal authority missing terminal outcome for {id}"
+                )));
+            }
+            return Ok(None);
+        };
+        if !terminal {
+            return Err(OpsLifecycleError::Internal(format!(
+                "generated op terminal authority has terminal outcome for non-terminal {id}"
+            )));
+        }
+        let payload = state
             .op_terminal_payload
             .get(&id_key)
             .map(String::as_str)
-            .unwrap_or("");
-        match kind {
-            mm_dsl::OperationTerminalOutcomeKind::Completed => {
-                let result = serde_json::from_str::<OperationResult>(payload).ok()?;
-                Some(OperationTerminalOutcome::Completed(result))
-            }
-            mm_dsl::OperationTerminalOutcomeKind::Failed => {
-                let error = serde_json::from_str::<String>(payload).unwrap_or_default();
-                Some(OperationTerminalOutcome::Failed { error })
-            }
-            mm_dsl::OperationTerminalOutcomeKind::Aborted => {
-                let reason = serde_json::from_str::<Option<String>>(payload)
-                    .ok()
-                    .flatten();
-                Some(OperationTerminalOutcome::Aborted { reason })
-            }
-            mm_dsl::OperationTerminalOutcomeKind::Cancelled => {
-                let reason = serde_json::from_str::<Option<String>>(payload)
-                    .ok()
-                    .flatten();
-                Some(OperationTerminalOutcome::Cancelled { reason })
-            }
-            mm_dsl::OperationTerminalOutcomeKind::Retired => {
-                Some(OperationTerminalOutcome::Retired)
-            }
-            mm_dsl::OperationTerminalOutcomeKind::Terminated => {
-                let reason = serde_json::from_str::<String>(payload).unwrap_or_default();
-                Some(OperationTerminalOutcome::Terminated { reason })
-            }
-        }
+            .ok_or_else(|| {
+                OpsLifecycleError::Internal(format!(
+                    "generated op terminal authority missing terminal payload for {id}"
+                ))
+            })?;
+        Self::terminal_outcome_from_parts(kind, payload, "generated op terminal authority", &id_key)
+            .map(Some)
     }
 
     /// Whether the operation is currently tracked in DSL state.
     fn contains(&self, id: &OperationId) -> bool {
         let id_key = mm_dsl::OperationId::from_domain(id).0;
-        self.dsl.0.state.op_statuses.contains_key(&id_key)
+        self.dsl.0.state().op_statuses.contains_key(&id_key)
     }
 
     /// Number of non-terminal operations (derived from DSL state).
     fn active_count(&self) -> usize {
-        self.dsl.0.state.active_op_count as usize
+        self.dsl.0.state().active_op_count as usize
     }
 
     /// Number of operations currently tracked (including terminal).
     fn operation_count(&self) -> usize {
-        self.dsl.0.state.op_statuses.len()
+        self.dsl.0.state().op_statuses.len()
     }
 
     /// Iterate over all tracked operation IDs (DSL keys converted to domain).
-    fn operation_ids(&self) -> Vec<OperationId> {
-        self.dsl
-            .0
-            .state
-            .op_statuses
-            .keys()
-            .filter_map(|k| serde_json::from_str::<OperationId>(k).ok())
-            .collect()
+    fn operation_ids(&self) -> Result<Vec<OperationId>, OpsLifecycleError> {
+        let mut ids = BTreeSet::new();
+        let state = self.dsl.0.state();
+        Self::collect_operation_id_keys(&mut ids, "op_statuses", state.op_statuses.keys())?;
+        Self::collect_operation_id_keys(&mut ids, "op_kinds", state.op_kinds.keys())?;
+        Self::collect_operation_id_keys(&mut ids, "op_sources", state.op_sources.keys())?;
+        Self::collect_operation_id_keys(&mut ids, "op_peer_ready", state.op_peer_ready.keys())?;
+        Self::collect_operation_id_keys(
+            &mut ids,
+            "op_progress_counts",
+            state.op_progress_counts.keys(),
+        )?;
+        Self::collect_operation_id_keys(
+            &mut ids,
+            "op_terminal_outcomes",
+            state.op_terminal_outcomes.keys(),
+        )?;
+        Self::collect_operation_id_keys(
+            &mut ids,
+            "op_terminal_payload",
+            state.op_terminal_payload.keys(),
+        )?;
+        Self::collect_operation_id_keys(
+            &mut ids,
+            "op_completion_seq",
+            state.op_completion_seq.keys(),
+        )?;
+        ids.extend(self.records.keys().cloned());
+        Ok(ids.into_iter().collect())
     }
 
-    /// Assign and return the next completion sequence number.
-    fn next_seq(&mut self) -> CompletionSeq {
-        self.next_completion_seq = self.next_completion_seq.saturating_add(1);
-        self.next_completion_seq
+    fn collect_operation_id_keys<'a, I>(
+        ids: &mut BTreeSet<OperationId>,
+        field: &str,
+        keys: I,
+    ) -> Result<(), OpsLifecycleError>
+    where
+        I: IntoIterator<Item = &'a String>,
+    {
+        for key in keys {
+            let id = serde_json::from_str::<OperationId>(key).map_err(|error| {
+                OpsLifecycleError::Internal(format!(
+                    "generated operation identity authority used invalid operation id key in {field}: {key}: {error}"
+                ))
+            })?;
+            ids.insert(id);
+        }
+        Ok(())
+    }
+
+    fn has_generated_operation_record_fact(&self, id: &OperationId) -> bool {
+        let id_key = mm_dsl::OperationId::from_domain(id).0;
+        let state = self.dsl.0.state();
+        state.op_statuses.contains_key(&id_key)
+            || state.op_kinds.contains_key(&id_key)
+            || state.op_sources.contains_key(&id_key)
+            || state.op_peer_ready.contains_key(&id_key)
+            || state.op_progress_counts.contains_key(&id_key)
+            || state.op_terminal_outcomes.contains_key(&id_key)
+            || state.op_terminal_payload.contains_key(&id_key)
+            || state.op_completion_seq.contains_key(&id_key)
+    }
+
+    /// Read the DSL-minted completion sequence for a terminal operation.
+    fn completion_sequence(&self, id: &OperationId) -> Option<CompletionSeq> {
+        let id_key = mm_dsl::OperationId::from_domain(id).0;
+        self.dsl.0.state().op_completion_seq.get(&id_key).copied()
+    }
+
+    fn completion_feed_authority_entries(
+        &self,
+    ) -> Result<HashMap<OperationId, CompletionFeedCanonicalState>, OpsLifecycleError> {
+        let state = self.dsl.0.state();
+        let sequence_keys: BTreeSet<String> =
+            state.completion_feed_sequences.keys().cloned().collect();
+        let companion_domains: [(&str, BTreeSet<String>); 3] = [
+            (
+                "completion_feed_kinds",
+                state.completion_feed_kinds.keys().cloned().collect(),
+            ),
+            (
+                "completion_feed_terminal_outcomes",
+                state
+                    .completion_feed_terminal_outcomes
+                    .keys()
+                    .cloned()
+                    .collect(),
+            ),
+            (
+                "completion_feed_terminal_payload",
+                state
+                    .completion_feed_terminal_payload
+                    .keys()
+                    .cloned()
+                    .collect(),
+            ),
+        ];
+        for (field, keys) in companion_domains {
+            if keys != sequence_keys {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "generated completion feed authority has mismatched {field} domain"
+                )));
+            }
+        }
+
+        let mut entries = HashMap::new();
+        for (id_key, seq) in &state.completion_feed_sequences {
+            if !state.completion_sequence_claims.contains(seq) {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "generated completion feed authority sequence {seq} for {id_key} is not claimed"
+                )));
+            }
+            let operation_id = serde_json::from_str::<OperationId>(id_key).map_err(|error| {
+                OpsLifecycleError::Internal(format!(
+                    "generated completion feed authority used invalid operation id key {id_key}: {error}"
+                ))
+            })?;
+            let kind = state
+                .completion_feed_kinds
+                .get(id_key)
+                .copied()
+                .map(OperationKind::from)
+                .ok_or_else(|| {
+                    OpsLifecycleError::Internal(format!(
+                        "generated completion feed authority missing kind for {id_key}"
+                    ))
+                })?;
+            let outcome_kind = state
+                .completion_feed_terminal_outcomes
+                .get(id_key)
+                .copied()
+                .ok_or_else(|| {
+                    OpsLifecycleError::Internal(format!(
+                        "generated completion feed authority missing terminal outcome for {id_key}"
+                    ))
+                })?;
+            let payload = state
+                .completion_feed_terminal_payload
+                .get(id_key)
+                .ok_or_else(|| {
+                    OpsLifecycleError::Internal(format!(
+                        "generated completion feed authority missing terminal payload for {id_key}"
+                    ))
+                })?;
+            let terminal_outcome = Self::terminal_outcome_from_parts(
+                outcome_kind,
+                payload,
+                "generated completion feed authority",
+                id_key,
+            )?;
+            entries.insert(
+                operation_id,
+                CompletionFeedCanonicalState {
+                    seq: *seq,
+                    kind,
+                    terminal_outcome,
+                },
+            );
+        }
+        Ok(entries)
+    }
+
+    fn completion_cursor(&self, consumer: CompletionCursorConsumer) -> CompletionSeq {
+        let state = self.dsl.0.state();
+        match consumer {
+            CompletionCursorConsumer::AgentApplied => state.completion_agent_applied_cursor,
+            CompletionCursorConsumer::RuntimeObserved => state.completion_runtime_observed_cursor,
+            CompletionCursorConsumer::RuntimeInjected => state.completion_runtime_injected_cursor,
+        }
+    }
+
+    fn completion_cursor_snapshot(&self) -> meerkat_core::EpochCursorSnapshot {
+        meerkat_core::EpochCursorSnapshot {
+            agent_applied_cursor: self.completion_cursor(CompletionCursorConsumer::AgentApplied),
+            runtime_observed_seq: self.completion_cursor(CompletionCursorConsumer::RuntimeObserved),
+            runtime_last_injected_seq: self
+                .completion_cursor(CompletionCursorConsumer::RuntimeInjected),
+        }
     }
 
     /// Build a snapshot from DSL state + shell record.
-    fn snapshot(&self, id: &OperationId) -> Option<OperationLifecycleSnapshot> {
-        let shell = self.records.get(id)?;
-        let kind = self.kind(id)?;
-        let status = self.status(id)?;
-        let peer_ready = self.peer_ready(id).unwrap_or(false);
-        let progress_count = self.progress_count(id).unwrap_or(0);
-        let terminal_outcome = self.terminal_outcome(id);
+    fn snapshot(
+        &self,
+        id: &OperationId,
+    ) -> Result<Option<OperationLifecycleSnapshot>, OpsLifecycleError> {
+        let Some(shell) = self.records.get(id) else {
+            if self.has_generated_operation_record_fact(id) {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "generated op lifecycle authority has operation facts without shell projection record for {id}"
+                )));
+            }
+            return Ok(None);
+        };
+        let kind = self.require_kind(id)?;
+        let status = self.require_status(id)?;
+        let terminal = Self::operation_status_is_terminal(id, status)?;
+        let public_result_class = Self::operation_public_result_class(id, status)?;
+        let peer_ready = self.require_peer_ready(id)?;
+        let progress_count = self.require_progress_count(id)?;
+        let operation_source = self.operation_source(id)?;
+        let terminal_outcome = self.terminal_outcome(id)?;
 
         let created_at_ms = ShellRecord::epoch_millis(&shell.created_at_wall);
         let started_at_ms = shell.started_at.map(|i| shell.epoch_millis_for_instant(i));
@@ -616,33 +1003,40 @@ impl ShellState {
                 .as_millis() as u64
         });
 
-        Some(OperationLifecycleSnapshot {
+        Ok(Some(OperationLifecycleSnapshot {
             id: shell.spec.id.clone(),
             kind,
             display_name: shell.spec.display_name.clone(),
+            child_session_id: Self::child_session_id_from_operation_source(
+                operation_source.as_ref(),
+            ),
+            operation_source,
             status,
+            terminal,
+            public_result_class,
             peer_ready,
             progress_count,
             watcher_count: shell.watchers.len() as u32,
             terminal_outcome,
-            child_session_id: shell.spec.child_session_id.clone(),
             peer_handle: shell.peer_handle.clone(),
             created_at_ms,
             started_at_ms,
             completed_at_ms,
             elapsed_ms,
-        })
+        }))
     }
 
     /// Emit shell-side mechanics for a terminal transition: notify watchers,
-    /// push CompletionEntry, retain in FIFO, evict as needed. Called AFTER the
-    /// DSL transition has already persisted the terminal status + outcome.
-    fn finalize_terminal(&mut self, id: &OperationId) {
-        let outcome = match self.terminal_outcome(id) {
-            Some(o) => o,
-            None => return,
-        };
-        let kind = self.kind(id);
+    /// push generated-authorized CompletionEntry rows, retain in FIFO, evict
+    /// as needed. Called AFTER the DSL transition has already persisted the
+    /// terminal status + outcome.
+    fn finalize_terminal(&mut self, id: &OperationId) -> Result<(), OpsLifecycleError> {
+        let outcome = self.terminal_outcome(id)?.ok_or_else(|| {
+            OpsLifecycleError::Internal(format!(
+                "generated op terminal transition did not mint terminal outcome for {id}"
+            ))
+        })?;
+        let kind = self.require_kind(id)?;
 
         // Notify watchers and mark completion timestamp.
         if let Some(shell) = self.records.get_mut(id) {
@@ -650,123 +1044,698 @@ impl ShellState {
             shell.mark_completed();
         }
 
-        // Push completion feed entry.
-        let seq = self.next_seq();
-        let display_name = self
-            .records
-            .get(id)
-            .map(|r| r.spec.display_name.clone())
-            .unwrap_or_default();
-        let completed_at_ms = self
-            .records
-            .get(id)
-            .and_then(|r| r.completed_at.map(|i| r.epoch_millis_for_instant(i)));
-        let kind_for_entry = kind.unwrap_or(OperationKind::BackgroundToolOp);
-        self.feed_buffer.push(CompletionEntry {
-            seq,
-            operation_id: id.clone(),
-            kind: kind_for_entry,
-            display_name,
-            terminal_outcome: outcome,
-            completed_at_ms,
-        });
+        if Self::operation_durability_class(id, kind)? == mm_dsl::OperationDurabilityClass::Discard
+        {
+            self.dsl_apply(
+                mm_dsl::MeerkatMachineInput::CollectCompletedOp {
+                    operation_id: mm_dsl::OperationId::from_domain(id).0,
+                },
+                "CollectCompletedOp",
+            )?;
+            self.records.remove(id);
+            self.completed_order.retain(|queued| queued != id);
+            return Ok(());
+        }
+
+        if Self::operation_completion_feed_class(id, kind)?
+            == mm_dsl::OperationCompletionFeedClass::Emit
+        {
+            let feed_authority = self
+                .completion_feed_authority_entries()?
+                .remove(id)
+                .ok_or_else(|| {
+                    OpsLifecycleError::Internal(format!(
+                        "generated op terminal transition did not mint completion feed authority for {id}"
+                    ))
+                })?;
+            if feed_authority.kind != kind || feed_authority.terminal_outcome != outcome {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "generated completion feed authority drifted from terminal op authority for {id}"
+                )));
+            }
+            let seq = self.completion_sequence(id).ok_or_else(|| {
+                OpsLifecycleError::Internal(format!(
+                    "generated op terminal transition did not mint completion sequence for {id}"
+                ))
+            })?;
+            if feed_authority.seq != seq {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "generated completion feed authority sequence drifted for {id}"
+                )));
+            }
+            let display_name = self
+                .records
+                .get(id)
+                .map(|r| r.spec.display_name.clone())
+                .unwrap_or_default();
+            let completed_at_ms = self
+                .records
+                .get(id)
+                .and_then(|r| r.completed_at.map(|i| r.epoch_millis_for_instant(i)));
+            self.feed_buffer.push(CompletionEntry {
+                seq: feed_authority.seq,
+                operation_id: id.clone(),
+                kind: feed_authority.kind,
+                display_name,
+                terminal_outcome: feed_authority.terminal_outcome,
+                completed_at_ms,
+            });
+        }
 
         // FIFO retention + eviction.
         self.completed_order.push_back(id.clone());
         while self.completed_order.len() > self.max_completed {
             if let Some(evicted) = self.completed_order.pop_front() {
-                let evicted_key = mm_dsl::OperationId::from_domain(&evicted).0;
-                self.dsl.0.state.op_statuses.remove(&evicted_key);
-                self.dsl.0.state.op_kinds.remove(&evicted_key);
-                self.dsl.0.state.op_peer_ready.remove(&evicted_key);
-                self.dsl.0.state.op_progress_counts.remove(&evicted_key);
-                self.dsl.0.state.op_terminal_outcomes.remove(&evicted_key);
-                self.dsl.0.state.op_terminal_payload.remove(&evicted_key);
-                self.dsl.0.state.op_completion_seq.remove(&evicted_key);
+                self.dsl_apply(
+                    mm_dsl::MeerkatMachineInput::EvictCompletedOp {
+                        operation_id: mm_dsl::OperationId::from_domain(&evicted).0,
+                    },
+                    "EvictCompletedOp",
+                )?;
                 self.records.remove(&evicted);
             }
         }
 
         // Satisfy a pending wait request if all its ops are now terminal.
         self.maybe_satisfy_wait();
+        Ok(())
     }
 
     /// Read barrier membership from DSL state (sole owner).
-    fn wait_operation_ids(&self) -> Vec<OperationId> {
+    fn wait_operation_ids(&self) -> Result<Vec<OperationId>, OpsLifecycleError> {
         self.dsl
             .0
-            .state
+            .state()
             .wait_operation_ids
             .iter()
-            .filter_map(|k| serde_json::from_str::<OperationId>(k).ok())
+            .map(|key| {
+                serde_json::from_str::<OperationId>(key).map_err(|error| {
+                    OpsLifecycleError::Internal(format!(
+                        "generated wait operation identity authority used invalid operation id key {key}: {error}"
+                    ))
+                })
+            })
             .collect()
     }
 
     /// Whether the DSL has a barrier wait active.
+    #[cfg(test)]
     fn wait_active(&self) -> bool {
-        self.dsl.0.state.wait_active
+        self.dsl.0.state().wait_active
+    }
+
+    fn wait_all_satisfied_from_effects(
+        effects: &[mm_dsl::MeerkatMachineEffect],
+    ) -> Result<Option<WaitAllSatisfied>, OpsLifecycleError> {
+        let mut satisfied = None;
+        for effect in effects {
+            let mm_dsl::MeerkatMachineEffect::WaitAllSatisfied {
+                wait_request_id,
+                run_id,
+                operation_ids,
+            } = effect
+            else {
+                continue;
+            };
+            if satisfied.is_some() {
+                return Err(OpsLifecycleError::Internal(
+                    "generated wait_all authority emitted multiple satisfaction effects".into(),
+                ));
+            }
+            let wait_uuid = uuid::Uuid::parse_str(&wait_request_id.0).map_err(|err| {
+                OpsLifecycleError::Internal(format!(
+                    "generated wait_all authority emitted invalid wait request id '{}': {err}",
+                    wait_request_id.0
+                ))
+            })?;
+            let mut ids = Vec::with_capacity(operation_ids.len());
+            for operation_id in operation_ids {
+                ids.push(
+                    serde_json::from_str::<OperationId>(&operation_id.0).map_err(|err| {
+                        OpsLifecycleError::Internal(format!(
+                            "generated wait_all authority emitted invalid operation id '{}': {err}",
+                            operation_id.0
+                        ))
+                    })?,
+                );
+            }
+            satisfied = Some(WaitAllSatisfied {
+                wait_request_id: WaitRequestId::from_uuid(wait_uuid),
+                run_id: RunId::from_uuid(uuid::Uuid::parse_str(&run_id.0).map_err(|err| {
+                    OpsLifecycleError::Internal(format!(
+                        "generated wait_all authority emitted invalid run id '{}': {err}",
+                        run_id.0
+                    ))
+                })?),
+                operation_ids: ids,
+            });
+        }
+        Ok(satisfied)
+    }
+
+    fn parse_wait_all_operation_id(
+        raw: &str,
+        context: &str,
+    ) -> Result<OperationId, OpsLifecycleError> {
+        serde_json::from_str::<OperationId>(raw).map_err(|err| {
+            OpsLifecycleError::Internal(format!(
+                "generated wait_all authority emitted invalid {context} operation id '{raw}': {err}"
+            ))
+        })
+    }
+
+    fn duplicate_wait_operation_id(operation_ids: &[OperationId]) -> Option<OperationId> {
+        let mut seen = HashSet::new();
+        operation_ids
+            .iter()
+            .find(|operation_id| !seen.insert((*operation_id).clone()))
+            .cloned()
+    }
+
+    fn wait_all_admission_error_from_effects(
+        wait_request_id: &WaitRequestId,
+        effects: &[mm_dsl::MeerkatMachineEffect],
+    ) -> Result<Option<OpsLifecycleError>, OpsLifecycleError> {
+        let mut admission = None;
+        for effect in effects {
+            let mm_dsl::MeerkatMachineEffect::WaitAllAdmissionResolved {
+                wait_request_id: resolved_wait_request_id,
+                result,
+                reject_reason,
+                rejected_operation_id,
+            } = effect
+            else {
+                continue;
+            };
+            if admission.is_some() {
+                return Err(OpsLifecycleError::Internal(
+                    "generated wait_all authority emitted multiple admission results".into(),
+                ));
+            }
+            let resolved_uuid =
+                uuid::Uuid::parse_str(&resolved_wait_request_id.0).map_err(|err| {
+                    OpsLifecycleError::Internal(format!(
+                        "generated wait_all authority emitted invalid wait request id '{}': {err}",
+                        resolved_wait_request_id.0
+                    ))
+                })?;
+            let resolved_wait_request_id = WaitRequestId::from_uuid(resolved_uuid);
+            if &resolved_wait_request_id != wait_request_id {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "generated wait_all authority resolved wait request {resolved_wait_request_id} while shell requested {wait_request_id}"
+                )));
+            }
+            admission = Some(match result {
+                mm_dsl::WaitAllAdmissionResultKind::Accept => {
+                    if reject_reason.is_some() || rejected_operation_id.is_some() {
+                        return Err(OpsLifecycleError::Internal(
+                            "generated wait_all authority accepted with rejection payload".into(),
+                        ));
+                    }
+                    None
+                }
+                mm_dsl::WaitAllAdmissionResultKind::Reject => {
+                    let reason = reject_reason.ok_or_else(|| {
+                        OpsLifecycleError::Internal(
+                            "generated wait_all authority rejected without reason".into(),
+                        )
+                    })?;
+                    let error = match reason {
+                        mm_dsl::WaitAllRejectReasonKind::DuplicateOperation => {
+                            let raw = rejected_operation_id.as_deref().ok_or_else(|| {
+                                OpsLifecycleError::Internal(
+                                    "generated wait_all authority rejected duplicate without operation id"
+                                        .into(),
+                                )
+                            })?;
+                            OpsLifecycleError::DuplicateWaitOperation(
+                                Self::parse_wait_all_operation_id(raw, "duplicate")?,
+                            )
+                        }
+                        mm_dsl::WaitAllRejectReasonKind::WaitAlreadyActive => {
+                            if rejected_operation_id.is_some() {
+                                return Err(OpsLifecycleError::Internal(
+                                    "generated wait_all authority rejected active wait with operation id"
+                                        .into(),
+                                ));
+                            }
+                            OpsLifecycleError::WaitAlreadyActive
+                        }
+                        mm_dsl::WaitAllRejectReasonKind::OperationNotFound => {
+                            let raw = rejected_operation_id.as_deref().ok_or_else(|| {
+                                OpsLifecycleError::Internal(
+                                    "generated wait_all authority rejected missing operation without operation id"
+                                        .into(),
+                                )
+                            })?;
+                            OpsLifecycleError::NotFound(Self::parse_wait_all_operation_id(
+                                raw, "missing",
+                            )?)
+                        }
+                    };
+                    Some(error)
+                }
+            });
+        }
+        admission.ok_or_else(|| {
+            OpsLifecycleError::Internal(
+                "generated wait_all authority emitted no admission result".into(),
+            )
+        })
+    }
+
+    fn resolve_wait_all_admission(
+        &mut self,
+        wait_request_id: &WaitRequestId,
+        operation_ids: &[OperationId],
+        dsl_ids: &BTreeSet<String>,
+        dsl_id_tokens: &BTreeSet<mm_dsl::OperationId>,
+        operation_token_by_id: &BTreeMap<String, mm_dsl::OperationId>,
+        operation_id_by_token: &BTreeMap<mm_dsl::OperationId, String>,
+    ) -> Result<(), OpsLifecycleError> {
+        let duplicate = Self::duplicate_wait_operation_id(operation_ids)
+            .map(|operation_id| mm_dsl::OperationId::from_domain(&operation_id).0);
+        let not_found = operation_ids
+            .iter()
+            .find(|operation_id| !self.contains(operation_id))
+            .map(|operation_id| mm_dsl::OperationId::from_domain(operation_id).0);
+        let dsl_id_sequence: Vec<String> = operation_ids
+            .iter()
+            .map(|id| mm_dsl::OperationId::from_domain(id).0)
+            .collect();
+        let effects = self.dsl_apply_with_effects(
+            mm_dsl::MeerkatMachineInput::ResolveWaitAllAdmission {
+                wait_request_id: mm_dsl::WaitRequestId::from_domain(wait_request_id),
+                operation_id_sequence: dsl_id_sequence,
+                operation_ids: dsl_ids.clone(),
+                operation_id_tokens: dsl_id_tokens.clone(),
+                operation_token_by_id: operation_token_by_id.clone(),
+                operation_id_by_token: operation_id_by_token.clone(),
+                duplicate_operation_id: duplicate,
+                not_found_operation_id: not_found,
+            },
+            "ResolveWaitAllAdmission",
+        )?;
+        if let Some(error) = Self::wait_all_admission_error_from_effects(wait_request_id, &effects)?
+        {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn try_satisfy_wait_all_authority(
+        &mut self,
+    ) -> Result<Option<WaitAllSatisfied>, OpsLifecycleError> {
+        let Some(dsl_wait_request_id) = self.dsl.0.state().wait_request_id.clone() else {
+            return Ok(None);
+        };
+        let Some(dsl_run_id) = self.dsl.0.state().wait_run_id.clone() else {
+            return Err(OpsLifecycleError::Internal(
+                "generated wait_all authority has active wait without run id".into(),
+            ));
+        };
+        let dsl_operation_id_tokens = self.dsl.0.state().wait_operation_id_tokens.clone();
+        let transition = match mm_dsl::MeerkatMachineMutator::apply(
+            &mut *self.dsl.0,
+            mm_dsl::MeerkatMachineInput::SatisfyWaitAll {
+                wait_request_id: dsl_wait_request_id,
+                run_id: dsl_run_id,
+                operation_id_tokens: dsl_operation_id_tokens,
+            },
+        ) {
+            Ok(transition) => transition,
+            Err(mm_dsl::MeerkatMachineTransitionError::GuardRejected { .. }) => return Ok(None),
+            Err(err) => {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "DSL rejected ops transition (SatisfyWaitAll): {err:?}"
+                )));
+            }
+        };
+        Self::wait_all_satisfied_from_effects(transition.effects())?
+            .ok_or_else(|| {
+                OpsLifecycleError::Internal(
+                    "generated wait_all authority accepted satisfaction without effect".into(),
+                )
+            })
+            .map(Some)
     }
 
     fn begin_wait_all_authority(
         &mut self,
+        run_id: &RunId,
         wait_request_id: &WaitRequestId,
         operation_ids: &[OperationId],
     ) -> Result<WaitAllAuthorityPlan, OpsLifecycleError> {
-        let mut seen = HashSet::new();
-        for operation_id in operation_ids {
-            if !seen.insert(operation_id.clone()) {
-                return Err(OpsLifecycleError::DuplicateWaitOperation(
-                    operation_id.clone(),
-                ));
-            }
+        let mut dsl_ids = BTreeSet::new();
+        let mut dsl_id_tokens = BTreeSet::new();
+        let mut operation_token_by_id = BTreeMap::new();
+        let mut operation_id_by_token = BTreeMap::new();
+        for id in operation_ids {
+            let token = mm_dsl::OperationId::from_domain(id);
+            let raw_id = token.0.clone();
+            dsl_ids.insert(raw_id.clone());
+            dsl_id_tokens.insert(token.clone());
+            operation_token_by_id.insert(raw_id.clone(), token.clone());
+            operation_id_by_token.insert(token, raw_id);
         }
-
-        if self.wait_active() {
-            return Err(OpsLifecycleError::WaitAlreadyActive);
-        }
-
-        for operation_id in operation_ids {
-            if !self.contains(operation_id) {
-                return Err(OpsLifecycleError::NotFound(operation_id.clone()));
-            }
-        }
-
-        let all_terminal = operation_ids.iter().all(|operation_id| {
-            self.status(operation_id)
-                .is_some_and(OperationStatus::is_terminal)
-        });
-        if all_terminal {
-            return Ok(WaitAllAuthorityPlan::AlreadySatisfied(WaitAllSatisfied {
-                wait_request_id: wait_request_id.clone(),
-                operation_ids: operation_ids.to_vec(),
-            }));
-        }
-
-        let dsl_ids: std::collections::BTreeSet<String> = operation_ids
-            .iter()
-            .map(|id| mm_dsl::OperationId::from_domain(id).0)
-            .collect();
-        let dsl_id_tokens: std::collections::BTreeSet<mm_dsl::OperationId> = operation_ids
-            .iter()
-            .map(mm_dsl::OperationId::from_domain)
-            .collect();
+        self.resolve_wait_all_admission(
+            wait_request_id,
+            operation_ids,
+            &dsl_ids,
+            &dsl_id_tokens,
+            &operation_token_by_id,
+            &operation_id_by_token,
+        )?;
         self.dsl_apply(
             mm_dsl::MeerkatMachineInput::RequestWaitAll {
+                run_id: mm_dsl::RunId::from_domain(run_id),
                 wait_request_id: mm_dsl::WaitRequestId::from_domain(wait_request_id),
+                operation_id_sequence: operation_ids
+                    .iter()
+                    .map(|id| mm_dsl::OperationId::from_domain(id).0)
+                    .collect(),
                 operation_ids: dsl_ids,
                 operation_id_tokens: dsl_id_tokens,
+                operation_token_by_id,
+                operation_id_by_token,
             },
             "RequestWaitAll",
         )?;
+        if let Some(satisfied) = self.try_satisfy_wait_all_authority()? {
+            return Ok(WaitAllAuthorityPlan::AlreadySatisfied(satisfied));
+        }
         Ok(WaitAllAuthorityPlan::ActivateBarrier)
     }
 
-    fn owner_termination_targets(&self) -> Vec<(OperationId, OperationStatus)> {
-        self.operation_ids()
-            .into_iter()
-            .filter_map(|id| self.status(&id).map(|status| (id, status)))
-            .filter(|(_, status)| !status.is_terminal())
-            .collect()
+    fn owner_termination_targets(
+        &self,
+    ) -> Result<Vec<(OperationId, OperationStatus)>, OpsLifecycleError> {
+        let mut targets = Vec::new();
+        for id in self.operation_ids()? {
+            let status = self.require_status(&id)?;
+            if !Self::operation_status_is_terminal(&id, status)? {
+                targets.push((id, status));
+            }
+        }
+        Ok(targets)
+    }
+
+    fn operation_status_is_terminal(
+        operation_id: &OperationId,
+        status: OperationStatus,
+    ) -> Result<bool, OpsLifecycleError> {
+        let operation_id_key = mm_dsl::OperationId::from_domain(operation_id).0;
+        let effects = Self::apply_stateless_classifier(
+            mm_dsl::MeerkatMachineInput::ClassifyOperationTerminality {
+                operation_id: operation_id_key.clone(),
+                status: mm_dsl::OperationStatus::from(status),
+            },
+            "ClassifyOperationTerminality",
+        )?;
+        let mut terminal = None;
+        for effect in effects {
+            match effect {
+                mm_dsl::MeerkatMachineEffect::OperationTerminal { operation_id }
+                    if operation_id == operation_id_key =>
+                {
+                    terminal = Some(true);
+                }
+                mm_dsl::MeerkatMachineEffect::OperationNonTerminal { operation_id }
+                    if operation_id == operation_id_key =>
+                {
+                    terminal = Some(false);
+                }
+                other => {
+                    return Err(OpsLifecycleError::Internal(format!(
+                        "unexpected generated operation terminality effect: {other:?}"
+                    )));
+                }
+            }
+        }
+        terminal.ok_or_else(|| {
+            OpsLifecycleError::Internal(format!(
+                "generated operation terminality authority emitted no effect for {operation_id}"
+            ))
+        })
+    }
+
+    fn operation_public_result_class(
+        operation_id: &OperationId,
+        status: OperationStatus,
+    ) -> Result<OperationPublicResultClass, OpsLifecycleError> {
+        let operation_id_key = mm_dsl::OperationId::from_domain(operation_id).0;
+        let effects = Self::apply_stateless_classifier(
+            mm_dsl::MeerkatMachineInput::ClassifyOperationPublicResult {
+                operation_id: operation_id_key.clone(),
+                status: mm_dsl::OperationStatus::from(status),
+            },
+            "ClassifyOperationPublicResult",
+        )?;
+        let mut result = None;
+        for effect in effects {
+            match effect {
+                mm_dsl::MeerkatMachineEffect::OperationPublicResultClassified {
+                    operation_id,
+                    result: classified,
+                } if operation_id == operation_id_key => {
+                    result = Some(OperationPublicResultClass::from(classified));
+                }
+                other => {
+                    return Err(OpsLifecycleError::Internal(format!(
+                        "unexpected generated operation public-result effect: {other:?}"
+                    )));
+                }
+            }
+        }
+        result.ok_or_else(|| {
+            OpsLifecycleError::Internal(format!(
+                "generated operation public-result authority emitted no effect for {operation_id}"
+            ))
+        })
+    }
+
+    fn operation_transition_rejection_is_idempotent(
+        operation_id: &OperationId,
+        action: OperationLifecycleAction,
+        status: OperationStatus,
+    ) -> Result<bool, OpsLifecycleError> {
+        let operation_id_key = mm_dsl::OperationId::from_domain(operation_id).0;
+        let action = mm_dsl::OpLifecycleActionKind::from(action);
+        let status = mm_dsl::OperationStatus::from(status);
+        let effects = Self::apply_stateless_classifier(
+            mm_dsl::MeerkatMachineInput::ClassifyOperationTransitionIdempotence {
+                operation_id: operation_id_key.clone(),
+                action,
+                status,
+            },
+            "ClassifyOperationTransitionIdempotence",
+        )?;
+        let mut idempotent = None;
+        for effect in effects {
+            match effect {
+                mm_dsl::MeerkatMachineEffect::OperationTransitionIdempotentSuccess {
+                    operation_id,
+                    action: effect_action,
+                    status: effect_status,
+                } if operation_id == operation_id_key
+                    && effect_action == action
+                    && effect_status == status =>
+                {
+                    idempotent = Some(true);
+                }
+                mm_dsl::MeerkatMachineEffect::OperationTransitionNotIdempotent {
+                    operation_id,
+                    action: effect_action,
+                    status: effect_status,
+                } if operation_id == operation_id_key
+                    && effect_action == action
+                    && effect_status == status =>
+                {
+                    idempotent = Some(false);
+                }
+                other => {
+                    return Err(OpsLifecycleError::Internal(format!(
+                        "unexpected generated operation transition-idempotence effect: {other:?}"
+                    )));
+                }
+            }
+        }
+        idempotent.ok_or_else(|| {
+            OpsLifecycleError::Internal(format!(
+                "generated operation transition-idempotence authority emitted no effect for {operation_id}"
+            ))
+        })
+    }
+
+    fn operation_completion_feed_class(
+        operation_id: &OperationId,
+        kind: OperationKind,
+    ) -> Result<mm_dsl::OperationCompletionFeedClass, OpsLifecycleError> {
+        let operation_id_key = mm_dsl::OperationId::from_domain(operation_id).0;
+        let kind = mm_dsl::OperationKind::from(kind);
+        let effects = Self::apply_stateless_classifier(
+            mm_dsl::MeerkatMachineInput::ClassifyOperationCompletionFeed {
+                operation_id: operation_id_key.clone(),
+                kind,
+            },
+            "ClassifyOperationCompletionFeed",
+        )?;
+        let mut class = None;
+        for effect in effects {
+            match effect {
+                mm_dsl::MeerkatMachineEffect::OperationCompletionFeedClassified {
+                    operation_id,
+                    result,
+                } if operation_id == operation_id_key => {
+                    class = Some(result);
+                }
+                other => {
+                    return Err(OpsLifecycleError::Internal(format!(
+                        "unexpected generated operation completion-feed effect: {other:?}"
+                    )));
+                }
+            }
+        }
+        class.ok_or_else(|| {
+            OpsLifecycleError::Internal(format!(
+                "generated operation completion-feed authority emitted no effect for {operation_id}"
+            ))
+        })
+    }
+
+    fn operation_completion_wake_class(
+        operation_id: &OperationId,
+        kind: OperationKind,
+    ) -> Result<OperationCompletionWakeClass, OpsLifecycleError> {
+        let operation_id_key = mm_dsl::OperationId::from_domain(operation_id).0;
+        let kind = mm_dsl::OperationKind::from(kind);
+        let effects = Self::apply_stateless_classifier(
+            mm_dsl::MeerkatMachineInput::ClassifyOperationCompletionWake {
+                operation_id: operation_id_key.clone(),
+                kind,
+            },
+            "ClassifyOperationCompletionWake",
+        )?;
+        let mut class = None;
+        for effect in effects {
+            match effect {
+                mm_dsl::MeerkatMachineEffect::OperationCompletionWakeClassified {
+                    operation_id,
+                    result,
+                } if operation_id == operation_id_key => {
+                    class = Some(OperationCompletionWakeClass::from(result));
+                }
+                other => {
+                    return Err(OpsLifecycleError::Internal(format!(
+                        "unexpected generated operation completion-wake effect: {other:?}"
+                    )));
+                }
+            }
+        }
+        class.ok_or_else(|| {
+            OpsLifecycleError::Internal(format!(
+                "generated operation completion-wake authority emitted no effect for {operation_id}"
+            ))
+        })
+    }
+
+    fn operation_durability_class(
+        operation_id: &OperationId,
+        kind: OperationKind,
+    ) -> Result<mm_dsl::OperationDurabilityClass, OpsLifecycleError> {
+        let operation_id_key = mm_dsl::OperationId::from_domain(operation_id).0;
+        let kind = mm_dsl::OperationKind::from(kind);
+        let effects = Self::apply_stateless_classifier(
+            mm_dsl::MeerkatMachineInput::ClassifyOperationDurability {
+                operation_id: operation_id_key.clone(),
+                kind,
+            },
+            "ClassifyOperationDurability",
+        )?;
+        let mut class = None;
+        for effect in effects {
+            match effect {
+                mm_dsl::MeerkatMachineEffect::OperationDurabilityClassified {
+                    operation_id,
+                    result,
+                } if operation_id == operation_id_key => {
+                    class = Some(result);
+                }
+                other => {
+                    return Err(OpsLifecycleError::Internal(format!(
+                        "unexpected generated operation durability effect: {other:?}"
+                    )));
+                }
+            }
+        }
+        class.ok_or_else(|| {
+            OpsLifecycleError::Internal(format!(
+                "generated operation durability authority emitted no effect for {operation_id}"
+            ))
+        })
+    }
+
+    fn recovered_operation_record_disposition(
+        operation_id: &OperationId,
+        status: OperationStatus,
+        kind: OperationKind,
+        terminal_outcome_present: bool,
+        terminal_payload_present: bool,
+        completion_sequence_present: bool,
+    ) -> Result<RecoveredOperationRecordDisposition, OpsLifecycleError> {
+        let operation_id_key = mm_dsl::OperationId::from_domain(operation_id).0;
+        let effects = Self::apply_stateless_classifier(
+            mm_dsl::MeerkatMachineInput::ClassifyRecoveredOperationRecord {
+                operation_id: operation_id_key.clone(),
+                status: mm_dsl::OperationStatus::from(status),
+                kind: mm_dsl::OperationKind::from(kind),
+                terminal_outcome_present,
+                terminal_payload_present,
+                completion_sequence_present,
+            },
+            "ClassifyRecoveredOperationRecord",
+        )?;
+        let mut disposition = None;
+        for effect in effects {
+            match effect {
+                mm_dsl::MeerkatMachineEffect::RetainTerminalRecord { operation_id }
+                    if operation_id == operation_id_key =>
+                {
+                    disposition = Some(RecoveredOperationRecordDisposition::Retain);
+                }
+                mm_dsl::MeerkatMachineEffect::DiscardRecoveredOperationRecord { operation_id }
+                    if operation_id == operation_id_key =>
+                {
+                    disposition = Some(RecoveredOperationRecordDisposition::Discard);
+                }
+                other => {
+                    return Err(OpsLifecycleError::Internal(format!(
+                        "unexpected generated recovered-operation classification effect: {other:?}"
+                    )));
+                }
+            }
+        }
+        disposition.ok_or_else(|| {
+            OpsLifecycleError::Internal(format!(
+                "generated recovered-operation classifier emitted no effect for {operation_id}"
+            ))
+        })
+    }
+
+    fn apply_stateless_classifier(
+        input: mm_dsl::MeerkatMachineInput,
+        label: &'static str,
+    ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, OpsLifecycleError> {
+        let mut authority = crate::meerkat_machine::dsl_authority::new_initialized_authority(
+            "ops stateless classifier Initialize must be accepted",
+        );
+        let transition =
+            mm_dsl::MeerkatMachineMutator::apply(&mut authority, input).map_err(|err| {
+                OpsLifecycleError::Internal(format!(
+                    "DSL rejected ops transition ({label}): {err:?}"
+                ))
+            })?;
+        Ok(transition.into_effects())
     }
 
     /// Check whether a pending barrier wait is now satisfied and resolve it.
@@ -788,38 +1757,38 @@ impl ShellState {
     /// without a live correlation (post-recovery, or duplicate resolution),
     /// the oneshot simply remains pending.
     fn maybe_satisfy_wait(&mut self) {
-        // Capture membership *before* applying — `SatisfyWaitAll` clears the
-        // DSL barrier, so a post-apply read would lose the member list carried
-        // on the obligation token.
-        let ids = self.wait_operation_ids();
-        let Some(dsl_wait_request_id) = self.dsl.0.state.wait_request_id.clone() else {
-            return;
+        let satisfied = match self.try_satisfy_wait_all_authority() {
+            Ok(Some(satisfied)) => satisfied,
+            Ok(None) => return,
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "generated wait_all authority rejected satisfaction unexpectedly"
+                );
+                return;
+            }
         };
-        let dsl_operation_id_tokens = self.dsl.0.state.wait_operation_id_tokens.clone();
-        if self
-            .dsl_apply_raw(mm_dsl::MeerkatMachineInput::SatisfyWaitAll {
-                wait_request_id: dsl_wait_request_id,
-                operation_id_tokens: dsl_operation_id_tokens,
-            })
-            .is_err()
+        let shell_wait_id = self.wait_request_id.take();
+        if shell_wait_id
+            .as_ref()
+            .is_some_and(|id| id != &satisfied.wait_request_id)
         {
-            // Guard rejection (barrier inactive, or members not all terminal
-            // yet) is an expected idempotent no-op on the satisfaction fixed
-            // point, not a shell/DSL desync. Swallow.
-            return;
+            tracing::error!(
+                shell_wait_request_id = ?shell_wait_id,
+                authority_wait_request_id = %satisfied.wait_request_id,
+                "generated wait_all authority satisfied a different wait request"
+            );
         }
-        let wait_id = match self.wait_request_id.take() {
-            Some(id) => id,
-            None => return,
-        };
         if let Some(pending) = self.pending_wait.take() {
-            if pending.wait_request_id == wait_id {
-                let _ = pending.sender.send(WaitAllSatisfied {
-                    wait_request_id: wait_id,
-                    operation_ids: ids,
-                });
-            } else {
-                self.pending_wait = Some(pending);
+            if pending.wait_request_id == satisfied.wait_request_id {
+                let _ = pending.sender.send(satisfied);
+            } else if let Some(shell_wait_id) = shell_wait_id {
+                tracing::error!(
+                    shell_wait_request_id = %shell_wait_id,
+                    pending_wait_request_id = %pending.wait_request_id,
+                    authority_wait_request_id = %satisfied.wait_request_id,
+                    "generated wait_all authority satisfied without a matching pending waiter"
+                );
             }
         }
     }
@@ -839,7 +1808,7 @@ impl ShellState {
             _ => return Ok(()),
         };
 
-        let snapshot = self.capture_snapshot(epoch_id.clone(), cursor_state);
+        let snapshot = self.capture_snapshot(epoch_id.clone(), cursor_state)?;
         let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
         let request = OpsLifecyclePersistenceRequest {
             snapshot,
@@ -864,34 +1833,32 @@ impl ShellState {
     fn capture_snapshot(
         &self,
         epoch_id: meerkat_core::RuntimeEpochId,
-        cursor_state: &meerkat_core::EpochCursorState,
-    ) -> PersistedOpsSnapshot {
-        let operation_specs: HashMap<OperationId, OperationSpec> = self
-            .records
-            .iter()
-            .map(|(id, record)| (id.clone(), record.spec.clone()))
-            .collect();
-
-        let completion_entries = {
-            let inner = self
-                .feed_buffer
-                .inner
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            inner.entries.iter().cloned().collect()
-        };
-
+        _cursor_state: &meerkat_core::EpochCursorState,
+    ) -> Result<PersistedOpsSnapshot, OpsLifecycleError> {
         let mut operations: HashMap<OperationId, OperationCanonicalState> = HashMap::new();
-        for op_id in self.operation_ids() {
-            let Some(status) = self.status(&op_id) else {
+        for op_id in self.operation_ids()? {
+            let status = self.require_status(&op_id)?;
+            let kind = self.require_kind(&op_id)?;
+            if Self::operation_durability_class(&op_id, kind)?
+                != mm_dsl::OperationDurabilityClass::Retain
+            {
                 continue;
-            };
-            let Some(kind) = self.kind(&op_id) else {
-                continue;
-            };
-            let peer_ready = self.peer_ready(&op_id).unwrap_or(false);
-            let progress_count = self.progress_count(&op_id).unwrap_or(0);
-            let terminal_outcome = self.terminal_outcome(&op_id);
+            }
+            let peer_ready = self.require_peer_ready(&op_id)?;
+            let progress_count = self.require_progress_count(&op_id)?;
+            let operation_source = self.operation_source(&op_id)?;
+            let terminal_outcome = self.terminal_outcome(&op_id)?;
+            let completion_sequence = self.completion_sequence(&op_id);
+            if terminal_outcome.is_some() && completion_sequence.is_none() {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "generated op terminal authority missing completion sequence for retained terminal {op_id}"
+                )));
+            }
+            if terminal_outcome.is_none() && completion_sequence.is_some() {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "generated op terminal authority has completion sequence for non-terminal {op_id}"
+                )));
+            }
             let terminal_buffered = terminal_outcome.is_some();
             let watcher_count = self
                 .records
@@ -903,33 +1870,72 @@ impl ShellState {
                 OperationCanonicalState {
                     status,
                     kind,
+                    operation_source,
                     peer_ready,
                     progress_count,
                     watcher_count,
                     terminal_outcome,
+                    completion_sequence,
                     terminal_buffered,
                 },
             );
         }
+        let operation_specs: HashMap<OperationId, OperationSpec> = self
+            .records
+            .iter()
+            .filter(|(id, _)| operations.contains_key(*id))
+            .map(|(id, record)| {
+                let mut spec = record.spec.clone();
+                let operation_source = operations
+                    .get(id)
+                    .and_then(|state| state.operation_source.as_ref());
+                Self::align_spec_child_session_id_to_source(&mut spec, operation_source);
+                (id.clone(), spec)
+            })
+            .collect();
+        let completed_order: VecDeque<OperationId> = self
+            .completed_order
+            .iter()
+            .filter(|id| operations.contains_key(*id))
+            .cloned()
+            .collect();
+        let active_count = operations
+            .iter()
+            .filter(|(id, state)| {
+                matches!(
+                    Self::operation_status_is_terminal(id, state.status),
+                    Ok(false)
+                )
+            })
+            .count();
+        let completion_entries = {
+            let inner = self
+                .feed_buffer
+                .inner
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            inner.entries.iter().cloned().collect()
+        };
 
         let authority_state = RegistryCanonicalState {
             operations,
-            completed_order: self.completed_order.clone(),
+            completion_feed_entries: self.completion_feed_authority_entries()?,
+            completed_order,
             max_completed: self.max_completed,
             max_concurrent: self.max_concurrent,
-            active_count: self.active_count(),
+            active_count,
             wait_request_id: self.wait_request_id.clone(),
-            wait_operation_ids: self.wait_operation_ids(),
-            next_completion_seq: self.next_completion_seq,
+            wait_operation_ids: self.wait_operation_ids()?,
+            next_completion_seq: self.dsl.0.state().next_completion_seq,
         };
 
-        PersistedOpsSnapshot {
+        Ok(PersistedOpsSnapshot {
             epoch_id,
             authority_state,
             operation_specs,
             completion_entries,
-            cursors: cursor_state.snapshot(),
-        }
+            cursors: self.completion_cursor_snapshot(),
+        })
     }
 
     fn shell_record_mut(
@@ -948,7 +1954,7 @@ impl ShellState {
         operation_ids
             .iter()
             .map(|operation_id| {
-                let outcome = self.terminal_outcome(operation_id).ok_or_else(|| {
+                let outcome = self.terminal_outcome(operation_id)?.ok_or_else(|| {
                     OpsLifecycleError::Internal(format!(
                         "wait_all completed without terminal outcome for {operation_id}"
                     ))
@@ -1019,13 +2025,87 @@ impl Default for RuntimeOpsLifecycleRegistry {
 
 impl RuntimeOpsLifecycleRegistry {
     pub fn new() -> Self {
-        Self::default()
+        let dsl = new_ops_dsl_authority();
+        let feed_capacity = DEFAULT_MAX_COMPLETED.saturating_mul(4).max(1024);
+        let feed_buffer = Arc::new(FeedBuffer::new(feed_capacity));
+        Self {
+            state: RwLock::new(ShellState {
+                dsl,
+                records: HashMap::new(),
+                pending_wait: None,
+                completed_order: VecDeque::new(),
+                max_completed: DEFAULT_MAX_COMPLETED,
+                max_concurrent: None,
+                wait_request_id: None,
+                feed_buffer,
+                persist_tx: None,
+                persist_epoch_id: None,
+                persist_cursor_state: None,
+            }),
+        }
     }
 
     pub fn with_config(config: OpsLifecycleConfig) -> Self {
         Self {
             state: RwLock::new(ShellState::new(config.max_completed, config.max_concurrent)),
         }
+    }
+
+    fn recover_completion_feed_entry(
+        shell: &mut ShellState,
+        operation_id: &OperationId,
+        entry: &CompletionFeedCanonicalState,
+    ) -> Result<(), OpsLifecycleError> {
+        let expected_operation_id = mm_dsl::OperationId::from_domain(operation_id).0;
+        let (terminal_outcome, terminal_payload) =
+            ShellState::split_outcome(&entry.terminal_outcome);
+        let effects = shell.dsl_apply_with_effects(
+            mm_dsl::MeerkatMachineInput::RecoverCompletionFeedEntry {
+                operation_id: expected_operation_id.clone(),
+                kind: mm_dsl::OperationKind::from(entry.kind),
+                terminal_outcome,
+                terminal_payload,
+                completion_sequence: entry.seq,
+            },
+            "RecoverCompletionFeedEntry",
+        )?;
+        let recovered = effects.iter().find_map(|effect| match effect {
+            mm_dsl::MeerkatMachineEffect::CompletionFeedEntryRecovered {
+                operation_id,
+                seq,
+                kind,
+                terminal_outcome,
+                terminal_payload,
+            } => Some((
+                operation_id,
+                *seq,
+                OperationKind::from(*kind),
+                *terminal_outcome,
+                terminal_payload.as_str(),
+            )),
+            _ => None,
+        });
+        let Some((operation_id, seq, kind, terminal_outcome, terminal_payload)) = recovered else {
+            return Err(OpsLifecycleError::Internal(
+                "generated completion-feed recovery emitted no recovered entry".into(),
+            ));
+        };
+        let recovered_outcome = ShellState::terminal_outcome_from_parts(
+            terminal_outcome,
+            terminal_payload,
+            "generated completion-feed recovery authority",
+            operation_id,
+        )?;
+        if operation_id != &expected_operation_id
+            || seq != entry.seq
+            || kind != entry.kind
+            || recovered_outcome != entry.terminal_outcome
+        {
+            return Err(OpsLifecycleError::Internal(format!(
+                "generated completion-feed recovery drifted for {operation_id}"
+            )));
+        }
+        Ok(())
     }
 
     /// Wire a persistence channel for durable snapshot writes.
@@ -1050,83 +2130,184 @@ impl RuntimeOpsLifecycleRegistry {
     ///
     /// Rebuilds DSL state (stripping non-terminal ops — only terminals
     /// survive recovery), creates fresh shell records from specs, and seeds
-    /// the feed buffer with persisted completion entries.
-    pub fn from_recovered(snapshot: PersistedOpsSnapshot) -> Self {
-        let mut shell = ShellState::new(
-            snapshot.authority_state.max_completed,
-            snapshot.authority_state.max_concurrent,
-        );
+    /// the feed buffer only with completion entries accepted by generated
+    /// recovery authority.
+    pub fn from_recovered(snapshot: PersistedOpsSnapshot) -> Result<Self, OpsLifecycleError> {
+        let PersistedOpsSnapshot {
+            authority_state,
+            operation_specs,
+            completion_entries,
+            cursors,
+            ..
+        } = snapshot;
+        let max_completed = authority_state.max_completed;
+        let max_concurrent = authority_state.max_concurrent;
+        let next_completion_seq = authority_state.next_completion_seq;
+        let authority_completion_entries = authority_state.completion_feed_entries;
+        let authority_operations = authority_state.operations;
+        let mut shell = ShellState::new(max_completed, max_concurrent);
 
-        // Only retain terminal operations in the DSL state.
+        // Replay every persisted op through generated recovery authority.
+        // The transition accepts only terminal records with outcome and
+        // completion-sequence witnesses. Volatile non-terminal rows are not
+        // recovered; terminal/corrupt rows must fail closed instead of being
+        // projected into shell/public feed state.
         let mut retained_ids: HashSet<OperationId> = HashSet::new();
-        for (op_id, op_state) in snapshot.authority_state.operations {
-            if !op_state.status.is_terminal() {
+        for (op_id, op_state) in authority_operations {
+            let (terminal_outcome, terminal_payload) = op_state
+                .terminal_outcome
+                .as_ref()
+                .map(ShellState::split_outcome)
+                .map(|(kind, payload)| (Some(kind), Some(payload)))
+                .unwrap_or((None, None));
+            let disposition = ShellState::recovered_operation_record_disposition(
+                &op_id,
+                op_state.status,
+                op_state.kind,
+                terminal_outcome.is_some(),
+                terminal_payload.is_some(),
+                op_state.completion_sequence.is_some(),
+            )?;
+            if disposition == RecoveredOperationRecordDisposition::Discard {
                 continue;
             }
-            let id_key = mm_dsl::OperationId::from_domain(&op_id).0;
-            shell.dsl.0.state.op_statuses.insert(
-                id_key.clone(),
-                mm_dsl::OperationStatus::from(op_state.status),
-            );
-            shell
-                .dsl
-                .0
-                .state
-                .op_kinds
-                .insert(id_key.clone(), mm_dsl::OperationKind::from(op_state.kind));
-            shell
-                .dsl
-                .0
-                .state
-                .op_peer_ready
-                .insert(id_key.clone(), op_state.peer_ready);
-            shell
-                .dsl
-                .0
-                .state
-                .op_progress_counts
-                .insert(id_key.clone(), op_state.progress_count as u64);
-            if let Some(outcome) = op_state.terminal_outcome.as_ref() {
-                let (kind, payload) = ShellState::split_outcome(outcome);
-                shell
-                    .dsl
-                    .0
-                    .state
-                    .op_terminal_outcomes
-                    .insert(id_key.clone(), kind);
-                shell
-                    .dsl
-                    .0
-                    .state
-                    .op_terminal_payload
-                    .insert(id_key.clone(), payload);
+            if let Some(spec_source) = operation_specs
+                .get(&op_id)
+                .and_then(|spec| spec.operation_source.as_ref())
+                && op_state.operation_source.as_ref() != Some(spec_source)
+            {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "persisted operation source mirror for {op_id} drifted from generated authority"
+                )));
+            }
+            let recovery = mm_dsl::MeerkatMachineInput::RecoverOpRecord {
+                operation_id: mm_dsl::OperationId::from_domain(&op_id).0,
+                status: mm_dsl::OperationStatus::from(op_state.status),
+                kind: mm_dsl::OperationKind::from(op_state.kind),
+                source: op_state
+                    .operation_source
+                    .as_ref()
+                    .map(mm_dsl::OperationSource::from_domain),
+                peer_ready: op_state.peer_ready,
+                progress_count: u64::from(op_state.progress_count),
+                terminal_outcome,
+                terminal_payload,
+                completion_sequence: op_state.completion_sequence,
+            };
+            shell.dsl_apply(recovery, "RecoverOpRecord")?;
+            let recovered_seq = shell.completion_sequence(&op_id).ok_or_else(|| {
+                OpsLifecycleError::Internal(format!(
+                    "generated op recovery accepted {op_id} without completion sequence"
+                ))
+            })?;
+            if op_state.completion_sequence != Some(recovered_seq) {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "generated op recovery completion sequence mismatch for {op_id}"
+                )));
             }
             retained_ids.insert(op_id);
         }
-        // active_count is 0 — all retained ops are terminal.
-        shell.dsl.0.state.active_op_count = 0;
+        shell.dsl_apply(
+            mm_dsl::MeerkatMachineInput::RecoverOpsCompletionCursor {
+                next_completion_seq,
+            },
+            "RecoverOpsCompletionCursor",
+        )?;
+        shell.dsl_apply(
+            mm_dsl::MeerkatMachineInput::RecoverCompletionConsumerCursors {
+                agent_applied_cursor: cursors.agent_applied_cursor,
+                runtime_observed_cursor: cursors.runtime_observed_seq,
+                runtime_injected_cursor: cursors.runtime_last_injected_seq,
+            },
+            "RecoverCompletionConsumerCursors",
+        )?;
 
-        // Rebuild completed_order keeping only retained ops.
-        shell.completed_order = snapshot
-            .authority_state
-            .completed_order
-            .into_iter()
-            .filter(|id| retained_ids.contains(id))
+        // Rebuild completed_order from generated completion-sequence truth,
+        // never from the persisted shell ordering mirror.
+        let mut recovered_completed: Vec<(CompletionSeq, OperationId)> = retained_ids
+            .iter()
+            .filter_map(|id| shell.completion_sequence(id).map(|seq| (seq, id.clone())))
             .collect();
+        recovered_completed.sort_by_key(|(seq, _)| *seq);
+        shell.completed_order = recovered_completed.into_iter().map(|(_, id)| id).collect();
 
-        // Re-seed completion sequence counter so new terminals keep
-        // monotonic order relative to persisted entries.
-        shell.next_completion_seq = snapshot.authority_state.next_completion_seq;
+        // Recover generated-owned feed authority for entries whose operation
+        // record is no longer retained. Retained records already wrote their
+        // feed authority through RecoverOpRecord above.
+        for (operation_id, entry) in &authority_completion_entries {
+            if !retained_ids.contains(operation_id) {
+                Self::recover_completion_feed_entry(&mut shell, operation_id, entry)?;
+            }
+        }
 
-        // Seed the feed buffer from persisted entries.
-        for entry in &snapshot.completion_entries {
-            shell.feed_buffer.push(entry.clone());
+        let canonical_feed_entries = shell.completion_feed_authority_entries()?;
+        for (operation_id, entry) in &authority_completion_entries {
+            let Some(recovered_entry) = canonical_feed_entries.get(operation_id) else {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "persisted completion feed authority for {operation_id} was not recovered"
+                )));
+            };
+            if recovered_entry != entry {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "persisted completion feed authority drifted from generated recovery for {operation_id}"
+                )));
+            }
+        }
+
+        // Projection rows may carry display metadata only after generated
+        // feed authority has decided the operation id, sequence, kind, and
+        // terminal outcome. Any semantic drift fails closed.
+        let mut projection_entries_by_id: HashMap<OperationId, CompletionEntry> = HashMap::new();
+        for entry in completion_entries {
+            let Some(authority_entry) = canonical_feed_entries.get(&entry.operation_id) else {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "persisted completion feed projection for {} has no generated feed authority",
+                    entry.operation_id
+                )));
+            };
+            if authority_entry.seq != entry.seq
+                || authority_entry.kind != entry.kind
+                || authority_entry.terminal_outcome != entry.terminal_outcome
+            {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "persisted completion feed projection for {} drifted from generated feed authority",
+                    entry.operation_id
+                )));
+            }
+            projection_entries_by_id.insert(entry.operation_id.clone(), entry);
+        }
+
+        let mut recovered_entries: Vec<(OperationId, CompletionFeedCanonicalState)> =
+            canonical_feed_entries.into_iter().collect();
+        recovered_entries.sort_by_key(|(_, entry)| entry.seq);
+        for (operation_id, entry) in recovered_entries {
+            let projection = projection_entries_by_id.get(&operation_id);
+            let display_name = operation_specs
+                .get(&operation_id)
+                .map(|spec| spec.display_name.clone())
+                .or_else(|| projection.map(|entry| entry.display_name.clone()))
+                .unwrap_or_default();
+            let completed_at_ms = projection.and_then(|entry| entry.completed_at_ms);
+            shell.feed_buffer.push(CompletionEntry {
+                seq: entry.seq,
+                operation_id,
+                kind: entry.kind,
+                display_name,
+                terminal_outcome: entry.terminal_outcome,
+                completed_at_ms,
+            });
         }
 
         // Rebuild shell records from specs (fresh timestamps, no watchers)
         // — only for operations still retained in the DSL state.
-        for (op_id, spec) in snapshot.operation_specs {
+        for (op_id, spec) in operation_specs {
             if retained_ids.contains(&op_id) {
+                let mut spec = spec;
+                let operation_source = shell.operation_source(&op_id)?;
+                ShellState::align_spec_child_session_id_to_source(
+                    &mut spec,
+                    operation_source.as_ref(),
+                );
                 shell.records.insert(
                     op_id,
                     ShellRecord {
@@ -1142,26 +2323,34 @@ impl RuntimeOpsLifecycleRegistry {
             }
         }
 
-        Self {
+        Ok(Self {
             state: RwLock::new(shell),
-        }
+        })
     }
 
     /// Capture a serializable snapshot of the current state for persistence.
     ///
     /// Includes authority state, operation specs, completion entries, and
-    /// cursor values. Cursor values may be stale relative to the agent's
-    /// true position (monotonic staleness, not atomicity).
+    /// generated completion-consumer cursor values.
     pub fn capture_persistence_snapshot(
         &self,
         epoch_id: meerkat_core::RuntimeEpochId,
         cursor_state: &meerkat_core::EpochCursorState,
-    ) -> PersistedOpsSnapshot {
+    ) -> Result<PersistedOpsSnapshot, OpsLifecycleError> {
         let state = self
             .state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.capture_snapshot(epoch_id, cursor_state)
+    }
+
+    /// Snapshot generated completion-consumer cursor state.
+    pub fn completion_cursor_snapshot(&self) -> meerkat_core::EpochCursorSnapshot {
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.completion_cursor_snapshot()
     }
 
     /// Return a read handle to the completion feed.
@@ -1176,18 +2365,23 @@ impl RuntimeOpsLifecycleRegistry {
     }
 
     /// Capture a stable diagnostic snapshot of the canonical ops lifecycle state.
-    pub(crate) fn diagnostic_snapshot(&self) -> RuntimeOpsDiagnosticSnapshot {
+    pub(crate) fn diagnostic_snapshot(
+        &self,
+    ) -> Result<RuntimeOpsDiagnosticSnapshot, OpsLifecycleError> {
         let state = self
             .state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut operations = state
-            .operation_ids()
+            .operation_ids()?
             .into_iter()
-            .filter_map(|id| state.snapshot(&id))
+            .map(|id| state.snapshot(&id))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
             .collect::<Vec<_>>();
         operations.sort_by(|left, right| left.display_name.cmp(&right.display_name));
-        RuntimeOpsDiagnosticSnapshot {
+        Ok(RuntimeOpsDiagnosticSnapshot {
             operation_count: state.operation_count(),
             active_count: state.active_count(),
             wait_request_id: state.wait_request_id.clone(),
@@ -1196,9 +2390,9 @@ impl RuntimeOpsLifecycleRegistry {
                 .pending_wait
                 .as_ref()
                 .map(|pending_wait| pending_wait.wait_request_id.clone()),
-            wait_operation_ids: state.wait_operation_ids(),
+            wait_operation_ids: state.wait_operation_ids()?,
             operations,
-        }
+        })
     }
 
     fn read_state(&self) -> Result<RwLockReadGuard<'_, ShellState>, OpsLifecycleError> {
@@ -1220,22 +2414,32 @@ impl RuntimeOpsLifecycleRegistry {
         let mut state = self.write_state()?;
         match state.wait_request_id.as_ref() {
             Some(active) if active == wait_request_id => {
-                state.wait_request_id = None;
-                state.pending_wait = None;
                 // Clear the DSL barrier via the dedicated `CancelWaitAll`
                 // transition. Unlike `SatisfyWaitAll`, it does not require
                 // every member to be terminal (the request was dropped, not
-                // resolved) and does not emit the `WaitAllSatisfied`
-                // obligation. The `wait_is_active` guard keeps it an
-                // idempotent no-op if the barrier was already cleared.
-                let _ = state.dsl_apply(
+                // resolved) and does not emit the `WaitAllSatisfied`.
+                state.dsl_apply(
                     mm_dsl::MeerkatMachineInput::CancelWaitAll,
                     "CancelWaitAll(cancel)",
-                );
+                )?;
+                state.wait_request_id = None;
+                if state
+                    .pending_wait
+                    .as_ref()
+                    .is_some_and(|pending| pending.wait_request_id == *wait_request_id)
+                {
+                    state.pending_wait = None;
+                }
                 Ok(())
             }
             _ => {
-                state.pending_wait = None;
+                if state
+                    .pending_wait
+                    .as_ref()
+                    .is_some_and(|pending| pending.wait_request_id == *wait_request_id)
+                {
+                    state.pending_wait = None;
+                }
                 Ok(())
             }
         }
@@ -1251,7 +2455,6 @@ enum WaitAllFutureState {
 struct WaitAllFuture<'a> {
     registry: &'a RuntimeOpsLifecycleRegistry,
     wait_request_id: WaitRequestId,
-    operation_ids: Vec<OperationId>,
     state: WaitAllFutureState,
 }
 
@@ -1273,7 +2476,7 @@ impl Future for WaitAllFuture<'_> {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(Ok(satisfied)) => {
                     let outcomes = match self.registry.read_state() {
-                        Ok(state) => state.collect_wait_outcomes(&self.operation_ids),
+                        Ok(state) => state.collect_wait_outcomes(&satisfied.operation_ids),
                         Err(err) => Err(err),
                     };
                     self.state = WaitAllFutureState::Done;
@@ -1298,124 +2501,262 @@ impl Future for WaitAllFuture<'_> {
 
 impl Drop for WaitAllFuture<'_> {
     fn drop(&mut self) {
-        if matches!(self.state, WaitAllFutureState::Waiting(_)) {
-            let _ = self
+        if matches!(self.state, WaitAllFutureState::Waiting(_))
+            && let Err(err) = self
                 .registry
-                .cancel_wait_all_internal(&self.wait_request_id);
+                .cancel_wait_all_internal(&self.wait_request_id)
+        {
+            tracing::error!(
+                wait_request_id = %self.wait_request_id,
+                error = %err,
+                "generated wait_all authority rejected cancellation during drop"
+            );
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Shell → DSL error classification
+// Generated op lifecycle result-class feedback
 // ---------------------------------------------------------------------------
-//
-// Transition legality (which "from" statuses each op-lifecycle transition is
-// legal from) is owned by the MeerkatMachine DSL's `from_status_valid` guards.
-// The shell's only job when a DSL transition is rejected is to surface the
-// pre-read status back to the caller as [`OpsLifecycleError::InvalidTransition`].
-//
-// Each op-lifecycle entry point follows the same shape:
-//   1. Pre-read `status(id)` under the write lock. `None` → `NotFound`.
-//   2. Fire the DSL input via `dsl_apply_raw`.
-//   3. On `GuardRejected`, synthesise `InvalidTransition { status, action }`.
-//   4. On `NoMatchingTransition`, surface as `Internal` (genuine desync).
-//
-// The `action` label is a short, human-readable name of the shell entry point
-// — matches the names formerly passed to the deleted `require_status`.
 
-/// Classify a kernel rejection from an op-lifecycle DSL apply.
-///
-/// `GuardRejected` → `InvalidTransition { id, status, action }`. The pre-read
-/// `status` and the DSL's guard observation come from the same canonical map
-/// under a single write lock, so they cannot diverge.
-/// `NoMatchingTransition` → `Internal` (genuine shell/DSL desync).
-fn classify_op_rejection(
+fn op_lifecycle_action_label(action: mm_dsl::OpLifecycleActionKind) -> &'static str {
+    match action {
+        mm_dsl::OpLifecycleActionKind::Start => "provisioning_succeeded",
+        mm_dsl::OpLifecycleActionKind::Fail => "fail_operation",
+        mm_dsl::OpLifecycleActionKind::PeerReady => "peer_ready",
+        mm_dsl::OpLifecycleActionKind::ProgressReported => "report_progress",
+        mm_dsl::OpLifecycleActionKind::Complete => "complete_operation",
+        mm_dsl::OpLifecycleActionKind::Abort => "abort_provisioning",
+        mm_dsl::OpLifecycleActionKind::Cancel => "cancel_operation",
+        mm_dsl::OpLifecycleActionKind::RetireRequested => "request_retire",
+        mm_dsl::OpLifecycleActionKind::RetireCompleted => "mark_retired",
+        mm_dsl::OpLifecycleActionKind::Terminate => "terminate_owner",
+    }
+}
+
+fn op_lifecycle_rejection_error_from_effects(
+    id: &OperationId,
+    requested_action: mm_dsl::OpLifecycleActionKind,
+    effects: &[mm_dsl::MeerkatMachineEffect],
+) -> Result<OpsLifecycleError, OpsLifecycleError> {
+    let expected_id = mm_dsl::OperationId::from_domain(id).0;
+    let mut rejection = None;
+    for effect in effects {
+        let mm_dsl::MeerkatMachineEffect::OpLifecycleTransitionRejected {
+            operation_id,
+            action,
+            reason,
+            status,
+        } = effect
+        else {
+            continue;
+        };
+        if rejection.is_some() {
+            return Err(OpsLifecycleError::Internal(
+                "generated op lifecycle authority emitted multiple rejection results".into(),
+            ));
+        }
+        if operation_id != &expected_id || *action != requested_action {
+            return Err(OpsLifecycleError::Internal(format!(
+                "generated op lifecycle authority resolved {operation_id}/{action:?} while shell requested {expected_id}/{requested_action:?}"
+            )));
+        }
+        let error = match reason {
+            mm_dsl::OpLifecycleRejectReasonKind::OperationNotFound => {
+                if status.is_some() {
+                    return Err(OpsLifecycleError::Internal(
+                        "generated op lifecycle authority emitted not-found with status".into(),
+                    ));
+                }
+                OpsLifecycleError::NotFound(id.clone())
+            }
+            mm_dsl::OpLifecycleRejectReasonKind::InvalidTransition => {
+                let status = status.ok_or_else(|| {
+                    OpsLifecycleError::Internal(
+                        "generated op lifecycle authority emitted invalid-transition without status"
+                            .into(),
+                    )
+                })?;
+                OpsLifecycleError::InvalidTransition {
+                    id: id.clone(),
+                    status: OperationStatus::from(status),
+                    action: op_lifecycle_action_label(requested_action),
+                }
+            }
+            mm_dsl::OpLifecycleRejectReasonKind::PeerNotExpected => {
+                if status.is_none() {
+                    return Err(OpsLifecycleError::Internal(
+                        "generated op lifecycle authority emitted peer-not-expected without status"
+                            .into(),
+                    ));
+                }
+                OpsLifecycleError::PeerNotExpected(id.clone())
+            }
+            mm_dsl::OpLifecycleRejectReasonKind::AlreadyPeerReady => {
+                if status.is_none() {
+                    return Err(OpsLifecycleError::Internal(
+                        "generated op lifecycle authority emitted already-peer-ready without status"
+                            .into(),
+                    ));
+                }
+                OpsLifecycleError::AlreadyPeerReady(id.clone())
+            }
+        };
+        rejection = Some(error);
+    }
+    rejection.ok_or_else(|| {
+        OpsLifecycleError::Internal(
+            "generated op lifecycle authority emitted no rejection result".into(),
+        )
+    })
+}
+
+fn classify_generated_op_rejection(
+    state: &mut ShellState,
     err: mm_dsl::MeerkatMachineTransitionError,
     id: &OperationId,
-    status: OperationStatus,
-    action: &'static str,
+    action: mm_dsl::OpLifecycleActionKind,
 ) -> OpsLifecycleError {
     match err {
         mm_dsl::MeerkatMachineTransitionError::GuardRejected { .. } => {
-            OpsLifecycleError::InvalidTransition {
-                id: id.clone(),
-                status,
-                action,
+            match state.dsl_apply_with_effects(
+                mm_dsl::MeerkatMachineInput::ResolveOpLifecycleTransitionRejection {
+                    operation_id: mm_dsl::OperationId::from_domain(id).0,
+                    action,
+                },
+                "ResolveOpLifecycleTransitionRejection",
+            ) {
+                Ok(effects) => op_lifecycle_rejection_error_from_effects(id, action, &effects)
+                    .unwrap_or_else(|err| err),
+                Err(err) => err,
             }
         }
         other => OpsLifecycleError::Internal(format!(
-            "DSL rejected ops transition ({action}): {other:?}"
+            "DSL rejected ops transition ({}): {other:?}",
+            op_lifecycle_action_label(action)
         )),
     }
 }
 
-/// Classify a `PeerReadyOp` DSL rejection back into the public error surface.
-///
-/// `PeerReadyOp`'s DSL guards layer three distinct rejections onto a single
-/// `GuardRejected` variant. The shell distinguishes them by re-reading the
-/// canonical DSL state under the same write lock that observed the guard
-/// failure — so the classification cannot race with a concurrent mutation.
-///
-/// Priority mirrors the declared guard order in the DSL transition:
-/// 1. `kind_is_mob_member_child` → `PeerNotExpected`
-/// 2. `not_already_peer_ready`   → `AlreadyPeerReady`
-/// 3. `from_status_valid`        → `InvalidTransition`
-fn classify_peer_ready_rejection(
-    state: &ShellState,
-    err: mm_dsl::MeerkatMachineTransitionError,
+fn apply_op_transition(
+    state: &mut ShellState,
     id: &OperationId,
-    status: OperationStatus,
-) -> OpsLifecycleError {
-    match err {
-        mm_dsl::MeerkatMachineTransitionError::GuardRejected { .. } => {
-            let kind = state.kind(id);
-            if kind != Some(OperationKind::MobMemberChild) {
-                return OpsLifecycleError::PeerNotExpected(id.clone());
-            }
-            if state.peer_ready(id).unwrap_or(false) {
-                return OpsLifecycleError::AlreadyPeerReady(id.clone());
-            }
-            OpsLifecycleError::InvalidTransition {
-                id: id.clone(),
-                status,
-                action: "peer_ready",
-            }
+    input: mm_dsl::MeerkatMachineInput,
+    action: mm_dsl::OpLifecycleActionKind,
+) -> Result<(), OpsLifecycleError> {
+    state
+        .dsl_apply_raw(input)
+        .map_err(|err| classify_generated_op_rejection(state, err, id, action))
+}
+
+fn op_registration_error_from_effects(
+    id: &OperationId,
+    effects: &[mm_dsl::MeerkatMachineEffect],
+) -> Result<Option<OpsLifecycleError>, OpsLifecycleError> {
+    let expected_id = mm_dsl::OperationId::from_domain(id).0;
+    let mut admission = None;
+    for effect in effects {
+        let mm_dsl::MeerkatMachineEffect::OpRegistrationAdmissionResolved {
+            operation_id,
+            result,
+            reject_reason,
+            max_concurrent_limit,
+            active_op_count,
+        } = effect
+        else {
+            continue;
+        };
+        if admission.is_some() {
+            return Err(OpsLifecycleError::Internal(
+                "generated op registration authority emitted multiple admission results".into(),
+            ));
         }
-        other => OpsLifecycleError::Internal(format!(
-            "DSL rejected ops transition (peer_ready): {other:?}"
-        )),
+        if operation_id != &expected_id {
+            return Err(OpsLifecycleError::Internal(format!(
+                "generated op registration authority resolved {operation_id} while shell requested {expected_id}"
+            )));
+        }
+        admission = Some(match result {
+            mm_dsl::OpRegistrationAdmissionResultKind::Accept => {
+                if reject_reason.is_some() {
+                    return Err(OpsLifecycleError::Internal(
+                        "generated op registration authority accepted with rejection reason".into(),
+                    ));
+                }
+                None
+            }
+            mm_dsl::OpRegistrationAdmissionResultKind::Reject => {
+                let reason = reject_reason.ok_or_else(|| {
+                    OpsLifecycleError::Internal(
+                        "generated op registration authority rejected without reason".into(),
+                    )
+                })?;
+                let error = match reason {
+                    mm_dsl::OpRegistrationRejectReasonKind::AlreadyRegistered => {
+                        OpsLifecycleError::AlreadyRegistered(id.clone())
+                    }
+                    mm_dsl::OpRegistrationRejectReasonKind::MaxConcurrentExceeded => {
+                        let limit = max_concurrent_limit.ok_or_else(|| {
+                            OpsLifecycleError::Internal(
+                                "generated op registration authority rejected capacity without limit"
+                                    .into(),
+                            )
+                        })?;
+                        OpsLifecycleError::MaxConcurrentExceeded {
+                            limit: limit as usize,
+                            active: *active_op_count as usize,
+                        }
+                    }
+                };
+                Some(error)
+            }
+        });
     }
+    admission.ok_or_else(|| {
+        OpsLifecycleError::Internal(
+            "generated op registration authority emitted no admission result".into(),
+        )
+    })
 }
 
 impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     fn register_operation(&self, spec: OperationSpec) -> Result<(), OpsLifecycleError> {
+        self.register_operation_with_admission_limit(spec, None)
+    }
+
+    fn register_operation_with_admission_limit(
+        &self,
+        mut spec: OperationSpec,
+        max_concurrent: Option<usize>,
+    ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
         let operation_id = spec.id.clone();
         let kind = spec.kind;
+        let max_concurrent = max_concurrent
+            .or(state.max_concurrent)
+            .map(|limit| limit as u64);
 
-        // Pre-check: duplicate.
-        if state.contains(&operation_id) {
-            return Err(OpsLifecycleError::AlreadyRegistered(operation_id));
-        }
-        // Pre-check: concurrency limit.
-        if let Some(limit) = state.max_concurrent
-            && state.active_count() >= limit
-        {
-            return Err(OpsLifecycleError::MaxConcurrentExceeded {
-                limit,
-                active: state.active_count(),
-            });
-        }
-
-        // DSL apply.
-        state.dsl_apply(
+        let effects = state.dsl_apply_with_effects(
             mm_dsl::MeerkatMachineInput::RegisterOp {
                 operation_id: mm_dsl::OperationId::from_domain(&operation_id).0,
                 kind: mm_dsl::OperationKind::from_domain(&kind),
+                source: spec
+                    .operation_source
+                    .as_ref()
+                    .map(mm_dsl::OperationSource::from_domain),
+                max_concurrent,
             },
             "RegisterOp",
         )?;
+        if let Some(error) = op_registration_error_from_effects(&operation_id, &effects)? {
+            return Err(error);
+        }
+
+        let authority_operation_source = state.operation_source(&operation_id)?;
+        ShellState::align_spec_child_session_id_to_source(
+            &mut spec,
+            authority_operation_source.as_ref(),
+        );
 
         // Insert shell record.
         state.records.insert(operation_id, ShellRecord::new(spec));
@@ -1425,20 +2766,14 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     fn provisioning_succeeded(&self, id: &OperationId) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let status = state
-            .status(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-
-        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::StartOp {
-            operation_id: mm_dsl::OperationId::from_domain(id).0,
-        }) {
-            return Err(classify_op_rejection(
-                err,
-                id,
-                status,
-                "provisioning_succeeded",
-            ));
-        }
+        apply_op_transition(
+            &mut state,
+            id,
+            mm_dsl::MeerkatMachineInput::StartOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+            },
+            mm_dsl::OpLifecycleActionKind::Start,
+        )?;
 
         // Shell concern: record the started timestamp.
         if let Some(shell) = state.records.get_mut(id) {
@@ -1454,22 +2789,21 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let status = state
-            .status(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-
         let terminal_outcome = OperationTerminalOutcome::Failed { error };
         let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
 
-        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::FailOp {
-            operation_id: mm_dsl::OperationId::from_domain(id).0,
-            outcome: outcome_kind,
-            payload: outcome_payload,
-        }) {
-            return Err(classify_op_rejection(err, id, status, "fail_operation"));
-        }
+        apply_op_transition(
+            &mut state,
+            id,
+            mm_dsl::MeerkatMachineInput::FailOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+                outcome: outcome_kind,
+                payload: outcome_payload,
+            },
+            mm_dsl::OpLifecycleActionKind::Fail,
+        )?;
 
-        state.finalize_terminal(id);
+        state.finalize_terminal(id)?;
         state.maybe_persist()?;
         Ok(())
     }
@@ -1481,19 +2815,14 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let status = state
-            .status(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-
-        // The kind / not-already-peer-ready / status decisions all live in
-        // the DSL's `PeerReadyOp` guards. The shell fires unconditionally
-        // and classifies a guard rejection by re-reading the state under
-        // the same write lock (so no race with the DSL's guard evaluation).
-        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::PeerReadyOp {
-            operation_id: mm_dsl::OperationId::from_domain(id).0,
-        }) {
-            return Err(classify_peer_ready_rejection(&state, err, id, status));
-        }
+        apply_op_transition(
+            &mut state,
+            id,
+            mm_dsl::MeerkatMachineInput::PeerReadyOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+            },
+            mm_dsl::OpLifecycleActionKind::PeerReady,
+        )?;
 
         // Shell concern: store the peer handle.
         if let Some(shell) = state.records.get_mut(id) {
@@ -1513,14 +2842,15 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         }
 
         // If already terminal, return an already-resolved watch.
-        if let Some(outcome) = state.terminal_outcome(id) {
-            return Ok(OperationCompletionWatch::already_resolved(outcome));
+        if let Some(outcome) = state.terminal_outcome(id)? {
+            return Ok(resolved_operation_completion_watch(outcome));
         }
 
         // Shell concern: create the channel and store the sender.
         let shell = state.shell_record_mut(id)?;
-        let (tx, watch) = OperationCompletionWatch::channel();
-        shell.watchers.push(tx);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let watch = operation_completion_watch_from_receiver(rx);
+        shell.watchers.push(OperationCompletionNotifier::new(tx));
         Ok(watch)
     }
 
@@ -1531,15 +2861,14 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let status = state
-            .status(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-
-        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::ProgressReportedOp {
-            operation_id: mm_dsl::OperationId::from_domain(id).0,
-        }) {
-            return Err(classify_op_rejection(err, id, status, "report_progress"));
-        }
+        apply_op_transition(
+            &mut state,
+            id,
+            mm_dsl::MeerkatMachineInput::ProgressReportedOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+            },
+            mm_dsl::OpLifecycleActionKind::ProgressReported,
+        )?;
         Ok(())
     }
 
@@ -1550,22 +2879,21 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let status = state
-            .status(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-
         let terminal_outcome = OperationTerminalOutcome::Completed(result);
         let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
 
-        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::CompleteOp {
-            operation_id: mm_dsl::OperationId::from_domain(id).0,
-            outcome: outcome_kind,
-            payload: outcome_payload,
-        }) {
-            return Err(classify_op_rejection(err, id, status, "complete_operation"));
-        }
+        apply_op_transition(
+            &mut state,
+            id,
+            mm_dsl::MeerkatMachineInput::CompleteOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+                outcome: outcome_kind,
+                payload: outcome_payload,
+            },
+            mm_dsl::OpLifecycleActionKind::Complete,
+        )?;
 
-        state.finalize_terminal(id);
+        state.finalize_terminal(id)?;
         state.maybe_persist()?;
         Ok(())
     }
@@ -1573,22 +2901,21 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     fn fail_operation(&self, id: &OperationId, error: String) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let status = state
-            .status(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-
         let terminal_outcome = OperationTerminalOutcome::Failed { error };
         let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
 
-        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::FailOp {
-            operation_id: mm_dsl::OperationId::from_domain(id).0,
-            outcome: outcome_kind,
-            payload: outcome_payload,
-        }) {
-            return Err(classify_op_rejection(err, id, status, "fail_operation"));
-        }
+        apply_op_transition(
+            &mut state,
+            id,
+            mm_dsl::MeerkatMachineInput::FailOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+                outcome: outcome_kind,
+                payload: outcome_payload,
+            },
+            mm_dsl::OpLifecycleActionKind::Fail,
+        )?;
 
-        state.finalize_terminal(id);
+        state.finalize_terminal(id)?;
         state.maybe_persist()?;
         Ok(())
     }
@@ -1600,22 +2927,21 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let status = state
-            .status(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-
         let terminal_outcome = OperationTerminalOutcome::Aborted { reason };
         let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
 
-        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::AbortOp {
-            operation_id: mm_dsl::OperationId::from_domain(id).0,
-            outcome: outcome_kind,
-            payload: outcome_payload,
-        }) {
-            return Err(classify_op_rejection(err, id, status, "abort_provisioning"));
-        }
+        apply_op_transition(
+            &mut state,
+            id,
+            mm_dsl::MeerkatMachineInput::AbortOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+                outcome: outcome_kind,
+                payload: outcome_payload,
+            },
+            mm_dsl::OpLifecycleActionKind::Abort,
+        )?;
 
-        state.finalize_terminal(id);
+        state.finalize_terminal(id)?;
         state.maybe_persist()?;
         Ok(())
     }
@@ -1627,22 +2953,21 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let status = state
-            .status(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-
         let terminal_outcome = OperationTerminalOutcome::Cancelled { reason };
         let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
 
-        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::CancelOp {
-            operation_id: mm_dsl::OperationId::from_domain(id).0,
-            outcome: outcome_kind,
-            payload: outcome_payload,
-        }) {
-            return Err(classify_op_rejection(err, id, status, "cancel_operation"));
-        }
+        apply_op_transition(
+            &mut state,
+            id,
+            mm_dsl::MeerkatMachineInput::CancelOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+                outcome: outcome_kind,
+                payload: outcome_payload,
+            },
+            mm_dsl::OpLifecycleActionKind::Cancel,
+        )?;
 
-        state.finalize_terminal(id);
+        state.finalize_terminal(id)?;
         state.maybe_persist()?;
         Ok(())
     }
@@ -1650,85 +2975,140 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     fn request_retire(&self, id: &OperationId) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let status = state
-            .status(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-
-        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::RetireRequestedOp {
-            operation_id: mm_dsl::OperationId::from_domain(id).0,
-        }) {
-            return Err(classify_op_rejection(err, id, status, "request_retire"));
-        }
+        apply_op_transition(
+            &mut state,
+            id,
+            mm_dsl::MeerkatMachineInput::RetireRequestedOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+            },
+            mm_dsl::OpLifecycleActionKind::RetireRequested,
+        )?;
         Ok(())
     }
 
     fn mark_retired(&self, id: &OperationId) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let status = state
-            .status(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-
         let terminal_outcome = OperationTerminalOutcome::Retired;
         let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
 
-        if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::RetireCompletedOp {
-            operation_id: mm_dsl::OperationId::from_domain(id).0,
-            outcome: outcome_kind,
-            payload: outcome_payload,
-        }) {
-            return Err(classify_op_rejection(err, id, status, "mark_retired"));
-        }
+        apply_op_transition(
+            &mut state,
+            id,
+            mm_dsl::MeerkatMachineInput::RetireCompletedOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+                outcome: outcome_kind,
+                payload: outcome_payload,
+            },
+            mm_dsl::OpLifecycleActionKind::RetireCompleted,
+        )?;
 
-        state.finalize_terminal(id);
+        state.finalize_terminal(id)?;
         state.maybe_persist()?;
         Ok(())
     }
 
-    fn snapshot(&self, id: &OperationId) -> Option<OperationLifecycleSnapshot> {
-        self.read_state().ok().and_then(|state| state.snapshot(id))
+    fn snapshot(
+        &self,
+        id: &OperationId,
+    ) -> Result<Option<OperationLifecycleSnapshot>, OpsLifecycleError> {
+        let state = self.read_state()?;
+        state.snapshot(id)
     }
 
-    fn list_operations(&self) -> Vec<OperationLifecycleSnapshot> {
-        let mut snapshots = self
-            .read_state()
-            .map(|state| {
-                state
-                    .operation_ids()
-                    .into_iter()
-                    .filter_map(|id| state.snapshot(&id))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+    fn list_operations(&self) -> Result<Vec<OperationLifecycleSnapshot>, OpsLifecycleError> {
+        let state = self.read_state()?;
+        let mut snapshots = Vec::new();
+        for id in state.operation_ids()? {
+            let snapshot = state.snapshot(&id)?.ok_or_else(|| {
+                OpsLifecycleError::Internal(format!(
+                    "operation {id} was present in generated lifecycle authority but produced no public snapshot"
+                ))
+            })?;
+            snapshots.push(snapshot);
+        }
         snapshots.sort_by(|left, right| left.display_name.cmp(&right.display_name));
-        snapshots
+        Ok(snapshots)
+    }
+
+    fn classify_operation_terminality(
+        &self,
+        id: &OperationId,
+        status: OperationStatus,
+    ) -> Result<bool, OpsLifecycleError> {
+        ShellState::operation_status_is_terminal(id, status)
+    }
+
+    fn classify_operation_public_result(
+        &self,
+        id: &OperationId,
+    ) -> Result<OperationPublicResultClass, OpsLifecycleError> {
+        let state = self.read_state()?;
+        let status = match state.status(id) {
+            Some(status) => status,
+            None if state.records.contains_key(id)
+                || state.has_generated_operation_record_fact(id) =>
+            {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "generated op lifecycle authority missing status for {id}"
+                )));
+            }
+            None => OperationStatus::Absent,
+        };
+        ShellState::operation_public_result_class(id, status)
+    }
+
+    fn classify_operation_completion_wake(
+        &self,
+        id: &OperationId,
+        kind: OperationKind,
+    ) -> Result<OperationCompletionWakeClass, OpsLifecycleError> {
+        ShellState::operation_completion_wake_class(id, kind)
+    }
+
+    fn classify_operation_transition_idempotence(
+        &self,
+        id: &OperationId,
+        action: OperationLifecycleAction,
+    ) -> Result<bool, OpsLifecycleError> {
+        let state = self.read_state()?;
+        let status = match state.status(id) {
+            Some(status) => status,
+            None if state.records.contains_key(id)
+                || state.has_generated_operation_record_fact(id) =>
+            {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "generated op lifecycle authority missing status for {id}"
+                )));
+            }
+            None => OperationStatus::Absent,
+        };
+        ShellState::operation_transition_rejection_is_idempotent(id, action, status)
     }
 
     fn terminate_owner(&self, reason: String) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let to_terminate = state.owner_termination_targets();
+        let to_terminate = state.owner_termination_targets()?;
 
-        for (op_id, status) in &to_terminate {
+        for (op_id, _status) in &to_terminate {
             let terminal_outcome = OperationTerminalOutcome::Terminated {
                 reason: reason.clone(),
             };
             let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
 
-            if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::TerminateOp {
-                operation_id: mm_dsl::OperationId::from_domain(op_id).0,
-                outcome: outcome_kind,
-                payload: outcome_payload,
-            }) {
-                return Err(classify_op_rejection(
-                    err,
-                    op_id,
-                    *status,
-                    "terminate_owner",
-                ));
-            }
+            apply_op_transition(
+                &mut state,
+                op_id,
+                mm_dsl::MeerkatMachineInput::TerminateOp {
+                    operation_id: mm_dsl::OperationId::from_domain(op_id).0,
+                    outcome: outcome_kind,
+                    payload: outcome_payload,
+                },
+                mm_dsl::OpLifecycleActionKind::Terminate,
+            )?;
 
-            state.finalize_terminal(op_id);
+            state.finalize_terminal(op_id)?;
         }
 
         if !to_terminate.is_empty() {
@@ -1742,19 +3122,17 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<Vec<(OperationId, OperationTerminalOutcome)>, OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let ids: Vec<OperationId> = state.completed_order.drain(..).collect();
+        let ids: Vec<OperationId> = state.completed_order.iter().cloned().collect();
         let mut collected = Vec::with_capacity(ids.len());
         for id in ids {
-            let outcome = state.terminal_outcome(&id);
-            // Remove from DSL state and shell record.
-            let id_key = mm_dsl::OperationId::from_domain(&id).0;
-            state.dsl.0.state.op_statuses.remove(&id_key);
-            state.dsl.0.state.op_kinds.remove(&id_key);
-            state.dsl.0.state.op_peer_ready.remove(&id_key);
-            state.dsl.0.state.op_progress_counts.remove(&id_key);
-            state.dsl.0.state.op_terminal_outcomes.remove(&id_key);
-            state.dsl.0.state.op_terminal_payload.remove(&id_key);
-            state.dsl.0.state.op_completion_seq.remove(&id_key);
+            let outcome = state.terminal_outcome(&id)?;
+            state.dsl_apply(
+                mm_dsl::MeerkatMachineInput::CollectCompletedOp {
+                    operation_id: mm_dsl::OperationId::from_domain(&id).0,
+                },
+                "CollectCompletedOp",
+            )?;
+            state.completed_order.retain(|queued| queued != &id);
             state.records.remove(&id);
             if let Some(outcome) = outcome {
                 collected.push((id, outcome));
@@ -1767,9 +3145,65 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         Some(self.completion_feed_handle())
     }
 
+    fn completion_cursor(&self, consumer: CompletionCursorConsumer) -> Option<CompletionSeq> {
+        let state = self.read_state().ok()?;
+        Some(state.completion_cursor(consumer))
+    }
+
+    fn advance_completion_cursor(
+        &self,
+        consumer: CompletionCursorConsumer,
+        cursor: CompletionSeq,
+        projection: Option<&meerkat_core::EpochCursorState>,
+    ) -> Result<CompletionSeq, OpsLifecycleError> {
+        let mut state = self.write_state()?;
+        let input = match consumer {
+            CompletionCursorConsumer::AgentApplied => {
+                mm_dsl::MeerkatMachineInput::AdvanceAgentCompletionCursor { cursor }
+            }
+            CompletionCursorConsumer::RuntimeObserved => {
+                mm_dsl::MeerkatMachineInput::AdvanceRuntimeObservedCompletionCursor { cursor }
+            }
+            CompletionCursorConsumer::RuntimeInjected => {
+                mm_dsl::MeerkatMachineInput::AdvanceRuntimeInjectedCompletionCursor { cursor }
+            }
+        };
+        let effects = state.dsl_apply_with_effects(input, "AdvanceCompletionCursor")?;
+        let advanced = effects
+            .iter()
+            .find_map(|effect| match (consumer, effect) {
+                (
+                    CompletionCursorConsumer::AgentApplied,
+                    mm_dsl::MeerkatMachineEffect::AgentCompletionCursorAdvanced { cursor },
+                ) => Some(*cursor),
+                (
+                    CompletionCursorConsumer::RuntimeObserved,
+                    mm_dsl::MeerkatMachineEffect::RuntimeObservedCompletionCursorAdvanced {
+                        cursor,
+                    },
+                ) => Some(*cursor),
+                (
+                    CompletionCursorConsumer::RuntimeInjected,
+                    mm_dsl::MeerkatMachineEffect::RuntimeInjectedCompletionCursorAdvanced {
+                        cursor,
+                    },
+                ) => Some(*cursor),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                OpsLifecycleError::Internal(format!(
+                    "generated completion cursor transition emitted no feedback for {consumer:?}"
+                ))
+            })?;
+        if let Some(projection) = projection {
+            projection.project_authorized_completion_cursor(consumer, advanced);
+        }
+        Ok(advanced)
+    }
+
     fn wait_all(
         &self,
-        _run_id: &RunId,
+        run_id: &RunId,
         ids: &[OperationId],
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<WaitAllResult, OpsLifecycleError>> + Send + '_>,
@@ -1779,11 +3213,11 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
 
         let state = match self.write_state() {
             Ok(mut state) => {
-                match state.begin_wait_all_authority(&wait_request_id, &owned_ids) {
+                match state.begin_wait_all_authority(run_id, &wait_request_id, &owned_ids) {
                     Ok(WaitAllAuthorityPlan::AlreadySatisfied(satisfied)) => {
                         let outcomes =
                             state
-                                .collect_wait_outcomes(&owned_ids)
+                                .collect_wait_outcomes(&satisfied.operation_ids)
                                 .map(|outcomes| WaitAllResult {
                                     outcomes,
                                     satisfied,
@@ -1791,31 +3225,29 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                         WaitAllFutureState::Ready(Some(outcomes))
                     }
                     Ok(WaitAllAuthorityPlan::ActivateBarrier) => {
-                        state.wait_request_id = Some(wait_request_id.clone());
-
                         if state.pending_wait.is_some() {
                             // Roll back the DSL barrier we just activated so the
                             // registry is not stuck in a wait-active state with
                             // no correlation oneshot to resolve. `CancelWaitAll`
                             // is the no-obligation clearer (members need not be
                             // terminal).
-                            state.wait_request_id = None;
-                            let _ = state.dsl_apply(
+                            let rollback = state.dsl_apply(
                                 mm_dsl::MeerkatMachineInput::CancelWaitAll,
                                 "CancelWaitAll(rollback)",
                             );
                             return Box::pin(WaitAllFuture {
                                 registry: self,
                                 wait_request_id,
-                                operation_ids: owned_ids,
-                                state: WaitAllFutureState::Ready(Some(Err(
-                                    OpsLifecycleError::Internal(
+                                state: WaitAllFutureState::Ready(Some(Err(match rollback {
+                                    Ok(()) => OpsLifecycleError::Internal(
                                         "wait_all started while a pending wait sender already existed"
                                             .into(),
                                     ),
-                                ))),
+                                    Err(err) => err,
+                                }))),
                             });
                         }
+                        state.wait_request_id = Some(wait_request_id.clone());
                         let (sender, receiver) = tokio::sync::oneshot::channel();
                         state.pending_wait = Some(PendingWaitState {
                             wait_request_id: wait_request_id.clone(),
@@ -1832,7 +3264,6 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         Box::pin(WaitAllFuture {
             registry: self,
             wait_request_id,
-            operation_ids: owned_ids,
             state,
         })
     }
@@ -1860,6 +3291,7 @@ mod tests {
             owner_session_id: SessionId::new(),
             display_name: name.into(),
             source_label: "test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         }
@@ -1886,10 +3318,25 @@ mod tests {
             .unwrap();
 
         let watch = registry.register_watcher(&op_id).unwrap();
-        match watch.wait().await {
+        match watch
+            .await
+            .expect("operation completion watch should resolve")
+        {
             OperationTerminalOutcome::Completed(result) => assert_eq!(result.content, "done"),
             other => panic!("expected completed outcome, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn dropped_watch_sender_is_waiter_error_not_terminal_outcome() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let watch = operation_completion_watch_from_receiver(rx);
+        drop(tx);
+
+        assert_eq!(
+            watch.await,
+            Err(meerkat_core::ops_lifecycle::OperationCompletionWatchError::ChannelClosed)
+        );
     }
 
     #[test]
@@ -1913,6 +3360,49 @@ mod tests {
             },
         );
         assert!(matches!(result, Err(OpsLifecycleError::PeerNotExpected(_))));
+    }
+
+    #[test]
+    fn duplicate_registration_rejection_is_generated() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let spec = background_spec("duplicate");
+        let op_id = spec.id.clone();
+
+        registry.register_operation(spec.clone()).unwrap();
+        let result = registry.register_operation(spec);
+
+        assert!(matches!(
+            result,
+            Err(OpsLifecycleError::AlreadyRegistered(id)) if id == op_id
+        ));
+    }
+
+    #[test]
+    fn invalid_transition_rejection_is_generated() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let spec = background_spec("invalid-transition");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+
+        let result = registry.complete_operation(
+            &op_id,
+            OperationResult {
+                id: op_id.clone(),
+                content: "too-early".into(),
+                is_error: false,
+                duration_ms: 1,
+                tokens_used: 0,
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(OpsLifecycleError::InvalidTransition {
+                id,
+                status: OperationStatus::Provisioning,
+                action: "complete_operation",
+            }) if id == op_id
+        ));
     }
 
     #[tokio::test]
@@ -1941,7 +3431,10 @@ mod tests {
             .unwrap();
 
         for watch in [watch1, watch2, watch3] {
-            match watch.wait().await {
+            match watch
+                .await
+                .expect("operation completion watch should resolve")
+            {
                 OperationTerminalOutcome::Completed(result) => {
                     assert_eq!(result.content, "multi-done");
                 }
@@ -2034,6 +3527,71 @@ mod tests {
         // Obligation carries the validated ID
         assert_eq!(wait_result.satisfied.operation_ids, vec![op_id]);
         assert_ne!(wait_result.satisfied.wait_request_id.to_string(), "");
+        let state = registry.read_state().unwrap();
+        assert!(
+            !state.wait_active(),
+            "already-satisfied wait_all must be cleared by generated satisfaction authority"
+        );
+        assert!(state.wait_operation_ids().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn wait_all_duplicate_rejection_is_generated() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let spec = background_spec("duplicate-wait");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&op_id).unwrap();
+
+        let result = registry
+            .wait_all(&test_run_id(), &[op_id.clone(), op_id.clone()])
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(OpsLifecycleError::DuplicateWaitOperation(id)) if id == op_id
+        ));
+        let state = registry.read_state().unwrap();
+        assert!(
+            !state.wait_active(),
+            "duplicate wait rejection must not create a shell or machine barrier"
+        );
+        assert!(state.wait_operation_ids().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn wait_all_active_rejection_is_generated() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let spec = background_spec("active-wait");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&op_id).unwrap();
+
+        let active_wait = registry.wait_all(&test_run_id(), std::slice::from_ref(&op_id));
+        let result = registry
+            .wait_all(&test_run_id(), std::slice::from_ref(&op_id))
+            .await;
+
+        assert!(matches!(result, Err(OpsLifecycleError::WaitAlreadyActive)));
+        drop(active_wait);
+        let state = registry.read_state().unwrap();
+        assert!(!state.wait_active());
+        assert!(state.wait_operation_ids().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn wait_all_unknown_operation_rejection_is_generated() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let op_id = OperationId::new();
+
+        let result = registry
+            .wait_all(&test_run_id(), std::slice::from_ref(&op_id))
+            .await;
+
+        assert!(matches!(result, Err(OpsLifecycleError::NotFound(id)) if id == op_id));
+        let state = registry.read_state().unwrap();
+        assert!(!state.wait_active());
+        assert!(state.wait_operation_ids().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2061,7 +3619,7 @@ mod tests {
                 None => panic!("wait request should be active"),
             };
             assert_eq!(
-                state.wait_operation_ids().as_slice(),
+                state.wait_operation_ids().unwrap().as_slice(),
                 std::slice::from_ref(&op_id)
             );
             wait_request_id
@@ -2108,7 +3666,7 @@ mod tests {
 
         let state = registry.read_state().unwrap();
         assert!(state.wait_request_id.is_none());
-        assert!(state.wait_operation_ids().is_empty());
+        assert!(state.wait_operation_ids().unwrap().is_empty());
         assert!(!state.wait_active());
     }
 
@@ -2141,11 +3699,11 @@ mod tests {
         registry.terminate_owner("shutdown".into()).unwrap();
 
         assert!(matches!(
-            registry.snapshot(&running_id).unwrap().status,
+            registry.snapshot(&running_id).unwrap().unwrap().status,
             OperationStatus::Terminated
         ));
         assert!(matches!(
-            registry.snapshot(&completed_id).unwrap().status,
+            registry.snapshot(&completed_id).unwrap().unwrap().status,
             OperationStatus::Completed
         ));
     }
@@ -2179,8 +3737,8 @@ mod tests {
         assert_eq!(collected.len(), 1);
         assert_eq!(collected[0].0, id_a);
 
-        assert!(registry.snapshot(&id_a).is_none());
-        assert!(registry.snapshot(&id_b).is_some());
+        assert!(registry.snapshot(&id_a).unwrap().is_none());
+        assert!(registry.snapshot(&id_b).unwrap().is_some());
 
         let collected2 = registry.collect_completed().unwrap();
         assert!(collected2.is_empty());
@@ -2214,11 +3772,1042 @@ mod tests {
             ids.push(id);
         }
 
-        assert!(registry.snapshot(&ids[0]).is_none());
-        assert!(registry.snapshot(&ids[1]).is_none());
-        assert!(registry.snapshot(&ids[2]).is_some());
-        assert!(registry.snapshot(&ids[3]).is_some());
-        assert!(registry.snapshot(&ids[4]).is_some());
+        assert!(registry.snapshot(&ids[0]).unwrap().is_none());
+        assert!(registry.snapshot(&ids[1]).unwrap().is_none());
+        assert!(registry.snapshot(&ids[2]).unwrap().is_some());
+        assert!(registry.snapshot(&ids[3]).unwrap().is_some());
+        assert!(registry.snapshot(&ids[4]).unwrap().is_some());
+    }
+
+    #[test]
+    fn recovered_snapshot_retains_only_machine_accepted_terminal_records() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+
+        let completed_spec = background_spec("completed");
+        let completed_id = completed_spec.id.clone();
+        registry.register_operation(completed_spec).unwrap();
+        registry.provisioning_succeeded(&completed_id).unwrap();
+        registry
+            .complete_operation(
+                &completed_id,
+                OperationResult {
+                    id: completed_id.clone(),
+                    content: "done".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .unwrap();
+
+        let running_spec = background_spec("running");
+        let running_id = running_spec.id.clone();
+        registry.register_operation(running_spec).unwrap();
+        registry.provisioning_succeeded(&running_id).unwrap();
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let snapshot = registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state)
+            .unwrap();
+        let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
+
+        assert!(recovered.snapshot(&completed_id).unwrap().is_some());
+        assert!(recovered.snapshot(&running_id).unwrap().is_none());
+
+        let collected = recovered.collect_completed().unwrap();
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].0, completed_id);
+    }
+
+    #[test]
+    fn capacity_slot_terminal_is_not_persisted_or_recovered() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+
+        let mut spec = background_spec("capacity");
+        spec.kind = OperationKind::BackgroundToolCapacitySlot;
+        let operation_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&operation_id).unwrap();
+        registry.mark_retired(&operation_id).unwrap();
+
+        assert!(registry.snapshot(&operation_id).unwrap().is_none());
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let snapshot = registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state)
+            .unwrap();
+        assert!(
+            !snapshot
+                .authority_state
+                .operations
+                .contains_key(&operation_id)
+        );
+        assert!(!snapshot.operation_specs.contains_key(&operation_id));
+        assert!(snapshot.completion_entries.is_empty());
+
+        let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
+        assert!(recovered.snapshot(&operation_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn recovered_snapshot_uses_authority_operation_source() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let child_session_id = SessionId::new();
+        let operation_source = OperationSource::session_child(child_session_id.clone());
+        let spec = OperationSpec {
+            id: OperationId::new(),
+            kind: OperationKind::MobMemberChild,
+            owner_session_id: SessionId::new(),
+            display_name: "source-recovery".into(),
+            source_label: "test".into(),
+            operation_source: Some(operation_source.clone()),
+            child_session_id: Some(child_session_id),
+            expect_peer_channel: true,
+        };
+        let operation_id = spec.id.clone();
+
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&operation_id).unwrap();
+        registry.mark_retired(&operation_id).unwrap();
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let mut snapshot = registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state)
+            .unwrap();
+        assert_eq!(
+            snapshot
+                .authority_state
+                .operations
+                .get(&operation_id)
+                .and_then(|state| state.operation_source.as_ref()),
+            Some(&operation_source)
+        );
+
+        snapshot
+            .operation_specs
+            .get_mut(&operation_id)
+            .expect("persisted spec")
+            .operation_source = None;
+        let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
+        assert_eq!(
+            recovered
+                .snapshot(&operation_id)
+                .unwrap()
+                .unwrap()
+                .operation_source,
+            Some(operation_source)
+        );
+    }
+
+    #[test]
+    fn recovered_snapshot_rejects_operation_source_mirror_drift() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let child_session_id = SessionId::new();
+        let operation_source = OperationSource::session_child(child_session_id.clone());
+        let spec = OperationSpec {
+            id: OperationId::new(),
+            kind: OperationKind::MobMemberChild,
+            owner_session_id: SessionId::new(),
+            display_name: "source-drift".into(),
+            source_label: "test".into(),
+            operation_source: Some(operation_source),
+            child_session_id: Some(child_session_id),
+            expect_peer_channel: true,
+        };
+        let operation_id = spec.id.clone();
+
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&operation_id).unwrap();
+        registry.mark_retired(&operation_id).unwrap();
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let mut snapshot = registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state)
+            .unwrap();
+        snapshot
+            .operation_specs
+            .get_mut(&operation_id)
+            .expect("persisted spec")
+            .operation_source = Some(OperationSource::session_child(SessionId::new()));
+
+        let err = RuntimeOpsLifecycleRegistry::from_recovered(snapshot)
+            .expect_err("source mirror drift must fail recovery");
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("operation source mirror")),
+            "unexpected recovery error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn persisted_authority_state_serializes_explicit_no_operation_source() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+
+        let spec = background_spec("explicit-no-source");
+        let operation_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&operation_id).unwrap();
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let snapshot = registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state)
+            .unwrap();
+        let value = serde_json::to_value(&snapshot).unwrap();
+        let operations = value
+            .get("authority_state")
+            .and_then(|state| state.get("operations"))
+            .and_then(serde_json::Value::as_object)
+            .expect("serialized authority operations");
+        let persisted_state = operations
+            .values()
+            .next()
+            .and_then(serde_json::Value::as_object)
+            .expect("serialized operation state");
+
+        assert!(
+            persisted_state
+                .get("operation_source")
+                .is_some_and(serde_json::Value::is_null),
+            "generated explicit no-source fact must be serialized as present null: {persisted_state:?}"
+        );
+
+        let recovered_snapshot = serde_json::from_value::<PersistedOpsSnapshot>(value).unwrap();
+        assert_eq!(
+            recovered_snapshot
+                .authority_state
+                .operations
+                .get(&operation_id)
+                .expect("round-tripped operation")
+                .operation_source,
+            None
+        );
+    }
+
+    #[test]
+    fn persisted_authority_state_rejects_missing_operation_source_fact() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+
+        let spec = background_spec("missing-source-fact");
+        registry.register_operation(spec).unwrap();
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let snapshot = registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state)
+            .unwrap();
+        let mut value = serde_json::to_value(&snapshot).unwrap();
+        let operations = value
+            .get_mut("authority_state")
+            .and_then(|state| state.get_mut("operations"))
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("serialized authority operations");
+        let operation_state = operations
+            .values_mut()
+            .next()
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("serialized operation state");
+        assert!(operation_state.remove("operation_source").is_some());
+
+        let err = serde_json::from_value::<PersistedOpsSnapshot>(value)
+            .expect_err("missing generated source fact must fail recovery snapshot decoding");
+        assert!(
+            err.to_string().contains("operation_source"),
+            "unexpected decode error: {err}"
+        );
+    }
+
+    #[test]
+    fn persisted_authority_state_rejects_missing_completion_feed_authority() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+
+        let spec = background_spec("missing-feed-authority");
+        let operation_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&operation_id).unwrap();
+        registry
+            .complete_operation(
+                &operation_id,
+                OperationResult {
+                    id: operation_id.clone(),
+                    content: "done".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .unwrap();
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let snapshot = registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state)
+            .unwrap();
+        let mut value = serde_json::to_value(&snapshot).unwrap();
+        let authority_state = value
+            .get_mut("authority_state")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("serialized authority state");
+        assert!(authority_state.remove("completion_feed_entries").is_some());
+
+        let err = serde_json::from_value::<PersistedOpsSnapshot>(value)
+            .expect_err("missing generated feed authority must fail recovery snapshot decoding");
+        assert!(
+            err.to_string().contains("completion_feed_entries"),
+            "unexpected decode error: {err}"
+        );
+    }
+
+    #[test]
+    fn public_child_session_projection_uses_authority_operation_source() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let authority_child_session_id = SessionId::new();
+        let stale_shell_child_session_id = SessionId::new();
+        let operation_source = OperationSource::session_child(authority_child_session_id.clone());
+        let spec = OperationSpec {
+            id: OperationId::new(),
+            kind: OperationKind::MobMemberChild,
+            owner_session_id: SessionId::new(),
+            display_name: "child-projection".into(),
+            source_label: "test".into(),
+            operation_source: Some(operation_source),
+            child_session_id: Some(stale_shell_child_session_id),
+            expect_peer_channel: true,
+        };
+        let operation_id = spec.id.clone();
+
+        registry.register_operation(spec).unwrap();
+
+        assert_eq!(
+            registry
+                .snapshot(&operation_id)
+                .unwrap()
+                .unwrap()
+                .child_session_id,
+            Some(authority_child_session_id.clone())
+        );
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let snapshot = registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state)
+            .unwrap();
+        assert_eq!(
+            snapshot
+                .operation_specs
+                .get(&operation_id)
+                .expect("persisted spec")
+                .child_session_id,
+            Some(authority_child_session_id)
+        );
+    }
+
+    #[test]
+    fn generated_terminal_payload_projection_fails_closed() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+
+        let spec = background_spec("terminal-payload-drift");
+        let operation_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&operation_id).unwrap();
+        registry
+            .complete_operation(
+                &operation_id,
+                OperationResult {
+                    id: operation_id.clone(),
+                    content: "done".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .unwrap();
+
+        {
+            let mut state = registry.write_state().unwrap();
+            let mut machine_state = state.dsl.0.state().clone();
+            let operation_id_key = mm_dsl::OperationId::from_domain(&operation_id).0;
+            machine_state
+                .op_terminal_payload
+                .insert(operation_id_key, "not-json".into());
+            state.dsl = DslAuthority(Box::new(
+                mm_dsl::MeerkatMachineAuthority::recover_from_state(machine_state).unwrap(),
+            ));
+        }
+
+        let err = match registry.register_watcher(&operation_id) {
+            Ok(_) => panic!("invalid generated terminal payload must reject watcher projection"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("generated op terminal authority has invalid Completed payload")),
+            "unexpected watcher error: {err:?}"
+        );
+        let err = registry
+            .snapshot(&operation_id)
+            .expect_err("invalid generated terminal payload must reject public snapshot");
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("invalid Completed payload")),
+            "unexpected public snapshot error: {err:?}"
+        );
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let err = match registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state)
+        {
+            Ok(_) => panic!("invalid generated terminal payload must reject persistence snapshot"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("generated op terminal authority has invalid Completed payload")),
+            "unexpected snapshot error: {err:?}"
+        );
+
+        let err = match registry.collect_completed() {
+            Ok(_) => panic!("invalid generated terminal payload must reject collection"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("generated op terminal authority has invalid Completed payload")),
+            "unexpected collection error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn generated_terminal_payload_missing_projection_fails_closed() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+
+        let spec = background_spec("terminal-payload-missing");
+        let operation_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&operation_id).unwrap();
+        registry
+            .fail_operation(&operation_id, "boom".into())
+            .unwrap();
+
+        {
+            let mut state = registry.write_state().unwrap();
+            let mut machine_state = state.dsl.0.state().clone();
+            let operation_id_key = mm_dsl::OperationId::from_domain(&operation_id).0;
+            machine_state.op_terminal_payload.remove(&operation_id_key);
+            state.dsl = DslAuthority(Box::new(
+                mm_dsl::MeerkatMachineAuthority::recover_from_state(machine_state).unwrap(),
+            ));
+        }
+
+        let err = match registry.register_watcher(&operation_id) {
+            Ok(_) => panic!("missing generated terminal payload must reject watcher projection"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("missing terminal payload")),
+            "unexpected watcher error: {err:?}"
+        );
+        let err = registry
+            .snapshot(&operation_id)
+            .expect_err("missing generated terminal payload must reject public snapshot");
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("missing terminal payload")),
+            "unexpected public snapshot error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn generated_terminal_status_without_outcome_fails_closed() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+
+        let spec = background_spec("terminal-outcome-missing");
+        let operation_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&operation_id).unwrap();
+        registry
+            .fail_operation(&operation_id, "boom".into())
+            .unwrap();
+
+        {
+            let mut state = registry.write_state().unwrap();
+            let mut machine_state = state.dsl.0.state().clone();
+            let operation_id_key = mm_dsl::OperationId::from_domain(&operation_id).0;
+            machine_state.op_terminal_outcomes.remove(&operation_id_key);
+            state.dsl = DslAuthority(Box::new(
+                mm_dsl::MeerkatMachineAuthority::recover_from_state(machine_state).unwrap(),
+            ));
+        }
+
+        let err = registry
+            .snapshot(&operation_id)
+            .expect_err("terminal status without outcome must reject public snapshot");
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("missing terminal outcome")),
+            "unexpected public snapshot error: {err:?}"
+        );
+
+        let err = match registry.collect_completed() {
+            Ok(_) => panic!("terminal status without outcome must reject collection"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("missing terminal outcome")),
+            "unexpected collection error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn generated_operation_source_projection_fails_closed() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let child_session_id = SessionId::new();
+        let operation_source = OperationSource::session_child(child_session_id.clone());
+        let spec = OperationSpec {
+            id: OperationId::new(),
+            kind: OperationKind::MobMemberChild,
+            owner_session_id: SessionId::new(),
+            display_name: "source-authority-drift".into(),
+            source_label: "test".into(),
+            operation_source: Some(operation_source),
+            child_session_id: Some(child_session_id),
+            expect_peer_channel: true,
+        };
+        let operation_id = spec.id.clone();
+
+        registry.register_operation(spec).unwrap();
+
+        {
+            let mut state = registry.write_state().unwrap();
+            let mut machine_state = state.dsl.0.state().clone();
+            let operation_id_key = mm_dsl::OperationId::from_domain(&operation_id).0;
+            machine_state
+                .op_sources
+                .get_mut(&operation_id_key)
+                .expect("generated operation source")
+                .session_id = None;
+            state.dsl = DslAuthority(Box::new(
+                mm_dsl::MeerkatMachineAuthority::recover_from_state(machine_state).unwrap(),
+            ));
+        }
+
+        let err = registry
+            .snapshot(&operation_id)
+            .expect_err("invalid generated operation source must reject public snapshot");
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("generated operation source authority has invalid source")),
+            "unexpected public snapshot error: {err:?}"
+        );
+        let err = registry
+            .list_operations()
+            .expect_err("invalid generated operation source must reject public operation list");
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("generated operation source authority has invalid source")),
+            "unexpected operation list error: {err:?}"
+        );
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let err = match registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state)
+        {
+            Ok(_) => panic!("invalid generated operation source must reject persistence snapshot"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("generated operation source authority has invalid source")),
+            "unexpected snapshot error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn generated_operation_id_projection_fails_closed() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+
+        {
+            let mut state = registry.write_state().unwrap();
+            let mut machine_state = state.dsl.0.state().clone();
+            machine_state.op_statuses.insert(
+                "not-json-operation-id".into(),
+                mm_dsl::OperationStatus::Running,
+            );
+            state.dsl = DslAuthority(Box::new(
+                mm_dsl::MeerkatMachineAuthority::recover_from_state(machine_state).unwrap(),
+            ));
+        }
+
+        let err = registry
+            .list_operations()
+            .expect_err("invalid generated operation id must reject public operation list");
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("invalid operation id key")),
+            "unexpected operation list error: {err:?}"
+        );
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let err = match registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state)
+        {
+            Ok(_) => panic!("invalid generated operation id must reject persistence snapshot"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("invalid operation id key")),
+            "unexpected persistence snapshot error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn generated_missing_kind_projection_fails_closed() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let spec = background_spec("missing-kind");
+        let operation_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+
+        {
+            let mut state = registry.write_state().unwrap();
+            let mut machine_state = state.dsl.0.state().clone();
+            let operation_id_key = mm_dsl::OperationId::from_domain(&operation_id).0;
+            machine_state.op_kinds.remove(&operation_id_key);
+            state.dsl = DslAuthority(Box::new(
+                mm_dsl::MeerkatMachineAuthority::recover_from_state(machine_state).unwrap(),
+            ));
+        }
+
+        let err = registry
+            .snapshot(&operation_id)
+            .expect_err("missing generated kind must reject public snapshot");
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("missing kind")),
+            "unexpected public snapshot error: {err:?}"
+        );
+        let err = registry
+            .list_operations()
+            .expect_err("missing generated kind must reject public list");
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("missing kind")),
+            "unexpected public list error: {err:?}"
+        );
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let err = registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state)
+            .expect_err("missing generated kind must reject persistence snapshot");
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("missing kind")),
+            "unexpected persistence snapshot error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn generated_missing_status_projection_fails_closed() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let spec = background_spec("missing-status");
+        let operation_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+
+        {
+            let mut state = registry.write_state().unwrap();
+            let mut machine_state = state.dsl.0.state().clone();
+            let operation_id_key = mm_dsl::OperationId::from_domain(&operation_id).0;
+            machine_state.op_statuses.remove(&operation_id_key);
+            state.dsl = DslAuthority(Box::new(
+                mm_dsl::MeerkatMachineAuthority::recover_from_state(machine_state).unwrap(),
+            ));
+        }
+
+        let err = registry
+            .snapshot(&operation_id)
+            .expect_err("missing generated status must reject public snapshot");
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("missing status")),
+            "unexpected public snapshot error: {err:?}"
+        );
+        let err = registry
+            .list_operations()
+            .expect_err("missing generated status must reject public list");
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("missing status")),
+            "unexpected public list error: {err:?}"
+        );
+        let err = registry
+            .classify_operation_public_result(&operation_id)
+            .expect_err("missing generated status must reject public-result classification");
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("missing status")),
+            "unexpected public-result error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn generated_retiring_public_result_remains_running_until_terminal() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let spec = background_spec("retiring-public-result");
+        let operation_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&operation_id).unwrap();
+        registry.request_retire(&operation_id).unwrap();
+
+        let snapshot = registry.snapshot(&operation_id).unwrap().unwrap();
+        assert_eq!(snapshot.status, OperationStatus::Retiring);
+        assert!(snapshot.terminal_outcome.is_none());
+        assert!(!snapshot.terminal);
+        assert_eq!(
+            snapshot.public_result_class,
+            OperationPublicResultClass::Running
+        );
+        assert_eq!(
+            registry
+                .classify_operation_public_result(&operation_id)
+                .unwrap(),
+            OperationPublicResultClass::Running
+        );
+    }
+
+    #[test]
+    fn generated_missing_peer_ready_projection_fails_closed() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let spec = background_spec("missing-peer-ready");
+        let operation_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+
+        {
+            let mut state = registry.write_state().unwrap();
+            let mut machine_state = state.dsl.0.state().clone();
+            let operation_id_key = mm_dsl::OperationId::from_domain(&operation_id).0;
+            machine_state.op_peer_ready.remove(&operation_id_key);
+            state.dsl = DslAuthority(Box::new(
+                mm_dsl::MeerkatMachineAuthority::recover_from_state(machine_state).unwrap(),
+            ));
+        }
+
+        let err = registry
+            .snapshot(&operation_id)
+            .expect_err("missing generated peer-ready fact must reject public snapshot");
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("missing peer-ready")),
+            "unexpected public snapshot error: {err:?}"
+        );
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let err = registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state)
+            .expect_err("missing generated peer-ready fact must reject persistence snapshot");
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("missing peer-ready")),
+            "unexpected persistence snapshot error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn generated_missing_progress_count_projection_fails_closed() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let spec = background_spec("missing-progress-count");
+        let operation_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+
+        {
+            let mut state = registry.write_state().unwrap();
+            let mut machine_state = state.dsl.0.state().clone();
+            let operation_id_key = mm_dsl::OperationId::from_domain(&operation_id).0;
+            machine_state.op_progress_counts.remove(&operation_id_key);
+            state.dsl = DslAuthority(Box::new(
+                mm_dsl::MeerkatMachineAuthority::recover_from_state(machine_state).unwrap(),
+            ));
+        }
+
+        let err = registry
+            .snapshot(&operation_id)
+            .expect_err("missing generated progress count must reject public snapshot");
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("missing progress count")),
+            "unexpected public snapshot error: {err:?}"
+        );
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let err = registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state)
+            .expect_err("missing generated progress count must reject persistence snapshot");
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("missing progress count")),
+            "unexpected persistence snapshot error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn generated_terminal_sequence_missing_persistence_fails_closed() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let spec = background_spec("terminal-sequence-missing");
+        let operation_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&operation_id).unwrap();
+        registry
+            .complete_operation(
+                &operation_id,
+                OperationResult {
+                    id: operation_id.clone(),
+                    content: "done".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .unwrap();
+
+        {
+            let mut state = registry.write_state().unwrap();
+            let mut machine_state = state.dsl.0.state().clone();
+            let operation_id_key = mm_dsl::OperationId::from_domain(&operation_id).0;
+            machine_state.op_completion_seq.remove(&operation_id_key);
+            state.dsl = DslAuthority(Box::new(
+                mm_dsl::MeerkatMachineAuthority::recover_from_state(machine_state).unwrap(),
+            ));
+        }
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let err = registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state)
+            .expect_err("missing generated terminal sequence must reject persistence snapshot");
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("missing completion sequence")),
+            "unexpected persistence snapshot error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn generated_record_without_shell_projection_fails_closed() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let spec = background_spec("missing-shell-record");
+        let operation_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+
+        {
+            let mut state = registry.write_state().unwrap();
+            state.records.remove(&operation_id);
+        }
+
+        let err = registry
+            .snapshot(&operation_id)
+            .expect_err("generated operation without shell record must reject public snapshot");
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("without shell projection record")),
+            "unexpected public snapshot error: {err:?}"
+        );
+        let err = registry
+            .list_operations()
+            .expect_err("generated operation without shell record must reject public list");
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("without shell projection record")),
+            "unexpected public list error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn recovered_snapshot_rebuilds_child_session_mirror_from_authority() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let child_session_id = SessionId::new();
+        let operation_source = OperationSource::session_child(child_session_id.clone());
+        let spec = OperationSpec {
+            id: OperationId::new(),
+            kind: OperationKind::MobMemberChild,
+            owner_session_id: SessionId::new(),
+            display_name: "child-drift".into(),
+            source_label: "test".into(),
+            operation_source: Some(operation_source),
+            child_session_id: Some(child_session_id.clone()),
+            expect_peer_channel: true,
+        };
+        let operation_id = spec.id.clone();
+
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&operation_id).unwrap();
+        registry.mark_retired(&operation_id).unwrap();
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let mut snapshot = registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state)
+            .unwrap();
+        snapshot
+            .operation_specs
+            .get_mut(&operation_id)
+            .expect("persisted spec")
+            .child_session_id = Some(SessionId::new());
+
+        let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
+        assert_eq!(
+            recovered
+                .snapshot(&operation_id)
+                .unwrap()
+                .unwrap()
+                .child_session_id,
+            Some(child_session_id)
+        );
+    }
+
+    #[test]
+    fn completion_wake_class_is_generated_by_operation_kind() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let operation_id = OperationId::new();
+
+        assert_eq!(
+            registry
+                .classify_operation_completion_wake(&operation_id, OperationKind::BackgroundToolOp)
+                .unwrap(),
+            OperationCompletionWakeClass::Wake
+        );
+        assert_eq!(
+            registry
+                .classify_operation_completion_wake(&operation_id, OperationKind::MobMemberChild)
+                .unwrap(),
+            OperationCompletionWakeClass::Ignore
+        );
+        assert_eq!(
+            registry
+                .classify_operation_completion_wake(
+                    &operation_id,
+                    OperationKind::BackgroundToolCapacitySlot,
+                )
+                .unwrap(),
+            OperationCompletionWakeClass::Ignore
+        );
+    }
+
+    #[test]
+    fn recovered_snapshot_rejects_completion_feed_without_generated_record() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+
+        let running_spec = background_spec("running");
+        let running_id = running_spec.id.clone();
+        registry.register_operation(running_spec.clone()).unwrap();
+        registry.provisioning_succeeded(&running_id).unwrap();
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let mut snapshot = registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state)
+            .unwrap();
+        snapshot.completion_entries.push(CompletionEntry {
+            seq: 1,
+            operation_id: running_id.clone(),
+            kind: running_spec.kind,
+            display_name: running_spec.display_name,
+            terminal_outcome: OperationTerminalOutcome::Completed(OperationResult {
+                id: running_id,
+                content: "phantom".into(),
+                is_error: false,
+                duration_ms: 1,
+                tokens_used: 0,
+            }),
+            completed_at_ms: None,
+        });
+
+        let err = match RuntimeOpsLifecycleRegistry::from_recovered(snapshot) {
+            Ok(_) => panic!("public completion feed must not recover without generated op truth"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("no generated feed authority")),
+            "unexpected recovery error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn recovered_snapshot_rejects_feed_authority_beyond_completion_cursor() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+
+        let spec = background_spec("terminal");
+        let operation_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&operation_id).unwrap();
+        registry
+            .complete_operation(
+                &operation_id,
+                OperationResult {
+                    id: operation_id.clone(),
+                    content: "done".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .unwrap();
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let mut snapshot = registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state)
+            .unwrap();
+        let phantom_id = OperationId::new();
+        let phantom_result = OperationResult {
+            id: phantom_id.clone(),
+            content: "phantom".into(),
+            is_error: false,
+            duration_ms: 1,
+            tokens_used: 0,
+        };
+        let phantom_entry = CompletionFeedCanonicalState {
+            seq: snapshot.authority_state.next_completion_seq + 1,
+            kind: OperationKind::BackgroundToolOp,
+            terminal_outcome: OperationTerminalOutcome::Completed(phantom_result.clone()),
+        };
+        snapshot
+            .authority_state
+            .completion_feed_entries
+            .insert(phantom_id.clone(), phantom_entry);
+        snapshot.completion_entries.push(CompletionEntry {
+            seq: snapshot.authority_state.next_completion_seq + 1,
+            operation_id: phantom_id.clone(),
+            kind: OperationKind::BackgroundToolOp,
+            display_name: "phantom".into(),
+            terminal_outcome: OperationTerminalOutcome::Completed(phantom_result),
+            completed_at_ms: None,
+        });
+
+        let err = match RuntimeOpsLifecycleRegistry::from_recovered(snapshot) {
+            Ok(_) => panic!("feed authority must not advance the recovered completion cursor"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("RecoverCompletionFeedEntry")),
+            "unexpected recovery error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn recovered_completed_order_uses_generated_completion_sequences() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+
+        let spec_a = background_spec("a");
+        let id_a = spec_a.id.clone();
+        registry.register_operation(spec_a).unwrap();
+        registry.provisioning_succeeded(&id_a).unwrap();
+        registry
+            .complete_operation(
+                &id_a,
+                OperationResult {
+                    id: id_a.clone(),
+                    content: "a".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .unwrap();
+
+        let spec_b = background_spec("b");
+        let id_b = spec_b.id.clone();
+        registry.register_operation(spec_b).unwrap();
+        registry.provisioning_succeeded(&id_b).unwrap();
+        registry
+            .complete_operation(
+                &id_b,
+                OperationResult {
+                    id: id_b.clone(),
+                    content: "b".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .unwrap();
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let mut snapshot = registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state)
+            .unwrap();
+        snapshot.authority_state.completed_order = VecDeque::from([id_b.clone(), id_a.clone()]);
+
+        let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
+        let collected = recovered.collect_completed().unwrap();
+
+        assert_eq!(collected[0].0, id_a);
+        assert_eq!(collected[1].0, id_b);
     }
 
     #[test]
@@ -2270,14 +4859,14 @@ mod tests {
         let op_id = spec.id.clone();
         registry.register_operation(spec).unwrap();
 
-        let snap1 = registry.snapshot(&op_id).unwrap();
+        let snap1 = registry.snapshot(&op_id).unwrap().unwrap();
         assert!(snap1.created_at_ms > 0);
         assert!(snap1.started_at_ms.is_none());
         assert!(snap1.completed_at_ms.is_none());
         assert!(snap1.elapsed_ms.is_none());
 
         registry.provisioning_succeeded(&op_id).unwrap();
-        let snap2 = registry.snapshot(&op_id).unwrap();
+        let snap2 = registry.snapshot(&op_id).unwrap().unwrap();
         assert!(snap2.started_at_ms.is_some());
         assert!(snap2.started_at_ms.unwrap() >= snap2.created_at_ms);
 
@@ -2293,7 +4882,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let snap3 = registry.snapshot(&op_id).unwrap();
+        let snap3 = registry.snapshot(&op_id).unwrap().unwrap();
         assert!(snap3.completed_at_ms.is_some());
         assert!(snap3.elapsed_ms.is_some());
         assert!(snap3.completed_at_ms.unwrap() >= snap3.started_at_ms.unwrap());
@@ -2302,20 +4891,22 @@ mod tests {
     #[test]
     fn snapshot_includes_peer_handle() {
         let registry = RuntimeOpsLifecycleRegistry::new();
+        let child_session_id = SessionId::new();
         let spec = OperationSpec {
             id: OperationId::new(),
             kind: OperationKind::MobMemberChild,
             owner_session_id: SessionId::new(),
             display_name: "peer-test".into(),
             source_label: "test".into(),
-            child_session_id: Some(SessionId::new()),
+            operation_source: Some(OperationSource::session_child(child_session_id.clone())),
+            child_session_id: Some(child_session_id),
             expect_peer_channel: true,
         };
         let op_id = spec.id.clone();
         registry.register_operation(spec).unwrap();
         registry.provisioning_succeeded(&op_id).unwrap();
 
-        let snap1 = registry.snapshot(&op_id).unwrap();
+        let snap1 = registry.snapshot(&op_id).unwrap().unwrap();
         assert!(snap1.peer_handle.is_none());
 
         let handle = OperationPeerHandle {
@@ -2329,7 +4920,7 @@ mod tests {
         };
         registry.peer_ready(&op_id, handle).unwrap();
 
-        let snap2 = registry.snapshot(&op_id).unwrap();
+        let snap2 = registry.snapshot(&op_id).unwrap().unwrap();
         assert_eq!(
             snap2.peer_handle.as_ref().unwrap().peer_name.as_str(),
             "member-x"

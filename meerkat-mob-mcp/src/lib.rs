@@ -38,7 +38,9 @@ use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
 use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime as CoreCommsRuntime};
 use meerkat_core::comms::{
-    CommsCommand, PeerId, PeerName, SendError, SendReceipt, TrustedPeerDescriptor,
+    CommsCommand, CommsTrustMutation, CommsTrustMutationResult,
+    GeneratedCommsTrustAuthoritySourceKind, PeerId, PeerName, SendError, SendReceipt,
+    TrustedPeerDescriptor,
 };
 use meerkat_core::error::ToolError;
 use meerkat_core::interaction::{InteractionId, PeerInputCandidate};
@@ -152,8 +154,6 @@ fn destroy_report_summary(report: &meerkat_mob::MobDestroyReport) -> String {
 }
 
 type DefaultLlmClientProvider = Arc<dyn Fn() -> Option<Arc<dyn LlmClient>> + Send + Sync + 'static>;
-const BRIDGE_SESSION_MISSING_FROM_LIVE_MOB_AUTHORITY: &str =
-    "bridge session not found in any live mob authority:";
 
 #[doc(hidden)]
 #[derive(Default)]
@@ -281,7 +281,7 @@ impl MobMcpState {
             // Auto-create realm profile store when persistent storage is available.
             #[cfg(not(target_arch = "wasm32"))]
             if !self.realm_profile_store_explicit {
-                let db_path = mob_root.join("realm_profiles.db");
+                let db_path = mob_root.join(Self::REALM_PROFILE_STORE_FILE_NAME);
                 match meerkat_mob::SqliteRealmProfileStore::open(&db_path) {
                     Ok(store) => {
                         self.realm_profile_store =
@@ -369,6 +369,13 @@ impl MobMcpState {
         Ok(())
     }
 
+    /// Reserved filename of the realm-scoped profile store inside the mob
+    /// persistent root. This database lives in the same directory as the
+    /// per-mob `*.db` files but is NOT a mob event log; the restore scan must
+    /// never treat it as a mob storage candidate.
+    #[cfg(not(target_arch = "wasm32"))]
+    const REALM_PROFILE_STORE_FILE_NAME: &str = "realm_profiles.db";
+
     fn persistent_mob_root(runtime_root: &Path) -> PathBuf {
         runtime_root.join("mobs")
     }
@@ -414,9 +421,8 @@ impl MobMcpState {
         builder
     }
 
-    fn bind_realm_profile_store(&self, mut storage: MobStorage) -> MobStorage {
-        storage.realm_profiles = self.realm_profile_store.clone();
-        storage
+    fn bind_realm_profile_store(&self, storage: MobStorage) -> MobStorage {
+        storage.with_realm_profile_store(self.realm_profile_store.clone())
     }
 
     async fn storage_for_new_mob(
@@ -529,9 +535,20 @@ impl MobMcpState {
                 {
                     continue;
                 }
+                // The realm-scoped profile store DB lives in this same
+                // directory (see `with_persistent_storage_root`) but is not a
+                // mob event log. Opening it as mob storage spawns a SQLite
+                // event-bus watcher thread and then deletes the file because
+                // its mob_events log is empty — silently destroying realm
+                // profiles. Never treat it as a mob storage candidate.
+                if path.file_name().and_then(|name| name.to_str())
+                    == Some(Self::REALM_PROFILE_STORE_FILE_NAME)
+                {
+                    continue;
+                }
 
                 let storage = self.bind_realm_profile_store(MobStorage::persistent(&path)?);
-                if storage.events.replay_all().await?.is_empty() {
+                if storage.is_event_log_empty().await? {
                     Self::maybe_remove_storage_file(Some(path.as_path())).await;
                     continue;
                 }
@@ -594,7 +611,34 @@ impl MobMcpState {
 
     pub async fn mob_create_definition(
         &self,
+        definition: MobDefinition,
+    ) -> Result<MobId, MobError> {
+        self.mob_create_definition_inner(definition, None).await
+    }
+
+    #[doc(hidden)]
+    pub async fn mob_create_definition_with_owner_bridge_session(
+        &self,
+        definition: MobDefinition,
+        owner_bridge_session_id: SessionId,
+        destroy_on_owner_archive: bool,
+        implicit_delegation_mob: bool,
+    ) -> Result<MobId, MobError> {
+        self.mob_create_definition_inner(
+            definition,
+            Some((
+                owner_bridge_session_id,
+                destroy_on_owner_archive,
+                implicit_delegation_mob,
+            )),
+        )
+        .await
+    }
+
+    async fn mob_create_definition_inner(
+        &self,
         mut definition: MobDefinition,
+        owner_bridge_session_authority: Option<(SessionId, bool, bool)>,
     ) -> Result<MobId, MobError> {
         self.hydrate_definition_skill_sources(&mut definition)
             .await?;
@@ -604,10 +648,17 @@ impl MobMcpState {
             return Err(MobError::Internal(format!("mob already exists: {mob_id}")));
         }
         let (storage, storage_path) = self.storage_for_new_mob(&mob_id).await?;
-        let handle = self
-            .configure_builder(MobBuilder::new(definition.clone(), storage))
-            .create()
-            .await?;
+        let mut builder = self.configure_builder(MobBuilder::new(definition.clone(), storage));
+        if let Some((owner_bridge_session_id, destroy_on_owner_archive, implicit_delegation_mob)) =
+            owner_bridge_session_authority
+        {
+            builder = builder.with_owner_bridge_session_create_authority(
+                owner_bridge_session_id,
+                destroy_on_owner_archive,
+                implicit_delegation_mob,
+            );
+        }
+        let handle = builder.create().await?;
         match self.mobs.write().await.entry(mob_id.clone()) {
             Entry::Vacant(entry) => {
                 entry.insert(ManagedMob {
@@ -768,9 +819,9 @@ impl MobMcpState {
     ) -> Result<meerkat_mob::MobDestroyReport, MobMcpDestroyError> {
         let managed = {
             let mobs = self.mobs.read().await;
-            mobs.get(mob_id).cloned().ok_or_else(|| {
-                MobMcpDestroyError::Mob(MobError::Internal(format!("mob not found: {mob_id}")))
-            })?
+            mobs.get(mob_id)
+                .cloned()
+                .ok_or_else(|| MobMcpDestroyError::Mob(MobError::MobNotFound(mob_id.clone())))?
         };
 
         match managed.handle.destroy().await {
@@ -826,8 +877,9 @@ impl MobMcpState {
         &self,
         mob_id: &MobId,
         specs: Vec<SpawnMemberSpec>,
-    ) -> Result<Vec<Result<meerkat_mob::SpawnResult, MobError>>, MobError> {
-        Ok(self.handle_for(mob_id).await?.spawn_many(specs).await)
+    ) -> Result<Vec<Result<meerkat_mob::SpawnResult, meerkat_mob::MobSpawnManyFailure>>, MobError>
+    {
+        self.handle_for(mob_id).await?.spawn_many(specs).await
     }
 
     pub async fn mob_retire(
@@ -836,15 +888,6 @@ impl MobMcpState {
         identity: AgentIdentity,
     ) -> Result<(), MobError> {
         self.handle_for(mob_id).await?.retire(identity).await
-    }
-
-    #[doc(hidden)]
-    pub fn is_missing_bridge_session_retire_error(error: &MobError) -> bool {
-        matches!(
-            error,
-            MobError::Internal(message)
-                if message.starts_with(BRIDGE_SESSION_MISSING_FROM_LIVE_MOB_AUTHORITY)
-        )
     }
 
     #[doc(hidden)]
@@ -873,7 +916,7 @@ impl MobMcpState {
                     .map_err(|error| error.into_session_error(cleanup_context))?;
                 Ok(true)
             }
-            Err(error) if Self::is_missing_bridge_session_retire_error(&error) => {
+            Err(MobError::BridgeSessionNotInLiveAuthority { .. }) => {
                 if self
                     .has_bridge_session_scoped_mobs(&bridge_session_key)
                     .await
@@ -930,9 +973,9 @@ impl MobMcpState {
                         ))
                     });
             }
-            return Err(MobError::Internal(format!(
-                "{BRIDGE_SESSION_MISSING_FROM_LIVE_MOB_AUTHORITY} {bridge_session_id}"
-            )));
+            return Err(MobError::BridgeSessionNotInLiveAuthority {
+                bridge_session_id: bridge_session_id.to_string(),
+            });
         };
         self.mob_retire(&mob_id, identity).await
     }
@@ -1382,7 +1425,7 @@ impl MobMcpState {
         &self,
         mob_id: &MobId,
     ) -> Result<meerkat_mob::MobEventRouterHandle, MobError> {
-        Ok(self.handle_for(mob_id).await?.subscribe_mob_events().await)
+        self.handle_for(mob_id).await?.subscribe_mob_events().await
     }
 
     /// Subscribe to agent-level events for a specific member.
@@ -1399,15 +1442,16 @@ impl MobMcpState {
 
     /// Find the implicit delegation mob for the given bridge session, if one exists.
     ///
-    /// Scans the in-memory mob registry for a mob whose definition has
-    /// `is_implicit == true` and an owner bridge-session index matching the
-    /// given bridge session ID.
+    /// Scans the in-memory mob registry for a mob whose generated MobMachine
+    /// owner-bridge authority marks it implicit and indexed to the given bridge
+    /// session ID.
     /// Does NOT match explicit mobs that merely share the same owner.
     #[doc(hidden)]
     pub async fn find_implicit_mob_for_bridge_session(
         &self,
         bridge_session_id: &str,
     ) -> Option<MobId> {
+        let bridge_session_id = SessionId::parse(bridge_session_id).ok()?;
         if !self
             .ensure_restored_best_effort("find_implicit_mob_for_bridge_session")
             .await
@@ -1417,15 +1461,19 @@ impl MobMcpState {
         let mobs = self.mobs.read().await;
         mobs.iter()
             .find(|(_, m)| {
-                let def = m.handle.definition();
-                def.is_implicit && def.has_owner_bridge_session_index(bridge_session_id)
+                m.handle
+                    .owner_bridge_session_lifecycle_authority()
+                    .is_some_and(|authority| {
+                        authority.implicit_delegation_mob
+                            && authority.bridge_session_id == bridge_session_id
+                    })
             })
             .map(|(id, _)| id.clone())
     }
 
     /// Check whether the given mob is an implicit delegation mob.
     ///
-    /// Checks the canonical `is_implicit` field on the mob definition.
+    /// Checks generated MobMachine owner-bridge authority.
     #[doc(hidden)]
     pub async fn is_implicit_mob(&self, mob_id: &MobId) -> bool {
         if !self.ensure_restored_best_effort("is_implicit_mob").await {
@@ -1433,14 +1481,18 @@ impl MobMcpState {
         }
         let mobs = self.mobs.read().await;
         mobs.get(mob_id)
-            .map(|m| m.handle.definition().is_implicit)
-            .unwrap_or(false)
+            .and_then(|m| m.handle.owner_bridge_session_lifecycle_authority())
+            .is_some_and(|authority| authority.implicit_delegation_mob)
     }
 
     /// Find all mobs indexed to the given owner bridge session
     /// (both implicit and explicit).
     #[doc(hidden)]
     pub async fn find_mobs_for_bridge_session(&self, bridge_session_id: &str) -> Vec<MobId> {
+        let bridge_session_id = match SessionId::parse(bridge_session_id) {
+            Ok(session_id) => session_id,
+            Err(_) => return Vec::new(),
+        };
         if !self
             .ensure_restored_best_effort("find_mobs_for_bridge_session")
             .await
@@ -1451,8 +1503,8 @@ impl MobMcpState {
         mobs.iter()
             .filter_map(|(id, m)| {
                 if m.handle
-                    .definition()
-                    .has_owner_bridge_session_index(bridge_session_id)
+                    .owner_bridge_session_lifecycle_authority()
+                    .is_some_and(|authority| authority.bridge_session_id == bridge_session_id)
                 {
                     Some(id.clone())
                 } else {
@@ -1463,6 +1515,10 @@ impl MobMcpState {
     }
 
     async fn find_bridge_session_scoped_mobs(&self, bridge_session_id: &str) -> Vec<MobId> {
+        let bridge_session_id = match SessionId::parse(bridge_session_id) {
+            Ok(session_id) => session_id,
+            Err(_) => return Vec::new(),
+        };
         if !self
             .ensure_restored_best_effort("find_bridge_session_scoped_mobs")
             .await
@@ -1473,8 +1529,11 @@ impl MobMcpState {
         mobs.iter()
             .filter_map(|(id, m)| {
                 if m.handle
-                    .definition()
-                    .is_cleanup_scoped_to_owner_bridge_session(bridge_session_id)
+                    .owner_bridge_session_lifecycle_authority()
+                    .is_some_and(|authority| {
+                        authority.destroy_on_owner_archive
+                            && authority.bridge_session_id == bridge_session_id
+                    })
                 {
                     Some(id.clone())
                 } else {
@@ -1499,11 +1558,20 @@ impl MobMcpState {
         model: &str,
     ) -> bool {
         let delegate_profile = ProfileName::from("delegate");
+        let bridge_session_id = match SessionId::parse(bridge_session_id) {
+            Ok(session_id) => session_id,
+            Err(_) => return false,
+        };
         let mobs = self.mobs.read().await;
         mobs.get(mob_id).is_some_and(|managed| {
             let definition = managed.handle.definition();
-            definition.is_implicit
-                && definition.has_owner_bridge_session_index(bridge_session_id)
+            managed
+                .handle
+                .owner_bridge_session_lifecycle_authority()
+                .is_some_and(|authority| {
+                    authority.implicit_delegation_mob
+                        && authority.bridge_session_id == bridge_session_id
+                })
                 && definition
                     .resolve_inline_profile(&delegate_profile)
                     .is_some_and(|profile| profile.model == model)
@@ -1556,8 +1624,18 @@ impl MobMcpState {
                 .map_err(MobMcpDestroyError::into_mob_error)?;
         }
 
+        let owner_bridge_session_id = SessionId::parse(bridge_session_id).map_err(|error| {
+            MobError::Internal(format!(
+                "invalid implicit mob owner bridge session id '{bridge_session_id}': {error}"
+            ))
+        })?;
         let mob_id = self
-            .mob_create_definition(MobDefinition::implicit(bridge_session_id, model))
+            .mob_create_definition_with_owner_bridge_session(
+                MobDefinition::implicit(bridge_session_id, model),
+                owner_bridge_session_id,
+                true,
+                true,
+            )
             .await?;
         Ok((mob_id, true))
     }
@@ -1645,30 +1723,20 @@ impl MobMcpState {
 
     async fn scavenge_orphaned_bridge_session_scoped_mobs_inner(&self) -> Vec<MobId> {
         // Collect bridge-session-scoped cleanup candidates under a read lock.
-        let candidates: Vec<(MobId, String)> = {
+        let candidates: Vec<(MobId, SessionId)> = {
             let mobs = self.mobs.read().await;
             mobs.iter()
                 .filter_map(|(id, m)| {
-                    let definition = m.handle.definition();
-                    if definition.session_cleanup_policy
-                        == meerkat_mob::definition::SessionCleanupPolicy::DestroyOnOwnerArchive
-                    {
-                        definition
-                            .owner_bridge_session_index()
-                            .map(|sid| (id.clone(), sid.to_string()))
-                    } else {
-                        None
-                    }
+                    m.handle
+                        .owner_bridge_session_lifecycle_authority()
+                        .filter(|authority| authority.destroy_on_owner_archive)
+                        .map(|authority| (id.clone(), authority.bridge_session_id))
                 })
                 .collect()
         };
 
         let mut scavenged = Vec::new();
         for (mob_id, bridge_session_id) in candidates {
-            let bridge_session_id = match SessionId::parse(&bridge_session_id) {
-                Ok(id) => id,
-                Err(_) => continue,
-            };
             let is_orphan = match self.session_service.read(&bridge_session_id).await {
                 Ok(_) => false,
                 Err(SessionError::NotFound { .. }) => true,
@@ -1700,7 +1768,7 @@ impl MobMcpState {
 
     /// Look up the [`MobHandle`] for a given mob ID.
     ///
-    /// Returns `MobError::Internal` if the mob is not found.
+    /// Returns `MobError::MobNotFound` if the mob is not found.
     pub async fn handle_for(&self, mob_id: &MobId) -> Result<MobHandle, MobError> {
         self.ensure_restored().await?;
         self.mobs
@@ -1708,7 +1776,7 @@ impl MobMcpState {
             .await
             .get(mob_id)
             .map(|m| m.handle.clone())
-            .ok_or_else(|| MobError::Internal(format!("mob not found: {mob_id}")))
+            .ok_or_else(|| MobError::MobNotFound(mob_id.clone()))
     }
 
     // ─── Realm profile CRUD ──────────────────────────────────────────
@@ -1786,20 +1854,26 @@ impl MobMcpState {
 
     /// Create MCP state backed by an in-memory local session service.
     pub fn new_in_memory() -> Arc<Self> {
-        let state = Self::new_with_runtime_adapter(
-            Arc::new(LocalSessionService::new()),
-            Some(Arc::new(meerkat_runtime::MeerkatMachine::ephemeral())),
-        );
+        let service = Arc::new(LocalSessionService::new());
+        let state = Self::new(service);
         Arc::new(state)
     }
 }
 
 struct LocalCommsRuntime {
+    name: String,
     peer_id: PeerId,
     public_key_bytes: [u8; 32],
     address: String,
     key: String,
-    trusted: RwLock<HashSet<String>>,
+    trusted: RwLock<HashMap<String, BTreeSet<GeneratedCommsTrustAuthoritySourceKind>>>,
+    trusted_descriptors: RwLock<
+        HashMap<String, HashMap<GeneratedCommsTrustAuthoritySourceKind, TrustedPeerDescriptor>>,
+    >,
+    private_trusted: RwLock<HashMap<String, BTreeSet<GeneratedCommsTrustAuthoritySourceKind>>>,
+    meerkat_machine_trust_owner:
+        std::sync::RwLock<Option<meerkat_core::comms::GeneratedPeerCommsOwnerToken>>,
+    mob_machine_trust_owner: RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
     notify: Arc<tokio::sync::Notify>,
 }
 
@@ -1846,14 +1920,165 @@ impl LocalCommsRuntime {
         }
         let peer_id = PeerId::from_ed25519_pubkey(&public_key_bytes);
         Self {
+            name: name.to_string(),
             peer_id,
             public_key_bytes,
             address: format!("inproc://{name}"),
             key: encode_ed25519_public_key(&public_key_bytes),
-            trusted: RwLock::new(HashSet::new()),
+            trusted: RwLock::new(HashMap::new()),
+            trusted_descriptors: RwLock::new(HashMap::new()),
+            private_trusted: RwLock::new(HashMap::new()),
+            meerkat_machine_trust_owner: std::sync::RwLock::new(None),
+            mob_machine_trust_owner: RwLock::new(None),
             notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
+
+    async fn validate_generated_trust_authority_owner(
+        &self,
+        authority: &meerkat_core::comms::CommsTrustMutationAuthority,
+    ) -> Result<(), SendError> {
+        let expected_meerkat = self
+            .meerkat_machine_trust_owner
+            .read()
+            .map_err(|_| {
+                SendError::Validation("poisoned meerkat_machine_trust_owner lock".to_string())
+            })?
+            .clone();
+        let expected_mob = self.mob_machine_trust_owner.read().await.clone();
+        authority
+            .validate_target_source_owner_token(expected_meerkat.as_ref(), expected_mob.as_ref())
+            .map_err(SendError::Validation)
+    }
+
+    async fn add_generated_trust_source(
+        &self,
+        peer: TrustedPeerDescriptor,
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
+        private: bool,
+    ) -> Result<bool, SendError> {
+        let peer_id = peer.peer_id.as_str().to_string();
+        let mut trusted = self.trusted.write().await;
+        let mut descriptors = self.trusted_descriptors.write().await;
+        let mut private_trusted = self.private_trusted.write().await;
+
+        let source_exists = trusted
+            .get(&peer_id)
+            .is_some_and(|sources| sources.contains(&source_kind));
+        let existing_descriptor = descriptors
+            .get(&peer_id)
+            .and_then(|by_source| by_source.get(&source_kind));
+        let private_source_exists = private_trusted
+            .get(&peer_id)
+            .is_some_and(|sources| sources.contains(&source_kind));
+
+        match (source_exists, existing_descriptor) {
+            (true, Some(existing)) if existing == &peer && private_source_exists == private => {
+                return Ok(false);
+            }
+            (false, None) if !private_source_exists => {}
+            _ => {
+                return Err(SendError::Validation(format!(
+                    "generated trust source {source_kind:?} for {peer_id} already owns different trust material"
+                )));
+            }
+        }
+
+        descriptors
+            .entry(peer_id.clone())
+            .or_default()
+            .insert(source_kind, peer);
+        let created = trusted
+            .entry(peer_id.clone())
+            .or_default()
+            .insert(source_kind);
+        if private {
+            private_trusted
+                .entry(peer_id)
+                .or_default()
+                .insert(source_kind);
+        }
+        Ok(created)
+    }
+
+    async fn remove_generated_trust_source(
+        &self,
+        peer_id: &str,
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    ) -> bool {
+        let mut trusted = self.trusted.write().await;
+        let removed = remove_trust_source(&mut trusted, peer_id, source_kind);
+        if !removed {
+            return false;
+        }
+        drop(trusted);
+
+        let mut descriptors = self.trusted_descriptors.write().await;
+        if let Some(by_source) = descriptors.get_mut(peer_id) {
+            by_source.remove(&source_kind);
+            if by_source.is_empty() {
+                descriptors.remove(peer_id);
+            }
+        }
+        drop(descriptors);
+
+        let mut private_trusted = self.private_trusted.write().await;
+        if let Some(sources) = private_trusted.get_mut(peer_id) {
+            sources.remove(&source_kind);
+            if sources.is_empty() {
+                private_trusted.remove(peer_id);
+            }
+        }
+        true
+    }
+}
+
+impl meerkat_core::handles::PeerCommsInstallTarget for LocalCommsRuntime {
+    fn install_generated_peer_comms_handle(
+        &self,
+        install: meerkat_core::handles::GeneratedPeerCommsInstall,
+    ) -> Result<(), String> {
+        let target_peer_id = self.generated_peer_comms_target_endpoint()?.peer_id;
+        if install.target_peer_id() != target_peer_id {
+            return Err(format!(
+                "generated peer-comms install targets peer_id {} but runtime peer_id is {}",
+                install.target_peer_id(),
+                target_peer_id
+            ));
+        }
+        let owner_token = install.owner_token();
+        let mut expected = self
+            .meerkat_machine_trust_owner
+            .write()
+            .map_err(|_| "poisoned meerkat_machine_trust_owner lock".to_string())?;
+        if let Some(existing) = expected.as_ref()
+            && !existing.same_owner(&owner_token)
+        {
+            return Err(
+                "target runtime is already bound to a different generated MeerkatMachine trust owner"
+                    .to_string(),
+            );
+        }
+        *expected = Some(owner_token);
+        Ok(())
+    }
+}
+
+fn remove_trust_source(
+    trusted: &mut HashMap<String, BTreeSet<GeneratedCommsTrustAuthoritySourceKind>>,
+    peer_id: &str,
+    source_kind: GeneratedCommsTrustAuthoritySourceKind,
+) -> bool {
+    let Some(sources) = trusted.get_mut(peer_id) else {
+        return false;
+    };
+    if !sources.remove(&source_kind) {
+        return false;
+    }
+    if sources.is_empty() {
+        trusted.remove(peer_id);
+    }
+    true
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -1871,28 +2096,145 @@ impl CoreCommsRuntime for LocalCommsRuntime {
         Some(self.public_key_bytes)
     }
 
+    fn comms_name(&self) -> Option<String> {
+        Some(self.name.clone())
+    }
+
     fn advertised_address(&self) -> Option<String> {
         Some(self.address.clone())
     }
 
-    async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-        TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
-            .map_err(SendError::Validation)?;
-        self.trusted
-            .write()
-            .await
-            .insert(peer.peer_id.as_str().to_string());
+    async fn apply_trust_mutation(
+        &self,
+        mutation: CommsTrustMutation,
+    ) -> Result<CommsTrustMutationResult, SendError> {
+        match mutation {
+            CommsTrustMutation::AddTrustedPeer { peer, authority } => {
+                self.validate_generated_trust_authority_owner(&authority)
+                    .await?;
+                authority
+                    .validate_public_add(self.peer_id(), &peer)
+                    .map_err(SendError::Validation)?;
+                TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
+                    .map_err(SendError::Validation)?;
+                let created = self
+                    .add_generated_trust_source(peer, authority.trust_row_owner_kind(), false)
+                    .await?;
+                Ok(CommsTrustMutationResult::Added { created })
+            }
+            CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
+                self.validate_generated_trust_authority_owner(&authority)
+                    .await?;
+                let parsed_peer_id = PeerId::parse(&peer_id)
+                    .map_err(|err| SendError::Validation(err.to_string()))?;
+                authority
+                    .validate_public_remove(self.peer_id(), parsed_peer_id)
+                    .map_err(SendError::Validation)?;
+                let removed = self
+                    .remove_generated_trust_source(&peer_id, authority.trust_row_owner_kind())
+                    .await;
+                Ok(CommsTrustMutationResult::Removed { removed })
+            }
+            CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
+                self.validate_generated_trust_authority_owner(&authority)
+                    .await?;
+                authority
+                    .validate_private_add(self.peer_id(), &peer)
+                    .map_err(SendError::Validation)?;
+                TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
+                    .map_err(SendError::Validation)?;
+                let created = self
+                    .add_generated_trust_source(peer, authority.trust_row_owner_kind(), true)
+                    .await?;
+                Ok(CommsTrustMutationResult::Added { created })
+            }
+            CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
+                self.validate_generated_trust_authority_owner(&authority)
+                    .await?;
+                let parsed_peer_id = PeerId::parse(&peer_id)
+                    .map_err(|err| SendError::Validation(err.to_string()))?;
+                authority
+                    .validate_private_remove(self.peer_id(), parsed_peer_id)
+                    .map_err(SendError::Validation)?;
+                let removed = self
+                    .remove_generated_trust_source(&peer_id, authority.trust_row_owner_kind())
+                    .await;
+                Ok(CommsTrustMutationResult::Removed { removed })
+            }
+        }
+    }
+
+    async fn install_generated_mob_trust_owner(
+        &self,
+        owner: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<(), SendError> {
+        let mut expected = self.mob_machine_trust_owner.write().await;
+        if let Some(existing) = expected.as_ref() {
+            if Arc::ptr_eq(existing, &owner) {
+                return Ok(());
+            }
+            return Err(SendError::Validation(
+                "target runtime is already bound to a different generated MobMachine trust owner"
+                    .to_string(),
+            ));
+        }
+        *expected = Some(owner);
         Ok(())
     }
 
-    async fn add_private_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-        TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
-            .map_err(SendError::Validation)?;
+    async fn validate_recovered_generated_mob_trust_owner(
+        &self,
+        owner: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<(), SendError> {
+        let expected = self.mob_machine_trust_owner.read().await;
+        if let Some(existing) = expected.as_ref()
+            && !Arc::ptr_eq(existing, &owner)
+        {
+            return Err(SendError::Validation(
+                "target runtime is already bound to a different generated MobMachine trust owner"
+                    .to_string(),
+            ));
+        }
         Ok(())
     }
 
-    async fn remove_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
-        Ok(self.trusted.write().await.remove(peer_id))
+    async fn install_recovered_generated_mob_trust_owner(
+        &self,
+        owner: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<(), SendError> {
+        let mut expected = self.mob_machine_trust_owner.write().await;
+        if let Some(existing) = expected.as_ref() {
+            if Arc::ptr_eq(existing, &owner) {
+                return Ok(());
+            }
+            return Err(SendError::Validation(
+                "target runtime is already bound to a different generated MobMachine trust owner"
+                    .to_string(),
+            ));
+        }
+        *expected = Some(owner);
+        Ok(())
+    }
+
+    async fn add_trusted_peer(&self, _peer: TrustedPeerDescriptor) -> Result<(), SendError> {
+        Err(SendError::Unsupported(
+            "add_trusted_peer requires apply_trust_mutation authority".to_string(),
+        ))
+    }
+
+    async fn add_private_trusted_peer(
+        &self,
+        _peer: TrustedPeerDescriptor,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unsupported(
+            "add_private_trusted_peer requires apply_trust_mutation authority".to_string(),
+        ))
+    }
+
+    async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
+        Err(SendError::Unsupported(
+            "remove_trusted_peer requires apply_trust_mutation authority".to_string(),
+        ))
     }
 
     async fn send(&self, _cmd: CommsCommand) -> Result<SendReceipt, SendError> {
@@ -1992,8 +2334,8 @@ impl LocalSessionService {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl SessionService for LocalSessionService {
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
-        let sid = req
-            .build
+        let build = req.build;
+        let sid = build
             .as_ref()
             .and_then(|build| build.resume_session.as_ref())
             .map(|session| session.id().clone())
@@ -2001,14 +2343,47 @@ impl SessionService for LocalSessionService {
         let n = self
             .counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let name = req
-            .build
-            .and_then(|b| b.comms_name)
+        let name = build
+            .as_ref()
+            .and_then(|b| b.comms_name.clone())
             .unwrap_or_else(|| format!("session-{n}"));
-        self.sessions
-            .write()
-            .await
-            .insert(sid.clone(), Arc::new(LocalCommsRuntime::new(&name)));
+        let provided_bindings = match build.as_ref().map(|build| &build.runtime_build_mode) {
+            Some(meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings)) => {
+                if bindings.session_id() != &sid {
+                    return Err(SessionError::Agent(
+                        meerkat_core::error::AgentError::InternalError(format!(
+                            "machine-prepared session bindings for {} do not match created session {}",
+                            bindings.session_id(),
+                            sid
+                        )),
+                    ));
+                }
+                Some(bindings.clone())
+            }
+            Some(meerkat_core::runtime_epoch::RuntimeBuildMode::StandaloneEphemeral) | None => None,
+        };
+        self.runtime_adapter.register_session(sid.clone()).await;
+        let runtime = Arc::new(LocalCommsRuntime::new(&name));
+        let bindings = match provided_bindings {
+            Some(bindings) => bindings,
+            None => self
+                .runtime_adapter
+                .prepare_bindings(sid.clone())
+                .await
+                .map_err(|error| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                        "machine prepare bindings failed: {error}"
+                    )))
+                })?,
+        };
+        bindings
+            .install_peer_comms_on(runtime.as_ref())
+            .map_err(|error| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "machine peer-comms install failed: {error}"
+                )))
+            })?;
+        self.sessions.write().await.insert(sid.clone(), runtime);
         self.pending_context
             .write()
             .await
@@ -3018,6 +3393,8 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .mob_flow_status(&MobId::from(args.mob_id), run_id)
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
+                let run = meerkat_mob::MobRun::public_flow_status_run_value(run.as_ref())
+                    .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"run": run}))
             }
             "mob_cancel_flow" => {
@@ -3066,7 +3443,10 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let results = results
                     .into_iter()
                     .map(
-                        |result: Result<meerkat_mob::SpawnResult, meerkat_mob::MobError>| {
+                        |result: Result<
+                            meerkat_mob::SpawnResult,
+                            meerkat_mob::MobSpawnManyFailure,
+                        >| {
                             match result {
                                 Ok(spawn_result) => {
                                     let identity = spawn_result.agent_identity.to_string();
@@ -3076,7 +3456,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                                     ))
                                 }
                                 Err(error) => json!(MobSpawnManyResultEntry::failed(
-                                    error.spawn_many_failure_cause(),
+                                    error.cause(),
                                     error.to_string(),
                                 )),
                             }
@@ -3370,7 +3750,11 @@ mod tests {
     use meerkat_core::InteractionId;
     use meerkat_core::PlainEventSource;
     use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
-    use meerkat_core::comms::{CommsCommand, SendError, SendReceipt};
+    use meerkat_core::comms::{
+        CommsCommand, CommsTrustMutation, CommsTrustMutationResult,
+        GeneratedCommsTrustAuthoritySourceKind, PeerId, SendError, SendReceipt,
+        TrustedPeerDescriptor,
+    };
     use meerkat_core::event::AgentEvent;
     use meerkat_core::event_injector::{
         EventInjector, EventInjectorError, InteractionSubscription, SubscribableInjector,
@@ -3386,7 +3770,7 @@ mod tests {
     use meerkat_core::{
         PeerMeta, Provider, Session, SessionMetadata, SessionTooling, ToolCategoryOverride,
     };
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeSet, HashMap, HashSet};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::SystemTime;
     use tokio::sync::Notify;
@@ -3406,6 +3790,200 @@ mod tests {
             }
         }))
         .expect("external binding target should deserialize")
+    }
+
+    #[tokio::test]
+    async fn test_local_comms_runtime_trust_requires_mutation_authority() {
+        let runtime = LocalCommsRuntime::new("local");
+        let mut pubkey = [0u8; 32];
+        pubkey[0] = 42;
+        let peer_id = PeerId::from_ed25519_pubkey(&pubkey).to_string();
+        let peer = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "peer".to_string(),
+            peer_id.clone(),
+            pubkey,
+            "inproc://peer",
+        )
+        .expect("valid peer descriptor");
+
+        let raw_add = runtime
+            .add_trusted_peer(peer.clone())
+            .await
+            .expect_err("raw add must fail closed");
+        assert!(matches!(raw_add, SendError::Unsupported(_)));
+        let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&peer);
+        let projection_authority = std::sync::Arc::new(std::sync::Mutex::new(
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new(),
+        ));
+        {
+            let mut authority = projection_authority
+                .lock()
+                .expect("projection authority lock should not be poisoned");
+            authority
+                .apply_signal(
+                    meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize,
+                )
+                .expect("Initialize signal");
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *authority,
+                meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+                    session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
+                        "mob-mcp-local-comms-test",
+                    ),
+                },
+            )
+            .expect("RegisterSession input");
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *authority,
+                meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint {
+                    endpoint: meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::new(
+                        "local",
+                        runtime.peer_id.to_string(),
+                        runtime.address.clone(),
+                        runtime.public_key_bytes,
+                    ),
+                },
+            )
+            .expect("PublishLocalEndpoint input");
+        }
+        let wiring_transition = {
+            let mut authority = projection_authority
+                .lock()
+                .expect("projection authority lock should not be poisoned");
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *authority,
+                meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
+                    epoch: 1,
+                    endpoints: BTreeSet::from([endpoint.clone()]),
+                },
+            )
+            .expect("ApplyMobPeerOverlay input")
+        };
+        let wiring_obligation =
+            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+                &wiring_transition,
+                meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                    std::sync::Arc::clone(&projection_authority),
+                ),
+            )
+            .pop()
+            .expect("generated wiring obligation");
+        let add_authority =
+            meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(
+                &wiring_obligation,
+                &endpoint,
+            )
+            .expect("generated wiring obligation covers peer");
+        meerkat_runtime::RuntimePeerCommsHandle::install_generated_on(
+            Arc::new(meerkat_runtime::HandleDslAuthority::from_shared(
+                Arc::clone(&projection_authority),
+            )),
+            &runtime,
+        )
+        .expect("install generated peer-comms owner");
+
+        let added = runtime
+            .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
+                peer: peer.clone(),
+                authority: add_authority,
+            })
+            .await
+            .expect("authorized add succeeds");
+        assert_eq!(added, CommsTrustMutationResult::Added { created: true });
+        assert!(runtime.trusted.read().await.contains_key(&peer_id));
+
+        let raw_remove = runtime
+            .remove_trusted_peer(&peer_id)
+            .await
+            .expect_err("raw remove must fail closed");
+        assert!(matches!(raw_remove, SendError::Unsupported(_)));
+        let unwiring_transition = {
+            let mut authority = projection_authority
+                .lock()
+                .expect("projection authority lock should not be poisoned");
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *authority,
+                meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
+                    epoch: 2,
+                    endpoints: BTreeSet::new(),
+                },
+            )
+            .expect("ApplyMobPeerOverlay remove input")
+        };
+        let unwiring_obligation =
+            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+                &unwiring_transition,
+                meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                    std::sync::Arc::clone(&projection_authority),
+                ),
+            )
+            .pop()
+            .expect("generated unwiring obligation");
+
+        let removed = runtime
+            .apply_trust_mutation(CommsTrustMutation::RemoveTrustedPeer {
+                peer_id: peer_id.clone(),
+                authority:
+                    meerkat_runtime::protocol_comms_trust_reconcile::removal_authority_for_peer_id(
+                        &unwiring_obligation,
+                        &peer_id,
+                    )
+                    .expect("generated unwiring obligation covers peer"),
+            })
+            .await
+            .expect("authorized remove succeeds");
+        assert_eq!(removed, CommsTrustMutationResult::Removed { removed: true });
+        assert!(!runtime.trusted.read().await.contains_key(&peer_id));
+    }
+
+    #[tokio::test]
+    async fn test_local_comms_runtime_generated_source_rejects_descriptor_rewrite() {
+        let runtime = LocalCommsRuntime::new("local");
+        let mut pubkey = [0u8; 32];
+        pubkey[0] = 45;
+        let peer_id = PeerId::from_ed25519_pubkey(&pubkey).to_string();
+        let peer = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "peer".to_string(),
+            peer_id.clone(),
+            pubkey,
+            "inproc://peer",
+        )
+        .expect("valid peer descriptor");
+        let rewritten = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "peer-renamed".to_string(),
+            peer_id.clone(),
+            pubkey,
+            "inproc://peer-renamed",
+        )
+        .expect("valid peer descriptor");
+
+        let source_kind = GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection;
+        let created = runtime
+            .add_generated_trust_source(peer.clone(), source_kind, false)
+            .await
+            .expect("initial generated trust row");
+        assert!(created);
+        let repeated = runtime
+            .add_generated_trust_source(peer, source_kind, false)
+            .await
+            .expect("same generated trust row should be idempotent");
+        assert!(!repeated);
+
+        let conflict = runtime
+            .add_generated_trust_source(rewritten, source_kind, false)
+            .await
+            .expect_err("same generated source must not rewrite descriptor material");
+        assert!(
+            matches!(conflict, SendError::Validation(ref message) if message.contains("already owns different trust material")),
+            "unexpected conflict error: {conflict:?}"
+        );
+        let descriptors = runtime.trusted_descriptors.read().await;
+        let descriptor = descriptors
+            .get(&peer_id)
+            .and_then(|by_source| by_source.get(&source_kind))
+            .expect("generated descriptor remains installed");
+        assert_eq!(descriptor.name.as_str(), "peer");
+        assert_eq!(descriptor.address.to_string(), "inproc://peer");
     }
 
     #[test]
@@ -3599,11 +4177,13 @@ mod tests {
     }
 
     struct MockComms {
+        name: String,
         peer_id: meerkat_core::comms::PeerId,
         public_key_bytes: [u8; 32],
         address: String,
         key: String,
-        trusted: RwLock<HashSet<String>>,
+        trusted: RwLock<HashMap<String, BTreeSet<GeneratedCommsTrustAuthoritySourceKind>>>,
+        mob_machine_trust_owner: RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
         notify: Arc<Notify>,
     }
 
@@ -3663,13 +4243,28 @@ mod tests {
             }
             let peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&public_key_bytes);
             Self {
+                name: name.to_string(),
                 peer_id,
                 public_key_bytes,
                 address: format!("inproc://{name}"),
                 key: super::encode_ed25519_public_key(&public_key_bytes),
-                trusted: RwLock::new(HashSet::new()),
+                trusted: RwLock::new(HashMap::new()),
+                mob_machine_trust_owner: RwLock::new(None),
                 notify: Arc::new(Notify::new()),
             }
+        }
+
+        async fn validate_mob_trust_authority_owner(
+            &self,
+            authority: &meerkat_core::comms::CommsTrustMutationAuthority,
+        ) -> Result<(), SendError> {
+            if !authority.is_mob_machine_source() {
+                return Ok(());
+            }
+            let expected = self.mob_machine_trust_owner.read().await;
+            authority
+                .validate_raw_source_owner_token(expected.as_ref())
+                .map_err(SendError::Validation)
         }
     }
 
@@ -3687,40 +4282,151 @@ mod tests {
             Some(self.public_key_bytes)
         }
 
+        fn comms_name(&self) -> Option<String> {
+            Some(self.name.clone())
+        }
+
         fn advertised_address(&self) -> Option<String> {
             Some(self.address.clone())
         }
 
+        async fn apply_trust_mutation(
+            &self,
+            mutation: CommsTrustMutation,
+        ) -> Result<CommsTrustMutationResult, SendError> {
+            match mutation {
+                CommsTrustMutation::AddTrustedPeer { peer, authority } => {
+                    self.validate_mob_trust_authority_owner(&authority).await?;
+                    authority
+                        .validate_public_add(self.peer_id(), &peer)
+                        .map_err(SendError::Validation)?;
+                    meerkat_core::comms::TrustedPeerDescriptor::validate_pubkey_for_peer_id(
+                        peer.peer_id,
+                        &peer.pubkey,
+                    )
+                    .map_err(SendError::Validation)?;
+                    let created = self
+                        .trusted
+                        .write()
+                        .await
+                        .entry(peer.peer_id.as_str().to_string())
+                        .or_default()
+                        .insert(authority.trust_row_owner_kind());
+                    Ok(CommsTrustMutationResult::Added { created })
+                }
+                CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
+                    self.validate_mob_trust_authority_owner(&authority).await?;
+                    let parsed_peer_id = PeerId::parse(&peer_id)
+                        .map_err(|err| SendError::Validation(err.to_string()))?;
+                    authority
+                        .validate_public_remove(self.peer_id(), parsed_peer_id)
+                        .map_err(SendError::Validation)?;
+                    let mut trusted = self.trusted.write().await;
+                    let removed = remove_trust_source(
+                        &mut trusted,
+                        &peer_id,
+                        authority.trust_row_owner_kind(),
+                    );
+                    Ok(CommsTrustMutationResult::Removed { removed })
+                }
+                CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
+                    self.validate_mob_trust_authority_owner(&authority).await?;
+                    authority
+                        .validate_private_add(self.peer_id(), &peer)
+                        .map_err(SendError::Validation)?;
+                    meerkat_core::comms::TrustedPeerDescriptor::validate_pubkey_for_peer_id(
+                        peer.peer_id,
+                        &peer.pubkey,
+                    )
+                    .map_err(SendError::Validation)?;
+                    Ok(CommsTrustMutationResult::Added { created: true })
+                }
+                CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
+                    self.validate_mob_trust_authority_owner(&authority).await?;
+                    let parsed_peer_id = PeerId::parse(&peer_id)
+                        .map_err(|err| SendError::Validation(err.to_string()))?;
+                    authority
+                        .validate_private_remove(self.peer_id(), parsed_peer_id)
+                        .map_err(SendError::Validation)?;
+                    Ok(CommsTrustMutationResult::Removed { removed: false })
+                }
+            }
+        }
+
+        async fn install_generated_mob_trust_owner(
+            &self,
+            owner: Arc<dyn std::any::Any + Send + Sync>,
+        ) -> Result<(), SendError> {
+            let mut expected = self.mob_machine_trust_owner.write().await;
+            if let Some(existing) = expected.as_ref() {
+                if Arc::ptr_eq(existing, &owner) {
+                    return Ok(());
+                }
+                return Err(SendError::Validation(
+                    "target runtime is already bound to a different generated MobMachine trust owner"
+                        .to_string(),
+                ));
+            }
+            *expected = Some(owner);
+            Ok(())
+        }
+
+        async fn validate_recovered_generated_mob_trust_owner(
+            &self,
+            owner: Arc<dyn std::any::Any + Send + Sync>,
+        ) -> Result<(), SendError> {
+            let expected = self.mob_machine_trust_owner.read().await;
+            if let Some(existing) = expected.as_ref()
+                && !Arc::ptr_eq(existing, &owner)
+            {
+                return Err(SendError::Validation(
+                    "target runtime is already bound to a different generated MobMachine trust owner"
+                        .to_string(),
+                ));
+            }
+            Ok(())
+        }
+
+        async fn install_recovered_generated_mob_trust_owner(
+            &self,
+            owner: Arc<dyn std::any::Any + Send + Sync>,
+        ) -> Result<(), SendError> {
+            let mut expected = self.mob_machine_trust_owner.write().await;
+            if let Some(existing) = expected.as_ref() {
+                if Arc::ptr_eq(existing, &owner) {
+                    return Ok(());
+                }
+                return Err(SendError::Validation(
+                    "target runtime is already bound to a different generated MobMachine trust owner"
+                        .to_string(),
+                ));
+            }
+            *expected = Some(owner);
+            Ok(())
+        }
+
         async fn add_trusted_peer(
             &self,
-            peer: meerkat_core::comms::TrustedPeerDescriptor,
+            _peer: meerkat_core::comms::TrustedPeerDescriptor,
         ) -> Result<(), SendError> {
-            meerkat_core::comms::TrustedPeerDescriptor::validate_pubkey_for_peer_id(
-                peer.peer_id,
-                &peer.pubkey,
-            )
-            .map_err(SendError::Validation)?;
-            self.trusted
-                .write()
-                .await
-                .insert(peer.peer_id.as_str().to_string());
-            Ok(())
+            Err(SendError::Unsupported(
+                "add_trusted_peer requires apply_trust_mutation authority".to_string(),
+            ))
         }
 
         async fn add_private_trusted_peer(
             &self,
-            peer: meerkat_core::comms::TrustedPeerDescriptor,
+            _peer: meerkat_core::comms::TrustedPeerDescriptor,
         ) -> Result<(), SendError> {
-            meerkat_core::comms::TrustedPeerDescriptor::validate_pubkey_for_peer_id(
-                peer.peer_id,
-                &peer.pubkey,
-            )
-            .map_err(SendError::Validation)?;
-            Ok(())
+            Err(SendError::Unsupported(
+                "add_private_trusted_peer requires apply_trust_mutation authority".to_string(),
+            ))
         }
 
-        async fn remove_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
-            Ok(self.trusted.write().await.remove(peer_id))
+        async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
+            Err(SendError::Unsupported(
+                "remove_trusted_peer requires apply_trust_mutation authority".to_string(),
+            ))
         }
 
         async fn send(&self, _cmd: CommsCommand) -> Result<SendReceipt, SendError> {
@@ -4152,6 +4858,7 @@ mod tests {
                     text: "Remember the customer preference.".to_string(),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-1".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await
@@ -4191,6 +4898,7 @@ mod tests {
                     text: "Remember the customer preference.".to_string(),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-1".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await
@@ -4264,6 +4972,7 @@ mod tests {
                     text: "Remember the picture.".to_string(),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-image".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await
@@ -4348,6 +5057,7 @@ mod tests {
                     text: "Remember the customer preference.".to_string(),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-archive".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await
@@ -4732,6 +5442,29 @@ mod tests {
                 .is_none(),
             "archive fallback must remove the persisted session snapshot"
         );
+    }
+
+    #[tokio::test]
+    async fn test_retire_member_unknown_bridge_session_returns_typed_recovery_variant() {
+        // A bridge session that lives in no live roster, is not service-reported,
+        // and is not persisted must surface the TYPED recovery class
+        // (BridgeSessionNotInLiveAuthority) rather than an Internal string the
+        // consumer has to re-parse by message prefix.
+        let svc = Arc::new(MockSessionSvc::new());
+        let session_service: Arc<dyn meerkat_mob::MobSessionService> = svc.clone();
+        let state = Arc::new(MobMcpState::new(session_service));
+
+        let unknown = SessionId::new();
+        let err = state
+            .retire_member_by_bridge_session_id(&unknown)
+            .await
+            .expect_err("unknown bridge session must not retire successfully");
+        match err {
+            MobError::BridgeSessionNotInLiveAuthority { bridge_session_id } => {
+                assert_eq!(bridge_session_id, unknown.to_string());
+            }
+            other => panic!("expected typed BridgeSessionNotInLiveAuthority, got {other:?}"),
+        }
     }
 
     fn flow_enabled_definition() -> serde_json::Value {
@@ -6041,10 +6774,14 @@ mod tests {
         let state = Arc::new(MobMcpState::new(svc.clone()));
         let sid = SessionId::new().to_string();
 
-        let mut definition = explicit_definition("bridge-session-partial-destroy");
-        definition.mark_owner_bridge_session_indexed(&sid);
+        let definition = explicit_definition("bridge-session-partial-destroy");
         let mob_id = state
-            .mob_create_definition(definition)
+            .mob_create_definition_with_owner_bridge_session(
+                definition,
+                SessionId::parse(&sid).expect("session id"),
+                true,
+                false,
+            )
             .await
             .expect("create bridge-session-scoped mob");
         state
@@ -6102,10 +6839,14 @@ mod tests {
         svc.insert_persisted_session(Session::with_id(owner_session_id.clone()))
             .await;
 
-        let mut definition = explicit_definition("archive-helper-partial-destroy");
-        definition.mark_owner_bridge_session_indexed(&owner_session_id.to_string());
+        let definition = explicit_definition("archive-helper-partial-destroy");
         let mob_id = state
-            .mob_create_definition(definition)
+            .mob_create_definition_with_owner_bridge_session(
+                definition,
+                owner_session_id.clone(),
+                true,
+                false,
+            )
             .await
             .expect("create archive-helper-owned mob");
         state
@@ -6207,10 +6948,14 @@ mod tests {
             .await
             .expect("parent member bridge session");
 
-        let mut child_definition = explicit_definition("archive-helper-live-member-child");
-        child_definition.mark_owner_bridge_session_indexed(&member_session_id.to_string());
+        let child_definition = explicit_definition("archive-helper-live-member-child");
         let child_mob_id = state
-            .mob_create_definition(child_definition)
+            .mob_create_definition_with_owner_bridge_session(
+                child_definition,
+                member_session_id.clone(),
+                true,
+                false,
+            )
             .await
             .expect("create child mob owned by parent member session");
         let child_identity = AgentIdentity::from("child-worker-1");
@@ -6279,21 +7024,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_destroy_bridge_session_mobs_uses_cleanup_policy_not_owner_index() {
+    async fn test_destroy_bridge_session_mobs_uses_generated_cleanup_authority() {
         let state = MobMcpState::new_in_memory();
         let sid = SessionId::new().to_string();
 
-        let mut manual = explicit_definition("manual-owner-index");
-        manual.set_owner_bridge_session_lookup_index(sid.clone());
+        let manual = explicit_definition("manual-owner-index");
         let manual_id = state
             .mob_create_definition(manual)
             .await
-            .expect("create manual owner-indexed mob");
+            .expect("create manual unowned mob");
 
-        let mut bridge_session_scoped = explicit_definition("bridge-session-scoped-owner");
-        bridge_session_scoped.mark_owner_bridge_session_indexed(&sid);
+        let bridge_session_scoped = explicit_definition("bridge-session-scoped-owner");
         let bridge_session_scoped_id = state
-            .mob_create_definition(bridge_session_scoped)
+            .mob_create_definition_with_owner_bridge_session(
+                bridge_session_scoped,
+                SessionId::parse(&sid).expect("session id"),
+                true,
+                false,
+            )
             .await
             .expect("create bridge-session-scoped mob");
 
@@ -6301,11 +7049,11 @@ mod tests {
 
         assert!(
             state.handle_for(&manual_id).await.is_ok(),
-            "owner bridge-session indexing alone must not make a mob eligible for cleanup"
+            "manual unowned mob must not be eligible for owner-session cleanup"
         );
         assert!(
             state.handle_for(&bridge_session_scoped_id).await.is_err(),
-            "DestroyOnOwnerArchive must remain the cleanup truth"
+            "generated DestroyOnOwnerArchive authority must remain the cleanup truth"
         );
     }
 
@@ -6381,13 +7129,12 @@ mod tests {
             .await
             .unwrap();
 
-        // Also create a manual owner-indexed explicit mob that should survive scavenging.
-        let mut manual = explicit_definition("manual-owner-index");
-        manual.set_owner_bridge_session_lookup_index(sid.clone());
+        // Also create an unowned explicit mob that should survive scavenging.
+        let manual = explicit_definition("manual-owner-index");
         let manual_id = state
             .mob_create_definition(manual)
             .await
-            .expect("create manual owner-indexed mob");
+            .expect("create manual unowned mob");
 
         // Session exists — scavenge should find nothing.
         let scavenged = state.scavenge_orphaned_bridge_session_scoped_mobs().await;
@@ -6410,7 +7157,7 @@ mod tests {
         );
         assert!(
             state.handle_for(&manual_id).await.is_ok(),
-            "manual owner-indexed mob must survive orphan scavenging"
+            "manual unowned mob must survive orphan scavenging"
         );
     }
 
@@ -6437,10 +7184,14 @@ mod tests {
             .unwrap();
         let sid = result.session_id.to_string();
 
-        let mut bridge_owned = explicit_definition("bridge-owned-orphan");
-        bridge_owned.mark_owner_bridge_session_indexed(&sid);
+        let bridge_owned = explicit_definition("bridge-owned-orphan");
         let bridge_owned_id = state
-            .mob_create_definition(bridge_owned)
+            .mob_create_definition_with_owner_bridge_session(
+                bridge_owned,
+                SessionId::parse(&sid).expect("session id"),
+                true,
+                false,
+            )
             .await
             .expect("create bridge-owned bridge-session-scoped mob");
 
@@ -6479,8 +7230,10 @@ mod tests {
             "implicit delegate mobs must not invent a local orchestrator member"
         );
         assert_eq!(
-            handle.definition().owner_bridge_session_index(),
-            Some(sid.as_str()),
+            handle
+                .owner_bridge_session_lifecycle_authority()
+                .map(|authority| authority.bridge_session_id.to_string()),
+            Some(sid),
             "implicit mob must have correct owner_bridge_session_id"
         );
     }

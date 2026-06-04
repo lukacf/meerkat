@@ -147,6 +147,305 @@ pub enum WorkCompletionPolicy {
     ReviewerQuorum,
 }
 
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkEvidenceKind {
+    #[default]
+    SelfAttest,
+    HostConfirmation,
+    PrincipalConfirmation,
+    SupervisorConfirmation,
+    ReviewerConfirmation,
+}
+
+/// Typed discriminant the shell extracts from a `WorkGraphError` and feeds back
+/// into the machine. This is a pure typed extraction (one variant per
+/// `WorkGraphError` variant); the shell performs NO grouping — the
+/// variant->public-class POLICY lives in the `ClassifyWorkGraphPublicError`
+/// transitions below, owned by this canonical machine.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkGraphErrorKind {
+    #[default]
+    NotFound,
+    AttentionNotFound,
+    StaleRevision,
+    Conflict,
+    InvalidTransition,
+    InvalidInput,
+    InvalidTimestampMillis,
+    Store,
+    UnsupportedBackend,
+}
+
+/// Machine-owned public error classification surfaced to REST/RPC callers. The
+/// machine is the sole authority for the many-to-one grouping of internal error
+/// kinds into this public vocabulary (see the `ClassifyWorkGraphPublicError`
+/// transitions). Shells mirror the emitted class; they do not decide it.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkGraphPublicErrorClass {
+    #[default]
+    NotFound,
+    Conflict,
+    InvalidTransition,
+    InvalidArguments,
+    CapabilityUnavailable,
+    StoreError,
+}
+
+/// Machine-owned admission verdict for the requested INITIAL lifecycle status of
+/// a newly created work item. This machine — not the shell — owns the creation
+/// policy "a new work item may only start open or blocked". The shell extracts
+/// the requested status as a pure typed observation (a `WorkLifecycleState`),
+/// drives `ClassifyCreateStatusAdmission`, and mirrors the verdict:
+/// `AdmittedOpen` -> drive `CreateOpen`, `AdmittedBlocked` -> drive
+/// `CreateBlocked`, `Denied` -> reject with `InvalidTransition`.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkCreateStatusAdmissionKind {
+    #[default]
+    Denied,
+    AdmittedOpen,
+    AdmittedBlocked,
+}
+
+/// Machine-owned admission verdict for the requested `completion_policy` of a
+/// newly created NON-GOAL work item. This machine — not the shell — owns the
+/// creation policy "non-goal work items must use the self-attest completion
+/// policy". The shell extracts the requested completion policy as a pure typed
+/// observation (a `WorkCompletionPolicy`), drives
+/// `ClassifyCreateCompletionPolicyAdmission`, and mirrors the verdict:
+/// `Admitted` -> proceed, `DeniedNonSelfAttest` -> reject with the same
+/// `InvalidInput` rejection. Fails closed.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkCreateCompletionPolicyAdmissionKind {
+    #[default]
+    DeniedNonSelfAttest,
+    Admitted,
+}
+
+/// Machine-owned admission verdict for the requested target lifecycle status of
+/// a `close` operation. This machine — not the shell — owns the lifecycle-class
+/// fact "close requires a terminal status". The shell extracts the requested
+/// target status as a pure typed observation (a `WorkLifecycleState`), drives
+/// `ClassifyCloseStatusAdmission`, and mirrors the verdict:
+/// `AdmittedCompleted` -> drive `CloseCompleted`, `AdmittedCancelled` -> drive
+/// `CloseCancelled`, `AdmittedFailed` -> drive `CloseFailed`,
+/// `DeniedNonTerminal` -> reject with the same `InvalidTransition` rejection.
+/// Fails closed.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkCloseStatusAdmissionKind {
+    #[default]
+    DeniedNonTerminal,
+    AdmittedCompleted,
+    AdmittedCancelled,
+    AdmittedFailed,
+}
+
+/// Machine-owned admission verdict for a PUBLIC (untrusted) goal-confirmation
+/// over a work item's machine-owned `completion_policy`. This machine — not the
+/// shell — owns the trust-scoped eligibility "only a self-attested completion
+/// policy may be confirmed by an untrusted public caller; every other policy
+/// requires trusted in-process host authority". The public-confirm surface
+/// extracts the typed `completion_policy` as a pure observation, drives
+/// `ClassifyPublicConfirmationAdmission`, and mirrors the verdict: `Admitted`
+/// -> proceed, `DeniedRequiresTrustedHost` -> reject with `InvalidInput`.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkPublicConfirmationAdmissionKind {
+    #[default]
+    DeniedRequiresTrustedHost,
+    Admitted,
+}
+
+/// Machine-owned admission verdict for a requested mutation of a work item's
+/// `completion_policy`. This machine — not the shell — owns the immutability
+/// invariant "a work item's completion policy is fixed at creation and cannot be
+/// changed by an update". The shell extracts the requested completion policy as a
+/// pure typed observation (variant plus supervisor owner key plus reviewer quorum
+/// threshold), drives `ClassifyCompletionPolicyMutationAdmission` over the
+/// recovered item state, and mirrors the verdict: `Admitted` (the requested
+/// policy is identical to the current machine-owned policy, so the update is a
+/// no-op on policy) -> proceed, `Denied` (the requested policy differs) -> reject
+/// with the same `InvalidInput` rejection. Fails closed.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkCompletionPolicyMutationAdmissionKind {
+    #[default]
+    Denied,
+    Admitted,
+}
+
+/// Typed observation the trusted goal-confirm shell extracts from the OPAQUE
+/// confirmation `evidence.kind` provenance string. This is a pure typed
+/// extraction (the recognized reserved confirmation literals map 1:1 onto a
+/// confirmation-evidence variant; an empty trimmed string is `Empty`; everything
+/// else is `Other`); the shell performs NO admission decision — the
+/// per-policy required-evidence-kind POLICY lives in the
+/// `ClassifyConfirmationAdmission` transitions, owned by this canonical machine.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkConfirmationEvidenceObservation {
+    #[default]
+    Empty,
+    Other,
+    HostConfirmation,
+    PrincipalConfirmation,
+    SupervisorConfirmation,
+    ReviewerConfirmation,
+}
+
+/// Machine-owned admission verdict for a TRUSTED-path goal confirmation over a
+/// work item's machine-owned `completion_policy`. This machine — not the
+/// goal-confirm shell — owns the eligibility "is this confirming principal +
+/// supplied evidence kind admissible for this completion policy". The
+/// goal-confirm shell extracts only pure typed observations (the machine-owned
+/// completion policy + its supervisor owner key, the requested confirming
+/// principal owner key + kind, and the typed evidence-kind observation), drives
+/// `ClassifyConfirmationAdmission`, and mirrors the verdict: `Admitted` ->
+/// proceed to stamp the canonicalized evidence; each `Denied*` -> the exact same
+/// `InvalidInput` rejection the shell previously produced. Fails closed.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkConfirmationAdmissionKind {
+    /// A confirming principal is required by the policy but none was supplied.
+    #[default]
+    DeniedPrincipalRequired,
+    /// `PrincipalConfirmed` requires a principal-kind owner key.
+    DeniedPrincipalKindMismatch,
+    /// `Supervisor` requires confirmation from the policy's owner key.
+    DeniedSupervisorMismatch,
+    /// The supplied evidence kind does not match the policy's required kind.
+    DeniedEvidenceKind,
+    /// `SelfAttest` requires a non-empty evidence kind.
+    DeniedSelfAttestEmptyEvidenceKind,
+    /// The confirmation is admissible; the shell proceeds to stamp evidence.
+    Admitted,
+}
+
 machine! {
     machine WorkGraphLifecycleMachine {
         version: 1,
@@ -171,6 +470,15 @@ machine! {
             completion_reviewer_quorum_threshold: Option<u64>,
             terminal_at_utc_ms: Option<u64>,
             evidence_count: u64,
+            // Machine-owned, per-kind confirmation accounting. The producer
+            // classifies each piece of confirmation evidence into a typed
+            // WorkEvidenceKind; the machine records it here so the completion
+            // policy satisfaction decision is computed from owned state, not a
+            // shell reducer scanning string `evidence.kind` values.
+            host_confirmation_count: u64,
+            principal_confirmation_count: u64,
+            supervisor_confirmation_owner_keys: Set<WorkOwnerKey>,
+            reviewer_confirmation_owner_keys: Set<WorkOwnerKey>,
         }
 
         init(Absent) {
@@ -191,6 +499,10 @@ machine! {
             completion_reviewer_quorum_threshold = None,
             terminal_at_utc_ms = None,
             evidence_count = 0,
+            host_confirmation_count = 0,
+            principal_confirmation_count = 0,
+            supervisor_confirmation_owner_keys = EmptySet,
+            reviewer_confirmation_owner_keys = EmptySet,
         }
 
         terminal [Completed, Cancelled, Failed]
@@ -253,7 +565,122 @@ machine! {
             CloseCompleted { expected_revision: u64, at_utc_ms: u64 },
             CloseCancelled { expected_revision: u64, at_utc_ms: u64 },
             CloseFailed { expected_revision: u64, at_utc_ms: u64 },
-            AddEvidence { expected_revision: u64 },
+            AddEvidence {
+                expected_revision: u64,
+                evidence_kind: Enum<WorkEvidenceKind>,
+                confirming_owner_key: Option<WorkOwnerKey>,
+            },
+            // Public error-class classification. The shell extracts a typed
+            // WorkGraphErrorKind from a WorkGraphError (pure typed extraction)
+            // and feeds it back here; this machine owns the variant->class
+            // POLICY and emits WorkGraphPublicErrorClassified.
+            ClassifyWorkGraphPublicError { kind: Enum<WorkGraphErrorKind> },
+            // Terminality classification. This machine owns the lifecycle_phase;
+            // the terminality verdict (which phases are terminal) is a machine
+            // fact. The shell extracts no fact — it drives this input over the
+            // recovered machine state and mirrors the emitted
+            // WorkItemTerminalityClassified.terminal, failing closed.
+            ClassifyTerminality {},
+            // Per-blocking-edge satisfaction classification. The shell extracts
+            // only the raw blocker lifecycle phase (a pure observation projected
+            // from the blocker item's own machine state) plus whether the blocker
+            // was resolvable at all; this machine owns the satisfaction POLICY
+            // (a blocking edge is satisfied iff its blocker reached terminal
+            // SUCCESS, i.e. Completed) and emits BlockerSatisfactionClassified.
+            // The shell mirrors the verdict and mechanically fans-in (counts)
+            // the unsatisfied blockers — the count it feeds to RefreshEligibility
+            // / Claim, which this machine revalidates via dependencies_satisfied.
+            ClassifyBlockerSatisfied {
+                blocker_present: bool,
+                blocker_lifecycle_phase: Enum<WorkLifecycleState>,
+            },
+            // Create-status admission classification. This machine owns the
+            // creation policy "a new work item may only start open or blocked".
+            // The shell extracts the requested INITIAL status as a pure typed
+            // observation (a WorkLifecycleState) and feeds it here; this machine
+            // decides whether that status is an admissible creation state and
+            // emits CreateStatusAdmissionClassified. The shell mirrors the
+            // verdict (AdmittedOpen -> CreateOpen, AdmittedBlocked ->
+            // CreateBlocked, Denied -> InvalidTransition), failing closed.
+            ClassifyCreateStatusAdmission { requested_status: Enum<WorkLifecycleState> },
+            // Create-time completion-policy admission classification. This
+            // machine owns the creation policy "non-goal work items must use the
+            // self-attest completion policy". The shell extracts the requested
+            // completion policy as a pure typed observation (a
+            // WorkCompletionPolicy) and feeds it here; this machine decides
+            // whether that policy is admissible at create and emits
+            // CreateCompletionPolicyAdmissionClassified. The shell mirrors the
+            // verdict (Admitted -> proceed, DeniedNonSelfAttest -> InvalidInput),
+            // failing closed. Phase-independent: self-loops over every phase so
+            // the classification is total regardless of the authority phase.
+            ClassifyCreateCompletionPolicyAdmission { completion_policy: Enum<WorkCompletionPolicy> },
+            // Close-status admission classification. This machine owns the
+            // lifecycle-class fact "close requires a terminal status" — i.e.
+            // which statuses are admissible as a CLOSE target. The shell extracts
+            // the requested target status as a pure typed observation (a
+            // WorkLifecycleState) and feeds it here; this machine decides
+            // admissibility and emits CloseStatusAdmissionClassified. The shell
+            // mirrors the verdict (AdmittedCompleted -> CloseCompleted,
+            // AdmittedCancelled -> CloseCancelled, AdmittedFailed -> CloseFailed,
+            // DeniedNonTerminal -> InvalidTransition), failing closed.
+            // Phase-independent: self-loops over every phase so the
+            // classification is total regardless of the authority phase.
+            ClassifyCloseStatusAdmission { requested_status: Enum<WorkLifecycleState> },
+            // Public-confirmation admission classification. This machine owns
+            // the trust-scoped eligibility "only a self-attested completion
+            // policy may be confirmed by an untrusted public caller". The
+            // public-confirm surface extracts the typed completion_policy as a
+            // pure observation and feeds it here; this machine decides
+            // admissibility and emits PublicConfirmationAdmissionClassified. The
+            // surface mirrors the verdict (Admitted -> proceed,
+            // DeniedRequiresTrustedHost -> InvalidInput), failing closed.
+            ClassifyPublicConfirmationAdmission { completion_policy: Enum<WorkCompletionPolicy> },
+            // Completion-policy mutation admission classification. This machine
+            // owns the immutability invariant "a work item's completion policy is
+            // fixed at creation and cannot be changed by an update". The shell
+            // extracts the REQUESTED completion policy as a pure typed observation
+            // (variant plus supervisor owner key plus reviewer quorum threshold)
+            // and drives this input over the item's recovered machine state; this
+            // machine compares the requested policy against its own
+            // machine-owned completion policy and emits
+            // CompletionPolicyMutationAdmissionClassified. The shell mirrors the
+            // verdict (Admitted -> the policy is unchanged, proceed; Denied -> the
+            // policy would change, reject with InvalidInput), failing closed.
+            ClassifyCompletionPolicyMutationAdmission {
+                requested_completion_policy: Enum<WorkCompletionPolicy>,
+                requested_completion_supervisor_owner_key: Option<WorkOwnerKey>,
+                requested_completion_reviewer_quorum_threshold: Option<u64>,
+            },
+            // Trusted-path confirmation admission classification. This machine
+            // owns the eligibility "is this confirming principal + supplied
+            // evidence kind admissible for this completion policy". The
+            // goal-confirm shell extracts only pure typed observations (the
+            // machine-owned completion policy + its supervisor owner key, the
+            // requested confirming principal owner key + kind, and the typed
+            // evidence-kind observation parsed from the opaque evidence.kind
+            // string) and drives this input; this machine decides admissibility
+            // and emits ConfirmationAdmissionClassified. The shell mirrors the
+            // verdict (Admitted -> stamp the canonicalized evidence, each
+            // Denied* -> the exact same InvalidInput rejection), failing closed.
+            // Phase-independent: self-loops over every phase so the
+            // classification is total regardless of the authority phase.
+            ClassifyConfirmationAdmission {
+                completion_policy: Enum<WorkCompletionPolicy>,
+                completion_supervisor_owner_key: Option<WorkOwnerKey>,
+                requested_principal_owner_key: Option<WorkOwnerKey>,
+                requested_principal_kind: Option<Enum<WorkOwnerKind>>,
+                supplied_evidence_kind: Enum<WorkConfirmationEvidenceObservation>,
+            },
+            // Readiness classification. An item is "ready" iff it is claimable
+            // right now — exactly the condition the `Claim` transition guards
+            // accept (`ClaimOpen` from Open, or `ClaimExpiredInProgress`
+            // reclaiming an expired in-progress lease). This machine owns that
+            // readiness POLICY; the shell extracts only the raw wall-clock
+            // `now_utc_ms` (a pure observation) and drives this input over the
+            // recovered item state, mirroring the emitted
+            // WorkItemReadinessClassified.ready, failing closed. Each transition
+            // self-loops in its phase (classification never mutates state).
+            ClassifyReadiness { now_utc_ms: u64 },
         }
 
         effect WorkGraphLifecycleEffect {
@@ -265,6 +692,27 @@ machine! {
             LinkValidated,
             Closed { terminal_state: WorkLifecycleState, at_utc_ms: u64 },
             EvidenceAdded,
+            WorkGraphPublicErrorClassified {
+                kind: Enum<WorkGraphErrorKind>,
+                public_class: Enum<WorkGraphPublicErrorClass>,
+            },
+            WorkItemTerminalityClassified { terminal: bool },
+            BlockerSatisfactionClassified { satisfied: bool },
+            CreateStatusAdmissionClassified { admission: Enum<WorkCreateStatusAdmissionKind> },
+            CreateCompletionPolicyAdmissionClassified {
+                admission: Enum<WorkCreateCompletionPolicyAdmissionKind>,
+            },
+            CloseStatusAdmissionClassified { admission: Enum<WorkCloseStatusAdmissionKind> },
+            PublicConfirmationAdmissionClassified {
+                admission: Enum<WorkPublicConfirmationAdmissionKind>,
+            },
+            CompletionPolicyMutationAdmissionClassified {
+                admission: Enum<WorkCompletionPolicyMutationAdmissionKind>,
+            },
+            ConfirmationAdmissionClassified {
+                admission: Enum<WorkConfirmationAdmissionKind>,
+            },
+            WorkItemReadinessClassified { ready: bool },
         }
 
         invariant absent_has_zero_revision {
@@ -317,6 +765,166 @@ machine! {
             }
         }
 
+        helper completion_policy_is_satisfied(
+            policy: WorkCompletionPolicy,
+            supervisor_owner_key: Option<WorkOwnerKey>,
+            reviewer_quorum_threshold: Option<u64>,
+            host_confirmation_count: u64,
+            principal_confirmation_count: u64,
+            supervisor_confirmation_owner_keys: Set<WorkOwnerKey>,
+            reviewer_confirmation_owner_keys: Set<WorkOwnerKey>
+        ) -> bool {
+            if policy == WorkCompletionPolicy::SelfAttest {
+                true
+            } else {
+                if policy == WorkCompletionPolicy::HostConfirmed {
+                    host_confirmation_count > 0
+                } else {
+                    if policy == WorkCompletionPolicy::PrincipalConfirmed {
+                        principal_confirmation_count > 0
+                    } else {
+                        if policy == WorkCompletionPolicy::Supervisor {
+                            supervisor_owner_key != None
+                                && supervisor_confirmation_owner_keys.contains(supervisor_owner_key.get("value"))
+                        } else {
+                            reviewer_quorum_threshold != None
+                                && reviewer_confirmation_owner_keys.len() >= reviewer_quorum_threshold.get("value")
+                        }
+                    }
+                }
+            }
+        }
+
+        helper evidence_kind_owner_key_present(
+            evidence_kind: WorkEvidenceKind,
+            confirming_owner_key: Option<WorkOwnerKey>
+        ) -> bool {
+            if evidence_kind == WorkEvidenceKind::SupervisorConfirmation {
+                confirming_owner_key != None
+            } else {
+                if evidence_kind == WorkEvidenceKind::ReviewerConfirmation {
+                    confirming_owner_key != None
+                } else {
+                    true
+                }
+            }
+        }
+
+        // --- Trusted-path confirmation-admission verdict helpers ---
+        //
+        // These encode the EXACT per-policy check precedence the retired
+        // `confirmation_evidence_for_policy` shell reducer applied:
+        //   SelfAttest         : Empty evidence -> empty-denial; else Admitted.
+        //   HostConfirmed      : evidence != HostConfirmation -> evidence-denial;
+        //                        else Admitted. (no principal check)
+        //   PrincipalConfirmed : principal absent -> principal-required;
+        //                        principal kind != Principal -> kind-mismatch;
+        //                        evidence != PrincipalConfirmation -> evidence;
+        //                        else Admitted.
+        //   Supervisor         : principal absent -> principal-required;
+        //                        principal != owner_key -> supervisor-mismatch;
+        //                        evidence != SupervisorConfirmation -> evidence;
+        //                        else Admitted.
+        //   ReviewerQuorum     : principal absent -> principal-required;
+        //                        evidence != ReviewerConfirmation -> evidence;
+        //                        else Admitted.
+        // Each helper returns true iff its verdict is the one that fires; the
+        // helpers are mutually exclusive and total.
+
+        // A confirming principal is required by the policy but none was supplied.
+        helper confirmation_denies_principal_required(
+            completion_policy: WorkCompletionPolicy,
+            requested_principal_owner_key: Option<WorkOwnerKey>
+        ) -> bool {
+            (completion_policy == WorkCompletionPolicy::PrincipalConfirmed
+                || completion_policy == WorkCompletionPolicy::Supervisor
+                || completion_policy == WorkCompletionPolicy::ReviewerQuorum)
+                && requested_principal_owner_key == None
+        }
+
+        // PrincipalConfirmed: principal present but its kind is not Principal.
+        helper confirmation_denies_principal_kind_mismatch(
+            completion_policy: WorkCompletionPolicy,
+            requested_principal_owner_key: Option<WorkOwnerKey>,
+            requested_principal_kind: Option<WorkOwnerKind>
+        ) -> bool {
+            completion_policy == WorkCompletionPolicy::PrincipalConfirmed
+                && requested_principal_owner_key != None
+                && (requested_principal_kind == None
+                    || requested_principal_kind.get("value") != WorkOwnerKind::Principal)
+        }
+
+        // Supervisor: principal present but does not equal the policy owner key.
+        helper confirmation_denies_supervisor_mismatch(
+            completion_policy: WorkCompletionPolicy,
+            completion_supervisor_owner_key: Option<WorkOwnerKey>,
+            requested_principal_owner_key: Option<WorkOwnerKey>
+        ) -> bool {
+            completion_policy == WorkCompletionPolicy::Supervisor
+                && requested_principal_owner_key != None
+                && (completion_supervisor_owner_key == None
+                    || requested_principal_owner_key.get("value")
+                        != completion_supervisor_owner_key.get("value"))
+        }
+
+        // SelfAttest: the evidence kind string is empty.
+        helper confirmation_denies_self_attest_empty(
+            completion_policy: WorkCompletionPolicy,
+            supplied_evidence_kind: WorkConfirmationEvidenceObservation
+        ) -> bool {
+            completion_policy == WorkCompletionPolicy::SelfAttest
+                && supplied_evidence_kind == WorkConfirmationEvidenceObservation::Empty
+        }
+
+        // The supplied evidence kind does not match the policy's required kind.
+        // Only reached for the policies that perform an evidence-kind check,
+        // AFTER the principal/kind/supervisor checks above have passed.
+        helper confirmation_denies_evidence_kind(
+            completion_policy: WorkCompletionPolicy,
+            completion_supervisor_owner_key: Option<WorkOwnerKey>,
+            requested_principal_owner_key: Option<WorkOwnerKey>,
+            requested_principal_kind: Option<WorkOwnerKind>,
+            supplied_evidence_kind: WorkConfirmationEvidenceObservation
+        ) -> bool {
+            if completion_policy == WorkCompletionPolicy::HostConfirmed {
+                supplied_evidence_kind != WorkConfirmationEvidenceObservation::HostConfirmation
+            } else {
+                if completion_policy == WorkCompletionPolicy::PrincipalConfirmed {
+                    confirmation_denies_principal_required(completion_policy, requested_principal_owner_key) == false
+                        && confirmation_denies_principal_kind_mismatch(completion_policy, requested_principal_owner_key, requested_principal_kind) == false
+                        && supplied_evidence_kind != WorkConfirmationEvidenceObservation::PrincipalConfirmation
+                } else {
+                    if completion_policy == WorkCompletionPolicy::Supervisor {
+                        confirmation_denies_principal_required(completion_policy, requested_principal_owner_key) == false
+                            && confirmation_denies_supervisor_mismatch(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key) == false
+                            && supplied_evidence_kind != WorkConfirmationEvidenceObservation::SupervisorConfirmation
+                    } else {
+                        if completion_policy == WorkCompletionPolicy::ReviewerQuorum {
+                            confirmation_denies_principal_required(completion_policy, requested_principal_owner_key) == false
+                                && supplied_evidence_kind != WorkConfirmationEvidenceObservation::ReviewerConfirmation
+                        } else {
+                            false
+                        }
+                    }
+                }
+            }
+        }
+
+        // The confirmation is admissible: no denial helper fires.
+        helper confirmation_admits(
+            completion_policy: WorkCompletionPolicy,
+            completion_supervisor_owner_key: Option<WorkOwnerKey>,
+            requested_principal_owner_key: Option<WorkOwnerKey>,
+            requested_principal_kind: Option<WorkOwnerKind>,
+            supplied_evidence_kind: WorkConfirmationEvidenceObservation
+        ) -> bool {
+            confirmation_denies_principal_required(completion_policy, requested_principal_owner_key) == false
+                && confirmation_denies_principal_kind_mismatch(completion_policy, requested_principal_owner_key, requested_principal_kind) == false
+                && confirmation_denies_supervisor_mismatch(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key) == false
+                && confirmation_denies_self_attest_empty(completion_policy, supplied_evidence_kind) == false
+                && confirmation_denies_evidence_kind(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind) == false
+        }
+
         invariant supervisor_policy_has_owner {
             self.completion_policy != WorkCompletionPolicy::Supervisor
                 || self.completion_supervisor_owner_key != None
@@ -346,6 +954,16 @@ machine! {
         disposition LinkValidated => local,
         disposition Closed => routed [WorkAttentionLifecycleMachine],
         disposition EvidenceAdded => local,
+        disposition WorkGraphPublicErrorClassified => local,
+        disposition WorkItemTerminalityClassified => local,
+        disposition BlockerSatisfactionClassified => local,
+        disposition CreateStatusAdmissionClassified => local,
+        disposition CreateCompletionPolicyAdmissionClassified => local,
+        disposition CloseStatusAdmissionClassified => local,
+        disposition PublicConfirmationAdmissionClassified => local,
+        disposition CompletionPolicyMutationAdmissionClassified => local,
+        disposition ConfirmationAdmissionClassified => local,
+        disposition WorkItemReadinessClassified => local,
 
         transition CreateOpen {
             on input CreateOpen { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count }
@@ -586,6 +1204,17 @@ machine! {
         transition CloseOpenCompleted {
             on input CloseCompleted { expected_revision, at_utc_ms }
             guard { self.lifecycle_phase == Phase::Open && self.revision == expected_revision }
+            guard "completion_policy_satisfied" {
+                completion_policy_is_satisfied(
+                    self.completion_policy,
+                    self.completion_supervisor_owner_key,
+                    self.completion_reviewer_quorum_threshold,
+                    self.host_confirmation_count,
+                    self.principal_confirmation_count,
+                    self.supervisor_confirmation_owner_keys,
+                    self.reviewer_confirmation_owner_keys
+                )
+            }
             update {
                 self.revision += 1;
                 self.claim_owner_key = None;
@@ -600,6 +1229,17 @@ machine! {
         transition CloseInProgressCompleted {
             on input CloseCompleted { expected_revision, at_utc_ms }
             guard { self.lifecycle_phase == Phase::InProgress && self.revision == expected_revision }
+            guard "completion_policy_satisfied" {
+                completion_policy_is_satisfied(
+                    self.completion_policy,
+                    self.completion_supervisor_owner_key,
+                    self.completion_reviewer_quorum_threshold,
+                    self.host_confirmation_count,
+                    self.principal_confirmation_count,
+                    self.supervisor_confirmation_owner_keys,
+                    self.reviewer_confirmation_owner_keys
+                )
+            }
             update {
                 self.revision += 1;
                 self.claim_owner_key = None;
@@ -614,6 +1254,17 @@ machine! {
         transition CloseBlockedCompleted {
             on input CloseCompleted { expected_revision, at_utc_ms }
             guard { self.lifecycle_phase == Phase::Blocked && self.revision == expected_revision }
+            guard "completion_policy_satisfied" {
+                completion_policy_is_satisfied(
+                    self.completion_policy,
+                    self.completion_supervisor_owner_key,
+                    self.completion_reviewer_quorum_threshold,
+                    self.host_confirmation_count,
+                    self.principal_confirmation_count,
+                    self.supervisor_confirmation_owner_keys,
+                    self.reviewer_confirmation_owner_keys
+                )
+            }
             update {
                 self.revision += 1;
                 self.claim_owner_key = None;
@@ -710,69 +1361,781 @@ machine! {
         }
 
         transition AddEvidenceOpen {
-            on input AddEvidence { expected_revision }
+            on input AddEvidence { expected_revision, evidence_kind, confirming_owner_key }
             guard { self.lifecycle_phase == Phase::Open && self.revision == expected_revision }
+            guard "owner_key_present_for_kind" {
+                evidence_kind_owner_key_present(evidence_kind, confirming_owner_key)
+            }
             update {
                 self.revision += 1;
                 self.evidence_count += 1;
+                if evidence_kind == WorkEvidenceKind::HostConfirmation {
+                    self.host_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::PrincipalConfirmation {
+                    self.principal_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::SupervisorConfirmation {
+                    self.supervisor_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
+                if evidence_kind == WorkEvidenceKind::ReviewerConfirmation {
+                    self.reviewer_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
             }
             to Open
             emit EvidenceAdded
         }
 
         transition AddEvidenceInProgress {
-            on input AddEvidence { expected_revision }
+            on input AddEvidence { expected_revision, evidence_kind, confirming_owner_key }
             guard { self.lifecycle_phase == Phase::InProgress && self.revision == expected_revision }
+            guard "owner_key_present_for_kind" {
+                evidence_kind_owner_key_present(evidence_kind, confirming_owner_key)
+            }
             update {
                 self.revision += 1;
                 self.evidence_count += 1;
+                if evidence_kind == WorkEvidenceKind::HostConfirmation {
+                    self.host_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::PrincipalConfirmation {
+                    self.principal_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::SupervisorConfirmation {
+                    self.supervisor_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
+                if evidence_kind == WorkEvidenceKind::ReviewerConfirmation {
+                    self.reviewer_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
             }
             to InProgress
             emit EvidenceAdded
         }
 
         transition AddEvidenceBlocked {
-            on input AddEvidence { expected_revision }
+            on input AddEvidence { expected_revision, evidence_kind, confirming_owner_key }
             guard { self.lifecycle_phase == Phase::Blocked && self.revision == expected_revision }
+            guard "owner_key_present_for_kind" {
+                evidence_kind_owner_key_present(evidence_kind, confirming_owner_key)
+            }
             update {
                 self.revision += 1;
                 self.evidence_count += 1;
+                if evidence_kind == WorkEvidenceKind::HostConfirmation {
+                    self.host_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::PrincipalConfirmation {
+                    self.principal_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::SupervisorConfirmation {
+                    self.supervisor_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
+                if evidence_kind == WorkEvidenceKind::ReviewerConfirmation {
+                    self.reviewer_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
             }
             to Blocked
             emit EvidenceAdded
         }
 
         transition AddEvidenceCompleted {
-            on input AddEvidence { expected_revision }
+            on input AddEvidence { expected_revision, evidence_kind, confirming_owner_key }
             guard { self.lifecycle_phase == Phase::Completed && self.revision == expected_revision }
+            guard "owner_key_present_for_kind" {
+                evidence_kind_owner_key_present(evidence_kind, confirming_owner_key)
+            }
             update {
                 self.revision += 1;
                 self.evidence_count += 1;
+                if evidence_kind == WorkEvidenceKind::HostConfirmation {
+                    self.host_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::PrincipalConfirmation {
+                    self.principal_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::SupervisorConfirmation {
+                    self.supervisor_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
+                if evidence_kind == WorkEvidenceKind::ReviewerConfirmation {
+                    self.reviewer_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
             }
             to Completed
             emit EvidenceAdded
         }
 
         transition AddEvidenceCancelled {
-            on input AddEvidence { expected_revision }
+            on input AddEvidence { expected_revision, evidence_kind, confirming_owner_key }
             guard { self.lifecycle_phase == Phase::Cancelled && self.revision == expected_revision }
+            guard "owner_key_present_for_kind" {
+                evidence_kind_owner_key_present(evidence_kind, confirming_owner_key)
+            }
             update {
                 self.revision += 1;
                 self.evidence_count += 1;
+                if evidence_kind == WorkEvidenceKind::HostConfirmation {
+                    self.host_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::PrincipalConfirmation {
+                    self.principal_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::SupervisorConfirmation {
+                    self.supervisor_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
+                if evidence_kind == WorkEvidenceKind::ReviewerConfirmation {
+                    self.reviewer_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
             }
             to Cancelled
             emit EvidenceAdded
         }
 
         transition AddEvidenceFailed {
-            on input AddEvidence { expected_revision }
+            on input AddEvidence { expected_revision, evidence_kind, confirming_owner_key }
             guard { self.lifecycle_phase == Phase::Failed && self.revision == expected_revision }
+            guard "owner_key_present_for_kind" {
+                evidence_kind_owner_key_present(evidence_kind, confirming_owner_key)
+            }
             update {
                 self.revision += 1;
                 self.evidence_count += 1;
+                if evidence_kind == WorkEvidenceKind::HostConfirmation {
+                    self.host_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::PrincipalConfirmation {
+                    self.principal_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::SupervisorConfirmation {
+                    self.supervisor_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
+                if evidence_kind == WorkEvidenceKind::ReviewerConfirmation {
+                    self.reviewer_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
             }
             to Failed
             emit EvidenceAdded
+        }
+
+        // --- Public error-class classification ---
+        //
+        // The public WorkGraph error class surfaced via REST/RPC is a machine
+        // fact. The shell extracts a typed WorkGraphErrorKind from the internal
+        // WorkGraphError (pure typed extraction, no grouping) and feeds it back
+        // here; the transitions below own the many-to-one variant->class POLICY.
+        // Each transition self-loops in every lifecycle phase (classification
+        // never mutates lifecycle state) and emits exactly one public class.
+
+        transition ClassifyPublicErrorNotFound {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyWorkGraphPublicError { kind }
+            guard "not_found_class" {
+                kind == WorkGraphErrorKind::NotFound
+                || kind == WorkGraphErrorKind::AttentionNotFound
+            }
+            update {}
+            to Absent
+            emit WorkGraphPublicErrorClassified {
+                kind: kind,
+                public_class: WorkGraphPublicErrorClass::NotFound
+            }
+        }
+
+        transition ClassifyPublicErrorConflict {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyWorkGraphPublicError { kind }
+            guard "conflict_class" {
+                kind == WorkGraphErrorKind::StaleRevision
+                || kind == WorkGraphErrorKind::Conflict
+            }
+            update {}
+            to Absent
+            emit WorkGraphPublicErrorClassified {
+                kind: kind,
+                public_class: WorkGraphPublicErrorClass::Conflict
+            }
+        }
+
+        transition ClassifyPublicErrorInvalidTransition {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyWorkGraphPublicError { kind }
+            guard "invalid_transition_class" {
+                kind == WorkGraphErrorKind::InvalidTransition
+            }
+            update {}
+            to Absent
+            emit WorkGraphPublicErrorClassified {
+                kind: kind,
+                public_class: WorkGraphPublicErrorClass::InvalidTransition
+            }
+        }
+
+        transition ClassifyPublicErrorInvalidArguments {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyWorkGraphPublicError { kind }
+            guard "invalid_arguments_class" {
+                kind == WorkGraphErrorKind::InvalidInput
+                || kind == WorkGraphErrorKind::InvalidTimestampMillis
+            }
+            update {}
+            to Absent
+            emit WorkGraphPublicErrorClassified {
+                kind: kind,
+                public_class: WorkGraphPublicErrorClass::InvalidArguments
+            }
+        }
+
+        transition ClassifyPublicErrorCapabilityUnavailable {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyWorkGraphPublicError { kind }
+            guard "capability_unavailable_class" {
+                kind == WorkGraphErrorKind::UnsupportedBackend
+            }
+            update {}
+            to Absent
+            emit WorkGraphPublicErrorClassified {
+                kind: kind,
+                public_class: WorkGraphPublicErrorClass::CapabilityUnavailable
+            }
+        }
+
+        transition ClassifyPublicErrorStoreError {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyWorkGraphPublicError { kind }
+            guard "store_error_class" {
+                kind == WorkGraphErrorKind::Store
+            }
+            update {}
+            to Absent
+            emit WorkGraphPublicErrorClassified {
+                kind: kind,
+                public_class: WorkGraphPublicErrorClass::StoreError
+            }
+        }
+
+        // --- Terminality classification ---
+        //
+        // The terminality verdict over the machine-owned lifecycle_phase is a
+        // machine fact. The shell drives this input over recovered state and
+        // mirrors the emitted `terminal`. Each transition self-loops in its phase
+        // (classification never mutates lifecycle state). The terminal phase set
+        // here is exactly `terminal [Completed, Cancelled, Failed]` above.
+
+        transition ClassifyTerminalityTerminal {
+            per_phase [Completed, Cancelled, Failed]
+            on input ClassifyTerminality {}
+            update {}
+            to Absent
+            emit WorkItemTerminalityClassified { terminal: true }
+        }
+
+        transition ClassifyTerminalityLive {
+            per_phase [Absent, Open, InProgress, Blocked]
+            on input ClassifyTerminality {}
+            update {}
+            to Absent
+            emit WorkItemTerminalityClassified { terminal: false }
+        }
+
+        // --- Readiness classification ---
+        //
+        // An item is "ready" iff it is claimable right now. The readiness
+        // condition reproduces EXACTLY the `Claim` transition guards: an Open
+        // item is ready when its blockers are resolved and its due / not-before
+        // / snooze windows are all eligible (`ClaimOpen`); an InProgress item is
+        // ready only when its prior claim's lease has expired and the same
+        // eligibility holds (`ClaimExpiredInProgress`); every other phase is not
+        // ready. The shell extracts only `now_utc_ms` and mirrors the verdict.
+        // Each transition self-loops in its phase.
+
+        helper claim_time_window_eligible(
+            due_at_utc_ms: Option<u64>,
+            not_before_utc_ms: Option<u64>,
+            snoozed_until_utc_ms: Option<u64>,
+            now_utc_ms: u64
+        ) -> bool {
+            (if due_at_utc_ms == None { true } else { due_at_utc_ms.get("value") <= now_utc_ms })
+            && (if not_before_utc_ms == None { true } else { not_before_utc_ms.get("value") <= now_utc_ms })
+            && (if snoozed_until_utc_ms == None { true } else { snoozed_until_utc_ms.get("value") <= now_utc_ms })
+        }
+
+        transition ClassifyReadinessOpen {
+            per_phase [Open]
+            on input ClassifyReadiness { now_utc_ms }
+            update {}
+            to Open
+            emit WorkItemReadinessClassified {
+                ready: self.unresolved_blocker_count == 0
+                    && claim_time_window_eligible(
+                        self.due_at_utc_ms,
+                        self.not_before_utc_ms,
+                        self.snoozed_until_utc_ms,
+                        now_utc_ms
+                    )
+            }
+        }
+
+        transition ClassifyReadinessInProgress {
+            per_phase [InProgress]
+            on input ClassifyReadiness { now_utc_ms }
+            update {}
+            to InProgress
+            emit WorkItemReadinessClassified {
+                ready: self.claim_owner_key != None
+                    && self.lease_expires_at_utc_ms != None
+                    && self.lease_expires_at_utc_ms.get("value") <= now_utc_ms
+                    && self.unresolved_blocker_count == 0
+                    && claim_time_window_eligible(
+                        self.due_at_utc_ms,
+                        self.not_before_utc_ms,
+                        self.snoozed_until_utc_ms,
+                        now_utc_ms
+                    )
+            }
+        }
+
+        transition ClassifyReadinessNotClaimable {
+            per_phase [Absent, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyReadiness { now_utc_ms }
+            update {}
+            to Absent
+            emit WorkItemReadinessClassified { ready: false }
+        }
+
+        // --- Per-blocking-edge satisfaction classification ---
+        //
+        // A blocking edge is satisfied iff its blocker item reached terminal
+        // SUCCESS (Completed). The shell extracts only the raw blocker lifecycle
+        // phase (projected from the blocker's own machine state) and whether the
+        // blocker was present at all; this machine owns the satisfaction POLICY
+        // and emits the verdict. The shell mirrors it and mechanically fans-in
+        // (counts) the unsatisfied edges. Phase-independent: self-loops in every
+        // phase of the item whose blockers are being classified.
+        transition ClassifyBlockerSatisfaction {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyBlockerSatisfied { blocker_present, blocker_lifecycle_phase }
+            update {}
+            to Absent
+            emit BlockerSatisfactionClassified {
+                satisfied: blocker_present && blocker_lifecycle_phase == WorkLifecycleState::Completed
+            }
+        }
+
+        // --- Create-status admission classification ---
+        //
+        // This machine owns the creation policy "a new work item may only start
+        // open or blocked". The shell extracts the requested INITIAL status as a
+        // pure typed WorkLifecycleState observation and drives this input over a
+        // fresh (Absent) authority; this machine decides admissibility and emits
+        // the verdict. Open -> AdmittedOpen, Blocked -> AdmittedBlocked, every
+        // other requested status (Absent / InProgress / terminal) -> Denied.
+        // Phase-independent: self-loops over every phase so the classification is
+        // total regardless of the authority's phase.
+        transition ClassifyCreateStatusAdmissionOpen {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateStatusAdmission { requested_status }
+            guard "requested_open" { requested_status == WorkLifecycleState::Open }
+            update {}
+            to Absent
+            emit CreateStatusAdmissionClassified { admission: WorkCreateStatusAdmissionKind::AdmittedOpen }
+        }
+
+        transition ClassifyCreateStatusAdmissionBlocked {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateStatusAdmission { requested_status }
+            guard "requested_blocked" { requested_status == WorkLifecycleState::Blocked }
+            update {}
+            to Absent
+            emit CreateStatusAdmissionClassified { admission: WorkCreateStatusAdmissionKind::AdmittedBlocked }
+        }
+
+        transition ClassifyCreateStatusAdmissionDeniedAbsent {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateStatusAdmission { requested_status }
+            guard "requested_absent" { requested_status == WorkLifecycleState::Absent }
+            update {}
+            to Absent
+            emit CreateStatusAdmissionClassified { admission: WorkCreateStatusAdmissionKind::Denied }
+        }
+
+        transition ClassifyCreateStatusAdmissionDeniedInProgress {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateStatusAdmission { requested_status }
+            guard "requested_in_progress" { requested_status == WorkLifecycleState::InProgress }
+            update {}
+            to Absent
+            emit CreateStatusAdmissionClassified { admission: WorkCreateStatusAdmissionKind::Denied }
+        }
+
+        transition ClassifyCreateStatusAdmissionDeniedCompleted {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateStatusAdmission { requested_status }
+            guard "requested_completed" { requested_status == WorkLifecycleState::Completed }
+            update {}
+            to Absent
+            emit CreateStatusAdmissionClassified { admission: WorkCreateStatusAdmissionKind::Denied }
+        }
+
+        transition ClassifyCreateStatusAdmissionDeniedCancelled {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateStatusAdmission { requested_status }
+            guard "requested_cancelled" { requested_status == WorkLifecycleState::Cancelled }
+            update {}
+            to Absent
+            emit CreateStatusAdmissionClassified { admission: WorkCreateStatusAdmissionKind::Denied }
+        }
+
+        transition ClassifyCreateStatusAdmissionDeniedFailed {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateStatusAdmission { requested_status }
+            guard "requested_failed" { requested_status == WorkLifecycleState::Failed }
+            update {}
+            to Absent
+            emit CreateStatusAdmissionClassified { admission: WorkCreateStatusAdmissionKind::Denied }
+        }
+
+        // --- Create-time completion-policy admission classification ---
+        //
+        // This machine owns the creation policy "non-goal work items must use the
+        // self-attest completion policy". The shell extracts the requested
+        // completion policy as a pure typed WorkCompletionPolicy observation and
+        // drives this input; this machine decides admissibility and emits the
+        // verdict. SelfAttest -> Admitted, every other policy ->
+        // DeniedNonSelfAttest. Phase-independent: self-loops over every phase so
+        // the classification is total regardless of the authority phase.
+        transition ClassifyCreateCompletionPolicyAdmissionSelfAttest {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateCompletionPolicyAdmission { completion_policy }
+            guard "self_attest_admissible_at_create" { completion_policy == WorkCompletionPolicy::SelfAttest }
+            update {}
+            to Absent
+            emit CreateCompletionPolicyAdmissionClassified { admission: WorkCreateCompletionPolicyAdmissionKind::Admitted }
+        }
+
+        transition ClassifyCreateCompletionPolicyAdmissionHostConfirmed {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateCompletionPolicyAdmission { completion_policy }
+            guard "host_confirmed_denied_at_create" { completion_policy == WorkCompletionPolicy::HostConfirmed }
+            update {}
+            to Absent
+            emit CreateCompletionPolicyAdmissionClassified { admission: WorkCreateCompletionPolicyAdmissionKind::DeniedNonSelfAttest }
+        }
+
+        transition ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmed {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateCompletionPolicyAdmission { completion_policy }
+            guard "principal_confirmed_denied_at_create" { completion_policy == WorkCompletionPolicy::PrincipalConfirmed }
+            update {}
+            to Absent
+            emit CreateCompletionPolicyAdmissionClassified { admission: WorkCreateCompletionPolicyAdmissionKind::DeniedNonSelfAttest }
+        }
+
+        transition ClassifyCreateCompletionPolicyAdmissionSupervisor {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateCompletionPolicyAdmission { completion_policy }
+            guard "supervisor_denied_at_create" { completion_policy == WorkCompletionPolicy::Supervisor }
+            update {}
+            to Absent
+            emit CreateCompletionPolicyAdmissionClassified { admission: WorkCreateCompletionPolicyAdmissionKind::DeniedNonSelfAttest }
+        }
+
+        transition ClassifyCreateCompletionPolicyAdmissionReviewerQuorum {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateCompletionPolicyAdmission { completion_policy }
+            guard "reviewer_quorum_denied_at_create" { completion_policy == WorkCompletionPolicy::ReviewerQuorum }
+            update {}
+            to Absent
+            emit CreateCompletionPolicyAdmissionClassified { admission: WorkCreateCompletionPolicyAdmissionKind::DeniedNonSelfAttest }
+        }
+
+        // --- Close-status admission classification ---
+        //
+        // This machine owns the lifecycle-class fact "close requires a terminal
+        // status". The shell extracts the requested target status as a pure typed
+        // WorkLifecycleState observation and drives this input; this machine
+        // decides which statuses are admissible as a CLOSE target and emits the
+        // verdict. Completed -> AdmittedCompleted, Cancelled -> AdmittedCancelled,
+        // Failed -> AdmittedFailed, every non-terminal status (Absent / Open /
+        // InProgress / Blocked) -> DeniedNonTerminal. Phase-independent:
+        // self-loops over every phase so the classification is total regardless
+        // of the authority's phase.
+        transition ClassifyCloseStatusAdmissionCompleted {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCloseStatusAdmission { requested_status }
+            guard "requested_completed" { requested_status == WorkLifecycleState::Completed }
+            update {}
+            to Absent
+            emit CloseStatusAdmissionClassified { admission: WorkCloseStatusAdmissionKind::AdmittedCompleted }
+        }
+
+        transition ClassifyCloseStatusAdmissionCancelled {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCloseStatusAdmission { requested_status }
+            guard "requested_cancelled" { requested_status == WorkLifecycleState::Cancelled }
+            update {}
+            to Absent
+            emit CloseStatusAdmissionClassified { admission: WorkCloseStatusAdmissionKind::AdmittedCancelled }
+        }
+
+        transition ClassifyCloseStatusAdmissionFailed {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCloseStatusAdmission { requested_status }
+            guard "requested_failed" { requested_status == WorkLifecycleState::Failed }
+            update {}
+            to Absent
+            emit CloseStatusAdmissionClassified { admission: WorkCloseStatusAdmissionKind::AdmittedFailed }
+        }
+
+        transition ClassifyCloseStatusAdmissionDeniedAbsent {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCloseStatusAdmission { requested_status }
+            guard "requested_absent" { requested_status == WorkLifecycleState::Absent }
+            update {}
+            to Absent
+            emit CloseStatusAdmissionClassified { admission: WorkCloseStatusAdmissionKind::DeniedNonTerminal }
+        }
+
+        transition ClassifyCloseStatusAdmissionDeniedOpen {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCloseStatusAdmission { requested_status }
+            guard "requested_open" { requested_status == WorkLifecycleState::Open }
+            update {}
+            to Absent
+            emit CloseStatusAdmissionClassified { admission: WorkCloseStatusAdmissionKind::DeniedNonTerminal }
+        }
+
+        transition ClassifyCloseStatusAdmissionDeniedInProgress {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCloseStatusAdmission { requested_status }
+            guard "requested_in_progress" { requested_status == WorkLifecycleState::InProgress }
+            update {}
+            to Absent
+            emit CloseStatusAdmissionClassified { admission: WorkCloseStatusAdmissionKind::DeniedNonTerminal }
+        }
+
+        transition ClassifyCloseStatusAdmissionDeniedBlocked {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCloseStatusAdmission { requested_status }
+            guard "requested_blocked" { requested_status == WorkLifecycleState::Blocked }
+            update {}
+            to Absent
+            emit CloseStatusAdmissionClassified { admission: WorkCloseStatusAdmissionKind::DeniedNonTerminal }
+        }
+
+        // --- Public-confirmation admission classification ---
+        //
+        // This machine owns the trust-scoped eligibility "only a self-attested
+        // completion policy may be confirmed by an untrusted public caller; every
+        // other policy requires trusted in-process host authority". The
+        // public-confirm surface extracts the typed completion_policy as a pure
+        // observation and drives this input; this machine decides admissibility
+        // and emits the verdict. SelfAttest -> Admitted, every other policy ->
+        // DeniedRequiresTrustedHost. Phase-independent: self-loops over every
+        // phase so the classification is total regardless of the authority phase.
+        transition ClassifyPublicConfirmationAdmissionSelfAttest {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyPublicConfirmationAdmission { completion_policy }
+            guard "self_attest_public_confirmable" { completion_policy == WorkCompletionPolicy::SelfAttest }
+            update {}
+            to Absent
+            emit PublicConfirmationAdmissionClassified { admission: WorkPublicConfirmationAdmissionKind::Admitted }
+        }
+
+        transition ClassifyPublicConfirmationAdmissionHostConfirmed {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyPublicConfirmationAdmission { completion_policy }
+            guard "host_confirmed_requires_trusted_host" { completion_policy == WorkCompletionPolicy::HostConfirmed }
+            update {}
+            to Absent
+            emit PublicConfirmationAdmissionClassified { admission: WorkPublicConfirmationAdmissionKind::DeniedRequiresTrustedHost }
+        }
+
+        transition ClassifyPublicConfirmationAdmissionPrincipalConfirmed {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyPublicConfirmationAdmission { completion_policy }
+            guard "principal_confirmed_requires_trusted_host" { completion_policy == WorkCompletionPolicy::PrincipalConfirmed }
+            update {}
+            to Absent
+            emit PublicConfirmationAdmissionClassified { admission: WorkPublicConfirmationAdmissionKind::DeniedRequiresTrustedHost }
+        }
+
+        transition ClassifyPublicConfirmationAdmissionSupervisor {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyPublicConfirmationAdmission { completion_policy }
+            guard "supervisor_requires_trusted_host" { completion_policy == WorkCompletionPolicy::Supervisor }
+            update {}
+            to Absent
+            emit PublicConfirmationAdmissionClassified { admission: WorkPublicConfirmationAdmissionKind::DeniedRequiresTrustedHost }
+        }
+
+        transition ClassifyPublicConfirmationAdmissionReviewerQuorum {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyPublicConfirmationAdmission { completion_policy }
+            guard "reviewer_quorum_requires_trusted_host" { completion_policy == WorkCompletionPolicy::ReviewerQuorum }
+            update {}
+            to Absent
+            emit PublicConfirmationAdmissionClassified { admission: WorkPublicConfirmationAdmissionKind::DeniedRequiresTrustedHost }
+        }
+
+        // --- Completion-policy mutation admission classification ---
+        //
+        // This machine owns the immutability invariant "a work item's completion
+        // policy is fixed at creation and cannot be changed by an update". The
+        // shell extracts the requested completion policy as a pure typed
+        // observation (variant plus supervisor owner key plus reviewer quorum
+        // threshold) and drives this input over the item's recovered state; this
+        // machine compares the requested policy — in full — against its own
+        // machine-owned completion policy and emits the verdict. Admitted iff the
+        // requested policy is identical to the current policy (the update is a
+        // no-op on policy); Denied otherwise. The shell mirrors the verdict and
+        // never decides. Phase-independent: self-loops over every phase so the
+        // classification is total regardless of the authority's phase, and never
+        // mutates lifecycle state.
+        transition ClassifyCompletionPolicyMutationAdmissionUnchanged {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCompletionPolicyMutationAdmission {
+                requested_completion_policy,
+                requested_completion_supervisor_owner_key,
+                requested_completion_reviewer_quorum_threshold
+            }
+            guard "completion_policy_unchanged" {
+                requested_completion_policy == self.completion_policy
+                    && requested_completion_supervisor_owner_key == self.completion_supervisor_owner_key
+                    && requested_completion_reviewer_quorum_threshold == self.completion_reviewer_quorum_threshold
+            }
+            update {}
+            to Absent
+            emit CompletionPolicyMutationAdmissionClassified { admission: WorkCompletionPolicyMutationAdmissionKind::Admitted }
+        }
+
+        transition ClassifyCompletionPolicyMutationAdmissionChanged {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCompletionPolicyMutationAdmission {
+                requested_completion_policy,
+                requested_completion_supervisor_owner_key,
+                requested_completion_reviewer_quorum_threshold
+            }
+            guard "completion_policy_changed" {
+                requested_completion_policy != self.completion_policy
+                    || requested_completion_supervisor_owner_key != self.completion_supervisor_owner_key
+                    || requested_completion_reviewer_quorum_threshold != self.completion_reviewer_quorum_threshold
+            }
+            update {}
+            to Absent
+            emit CompletionPolicyMutationAdmissionClassified { admission: WorkCompletionPolicyMutationAdmissionKind::Denied }
+        }
+
+        // --- Trusted-path confirmation-admission classification ---
+        //
+        // This machine owns the eligibility "is this confirming principal +
+        // supplied evidence kind admissible for this completion policy". The
+        // goal-confirm shell extracts only pure typed observations and drives
+        // this input; this machine decides the verdict and emits
+        // ConfirmationAdmissionClassified. The shell mirrors the verdict
+        // (Admitted -> stamp evidence, each Denied* -> the exact same InvalidInput
+        // rejection), failing closed. The guards are mutually exclusive and total
+        // via the confirmation_* helpers (which encode the EXACT per-policy check
+        // precedence). Phase-independent: self-loops over every phase.
+
+        transition ClassifyConfirmationAdmissionPrincipalRequired {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyConfirmationAdmission {
+                completion_policy,
+                completion_supervisor_owner_key,
+                requested_principal_owner_key,
+                requested_principal_kind,
+                supplied_evidence_kind
+            }
+            guard "principal_required" {
+                confirmation_denies_principal_required(completion_policy, requested_principal_owner_key)
+            }
+            update {}
+            to Absent
+            emit ConfirmationAdmissionClassified { admission: WorkConfirmationAdmissionKind::DeniedPrincipalRequired }
+        }
+
+        transition ClassifyConfirmationAdmissionPrincipalKindMismatch {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyConfirmationAdmission {
+                completion_policy,
+                completion_supervisor_owner_key,
+                requested_principal_owner_key,
+                requested_principal_kind,
+                supplied_evidence_kind
+            }
+            guard "principal_kind_mismatch" {
+                confirmation_denies_principal_kind_mismatch(completion_policy, requested_principal_owner_key, requested_principal_kind)
+            }
+            update {}
+            to Absent
+            emit ConfirmationAdmissionClassified { admission: WorkConfirmationAdmissionKind::DeniedPrincipalKindMismatch }
+        }
+
+        transition ClassifyConfirmationAdmissionSupervisorMismatch {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyConfirmationAdmission {
+                completion_policy,
+                completion_supervisor_owner_key,
+                requested_principal_owner_key,
+                requested_principal_kind,
+                supplied_evidence_kind
+            }
+            guard "supervisor_mismatch" {
+                confirmation_denies_supervisor_mismatch(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key)
+            }
+            update {}
+            to Absent
+            emit ConfirmationAdmissionClassified { admission: WorkConfirmationAdmissionKind::DeniedSupervisorMismatch }
+        }
+
+        transition ClassifyConfirmationAdmissionSelfAttestEmpty {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyConfirmationAdmission {
+                completion_policy,
+                completion_supervisor_owner_key,
+                requested_principal_owner_key,
+                requested_principal_kind,
+                supplied_evidence_kind
+            }
+            guard "self_attest_empty" {
+                confirmation_denies_self_attest_empty(completion_policy, supplied_evidence_kind)
+            }
+            update {}
+            to Absent
+            emit ConfirmationAdmissionClassified { admission: WorkConfirmationAdmissionKind::DeniedSelfAttestEmptyEvidenceKind }
+        }
+
+        transition ClassifyConfirmationAdmissionEvidenceKind {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyConfirmationAdmission {
+                completion_policy,
+                completion_supervisor_owner_key,
+                requested_principal_owner_key,
+                requested_principal_kind,
+                supplied_evidence_kind
+            }
+            guard "evidence_kind_mismatch" {
+                confirmation_denies_evidence_kind(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+            }
+            update {}
+            to Absent
+            emit ConfirmationAdmissionClassified { admission: WorkConfirmationAdmissionKind::DeniedEvidenceKind }
+        }
+
+        transition ClassifyConfirmationAdmissionAdmitted {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyConfirmationAdmission {
+                completion_policy,
+                completion_supervisor_owner_key,
+                requested_principal_owner_key,
+                requested_principal_kind,
+                supplied_evidence_kind
+            }
+            guard "confirmation_admissible" {
+                confirmation_admits(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+            }
+            update {}
+            to Absent
+            emit ConfirmationAdmissionClassified { admission: WorkConfirmationAdmissionKind::Admitted }
         }
     }
 }
@@ -842,6 +2205,14 @@ struct WorkGraphLifecycleMachineStateWire {
     completion_reviewer_quorum_threshold: Option<u64>,
     terminal_at_utc_ms: Option<u64>,
     evidence_count: u64,
+    #[serde(default)]
+    host_confirmation_count: u64,
+    #[serde(default)]
+    principal_confirmation_count: u64,
+    #[serde(default)]
+    supervisor_confirmation_owner_keys: std::collections::BTreeSet<WorkOwnerKey>,
+    #[serde(default)]
+    reviewer_confirmation_owner_keys: std::collections::BTreeSet<WorkOwnerKey>,
 }
 
 impl From<&WorkGraphLifecycleMachineState> for WorkGraphLifecycleMachineStateWire {
@@ -865,6 +2236,10 @@ impl From<&WorkGraphLifecycleMachineState> for WorkGraphLifecycleMachineStateWir
             completion_reviewer_quorum_threshold: state.completion_reviewer_quorum_threshold,
             terminal_at_utc_ms: state.terminal_at_utc_ms,
             evidence_count: state.evidence_count,
+            host_confirmation_count: state.host_confirmation_count,
+            principal_confirmation_count: state.principal_confirmation_count,
+            supervisor_confirmation_owner_keys: state.supervisor_confirmation_owner_keys.clone(),
+            reviewer_confirmation_owner_keys: state.reviewer_confirmation_owner_keys.clone(),
         }
     }
 }
@@ -890,6 +2265,10 @@ impl From<WorkGraphLifecycleMachineStateWire> for WorkGraphLifecycleMachineState
             completion_reviewer_quorum_threshold: wire.completion_reviewer_quorum_threshold,
             terminal_at_utc_ms: wire.terminal_at_utc_ms,
             evidence_count: wire.evidence_count,
+            host_confirmation_count: wire.host_confirmation_count,
+            principal_confirmation_count: wire.principal_confirmation_count,
+            supervisor_confirmation_owner_keys: wire.supervisor_confirmation_owner_keys,
+            reviewer_confirmation_owner_keys: wire.reviewer_confirmation_owner_keys,
         }
     }
 }

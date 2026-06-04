@@ -83,7 +83,7 @@ fn comms_drain_bridge_authority_matchers_do_not_consume_display_labels() -> Resu
     let source = read_runtime_source("src/comms_drain.rs")?;
     let source = production_source(&source);
     for signature in [
-        "fn sender_matches_bound_supervisor",
+        "fn generated_sender_peer_id",
         "fn sender_matches_bridge_peer",
     ] {
         let body = function_body(source, signature)?;

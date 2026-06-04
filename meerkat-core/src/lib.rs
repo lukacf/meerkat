@@ -52,18 +52,23 @@ pub mod ops;
 pub mod ops_lifecycle;
 pub mod peer_correlation;
 pub mod peer_meta;
+pub use generated::approval_lifecycle;
+pub use generated::session_document;
+pub mod pending_continuation;
 pub mod placement;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod prompt;
 pub mod provider;
 pub mod provider_matrix;
 pub mod realtime_transcript;
+pub mod realtime_transcript_revision;
 pub mod retry;
 pub mod runtime_bootstrap;
 pub mod runtime_epoch;
 pub mod schema;
 pub mod service;
 pub mod session;
+pub mod session_durable_config_authority;
 pub mod session_migrations;
 pub mod session_recovery;
 pub mod session_store;
@@ -109,8 +114,8 @@ pub use budget::{
 pub use checkpoint::SessionCheckpointer;
 pub use comms::{
     CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
-    PeerDirectorySource, PeerName, PeerReachability, PeerReachabilityReason, PeerRoute,
-    SUPERVISOR_BRIDGE_INTENT, SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope,
+    PeerDirectorySource, PeerName, PeerRoute, SUPERVISOR_BRIDGE_INTENT, SendAndStreamError,
+    SendError, SendReceipt, StreamError, StreamScope,
 };
 pub use compact::{
     CompactionConfig, CompactionContext, CompactionResult, Compactor,
@@ -196,14 +201,15 @@ pub use interaction::{
     ClassifiedInboxInteraction, InboxInteraction, InteractionContent, InteractionId,
     PeerIngressAdmission, PeerIngressAdmissionDiagnostic, PeerIngressAuthDecision,
     PeerIngressAuthExemption, PeerIngressAuthorityPhase, PeerIngressClassification,
-    PeerIngressConvention, PeerIngressDiagnosticDisplay, PeerIngressEntrySnapshot,
-    PeerIngressEnvelopeFacts, PeerIngressEnvelopeKind, PeerIngressFact, PeerIngressIdentity,
-    PeerIngressKind, PeerIngressMachinePolicy, PeerIngressPlainEventFacts,
-    PeerIngressQueueSnapshot, PeerIngressRuntimeSnapshot, PeerInputClass, ResponseStatus,
-    SendResponseCallProjection, TerminalDisposition, TerminalityClass,
-    classify_response_terminality, format_external_event_projection, format_peer_ack_projection,
-    format_peer_message_projection, format_peer_request_projection,
-    format_peer_response_projection, peer_lifecycle_subject, render_peer_ingress_admitted_text,
+    PeerIngressConvention, PeerIngressDequeueAuthority, PeerIngressDequeueFacts,
+    PeerIngressDiagnosticDisplay, PeerIngressEntrySnapshot, PeerIngressEnvelopeFacts,
+    PeerIngressEnvelopeKind, PeerIngressFact, PeerIngressIdentity, PeerIngressKind,
+    PeerIngressPlainEventFacts, PeerIngressQueueSnapshot, PeerIngressReceiveAuthority,
+    PeerIngressReceiveFacts, PeerIngressReceiveOutcome, PeerIngressRuntimeSnapshot, PeerInputClass,
+    ResponseStatus, SendResponseCallProjection, TerminalDisposition, TerminalityClass,
+    format_external_event_projection, format_peer_ack_projection, format_peer_message_projection,
+    format_peer_request_projection, format_peer_response_projection, peer_lifecycle_subject,
+    render_peer_ingress_admitted_text,
 };
 pub use lifecycle::{
     ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreApplyFailureCause,
@@ -220,9 +226,10 @@ pub use ops::{
     ToolDispatchTerminalErrorKind, ToolDispatchTimeoutPolicy, WaitPolicy, WorkKind,
 };
 pub use ops_lifecycle::{
-    OperationCompletionWatch, OperationKind, OperationLifecycleSnapshot, OperationPeerHandle,
-    OperationProgressUpdate, OperationStatus, OperationTerminalOutcome, OpsLifecycleError,
-    OpsLifecycleRegistry, WaitAllResult, WaitAllSatisfied,
+    OperationCompletionWatch, OperationCompletionWatchError, OperationKind,
+    OperationLifecycleSnapshot, OperationPeerHandle, OperationProgressUpdate, OperationStatus,
+    OperationTerminalOutcome, OpsLifecycleError, OpsLifecycleRegistry, WaitAllResult,
+    WaitAllSatisfied,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use prompt::{AGENTS_MD_MAX_BYTES, DEFAULT_SYSTEM_PROMPT, SystemPromptConfig};
@@ -260,7 +267,8 @@ pub use service::{
     TranscriptRewriteSelection, TurnToolOverlay,
 };
 pub use session::{
-    DeferredFirstTurnPhase, DeferredToolLoadAuthority, PendingDeferredPrompt,
+    AuthorizedSessionToolVisibilityState, ConsumedDeferredTurnInputs, DeferredFirstTurnPhase,
+    DeferredToolLoadAuthority, InheritedToolVisibilityAuthority, PendingDeferredPrompt,
     PendingSystemContextAppend, PendingToolResultsMessage, SESSION_BUILD_STATE_KEY,
     SESSION_DEFERRED_TURN_STATE_KEY, SESSION_METADATA_SCHEMA_VERSION,
     SESSION_SYSTEM_CONTEXT_STATE_KEY, SESSION_TOOL_VISIBILITY_STATE_KEY,
@@ -269,10 +277,10 @@ pub use session::{
     SessionDeferredTurnState, SessionLlmIdentity, SessionLlmIdentityOverride,
     SessionLlmIdentityOverrideError, SessionLlmRequestPolicy, SessionMeta, SessionMetadata,
     SessionSystemContextState, SessionToolVisibilityState, SessionTooling, SystemContextStageError,
-    ToolCategoryOverride, ToolVisibilityWitness, TranscriptHistoryState, TranscriptRevisionBody,
-    TranscriptRewriteRecord, VIEW_IMAGE_TOOL_NAME, WitnessedToolFilter,
+    SystemContextStateHandle, ToolCategoryOverride, ToolVisibilityWitness, TranscriptHistoryState,
+    TranscriptRevisionBody, TranscriptRewriteRecord, VIEW_IMAGE_TOOL_NAME, WitnessedToolFilter,
     capability_base_filter_for_image_tool_results, resolve_session_llm_identity_override,
-    transcript_messages_digest,
+    session_metadata_schema_version, session_version, transcript_messages_digest,
 };
 pub use session_recovery::{
     BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RecoveredSessionBuild, SurfaceSessionRecoveryContext,
@@ -293,9 +301,9 @@ pub use tool_scope::{
     ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase,
     ExternalToolSurfaceEntrySnapshot, ExternalToolSurfaceFailureCause,
     ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp, ExternalToolSurfaceSnapshot,
-    ExternalToolSurfaceStagedOp, LocalToolVisibilityOwner, ToolFilter, ToolScope,
-    ToolScopeApplyError, ToolScopeHandle, ToolScopeRevision, ToolScopeSnapshot,
-    ToolScopeStageError, ToolVisibilityOwner,
+    ExternalToolSurfaceStagedOp, GeneratedToolVisibilityOwner, LocalToolVisibilityOwner,
+    ToolFilter, ToolScope, ToolScopeApplyError, ToolScopeHandle, ToolScopeRevision,
+    ToolScopeSnapshot, ToolScopeStageError, ToolVisibilityOwner,
 };
 pub use turn_boundary::{TurnBoundaryHook, TurnBoundaryMessage};
 pub use turn_execution_authority::{
@@ -307,10 +315,11 @@ pub use types::{
     ContentInput, ExtractionError, HandlingMode, ImageData, Message, OutputSchema, ProviderMeta,
     RunResult, SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, SessionId, StopReason, SystemMessage,
     SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage,
-    SystemNoticePeer, ToolCall, ToolCallIter, ToolCallView, ToolDef, ToolIdentity, ToolName,
-    ToolNameSet, ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind, TranscriptSource, Usage,
-    UserMessage, VideoData, assistant_blocks_have_visible_or_actionable_output, has_images,
-    has_non_text_content, has_video, is_supported_video_media_type, validate_inline_video_blocks,
+    SystemNoticePeer, SystemPromptMutationKind, ToolCall, ToolCallIter, ToolCallView, ToolDef,
+    ToolIdentity, ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind,
+    TranscriptSource, TranscriptUserRole, Usage, UserMessage, VideoData,
+    assistant_blocks_have_visible_or_actionable_output, has_images, has_non_text_content,
+    has_video, is_supported_video_media_type, validate_inline_video_blocks,
 };
 pub use web_search::*;
 
@@ -321,11 +330,9 @@ pub use auth::{
     AuthErrorSummary, AuthLease, AuthMetadata, AuthMetadataDefaults, AuthRefreshReason,
     AuthRouteHints, AuthStatus, AuthStatusPhase, GoogleAuthMetadata, GoogleRouteHints,
     HttpAuthorizationRequest, HttpAuthorizer, OpenAiAuthMetadata, OpenAiRouteHints,
-    ProviderAuthMetadata, PublishedAuthStatus, ResolvedAuthEnvelope, ResolvedAuthKind,
-    TokenLifecycleClearError, clear_tokens_and_publish_lifecycle_released,
-    lease_snapshot_expires_at_datetime, mark_tokens_lifecycle_published,
-    mark_tokens_lifecycle_published_for_generation, mark_tokens_lifecycle_published_for_snapshot,
-    mark_tokens_lifecycle_published_for_transition,
+    ProviderAuthMetadata, PublishedAuthStatus, RefreshFailureObservation, ResolvedAuthEnvelope,
+    ResolvedAuthKind, TokenLifecycleClearError, clear_tokens_and_publish_lifecycle_released,
+    lease_snapshot_expires_at_datetime, mark_tokens_lifecycle_published_for_transition,
     oauth_status_projection_snapshot_from_newer_marker,
     persisted_auth_mode_uses_oauth_login_lifecycle, persisted_token_expires_at_epoch_secs,
     project_published_auth_status, publish_token_lifecycle_acquired,
@@ -336,7 +343,7 @@ pub use auth::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use auth::{
     AuthLoginLifecycleGuard, AuthStatusRehydrateError, acquire_auth_login_lifecycle_guard,
-    rehydrate_marked_oauth_tokens_for_status,
+    rehydrate_marked_tokens_for_status,
 };
 pub use connection::{
     AuthBindingRef, AuthProfile, AuthProfileConfig, BackendProfile, BackendProfileConfig,

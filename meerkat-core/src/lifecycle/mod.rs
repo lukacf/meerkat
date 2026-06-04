@@ -20,9 +20,9 @@ pub mod run_receipt;
 
 // Re-exports for convenience
 pub use core_executor::{
-    CoreApplyFailureCause, CoreApplyFailureCauseKind, CoreControlFailureCause,
-    CoreControlFailureCauseKind, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
-    CoreExecutorInterruptHandle,
+    CoreApplyFailureCause, CoreApplyFailureCauseKind, CoreBoundaryStageOutput,
+    CoreControlFailureCause, CoreControlFailureCauseKind, CoreExecutor, CoreExecutorBoundaryHandle,
+    CoreExecutorError, CoreExecutorInterruptHandle,
 };
 pub use identifiers::{InputId, RunId, WaitRequestId};
 pub use run_event::RunEvent;

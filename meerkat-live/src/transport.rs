@@ -6,14 +6,14 @@
 //!
 //! Connect: `GET {LIVE_WS_PATH}?token={token}&channel={channel_id}&format={format}`
 //!
-//! - `token` (required): single-use, URL-safe token minted via `mint_token`,
+//! - `token` (required): single-use token material minted by the transport
+//!   and recorded through generated machine authority before it is returned,
 //!   valid for [`TOKEN_TTL`] after issue.
 //! - `channel` (required): the channel id the caller intends to bind to.
 //!   G38: pinning the token to a specific `(token, channel_id)` tuple
 //!   tightens the bearer-token misuse surface — a token leaked from one
 //!   `live/open` cannot be replayed against a different channel.
-//!   `consume_token` rejects with `ChannelMismatch` if the channel recorded
-//!   at mint time does not match.
+//!   The generated token admission authority rejects channel mismatches.
 //! - `format` (required when sending binary frames): negotiates the binary
 //!   payload encoding. Currently the only accepted value is `pcm_24k_mono`
 //!   (16-bit signed little-endian PCM, 24 kHz, mono). Text-only sessions may
@@ -21,29 +21,33 @@
 //!
 //! Frames:
 //!
-//! - `Text`: JSON-encoded [`LiveInputChunk`]. Invalid JSON closes the socket
-//!   with reason `invalid_frame`.
+//! - `Text`: JSON-encoded [`LiveInputChunk`]. Invalid JSON fails closed after
+//!   generated close authority accepts the channel close.
 //! - `Binary`: raw audio bytes in the negotiated format. If no format was
-//!   negotiated, the socket is closed with reason `binary_format_unnegotiated`.
+//!   negotiated, the socket fails closed after generated close authority
+//!   accepts the channel close.
 //! - `Close`/`Ping`: handled by axum.
-//! - Anything else (e.g. unsolicited `Pong`): closes the socket with reason
-//!   `unsupported_frame`.
+//! - Anything else (e.g. unsolicited `Pong`): fails closed after generated
+//!   close authority accepts the channel close.
 //!
 //! Outbound frames are JSON-encoded [`LiveAdapterObservation`] values.
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::host::{LiveAdapterHost, LiveChannelId, ObservationOutcome};
+use crate::host::{
+    LiveAdapterHost, LiveAdapterHostError, LiveChannelCloseCommitAuthority,
+    LiveChannelCloseObservation, LiveChannelId, LiveChannelStatusCommitAuthority,
+    LiveChannelStatusObservation, ObservationOutcome, ObservationRouting,
+};
 use axum::Router;
 use axum::extract::ws::{CloseFrame, Message as WsMessage, WebSocket, close_code};
 use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use meerkat_contracts::WireLiveAdapterObservation;
-use meerkat_core::live_adapter::LiveInputChunk;
-use tokio::sync::Mutex;
+use meerkat_core::live_adapter::{LiveAdapterObservation, LiveInputChunk};
+use meerkat_core::types::SessionId;
 use uuid::Uuid;
 
 pub const LIVE_WS_PATH: &str = "/live/ws";
@@ -136,24 +140,184 @@ pub enum TokenParseError {
     InvalidByte { idx: usize, byte: u8 },
 }
 
-/// Errors returned when consuming a token.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum TokenConsumeError {
-    #[error("token not found")]
-    NotFound,
-    #[error("token expired")]
-    Expired,
-    /// G38: token was minted for a different channel than the caller asserted.
-    /// The bound channel id is intentionally not echoed back to keep the
-    /// bearer-token model from leaking the originally-bound channel to a
-    /// holder of a wrong channel id.
-    #[error("token bound to a different channel")]
-    ChannelMismatch,
+/// Generated authority projection for WebSocket token admission failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveWsTokenAdmissionRejection {
+    TokenNotFound,
+    TokenExpired,
+    TokenChannelMismatch,
+    TokenAlreadyConsumed,
+    ChannelNotBound,
 }
 
-struct PendingToken {
-    channel_id: LiveChannelId,
-    expires_at: Instant,
+impl std::fmt::Display for LiveWsTokenAdmissionRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reason = match self {
+            Self::TokenNotFound => "token not found",
+            Self::TokenExpired => "token expired",
+            Self::TokenChannelMismatch => "token bound to a different channel",
+            Self::TokenAlreadyConsumed => "token already consumed",
+            Self::ChannelNotBound => "channel not bound",
+        };
+        f.write_str(reason)
+    }
+}
+
+/// Public error class emitted by generated WebSocket token admission
+/// authority. The transport maps this to a WebSocket close only after the
+/// generated effect exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveWsTokenAdmissionPublicErrorClass {
+    InvalidToken,
+}
+
+impl LiveWsTokenAdmissionPublicErrorClass {
+    fn as_wire_error(self) -> &'static str {
+        match self {
+            Self::InvalidToken => "invalid_token",
+        }
+    }
+}
+
+/// Generated authority output for a recorded WebSocket token issue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveWsTokenIssue {
+    pub token: LiveTokenString,
+    pub expires_at_ms: u64,
+    pub sequence: u64,
+}
+
+/// Generated authority output for WebSocket token admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveWsTokenAdmission {
+    pub channel_id: LiveChannelId,
+    pub admitted: bool,
+    pub rejection: Option<LiveWsTokenAdmissionRejection>,
+    pub public_error_class: Option<LiveWsTokenAdmissionPublicErrorClass>,
+    pub sequence: u64,
+}
+
+/// Typed close feedback sink for live transports.
+///
+/// Transports own sockets and peer connections only. When a transport observes
+/// a close/terminal condition, it must submit the host close observation
+/// through this seam so generated machine authority owns active-channel
+/// lifecycle cleanup. If generated close cleanup has already committed before
+/// the transport drains a staged terminal observation, the transport uses that
+/// committed fact and must not mint a second close observation.
+#[async_trait::async_trait]
+pub trait LiveChannelCloseFeedback: Send + Sync {
+    async fn record_live_channel_closed(
+        &self,
+        channel_id: &LiveChannelId,
+        observation: &LiveChannelCloseObservation,
+    ) -> Result<LiveChannelCloseCommitAuthority, String>;
+}
+
+#[cfg(test)]
+pub(crate) struct GeneratedTestMachineLiveChannelCloseFeedback {
+    host: Arc<LiveAdapterHost>,
+}
+
+#[cfg(test)]
+impl GeneratedTestMachineLiveChannelCloseFeedback {
+    pub(crate) fn new(host: Arc<LiveAdapterHost>) -> Self {
+        Self { host }
+    }
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl LiveChannelCloseFeedback for GeneratedTestMachineLiveChannelCloseFeedback {
+    async fn record_live_channel_closed(
+        &self,
+        channel_id: &LiveChannelId,
+        observation: &LiveChannelCloseObservation,
+    ) -> Result<LiveChannelCloseCommitAuthority, String> {
+        if observation.channel_id() != channel_id.as_str() {
+            return Err(format!(
+                "generated test close feedback channel mismatch: observed {}, requested {}",
+                observation.channel_id(),
+                channel_id
+            ));
+        }
+        self.host
+            .close_commit_authority_from_generated_test_machine(observation)
+            .await
+            .map_err(|err| err.to_string())
+    }
+}
+
+/// Typed status feedback sink for live transports.
+///
+/// Transports observe provider status, but generated MeerkatMachine authority
+/// decides when that observation can become the host fact used by command
+/// admission and public status projection.
+#[async_trait::async_trait]
+pub trait LiveChannelStatusFeedback: Send + Sync {
+    async fn record_live_channel_status(
+        &self,
+        channel_id: &LiveChannelId,
+        observation: &LiveChannelStatusObservation,
+    ) -> Result<LiveChannelStatusCommitAuthority, String>;
+}
+
+#[cfg(test)]
+pub(crate) struct GeneratedTestMachineLiveChannelStatusFeedback {
+    host: Arc<LiveAdapterHost>,
+}
+
+#[cfg(test)]
+impl GeneratedTestMachineLiveChannelStatusFeedback {
+    pub(crate) fn new(host: Arc<LiveAdapterHost>) -> Self {
+        Self { host }
+    }
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl LiveChannelStatusFeedback for GeneratedTestMachineLiveChannelStatusFeedback {
+    async fn record_live_channel_status(
+        &self,
+        channel_id: &LiveChannelId,
+        observation: &LiveChannelStatusObservation,
+    ) -> Result<LiveChannelStatusCommitAuthority, String> {
+        if observation.channel_id() != channel_id.as_str() {
+            return Err(format!(
+                "generated test status feedback channel mismatch: observed {}, requested {}",
+                observation.channel_id(),
+                channel_id
+            ));
+        }
+        self.host
+            .status_commit_authority_from_generated_test_machine(observation)
+            .await
+            .map_err(|err| err.to_string())
+    }
+}
+
+/// Typed token authority seam for live WebSocket upgrades.
+///
+/// Production implementations route these calls into generated MeerkatMachine
+/// inputs/effects. The WebSocket transport owns sockets only; it does not own
+/// token binding, expiry, or consume/admission facts.
+#[async_trait::async_trait]
+pub trait LiveWsTokenAuthority: Send + Sync {
+    async fn record_live_ws_token_issued(
+        &self,
+        session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        token: &LiveTokenString,
+        issued_at_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<LiveWsTokenIssue, String>;
+
+    async fn resolve_live_ws_token_admission(
+        &self,
+        channel_id: &LiveChannelId,
+        token: &str,
+        observed_at_ms: u64,
+    ) -> Result<LiveWsTokenAdmission, String>;
 }
 
 /// Shared state for the live WebSocket transport.
@@ -162,20 +326,55 @@ struct PendingToken {
 /// `LiveAdapterHost` and either mounts the router or starts a listener.
 pub struct LiveWsState {
     host: Arc<LiveAdapterHost>,
-    pending_tokens: Mutex<HashMap<LiveTokenString, PendingToken>>,
+    close_feedback: Arc<dyn LiveChannelCloseFeedback>,
+    status_feedback: Arc<dyn LiveChannelStatusFeedback>,
+    token_authority: Arc<dyn LiveWsTokenAuthority>,
     token_ttl: Duration,
 }
 
 impl LiveWsState {
-    pub fn new(host: Arc<LiveAdapterHost>) -> Self {
-        Self::with_token_ttl(host, TOKEN_TTL)
+    pub fn new(
+        host: Arc<LiveAdapterHost>,
+        close_feedback: Arc<dyn LiveChannelCloseFeedback>,
+        status_feedback: Arc<dyn LiveChannelStatusFeedback>,
+        token_authority: Arc<dyn LiveWsTokenAuthority>,
+    ) -> Self {
+        Self::with_token_ttl(
+            host,
+            close_feedback,
+            status_feedback,
+            token_authority,
+            TOKEN_TTL,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test_with_token_authority(
+        host: Arc<LiveAdapterHost>,
+        token_authority: Arc<dyn LiveWsTokenAuthority>,
+    ) -> Self {
+        let close_feedback = Arc::new(GeneratedTestMachineLiveChannelCloseFeedback::new(
+            Arc::clone(&host),
+        ));
+        let status_feedback = Arc::new(GeneratedTestMachineLiveChannelStatusFeedback::new(
+            Arc::clone(&host),
+        ));
+        Self::new(host, close_feedback, status_feedback, token_authority)
     }
 
     /// Construct with a custom token TTL — primarily for tests.
-    pub fn with_token_ttl(host: Arc<LiveAdapterHost>, token_ttl: Duration) -> Self {
+    pub fn with_token_ttl(
+        host: Arc<LiveAdapterHost>,
+        close_feedback: Arc<dyn LiveChannelCloseFeedback>,
+        status_feedback: Arc<dyn LiveChannelStatusFeedback>,
+        token_authority: Arc<dyn LiveWsTokenAuthority>,
+        token_ttl: Duration,
+    ) -> Self {
         Self {
             host,
-            pending_tokens: Mutex::new(HashMap::new()),
+            close_feedback,
+            status_feedback,
+            token_authority,
             token_ttl,
         }
     }
@@ -184,71 +383,183 @@ impl LiveWsState {
         &self.host
     }
 
-    /// Mint a single-use token for a channel. The token expires after
-    /// [`Self::token_ttl`] if not consumed. Each call also reaps any
-    /// already-expired tokens.
-    pub async fn mint_token(&self, channel_id: LiveChannelId) -> LiveTokenString {
-        let token = LiveTokenString::random();
-        let expires_at = Instant::now() + self.token_ttl;
-        let mut guard = self.pending_tokens.lock().await;
-        reap_expired(&mut guard);
-        guard.insert(
-            token.clone(),
-            PendingToken {
-                channel_id,
-                expires_at,
-            },
-        );
-        token
+    async fn close_channel_with_generated_feedback(&self, channel_id: &LiveChannelId) -> bool {
+        // Runtime-initiated terminal paths can commit generated close authority
+        // before the WS pump drains the staged terminal observation. In that
+        // case the committed host status is the generated close handoff result;
+        // asking close feedback for a second decision would route through an
+        // already-cleared active binding.
+        match self.host.generated_close_has_committed(channel_id).await {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(LiveAdapterHostError::ChannelNotFound(_)) => return false,
+            Err(err) => {
+                tracing::warn!(
+                    channel = %channel_id,
+                    error = %err,
+                    "live transport generated close status check failed"
+                );
+                return false;
+            }
+        }
+
+        let observation = match self
+            .host
+            .reserve_channel_close_observation(channel_id)
+            .await
+        {
+            Ok(observation) => observation,
+            Err(LiveAdapterHostError::ChannelNotFound(_)) => return false,
+            Err(err) => {
+                tracing::warn!(
+                    channel = %channel_id,
+                    error = %err,
+                    "live transport host close observation reservation failed"
+                );
+                return false;
+            }
+        };
+        let authority = match self
+            .close_feedback
+            .record_live_channel_closed(channel_id, &observation)
+            .await
+        {
+            Ok(authority) => authority,
+            Err(err) => {
+                tracing::warn!(
+                    channel = %channel_id,
+                    error = %err,
+                    "generated live close feedback rejected transport close"
+                );
+                return false;
+            }
+        };
+        if let Err(err) = self
+            .host
+            .commit_channel_close_observation(&observation, &authority)
+            .await
+        {
+            tracing::warn!(
+                channel = %channel_id,
+                error = %err,
+                "live transport host close commit failed after generated feedback"
+            );
+            return false;
+        }
+        true
     }
 
-    /// Consume a token, returning the channel ID if the token is valid,
-    /// unexpired, **and** bound to `expected_channel`. Reaps expired tokens
-    /// as a side effect.
-    ///
-    /// G38: the `expected_channel` argument pins the bearer token to the
-    /// channel its mint call recorded. A `ChannelMismatch` does not re-insert
-    /// the token — it stays consumed so a wrong-channel attempt cannot be
-    /// retried with the same token.
-    pub async fn consume_token(
+    async fn commit_status_with_generated_feedback(
+        &self,
+        channel_id: &LiveChannelId,
+        observation: &LiveAdapterObservation,
+    ) -> bool {
+        let status = match LiveAdapterHost::classify_observation(observation) {
+            ObservationRouting::UpdateStatus(status) => status,
+            _ => return true,
+        };
+        if status.is_terminal() {
+            return true;
+        }
+
+        let status_observation = match self
+            .host
+            .reserve_channel_status_observation(channel_id, status)
+            .await
+        {
+            Ok(observation) => observation,
+            Err(LiveAdapterHostError::ChannelNotFound(_)) => return false,
+            Err(err) => {
+                tracing::warn!(
+                    channel = %channel_id,
+                    error = %err,
+                    "live transport host status observation reservation failed"
+                );
+                return false;
+            }
+        };
+        let authority = match self
+            .status_feedback
+            .record_live_channel_status(channel_id, &status_observation)
+            .await
+        {
+            Ok(authority) => authority,
+            Err(err) => {
+                tracing::warn!(
+                    channel = %channel_id,
+                    error = %err,
+                    "generated live status feedback rejected transport status"
+                );
+                return false;
+            }
+        };
+        if let Err(err) = self
+            .host
+            .commit_channel_status_observation(&status_observation, &authority)
+            .await
+        {
+            tracing::warn!(
+                channel = %channel_id,
+                error = %err,
+                "live transport host status commit failed after generated feedback"
+            );
+            return false;
+        }
+        true
+    }
+
+    pub fn token_ttl(&self) -> Duration {
+        self.token_ttl
+    }
+
+    /// Mint random token material and record the authoritative binding in
+    /// MeerkatMachine before returning it.
+    pub async fn mint_token(
+        &self,
+        session_id: &SessionId,
+        channel_id: LiveChannelId,
+    ) -> Result<LiveTokenString, String> {
+        let token = LiveTokenString::random();
+        let issued_at_ms = live_ws_now_ms()?;
+        let ttl_ms = live_ws_duration_ms(self.token_ttl)?;
+        let issue = self
+            .token_authority
+            .record_live_ws_token_issued(session_id, &channel_id, &token, issued_at_ms, ttl_ms)
+            .await?;
+        Ok(issue.token)
+    }
+
+    async fn resolve_token_admission(
         &self,
         token: &str,
         expected_channel: &LiveChannelId,
-    ) -> Result<LiveChannelId, TokenConsumeError> {
-        let key = LiveTokenString::new(token).map_err(|_| TokenConsumeError::NotFound)?;
-        let mut guard = self.pending_tokens.lock().await;
-        reap_expired(&mut guard);
-        match guard.remove(&key) {
-            Some(pending) => {
-                if pending.expires_at <= Instant::now() {
-                    Err(TokenConsumeError::Expired)
-                } else if &pending.channel_id != expected_channel {
-                    Err(TokenConsumeError::ChannelMismatch)
-                } else {
-                    Ok(pending.channel_id)
-                }
-            }
-            None => Err(TokenConsumeError::NotFound),
-        }
-    }
-
-    #[cfg(test)]
-    async fn pending_token_count(&self) -> usize {
-        self.pending_tokens.lock().await.len()
+    ) -> Result<LiveWsTokenAdmission, String> {
+        let observed_at_ms = live_ws_now_ms()?;
+        self.token_authority
+            .resolve_live_ws_token_admission(expected_channel, token, observed_at_ms)
+            .await
     }
 }
 
-fn reap_expired(map: &mut HashMap<LiveTokenString, PendingToken>) {
-    let now = Instant::now();
-    map.retain(|_, p| p.expires_at > now);
+fn live_ws_now_ms() -> Result<u64, String> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| format!("system time is before Unix epoch: {err}"))?;
+    u64::try_from(elapsed.as_millis())
+        .map_err(|_| "system time milliseconds overflow u64".to_string())
+}
+
+fn live_ws_duration_ms(duration: Duration) -> Result<u64, String> {
+    u64::try_from(duration.as_millis())
+        .map_err(|_| "live WebSocket token TTL milliseconds overflow u64".to_string())
 }
 
 #[derive(serde::Deserialize)]
 pub struct WsConnectParams {
     pub token: String,
     /// Channel id this token claims to bind to. G38: required so
-    /// `consume_token` can verify the token was minted for the same channel
-    /// the client is attempting to attach.
+    /// generated token admission can verify the token was minted for the same
+    /// channel the client is attempting to attach.
     pub channel: String,
     /// Negotiated binary format. Optional — required only if the client will
     /// send binary frames.
@@ -298,15 +609,12 @@ async fn close_with(socket: &mut WebSocket, code: u16, reason: &str) {
         .await;
 }
 
-/// Extract the stable serde tag (e.g. `"provider_error"`) from a typed error
-/// code so it can be embedded in a WS close-frame reason string clients can
-/// key on. Unlike `Debug`-formatting, this stays stable across Rust source
-/// reformatting and matches the wire shape used elsewhere.
-fn live_adapter_error_code_slug(code: &meerkat_core::live_adapter::LiveAdapterErrorCode) -> String {
-    serde_json::to_value(code)
-        .ok()
-        .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_owned))
-        .unwrap_or_else(|| "unknown".to_owned())
+fn observation_requires_generated_close(observation: &LiveAdapterObservation) -> bool {
+    match observation {
+        LiveAdapterObservation::Error { .. } => true,
+        LiveAdapterObservation::StatusChanged { status } => status.is_terminal(),
+        _ => false,
+    }
 }
 
 async fn handle_live_socket(
@@ -316,19 +624,51 @@ async fn handle_live_socket(
     binary_format: Option<BinaryFormat>,
     state: Arc<LiveWsState>,
 ) {
-    let channel_id = match state.consume_token(&token, &expected_channel).await {
-        Ok(id) => id,
+    let admission = match state
+        .resolve_token_admission(&token, &expected_channel)
+        .await
+    {
+        Ok(admission) => admission,
         Err(err) => {
-            let err_json = serde_json::to_string(&WsErrorFrame {
-                error: "invalid_token".into(),
-                reason: Some(err.to_string()),
-            })
-            .unwrap_or_default();
-            let _ = socket.send(WsMessage::Text(err_json.into())).await;
-            close_with(&mut socket, close_code::POLICY, "invalid_token").await;
+            tracing::warn!(
+                error = %err,
+                "live WebSocket token authority unavailable; failing closed without public token class"
+            );
+            drop(socket);
             return;
         }
     };
+    if !admission.admitted {
+        let Some(public_error_class) = admission.public_error_class else {
+            tracing::warn!(
+                channel = %expected_channel,
+                sequence = admission.sequence,
+                "live WebSocket token admission rejected without generated public class; failing closed"
+            );
+            drop(socket);
+            return;
+        };
+        let Some(rejection) = admission.rejection else {
+            tracing::warn!(
+                channel = %expected_channel,
+                sequence = admission.sequence,
+                "live WebSocket token admission rejected without generated rejection reason; failing closed"
+            );
+            drop(socket);
+            return;
+        };
+        let public_error = public_error_class.as_wire_error();
+        let reason = rejection.to_string();
+        let err_json = serde_json::to_string(&WsErrorFrame {
+            error: public_error.into(),
+            reason: Some(reason),
+        })
+        .unwrap_or_default();
+        let _ = socket.send(WsMessage::Text(err_json.into())).await;
+        close_with(&mut socket, close_code::POLICY, public_error).await;
+        return;
+    }
+    let channel_id = admission.channel_id;
 
     tracing::info!(channel = %channel_id, "live WebSocket connected");
 
@@ -340,6 +680,7 @@ async fn handle_live_socket(
     // distinct from `biased;` ordering. We box+pin once and re-arm only
     // after an observation is consumed (or an error tears the loop down).
     let mut observation_fut = Box::pin(state.host.next_observation_raw(&channel_id));
+    let mut close_feedback_recorded = false;
 
     loop {
         // No `biased;` — fair scheduling prevents continuous mic-audio inbound
@@ -366,7 +707,10 @@ async fn handle_live_socket(
                                     error = %parse_err,
                                     "invalid WS text frame; closing"
                                 );
-                                close_with(&mut socket, close_code::INVALID, "invalid_frame").await;
+                                if !state.close_channel_with_generated_feedback(&channel_id).await {
+                                    break;
+                                }
+                                close_feedback_recorded = true;
                                 break;
                             }
                         }
@@ -377,11 +721,10 @@ async fn handle_live_socket(
                                 channel = %channel_id,
                                 "binary frame received before format negotiation; closing"
                             );
-                            close_with(
-                                &mut socket,
-                                close_code::POLICY,
-                                "binary_format_unnegotiated",
-                            ).await;
+                            if !state.close_channel_with_generated_feedback(&channel_id).await {
+                                break;
+                            }
+                            close_feedback_recorded = true;
                             break;
                         };
                         let chunk = LiveInputChunk::Audio {
@@ -408,7 +751,10 @@ async fn handle_live_socket(
                             kind = ?std::mem::discriminant(&other),
                             "unsupported WS frame; closing"
                         );
-                        close_with(&mut socket, close_code::UNSUPPORTED, "unsupported_frame").await;
+                        if !state.close_channel_with_generated_feedback(&channel_id).await {
+                            break;
+                        }
+                        close_feedback_recorded = true;
                         break;
                     }
                     Some(Err(err)) => {
@@ -426,9 +772,8 @@ async fn handle_live_socket(
                 observation_fut = Box::pin(state.host.next_observation_raw(&channel_id));
                 // Wave-3 RPC pump migration: split the convenience wrapper
                 // into `next_observation_raw` + `apply_observation` so the
-                // pump can react to the typed `ObservationOutcome` —
-                // specifically `Terminal { code }`, which closes the WS
-                // with a stable typed reason string clients can key on.
+                // pump can react to the typed `ObservationOutcome` after
+                // generated close authority has accepted terminal facts.
                 match observation {
                     Ok(Some(obs)) => {
                         // R6-2 (P2): route the WS write through the typed
@@ -442,15 +787,37 @@ async fn handle_live_socket(
                         // / `_command_rejected` in
                         // `meerkat-contracts/src/wire/live.rs`.
                         let wire_obs = WireLiveAdapterObservation::from(obs.clone());
-                        // Forward to the client first so it sees the terminal
-                        // observation alongside the close frame.
-                        let send_ok = match serde_json::to_string(&wire_obs) {
-                            Ok(json) => socket.send(WsMessage::Text(json.into())).await.is_ok(),
-                            Err(_) => true,
-                        };
+                        let close_observation = observation_requires_generated_close(&obs);
+                        let publish_observation =
+                            !matches!(&obs, &LiveAdapterObservation::Error { .. });
 
-                        // Apply to canonical state and inspect the typed outcome.
+                        if close_observation {
+                            if !state.close_channel_with_generated_feedback(&channel_id).await {
+                                break;
+                            }
+                            close_feedback_recorded = true;
+                        } else if !state
+                            .commit_status_with_generated_feedback(&channel_id, &obs)
+                            .await
+                        {
+                            break;
+                        }
+
+                        // Apply to canonical state and inspect the typed outcome
+                        // only after generated close authority has accepted any
+                        // terminal observation. Public WS frames are sent after
+                        // this point so terminality is not observable before the
+                        // machine-owned close fact is accepted.
                         let outcome = state.host.apply_observation(&channel_id, &obs).await;
+
+                        let send_ok = if publish_observation {
+                            match serde_json::to_string(&wire_obs) {
+                                Ok(json) => socket.send(WsMessage::Text(json.into())).await.is_ok(),
+                                Err(_) => true,
+                            }
+                        } else {
+                            true
+                        };
 
                         if !send_ok {
                             break;
@@ -458,9 +825,11 @@ async fn handle_live_socket(
 
                         match outcome {
                             Ok(ObservationOutcome::Terminal { code }) => {
-                                let slug = live_adapter_error_code_slug(&code);
-                                let reason = format!("terminal:{slug}");
-                                close_with(&mut socket, close_code::POLICY, &reason).await;
+                                tracing::info!(
+                                    channel = %channel_id,
+                                    ?code,
+                                    "live WebSocket reached terminal observation after generated close authority"
+                                );
                                 break;
                             }
                             // R5-9: typed scoped command rejection. The
@@ -490,6 +859,9 @@ async fn handle_live_socket(
                                 break;
                             }
                         }
+                        if close_observation {
+                            break;
+                        }
                     }
                     Ok(None) => break,
                     Err(_) => break,
@@ -499,7 +871,11 @@ async fn handle_live_socket(
     }
 
     tracing::info!(channel = %channel_id, "live WebSocket disconnected");
-    let _ = state.host.close_channel(&channel_id).await;
+    if !close_feedback_recorded {
+        state
+            .close_channel_with_generated_feedback(&channel_id)
+            .await;
+    }
 }
 
 /// Start the live WebSocket listener on a pre-bound TCP listener.
@@ -523,7 +899,242 @@ pub async fn serve_live_ws_listener(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::host::NoOpProjectionSink;
+    use crate::host::{
+        LiveProjectionError, LiveProjectionSink, LiveTranscriptIdentity, NoOpProjectionSink,
+    };
+    use std::collections::VecDeque;
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    type IssuedLiveWsToken = (SessionId, LiveChannelId, LiveTokenString, u64, u64);
+
+    #[derive(Default)]
+    struct ScriptedLiveWsTokenAuthority {
+        issued: tokio::sync::Mutex<Vec<IssuedLiveWsToken>>,
+        admissions: tokio::sync::Mutex<VecDeque<LiveWsTokenAdmission>>,
+    }
+
+    impl ScriptedLiveWsTokenAuthority {
+        fn new(admissions: impl IntoIterator<Item = LiveWsTokenAdmission>) -> Arc<Self> {
+            Arc::new(Self {
+                issued: tokio::sync::Mutex::new(Vec::new()),
+                admissions: tokio::sync::Mutex::new(admissions.into_iter().collect()),
+            })
+        }
+
+        fn admitting(channel_id: LiveChannelId) -> Arc<Self> {
+            Self::new([generated_admission(channel_id)])
+        }
+
+        fn rejecting(
+            channel_id: LiveChannelId,
+            rejection: LiveWsTokenAdmissionRejection,
+        ) -> Arc<Self> {
+            Self::new([generated_rejection(channel_id, rejection)])
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LiveWsTokenAuthority for ScriptedLiveWsTokenAuthority {
+        async fn record_live_ws_token_issued(
+            &self,
+            session_id: &SessionId,
+            channel_id: &LiveChannelId,
+            token: &LiveTokenString,
+            issued_at_ms: u64,
+            ttl_ms: u64,
+        ) -> Result<LiveWsTokenIssue, String> {
+            self.issued.lock().await.push((
+                session_id.clone(),
+                channel_id.clone(),
+                token.clone(),
+                issued_at_ms,
+                ttl_ms,
+            ));
+            Ok(LiveWsTokenIssue {
+                token: token.clone(),
+                expires_at_ms: 0,
+                sequence: 0,
+            })
+        }
+
+        async fn resolve_live_ws_token_admission(
+            &self,
+            _channel_id: &LiveChannelId,
+            _token: &str,
+            _observed_at_ms: u64,
+        ) -> Result<LiveWsTokenAdmission, String> {
+            self.admissions
+                .lock()
+                .await
+                .pop_front()
+                .ok_or_else(|| "missing scripted generated token admission".to_string())
+        }
+    }
+
+    #[derive(Default)]
+    struct RejectingCloseFeedback {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LiveChannelCloseFeedback for RejectingCloseFeedback {
+        async fn record_live_channel_closed(
+            &self,
+            _channel_id: &LiveChannelId,
+            _observation: &LiveChannelCloseObservation,
+        ) -> Result<LiveChannelCloseCommitAuthority, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err("active channel owner should not be requested after generated close commit".into())
+        }
+    }
+
+    #[derive(Default)]
+    struct TerminalRecordingProjectionSink {
+        terminal_errors: StdMutex<
+            Vec<(
+                SessionId,
+                meerkat_core::live_adapter::LiveAdapterErrorCode,
+                String,
+            )>,
+        >,
+    }
+
+    #[async_trait::async_trait]
+    impl LiveProjectionSink for TerminalRecordingProjectionSink {
+        async fn append_user_transcript(
+            &self,
+            _session_id: &SessionId,
+            _text: &str,
+            _identity: LiveTranscriptIdentity<'_>,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
+        async fn append_assistant_text_delta(
+            &self,
+            _session_id: &SessionId,
+            _delta: &str,
+            _identity: LiveTranscriptIdentity<'_>,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
+        async fn append_assistant_transcript_delta(
+            &self,
+            _session_id: &SessionId,
+            _delta: &str,
+            _identity: LiveTranscriptIdentity<'_>,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
+        async fn append_assistant_text_final(
+            &self,
+            _session_id: &SessionId,
+            _text: &str,
+            _identity: LiveTranscriptIdentity<'_>,
+            _stop_reason: meerkat_core::types::StopReason,
+            _usage: meerkat_core::types::Usage,
+            _response_id: Option<&str>,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
+        async fn append_assistant_transcript_final(
+            &self,
+            _session_id: &SessionId,
+            _text: &str,
+            _identity: LiveTranscriptIdentity<'_>,
+            _stop_reason: meerkat_core::types::StopReason,
+            _usage: meerkat_core::types::Usage,
+            _response_id: Option<&str>,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
+        async fn truncate_assistant_transcript(
+            &self,
+            _session_id: &SessionId,
+            _provider_item_id: Option<&str>,
+            _previous_item_id: Option<&str>,
+            _content_index: Option<u32>,
+            _response_id: Option<&str>,
+            _text: Option<&str>,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
+        async fn signal_turn_interrupt(
+            &self,
+            _session_id: &SessionId,
+            _response_id: Option<&str>,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
+        async fn signal_turn_completed(
+            &self,
+            _session_id: &SessionId,
+            _stop_reason: meerkat_core::types::StopReason,
+            _usage: meerkat_core::types::Usage,
+            _response_id: Option<&str>,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
+        async fn signal_terminal_error(
+            &self,
+            session_id: &SessionId,
+            code: meerkat_core::live_adapter::LiveAdapterErrorCode,
+            message: &str,
+        ) -> Result<(), LiveProjectionError> {
+            self.terminal_errors.lock().unwrap().push((
+                session_id.clone(),
+                code,
+                message.to_string(),
+            ));
+            Ok(())
+        }
+
+        async fn append_realtime_transcript(
+            &self,
+            _session_id: &SessionId,
+            _event: &meerkat_core::RealtimeTranscriptEvent,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+    }
+
+    fn generated_admission(channel_id: LiveChannelId) -> LiveWsTokenAdmission {
+        LiveWsTokenAdmission {
+            channel_id,
+            admitted: true,
+            rejection: None,
+            public_error_class: None,
+            sequence: 1,
+        }
+    }
+
+    fn generated_rejection(
+        channel_id: LiveChannelId,
+        rejection: LiveWsTokenAdmissionRejection,
+    ) -> LiveWsTokenAdmission {
+        LiveWsTokenAdmission {
+            channel_id,
+            admitted: false,
+            rejection: Some(rejection),
+            public_error_class: Some(LiveWsTokenAdmissionPublicErrorClass::InvalidToken),
+            sequence: 1,
+        }
+    }
+
+    fn test_state_with_authority(
+        host: Arc<LiveAdapterHost>,
+        authority: Arc<dyn LiveWsTokenAuthority>,
+    ) -> LiveWsState {
+        LiveWsState::new_for_test_with_token_authority(host, authority)
+    }
 
     #[test]
     fn token_string_accepts_url_safe_alphabet() {
@@ -553,128 +1164,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mint_and_consume_token() {
+    async fn mint_token_records_issue_through_authority() {
         let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
-        let state = LiveWsState::new(host);
+        let authority = ScriptedLiveWsTokenAuthority::default();
+        let authority = Arc::new(authority);
+        let state = test_state_with_authority(host, authority.clone());
+        let session_id = SessionId::new();
         let channel_id = LiveChannelId::new("test_ch");
-        let token = state.mint_token(channel_id.clone()).await;
-        assert!(!token.as_str().is_empty());
-        let consumed = state.consume_token(token.as_str(), &channel_id).await;
-        assert_eq!(consumed.unwrap(), channel_id);
-        assert_eq!(
-            state
-                .consume_token(token.as_str(), &channel_id)
-                .await
-                .unwrap_err(),
-            TokenConsumeError::NotFound,
-        );
-    }
-
-    #[tokio::test]
-    async fn consume_unknown_token_returns_not_found() {
-        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
-        let state = LiveWsState::new(host);
-        let any_channel = LiveChannelId::new("any");
-        assert_eq!(
-            state
-                .consume_token("bogus", &any_channel)
-                .await
-                .unwrap_err(),
-            TokenConsumeError::NotFound,
-        );
-    }
-
-    #[tokio::test]
-    async fn consume_malformed_token_returns_not_found() {
-        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
-        let state = LiveWsState::new(host);
-        let any_channel = LiveChannelId::new("any");
-        // Spaces are not URL-safe; treated as not-found rather than crashing.
-        assert_eq!(
-            state
-                .consume_token("has spaces", &any_channel)
-                .await
-                .unwrap_err(),
-            TokenConsumeError::NotFound,
-        );
-    }
-
-    #[tokio::test]
-    async fn consume_token_with_wrong_channel_rejects() {
-        // G38: token minted for channel A must not redeem for channel B.
-        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
-        let state = LiveWsState::new(host);
-        let channel_a = LiveChannelId::new("ch_a");
-        let channel_b = LiveChannelId::new("ch_b");
-        let token = state.mint_token(channel_a.clone()).await;
-
-        assert_eq!(
-            state
-                .consume_token(token.as_str(), &channel_b)
-                .await
-                .unwrap_err(),
-            TokenConsumeError::ChannelMismatch,
-        );
-
-        // ChannelMismatch is terminal — the token is consumed, not retryable.
-        assert_eq!(
-            state
-                .consume_token(token.as_str(), &channel_a)
-                .await
-                .unwrap_err(),
-            TokenConsumeError::NotFound,
-            "token must remain consumed after ChannelMismatch (no retry)"
-        );
-    }
-
-    #[tokio::test]
-    async fn token_expires_after_ttl_and_is_reaped() {
-        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
-        let state = LiveWsState::with_token_ttl(host, Duration::from_millis(50));
-        let channel_id = LiveChannelId::new("ttl_ch");
-        let token = state.mint_token(channel_id.clone()).await;
-        assert_eq!(state.pending_token_count().await, 1);
-
-        tokio::time::sleep(Duration::from_millis(120)).await;
-
-        // Either the reap (triggered by another mint/consume) drops it, or
-        // consume itself reports Expired. We test both behaviors: first
-        // consume — should report NotFound because reap removes expired
-        // entries before lookup.
-        let err = state
-            .consume_token(token.as_str(), &channel_id)
+        let token = state
+            .mint_token(&session_id, channel_id.clone())
             .await
-            .unwrap_err();
-        assert!(
-            matches!(
-                err,
-                TokenConsumeError::NotFound | TokenConsumeError::Expired
-            ),
-            "unexpected error: {err:?}"
-        );
-
-        // After consume, the map must be empty.
-        assert_eq!(state.pending_token_count().await, 0);
+            .unwrap();
+        assert!(!token.as_str().is_empty());
+        let issued = authority.issued.lock().await;
+        assert_eq!(issued.len(), 1);
+        assert_eq!(issued[0].0, session_id);
+        assert_eq!(issued[0].1, channel_id);
+        assert_eq!(issued[0].2, token);
+        assert_eq!(issued[0].4, u64::try_from(TOKEN_TTL.as_millis()).unwrap());
     }
 
     #[tokio::test]
-    async fn unrelated_mint_reaps_expired_tokens() {
+    async fn token_ttl_is_transport_configuration_only() {
         let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
-        let state = LiveWsState::with_token_ttl(host, Duration::from_millis(40));
-        let _stale = state.mint_token(LiveChannelId::new("stale")).await;
-        assert_eq!(state.pending_token_count().await, 1);
-
-        tokio::time::sleep(Duration::from_millis(80)).await;
-
-        // Minting another token must reap the stale entry as a side effect.
-        let _fresh = state.mint_token(LiveChannelId::new("fresh")).await;
-        assert_eq!(state.pending_token_count().await, 1);
+        let state = LiveWsState::with_token_ttl(
+            Arc::clone(&host),
+            Arc::new(GeneratedTestMachineLiveChannelCloseFeedback::new(
+                Arc::clone(&host),
+            )),
+            Arc::new(GeneratedTestMachineLiveChannelStatusFeedback::new(
+                Arc::clone(&host),
+            )),
+            ScriptedLiveWsTokenAuthority::new([]),
+            Duration::from_millis(40),
+        );
+        assert_eq!(state.token_ttl(), Duration::from_millis(40));
     }
 
     #[tokio::test]
     async fn websocket_roundtrip_with_token() {
         // R5 (Option A): the test exercises the full input roundtrip path —
-        // upgrade → consume_token → `host.send_input` → adapter.send_command.
+        // upgrade → generated token admission → `host.send_input` → adapter.send_command.
         // Without an attached & Ready adapter, `send_input` errors with
         // `NoAdapter`, the server emits a JSON error frame and may tear the
         // socket down before the client's subsequent Close is observed,
@@ -685,19 +1215,26 @@ mod tests {
         // frame as a success signal.
         let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
         let session_id = meerkat_core::types::SessionId::new();
-        let channel_id = host.open_channel(session_id).await.unwrap();
+        let channel_id = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
         host.attach_adapter(&channel_id, Arc::new(IdleAdapter))
             .await
             .unwrap();
-        host.apply_status_update(
+        host.commit_status_with_generated_test_machine_authority(
             &channel_id,
             meerkat_core::live_adapter::LiveAdapterStatus::Ready,
         )
         .await
         .unwrap();
 
-        let state = Arc::new(LiveWsState::new(host));
-        let token = state.mint_token(channel_id.clone()).await;
+        let authority = ScriptedLiveWsTokenAuthority::admitting(channel_id.clone());
+        let state = Arc::new(test_state_with_authority(host, authority));
+        let token = state
+            .mint_token(&session_id, channel_id.clone())
+            .await
+            .unwrap();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -722,39 +1259,6 @@ mod tests {
     }
 
     // -- Wave-3 RPC pump migration regression --
-
-    #[test]
-    fn live_adapter_error_code_slug_emits_serde_tag() {
-        use meerkat_core::live_adapter::LiveAdapterErrorCode;
-        assert_eq!(
-            live_adapter_error_code_slug(&LiveAdapterErrorCode::ProviderError),
-            "provider_error"
-        );
-        assert_eq!(
-            live_adapter_error_code_slug(&LiveAdapterErrorCode::ConnectionLost),
-            "connection_lost"
-        );
-        assert_eq!(
-            live_adapter_error_code_slug(&LiveAdapterErrorCode::Other {
-                raw: "custom".into()
-            }),
-            "other"
-        );
-        // R12: ConfigRejected must surface the typed slug so WS clients can
-        // distinguish a local-guard rejection from an upstream provider
-        // failure without parsing the close-frame reason text.
-        // R5-2: `reason` is now a typed `LiveConfigRejectionReason`; the
-        // slug routes on the outer `code` discriminator and is independent
-        // of the inner reason variant.
-        assert_eq!(
-            live_adapter_error_code_slug(&LiveAdapterErrorCode::ConfigRejected {
-                reason: meerkat_core::live_adapter::LiveConfigRejectionReason::Other {
-                    detail: "model swap requires close + reopen".into(),
-                },
-            }),
-            "config_rejected"
-        );
-    }
 
     /// Adapter that never produces an observation — `next_observation` is
     /// `pending` forever. Used by tests that drive client→server frame
@@ -822,7 +1326,7 @@ mod tests {
         > {
             let mut slot = self.observation.lock().await;
             // Yield once, then idle forever so the pump survives until the
-            // server drops the channel after the close frame is written.
+            // server drops the channel after generated close cleanup.
             if let Some(obs) = slot.take() {
                 Ok(Some(obs))
             } else {
@@ -840,12 +1344,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn websocket_closes_on_terminal_observation_with_typed_reason() {
+    async fn websocket_disconnects_after_generated_terminal_error_close() {
         use meerkat_core::live_adapter::{LiveAdapterErrorCode, LiveAdapterObservation};
 
         let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
         let session_id = meerkat_core::types::SessionId::new();
-        let channel_id = host.open_channel(session_id).await.unwrap();
+        let channel_id = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
         host.attach_adapter(
             &channel_id,
             Arc::new(ScriptedAdapter::new(LiveAdapterObservation::Error {
@@ -856,8 +1363,12 @@ mod tests {
         .await
         .unwrap();
 
-        let state = Arc::new(LiveWsState::new(host));
-        let token = state.mint_token(channel_id.clone()).await;
+        let authority = ScriptedLiveWsTokenAuthority::admitting(channel_id.clone());
+        let state = Arc::new(test_state_with_authority(host, authority));
+        let token = state
+            .mint_token(&session_id, channel_id.clone())
+            .await
+            .unwrap();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -871,38 +1382,218 @@ mod tests {
         use tokio_tungstenite::tungstenite::Message;
         let (_write, mut read) = ws_stream.split();
 
-        // Expect: (1) the JSON observation forwarded to the client, (2) a
-        // Close frame with reason matching the typed error code slug.
-        let mut saw_observation = false;
-        let mut saw_close_with_terminal_reason = false;
+        // Terminal adapter error classes are not public WS result classes.
+        // The transport closes only after generated close authority commits.
+        let mut saw_terminal_error_observation = false;
+        let mut disconnected = false;
         while let Some(msg) = read.next().await {
             match msg {
                 Ok(Message::Text(text)) => {
                     if text.contains("\"observation\"") && text.contains("provider_error") {
-                        saw_observation = true;
+                        saw_terminal_error_observation = true;
                     }
                 }
-                Ok(Message::Close(Some(frame))) => {
-                    assert!(
-                        frame.reason.contains("terminal:provider_error"),
-                        "unexpected close reason: {}",
-                        frame.reason
-                    );
-                    saw_close_with_terminal_reason = true;
+                Ok(Message::Close(_)) => {
+                    disconnected = true;
                     break;
                 }
                 Ok(_) => continue,
-                Err(_) => break,
+                Err(_) => {
+                    disconnected = true;
+                    break;
+                }
             }
         }
 
         assert!(
-            saw_observation,
-            "client should have received the terminal observation JSON before the close frame"
+            !saw_terminal_error_observation,
+            "terminal adapter error class must not be published without generated public authority"
         );
         assert!(
-            saw_close_with_terminal_reason,
-            "WS pump must close with a typed terminal:<code> reason on Error observations"
+            disconnected,
+            "terminal adapter error should disconnect the WS"
+        );
+        let status = state.host().channel_status(&channel_id).await.unwrap();
+        assert_eq!(
+            status,
+            meerkat_core::live_adapter::LiveAdapterStatus::Closed,
+            "generated close authority must commit before terminal disconnect"
+        );
+
+        server_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_applies_runtime_preclosed_terminal_error_without_new_feedback() {
+        use meerkat_core::live_adapter::{
+            LiveAdapterErrorCode, LiveAdapterStatus, LiveConfigRejectionReason,
+        };
+
+        let sink = Arc::new(TerminalRecordingProjectionSink::default());
+        let sink_for_host: Arc<dyn LiveProjectionSink> = sink.clone();
+        let host = Arc::new(LiveAdapterHost::new(sink_for_host));
+        let session_id = meerkat_core::types::SessionId::new();
+        let channel_id = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
+        host.attach_adapter(&channel_id, Arc::new(IdleAdapter))
+            .await
+            .unwrap();
+        host.commit_status_with_generated_test_machine_authority(
+            &channel_id,
+            LiveAdapterStatus::Ready,
+        )
+        .await
+        .unwrap();
+
+        let close_observation = host
+            .signal_terminal_error_observed(
+                &channel_id,
+                LiveAdapterErrorCode::ConfigRejected {
+                    reason: LiveConfigRejectionReason::Other {
+                        detail: "runtime-preclosed terminal".into(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let close_authority = host
+            .close_commit_authority_from_generated_test_machine(&close_observation)
+            .await
+            .unwrap();
+        host.commit_channel_close_observation(&close_observation, &close_authority)
+            .await
+            .unwrap();
+        assert_eq!(
+            host.channel_status(&channel_id).await.unwrap(),
+            LiveAdapterStatus::Closed
+        );
+
+        let close_feedback = Arc::new(RejectingCloseFeedback::default());
+        let close_feedback_for_state: Arc<dyn LiveChannelCloseFeedback> = close_feedback.clone();
+        let state = Arc::new(LiveWsState::with_token_ttl(
+            Arc::clone(&host),
+            close_feedback_for_state,
+            Arc::new(GeneratedTestMachineLiveChannelStatusFeedback::new(
+                Arc::clone(&host),
+            )),
+            ScriptedLiveWsTokenAuthority::admitting(channel_id.clone()),
+            TOKEN_TTL,
+        ));
+        let token = state
+            .mint_token(&session_id, channel_id.clone())
+            .await
+            .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ws_state = Arc::clone(&state);
+        let server_handle =
+            tokio::spawn(async move { serve_live_ws_listener(listener, ws_state).await });
+
+        let url = format!("ws://{addr}{LIVE_WS_PATH}?token={token}&channel={channel_id}");
+        let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        use futures::StreamExt;
+        let (_write, mut read) = ws_stream.split();
+
+        while let Some(msg) = read.next().await {
+            match msg {
+                Ok(tokio_tungstenite::tungstenite::Message::Close(_)) | Err(_) => break,
+                Ok(_) => continue,
+            }
+        }
+
+        assert_eq!(
+            close_feedback.calls.load(Ordering::SeqCst),
+            0,
+            "transport must not request a second close authority after generated close committed"
+        );
+        let terminals = sink.terminal_errors.lock().unwrap();
+        assert_eq!(
+            terminals.len(),
+            1,
+            "preclosed synthetic terminal observation must still reach the projection sink"
+        );
+        assert_eq!(terminals[0].0, session_id);
+        assert!(matches!(
+            terminals[0].1,
+            LiveAdapterErrorCode::ConfigRejected { .. }
+        ));
+
+        server_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_commits_generated_close_before_public_closed_status() {
+        use meerkat_core::live_adapter::{LiveAdapterObservation, LiveAdapterStatus};
+
+        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
+        let session_id = meerkat_core::types::SessionId::new();
+        let channel_id = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
+        host.attach_adapter(
+            &channel_id,
+            Arc::new(ScriptedAdapter::new(
+                LiveAdapterObservation::StatusChanged {
+                    status: LiveAdapterStatus::Closed,
+                },
+            )),
+        )
+        .await
+        .unwrap();
+
+        let authority = ScriptedLiveWsTokenAuthority::admitting(channel_id.clone());
+        let state = Arc::new(test_state_with_authority(host, authority));
+        let token = state
+            .mint_token(&session_id, channel_id.clone())
+            .await
+            .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ws_state = Arc::clone(&state);
+        let server_handle =
+            tokio::spawn(async move { serve_live_ws_listener(listener, ws_state).await });
+
+        let url = format!("ws://{addr}{LIVE_WS_PATH}?token={token}&channel={channel_id}");
+        let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        use futures::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+        let (_write, mut read) = ws_stream.split();
+
+        let mut saw_closed_status = false;
+        while let Some(msg) = read.next().await {
+            match msg {
+                Ok(Message::Text(text)) => {
+                    let observation: WireLiveAdapterObservation =
+                        serde_json::from_str(&text).expect("wire observation");
+                    if matches!(
+                        observation,
+                        WireLiveAdapterObservation::StatusChanged {
+                            status: meerkat_contracts::WireLiveAdapterStatus::Closed
+                        }
+                    ) {
+                        let status = state.host().channel_status(&channel_id).await.unwrap();
+                        assert_eq!(
+                            status,
+                            LiveAdapterStatus::Closed,
+                            "generated close authority must commit before public closed status"
+                        );
+                        saw_closed_status = true;
+                        break;
+                    }
+                }
+                Ok(Message::Close(_)) | Err(_) => break,
+                Ok(_) => continue,
+            }
+        }
+
+        assert!(
+            saw_closed_status,
+            "client should receive closed status only after generated close commit"
         );
 
         server_handle.abort();
@@ -918,7 +1609,10 @@ mod tests {
 
         let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
         let session_id = meerkat_core::types::SessionId::new();
-        let channel_id = host.open_channel(session_id).await.unwrap();
+        let channel_id = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
         host.attach_adapter(
             &channel_id,
             Arc::new(ScriptedAdapter::new(
@@ -933,8 +1627,12 @@ mod tests {
         .await
         .unwrap();
 
-        let state = Arc::new(LiveWsState::new(host));
-        let token = state.mint_token(channel_id.clone()).await;
+        let authority = ScriptedLiveWsTokenAuthority::admitting(channel_id.clone());
+        let state = Arc::new(test_state_with_authority(host, authority));
+        let token = state
+            .mint_token(&session_id, channel_id.clone())
+            .await
+            .unwrap();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -990,7 +1688,12 @@ mod tests {
     #[tokio::test]
     async fn websocket_rejects_invalid_token() {
         let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
-        let state = Arc::new(LiveWsState::new(host));
+        let channel_id = LiveChannelId::new("does_not_exist");
+        let authority = ScriptedLiveWsTokenAuthority::rejecting(
+            channel_id,
+            LiveWsTokenAdmissionRejection::TokenNotFound,
+        );
+        let state = Arc::new(test_state_with_authority(host, authority));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -999,8 +1702,8 @@ mod tests {
             tokio::spawn(async move { serve_live_ws_listener(listener, ws_state).await });
 
         // G38: a non-matching channel must still be supplied for the upgrade
-        // to parse — the token itself is bogus, so consume_token returns
-        // NotFound and the handler closes the socket with `invalid_token`.
+        // to parse — the token itself is bogus, so generated admission returns
+        // not-found and the handler closes the socket with `invalid_token`.
         let url = format!("ws://{addr}{LIVE_WS_PATH}?token=bogus&channel=does_not_exist");
         let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         let (_write, mut read) = futures::StreamExt::split(ws_stream);
@@ -1016,6 +1719,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn websocket_token_authority_error_fails_closed_without_public_class() {
+        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
+        let state = Arc::new(test_state_with_authority(
+            host,
+            ScriptedLiveWsTokenAuthority::new([]),
+        ));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ws_state = Arc::clone(&state);
+        let server_handle =
+            tokio::spawn(async move { serve_live_ws_listener(listener, ws_state).await });
+
+        let url = format!("ws://{addr}{LIVE_WS_PATH}?token=bogus&channel=does_not_exist");
+        let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let (_write, mut read) = futures::StreamExt::split(ws_stream);
+
+        use futures::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+        if let Ok(Some(Ok(msg))) =
+            tokio::time::timeout(Duration::from_millis(500), read.next()).await
+        {
+            match msg {
+                Message::Text(text) => assert!(
+                    !text.contains("invalid_token"),
+                    "authority errors must not invent a public token class"
+                ),
+                Message::Close(Some(frame)) => assert!(
+                    !frame.reason.contains("invalid_token"),
+                    "authority errors must not invent a public token close reason"
+                ),
+                _ => {}
+            }
+        }
+
+        server_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_missing_generated_public_class_fails_closed() {
+        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
+        let channel_id = LiveChannelId::new("does_not_exist");
+        let state = Arc::new(test_state_with_authority(
+            host,
+            ScriptedLiveWsTokenAuthority::new([LiveWsTokenAdmission {
+                channel_id,
+                admitted: false,
+                rejection: Some(LiveWsTokenAdmissionRejection::TokenNotFound),
+                public_error_class: None,
+                sequence: 1,
+            }]),
+        ));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ws_state = Arc::clone(&state);
+        let server_handle =
+            tokio::spawn(async move { serve_live_ws_listener(listener, ws_state).await });
+
+        let url = format!("ws://{addr}{LIVE_WS_PATH}?token=bogus&channel=does_not_exist");
+        let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let (_write, mut read) = futures::StreamExt::split(ws_stream);
+
+        use futures::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+        if let Ok(Some(Ok(msg))) =
+            tokio::time::timeout(Duration::from_millis(500), read.next()).await
+        {
+            match msg {
+                Message::Text(text) => assert!(
+                    !text.contains("invalid_token"),
+                    "missing generated public class must not invent invalid_token"
+                ),
+                Message::Close(Some(frame)) => assert!(
+                    !frame.reason.contains("invalid_token"),
+                    "missing generated public class must not invent invalid_token close reason"
+                ),
+                _ => {}
+            }
+        }
+
+        server_handle.abort();
+    }
+
+    #[tokio::test]
     async fn websocket_rejects_token_with_wrong_channel() {
         // G38 end-to-end: token minted for channel A is presented with
         // channel B in the WS upgrade — handler must refuse with
@@ -1023,11 +1811,24 @@ mod tests {
         let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
         let session_a = meerkat_core::types::SessionId::new();
         let session_b = meerkat_core::types::SessionId::new();
-        let channel_a = host.open_channel(session_a).await.unwrap();
-        let channel_b = host.open_channel(session_b).await.unwrap();
+        let channel_a = host
+            .open_channel_with_generated_test_machine_authority(session_a.clone())
+            .await
+            .unwrap();
+        let channel_b = host
+            .open_channel_with_generated_test_machine_authority(session_b)
+            .await
+            .unwrap();
 
-        let state = Arc::new(LiveWsState::new(host));
-        let token = state.mint_token(channel_a.clone()).await;
+        let authority = ScriptedLiveWsTokenAuthority::rejecting(
+            channel_b.clone(),
+            LiveWsTokenAdmissionRejection::TokenChannelMismatch,
+        );
+        let state = Arc::new(test_state_with_authority(host, authority));
+        let token = state
+            .mint_token(&session_a, channel_a.clone())
+            .await
+            .unwrap();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1075,15 +1876,22 @@ mod tests {
     async fn websocket_rejects_binary_without_format() {
         let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
         let session_id = meerkat_core::types::SessionId::new();
-        let channel_id = host.open_channel(session_id).await.unwrap();
+        let channel_id = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
         // Attach an idle adapter so the observation arm of the pump's
         // select! stays pending instead of immediately resolving with
         // `Err(NoAdapter)` and closing the loop before the test sends.
         host.attach_adapter(&channel_id, Arc::new(IdleAdapter))
             .await
             .unwrap();
-        let state = Arc::new(LiveWsState::new(host));
-        let token = state.mint_token(channel_id.clone()).await;
+        let authority = ScriptedLiveWsTokenAuthority::admitting(channel_id.clone());
+        let state = Arc::new(test_state_with_authority(host, authority));
+        let token = state
+            .mint_token(&session_id, channel_id.clone())
+            .await
+            .unwrap();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1102,24 +1910,27 @@ mod tests {
             .await
             .unwrap();
 
-        // Drain frames until we see a Close with the negotiated reason.
-        let mut saw_close = false;
-        while let Some(msg) = read.next().await {
-            match msg {
-                Ok(Message::Close(Some(frame))) => {
-                    assert!(
-                        frame.reason.contains("binary_format_unnegotiated"),
-                        "unexpected close reason: {}",
-                        frame.reason
-                    );
-                    saw_close = true;
-                    break;
+        let disconnected = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(msg) = read.next().await {
+                match msg {
+                    Ok(Message::Close(_)) | Err(_) => return true,
+                    Ok(_) => continue,
                 }
-                Ok(_) => continue,
-                Err(_) => break,
             }
-        }
-        assert!(saw_close, "expected close frame for un-negotiated binary");
+            true
+        })
+        .await
+        .unwrap_or(false);
+        assert!(
+            disconnected,
+            "expected transport disconnect for un-negotiated binary"
+        );
+        let status = state.host().channel_status(&channel_id).await.unwrap();
+        assert_eq!(
+            status,
+            meerkat_core::live_adapter::LiveAdapterStatus::Closed,
+            "generated close authority must commit before disconnecting un-negotiated binary"
+        );
 
         server_handle.abort();
     }
@@ -1128,14 +1939,21 @@ mod tests {
     async fn websocket_closes_on_invalid_text_frame() {
         let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
         let session_id = meerkat_core::types::SessionId::new();
-        let channel_id = host.open_channel(session_id).await.unwrap();
+        let channel_id = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
         // See `websocket_rejects_binary_without_format` for why the test
         // attaches an idle adapter.
         host.attach_adapter(&channel_id, Arc::new(IdleAdapter))
             .await
             .unwrap();
-        let state = Arc::new(LiveWsState::new(host));
-        let token = state.mint_token(channel_id.clone()).await;
+        let authority = ScriptedLiveWsTokenAuthority::admitting(channel_id.clone());
+        let state = Arc::new(test_state_with_authority(host, authority));
+        let token = state
+            .mint_token(&session_id, channel_id.clone())
+            .await
+            .unwrap();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1151,23 +1969,27 @@ mod tests {
 
         write.send(Message::Text("not json".into())).await.unwrap();
 
-        let mut saw_close = false;
-        while let Some(msg) = read.next().await {
-            match msg {
-                Ok(Message::Close(Some(frame))) => {
-                    assert!(
-                        frame.reason.contains("invalid_frame"),
-                        "unexpected close reason: {}",
-                        frame.reason
-                    );
-                    saw_close = true;
-                    break;
+        let disconnected = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(msg) = read.next().await {
+                match msg {
+                    Ok(Message::Close(_)) | Err(_) => return true,
+                    Ok(_) => continue,
                 }
-                Ok(_) => continue,
-                Err(_) => break,
             }
-        }
-        assert!(saw_close, "expected close frame for invalid JSON");
+            true
+        })
+        .await
+        .unwrap_or(false);
+        assert!(
+            disconnected,
+            "expected transport disconnect for invalid JSON"
+        );
+        let status = state.host().channel_status(&channel_id).await.unwrap();
+        assert_eq!(
+            status,
+            meerkat_core::live_adapter::LiveAdapterStatus::Closed,
+            "generated close authority must commit before disconnecting invalid JSON"
+        );
 
         server_handle.abort();
     }
@@ -1245,7 +2067,10 @@ mod tests {
 
         let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
         let session_id = meerkat_core::types::SessionId::new();
-        let channel_id = host.open_channel(session_id).await.unwrap();
+        let channel_id = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
         host.attach_adapter(
             &channel_id,
             Arc::new(DelayedObservationAdapter::new(
@@ -1259,15 +2084,19 @@ mod tests {
         )
         .await
         .unwrap();
-        host.apply_status_update(
+        host.commit_status_with_generated_test_machine_authority(
             &channel_id,
             meerkat_core::live_adapter::LiveAdapterStatus::Ready,
         )
         .await
         .unwrap();
 
-        let state = Arc::new(LiveWsState::new(host));
-        let token = state.mint_token(channel_id.clone()).await;
+        let authority = ScriptedLiveWsTokenAuthority::admitting(channel_id.clone());
+        let state = Arc::new(test_state_with_authority(host, authority));
+        let token = state
+            .mint_token(&session_id, channel_id.clone())
+            .await
+            .unwrap();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1348,22 +2177,29 @@ mod tests {
 
         let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
         let session_id = meerkat_core::types::SessionId::new();
-        let channel_id = host.open_channel(session_id).await.unwrap();
+        let channel_id = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
         host.attach_adapter(
             &channel_id,
             Arc::new(ScriptedAdapter::new(LiveAdapterObservation::Ready)),
         )
         .await
         .unwrap();
-        host.apply_status_update(
+        host.commit_status_with_generated_test_machine_authority(
             &channel_id,
             meerkat_core::live_adapter::LiveAdapterStatus::Ready,
         )
         .await
         .unwrap();
 
-        let state = Arc::new(LiveWsState::new(host));
-        let token = state.mint_token(channel_id.clone()).await;
+        let authority = ScriptedLiveWsTokenAuthority::admitting(channel_id.clone());
+        let state = Arc::new(test_state_with_authority(host, authority));
+        let token = state
+            .mint_token(&session_id, channel_id.clone())
+            .await
+            .unwrap();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

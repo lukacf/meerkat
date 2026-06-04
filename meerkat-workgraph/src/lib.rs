@@ -20,7 +20,7 @@ mod tools;
 mod types;
 
 pub use error::WorkGraphError;
-pub use machine::{WorkAttentionMachine, WorkGraphMachine};
+pub use machine::{WorkAttentionMachine, WorkGraphMachine, WorkGraphPublicErrorClass};
 pub use rest_contract::{
     WORKGRAPH_REST_PATHS, WorkGraphRestOperationDescriptor, WorkGraphRestPathDescriptor,
     WorkGraphRestRoute, workgraph_rest_path_catalog, workgraph_rest_request_response_schema,
@@ -42,8 +42,11 @@ pub use tool_surface::{
 };
 pub use tools::{
     CAPABILITY_UNAVAILABLE as WORKGRAPH_TOOL_CAPABILITY_UNAVAILABLE,
-    INVALID_ARGUMENTS as WORKGRAPH_TOOL_INVALID_ARGUMENTS, NOT_FOUND as WORKGRAPH_TOOL_NOT_FOUND,
-    WorkGraphToolError, handle_workgraph_tools_call, workgraph_tools_list,
+    CONFLICT as WORKGRAPH_TOOL_CONFLICT, INTERNAL_ERROR as WORKGRAPH_TOOL_INTERNAL_ERROR,
+    INVALID_ARGUMENTS as WORKGRAPH_TOOL_INVALID_ARGUMENTS,
+    INVALID_TRANSITION as WORKGRAPH_TOOL_INVALID_TRANSITION, NOT_FOUND as WORKGRAPH_TOOL_NOT_FOUND,
+    STORE_ERROR as WORKGRAPH_TOOL_STORE_ERROR, WorkGraphToolError, handle_workgraph_tools_call,
+    workgraph_tools_list,
 };
 pub use types::{
     AddEvidenceRequest, AttentionBindingRequest, AttentionBindingResult,

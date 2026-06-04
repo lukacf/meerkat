@@ -360,6 +360,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_event_store_round_trips_tool_config_changed_event()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Regression guard for the AgentEvent log replay path. A persisted
+        // ToolConfigChanged event (the current `status_info`-bearing shape) must
+        // survive the JSONL append -> read_from round trip. Pre-`status_info`
+        // (v0.4-v0.5) logs that recorded only the legacy `status` string are
+        // intentionally NOT resumable (a clean pre-1.0 break documented in the
+        // CHANGELOG); this pins that the CURRENT shape replays cleanly and does
+        // not silently regress.
+        let temp = tempfile::tempdir()?;
+        let store = FileEventStore::new(temp.path().join("events"));
+        let session_id = SessionId::new();
+
+        let payload = meerkat_core::ToolConfigChangedPayload::new(
+            meerkat_core::ToolConfigChangeOperation::Add,
+            "shell",
+            meerkat_core::ToolConfigChangeStatus::boundary_applied(true, false, 7),
+            true,
+        );
+        store
+            .append(
+                &session_id,
+                &[
+                    AgentEvent::TurnStarted { turn_number: 1 },
+                    AgentEvent::ToolConfigChanged {
+                        payload: payload.clone(),
+                    },
+                ],
+            )
+            .await?;
+
+        let events = store.read_from(&session_id, 1).await?;
+        let replayed = events
+            .iter()
+            .find_map(|entry| match &entry.event {
+                AgentEvent::ToolConfigChanged { payload } => Some(payload.clone()),
+                _ => None,
+            })
+            .expect("ToolConfigChanged event must round-trip through the event log");
+        assert_eq!(
+            replayed, payload,
+            "current ToolConfigChanged shape must replay byte-for-byte"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn file_event_store_restart_continues_from_durable_sequence_owner()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;

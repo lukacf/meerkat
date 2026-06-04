@@ -17,6 +17,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Resume`(expected_revision: u64)
 - `Supersede`(expected_revision: u64, superseded_by_binding_key: WorkAttentionBindingKey, at_utc_ms: u64)
 - `Stop`(expected_revision: u64, at_utc_ms: u64)
+- `ClassifyAttentionEligibility`(now_utc_ms: u64)
+- `ClassifyAttentionAuthority`(mode: WorkAttentionMode, delegated_authority: AttentionDelegatedAuthority)
 
 ## Signals
 
@@ -25,6 +27,23 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AttentionResumed`(revision: u64)
 - `AttentionSuperseded`(revision: u64)
 - `AttentionStopped`(revision: u64)
+- `AttentionEligibilityClassified`(eligible: Bool)
+- `AttentionAuthorityClassified`(can_get: Bool, can_add_evidence: Bool, can_release: Bool, can_update: Bool, can_block: Bool, can_create: Bool, can_link: Bool, can_link_parent: Bool, can_link_related: Bool, can_link_derived_from: Bool, can_close_own_review_item: Bool, can_close_if_policy_allows: Bool)
+
+## Helpers
+- `attention_is_adversarial`(mode: WorkAttentionMode) -> `Bool`
+- `attention_can_get`(mode: WorkAttentionMode) -> `Bool`
+- `attention_can_add_evidence`(mode: WorkAttentionMode) -> `Bool`
+- `attention_can_release`(mode: WorkAttentionMode) -> `Bool`
+- `attention_can_update`(mode: WorkAttentionMode) -> `Bool`
+- `attention_can_block`(mode: WorkAttentionMode) -> `Bool`
+- `attention_can_create`(mode: WorkAttentionMode) -> `Bool`
+- `attention_can_link`(mode: WorkAttentionMode) -> `Bool`
+- `attention_can_link_parent`(mode: WorkAttentionMode) -> `Bool`
+- `attention_can_link_related`(mode: WorkAttentionMode) -> `Bool`
+- `attention_can_link_derived_from`(mode: WorkAttentionMode) -> `Bool`
+- `attention_can_close_own_review_item`(mode: WorkAttentionMode, delegated_authority: AttentionDelegatedAuthority) -> `Bool`
+- `attention_can_close_if_policy_allows`(mode: WorkAttentionMode, delegated_authority: AttentionDelegatedAuthority) -> `Bool`
 
 ## Invariants
 - `live_has_no_terminal_time`
@@ -86,6 +105,64 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - ``
 - Emits: `AttentionStopped`
+- To: `Stopped`
+
+### `ClassifyEligibilityActive`
+- From: `Active`
+- On: `ClassifyAttentionEligibility`(now_utc_ms)
+- Emits: `AttentionEligibilityClassified`
+- To: `Active`
+
+### `ClassifyEligibilityPausedElapsed`
+- From: `Paused`
+- On: `ClassifyAttentionEligibility`(now_utc_ms)
+- Guards:
+  - `deadline_elapsed`
+- Emits: `AttentionEligibilityClassified`
+- To: `Paused`
+
+### `ClassifyEligibilityPausedPending`
+- From: `Paused`
+- On: `ClassifyAttentionEligibility`(now_utc_ms)
+- Guards:
+  - `deadline_not_elapsed`
+- Emits: `AttentionEligibilityClassified`
+- To: `Paused`
+
+### `ClassifyEligibilitySuperseded`
+- From: `Superseded`
+- On: `ClassifyAttentionEligibility`(now_utc_ms)
+- Emits: `AttentionEligibilityClassified`
+- To: `Superseded`
+
+### `ClassifyEligibilityStopped`
+- From: `Stopped`
+- On: `ClassifyAttentionEligibility`(now_utc_ms)
+- Emits: `AttentionEligibilityClassified`
+- To: `Stopped`
+
+### `ClassifyAuthorityActive`
+- From: `Active`
+- On: `ClassifyAttentionAuthority`(mode, delegated_authority)
+- Emits: `AttentionAuthorityClassified`
+- To: `Active`
+
+### `ClassifyAuthorityPaused`
+- From: `Paused`
+- On: `ClassifyAttentionAuthority`(mode, delegated_authority)
+- Emits: `AttentionAuthorityClassified`
+- To: `Paused`
+
+### `ClassifyAuthoritySuperseded`
+- From: `Superseded`
+- On: `ClassifyAttentionAuthority`(mode, delegated_authority)
+- Emits: `AttentionAuthorityClassified`
+- To: `Superseded`
+
+### `ClassifyAuthorityStopped`
+- From: `Stopped`
+- On: `ClassifyAttentionAuthority`(mode, delegated_authority)
+- Emits: `AttentionAuthorityClassified`
 - To: `Stopped`
 
 ## Coverage

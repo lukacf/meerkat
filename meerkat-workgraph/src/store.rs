@@ -659,7 +659,12 @@ fn item_matches_filter(item: &WorkItem, filter: &WorkItemFilter) -> bool {
     if !filter.statuses.is_empty() && !filter.statuses.contains(&item.status) {
         return false;
     }
-    if !filter.include_terminal && item.status.is_terminal() {
+    // The terminality verdict (which lifecycle phases are terminal) is a machine
+    // fact owned by WorkGraphLifecycleMachine, not this filter. We drive the
+    // machine's ClassifyTerminality over the item's recovered state and mirror the
+    // verdict, failing closed: an item the machine cannot classify is treated as
+    // terminal so it is never surfaced as live work when terminals are excluded.
+    if !filter.include_terminal && WorkGraphMachine::classify_terminality(item).unwrap_or(true) {
         return false;
     }
     filter
@@ -1567,7 +1572,9 @@ fn normalize_attention_for_terminal_items_tx(tx: &Transaction<'_>) -> Result<(),
         let Some(item) = item else {
             continue;
         };
-        if item.status.is_terminal() {
+        // Terminality is a WorkGraph machine fact: the shell mirrors the
+        // canonical classify verdict rather than re-deciding `is_terminal()`.
+        if WorkGraphMachine::classify_terminality(&item)? {
             let expected_revision = binding.machine_state.revision;
             let stopped = WorkAttentionMachine::stop(binding, expected_revision, item.updated_at)?;
             upsert_attention_tx(tx, &stopped)?;

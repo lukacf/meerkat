@@ -13,7 +13,6 @@
 use indexmap::IndexMap;
 use meerkat::{AgentFactory, Config, FactoryAgentBuilder};
 use meerkat_core::HandlingMode;
-use meerkat_core::agent::CommsRuntime as _;
 use meerkat_mob::definition::{
     BackendConfig, CollectionPolicy, ConditionExpr, DependencyMode, DispatchMode, FlowNodeSpec,
     FlowSpec, FlowStepSpec, FrameSpec, FrameStepSpec, LimitsSpec, OrchestratorConfig,
@@ -53,6 +52,16 @@ fn flow_runtime_smoke_concurrency_from_env(value: Option<&str>) -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(4)
+}
+
+fn flow_runtime_smoke_run_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var("MEERKAT_FLOW_RUNTIME_SMOKE_RUN_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(600),
+    )
 }
 
 fn flow_runtime_smoke_semaphore() -> &'static Arc<Semaphore> {
@@ -2643,6 +2652,24 @@ async fn spawn_production_external_tcp_target(peer_name: &str) -> ProductionExte
     let bootstrap_token = runtime.bridge_bootstrap_token().to_string();
     let runtime = Arc::new(runtime);
     let session_id = meerkat_core::SessionId::new();
+
+    // The target runs the PRODUCTION comms_drain on `adapter`, which mints the
+    // supervisor trust-publish obligations during BindMember. The runtime's
+    // peer-comms classification handle AND its generated trust owner must come
+    // from that SAME adapter session — otherwise the inbound BindMember is
+    // dropped (ClassificationRejected → PeerOffline) for lack of a classifier,
+    // and the supervisor trust publish is rejected ("minted by a different
+    // generated owner"). A real session-backed external member gets this wiring
+    // from its SessionRuntimeBindings; this simulation installs it explicitly.
+    let adapter = Arc::new(meerkat_runtime::meerkat_machine::MeerkatMachine::ephemeral());
+    adapter.register_session(session_id.clone()).await;
+    adapter
+        .test_install_session_peer_comms_handle_on_runtime(&session_id, runtime.as_ref())
+        .await
+        .expect("install adapter session peer-comms handle on target runtime");
+
+    // Peer request/response authority records inbound bridge requests on the
+    // runtime so the drain can reply (request_received → response).
     let dsl = Arc::new(meerkat_runtime::HandleDslAuthority::ephemeral());
     dsl.apply_signal(
         meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize,
@@ -2667,8 +2694,6 @@ async fn spawn_production_external_tcp_target(peer_name: &str) -> ProductionExte
         ),
     );
 
-    let adapter = Arc::new(meerkat_runtime::meerkat_machine::MeerkatMachine::ephemeral());
-    adapter.register_session(session_id.clone()).await;
     let spawned = adapter
         .maybe_spawn_comms_drain(
             &session_id,
@@ -2692,14 +2717,16 @@ async fn spawn_production_external_tcp_target(peer_name: &str) -> ProductionExte
 }
 
 async fn wait_for_run_terminal(handle: &MobHandle, run_id: &meerkat_mob::RunId) -> MobRun {
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + flow_runtime_smoke_run_timeout();
     loop {
         let run = handle
             .flow_status(run_id.clone())
             .await
             .expect("flow_status should succeed")
             .expect("run should exist");
-        if run.status.is_terminal() {
+        if meerkat_mob::mob_machine_run_status_is_terminal(&run.run_id, &run.status)
+            .expect("MobMachine terminality classifier should accept run status")
+        {
             return run;
         }
         assert!(
@@ -2736,6 +2763,13 @@ fn count_loop_iterations(run: &MobRun, loop_id: &str) -> usize {
     run.loop_iteration_ledger
         .iter()
         .filter(|entry| loop_instance_ids.contains(&entry.loop_instance_id))
+        .count()
+}
+
+fn count_loop_step_outputs(run: &MobRun, loop_id: &str, step_id: &str) -> usize {
+    loop_iterations(run, loop_id)
+        .iter()
+        .filter(|iteration| iteration.contains_key(&StepId::from(step_id)))
         .count()
 }
 
@@ -2793,9 +2827,15 @@ async fn e2e_external_tcp_production_drain_bind_and_turn_smoke() {
         .expect("persistent smoke service should expose a runtime adapter");
     let storage =
         MobStorage::persistent(&paths.mob_db_path).expect("create persistent mob storage");
+    // External peer-only members are owned by the MobMachine owner bridge session
+    // (the supervisor's ops owner). Production surfaces (RPC router, mob-mcp)
+    // establish this authority at mob creation and spawn external members with an
+    // explicit owner context; the smoke mob does the same.
+    let owner_bridge_session_id = meerkat_core::SessionId::new();
     let handle = MobBuilder::new(definition, storage)
         .with_session_service(mob_service.clone())
         .with_runtime_adapter(runtime_adapter)
+        .with_owner_bridge_session_create_authority(owner_bridge_session_id.clone(), false, false)
         .create()
         .await
         .expect("create external TCP smoke mob");
@@ -2814,17 +2854,26 @@ async fn e2e_external_tcp_production_drain_bind_and_turn_smoke() {
     let mut spec = SpawnMemberSpec::new("lead", AgentIdentity::from("l-production-tcp"));
     spec.runtime_mode = Some(MobRuntimeMode::TurnDriven);
     spec.binding = Some(target.binding.clone());
+    // External peer-only members require an explicit machine-minted owner context
+    // (plain `spawn_spec` fails closed by design); supply the mob's owner bridge
+    // session as the canonical operation owner.
     handle
-        .spawn_spec(spec)
+        .spawn_spec_with_generated_owner_context(spec, owner_bridge_session_id.clone())
         .await
         .expect("BindMember should complete through production target comms_drain");
 
-    let trusted_peers = target.runtime.peers().await;
+    // Supervisor trust on a member runtime is PRIVATE (control-plane): it is
+    // send-resolvable but intentionally filtered out of the public `peers()`
+    // directory. Verify the bind installed it via the full trusted-peers view
+    // (the send/admission union), not the public directory.
+    let trusted = target.runtime.trusted_peers_shared();
     assert!(
-        trusted_peers
+        trusted
+            .peers()
             .iter()
-            .any(|peer| peer.address.to_string() == supervisor_advertised_address),
-        "target runtime must install the advertised supervisor bridge as sendable trust; peers={trusted_peers:?}"
+            .any(|peer| peer.addr == supervisor_advertised_address),
+        "target runtime must install the advertised supervisor bridge as sendable trust; trusted={:?}",
+        trusted.peers()
     );
 
     handle
@@ -2955,9 +3004,15 @@ async fn e2e_flow_runtime_fanout_parallel_review_loop_smoke() {
         "finalize output should reflect downstream access to loop + sibling state: {finalize:?}"
     );
 
-    assert!(
-        completed_count(&run, "draft") >= 2 && completed_count(&run, "review") >= 2,
-        "loop body steps should complete once per iteration: {run:?}"
+    assert_eq!(
+        count_loop_step_outputs(&run, "review_loop", "draft"),
+        2,
+        "draft loop output should be recorded once per review iteration: {run:?}"
+    );
+    assert_eq!(
+        count_loop_step_outputs(&run, "review_loop", "review"),
+        2,
+        "review loop output should be recorded once per review iteration: {run:?}"
     );
 }
 
@@ -3028,11 +3083,19 @@ async fn e2e_flow_runtime_dual_sibling_loops_join_smoke() {
         Some(&serde_json::json!("joined left-second and right-second")),
         "join should see the last iteration output from both sibling loops"
     );
+    assert_eq!(
+        count_loop_step_outputs(&run, "left_loop", "left"),
+        2,
+        "left loop output should be recorded once per iteration: {run:?}"
+    );
+    assert_eq!(
+        count_loop_step_outputs(&run, "right_loop", "right"),
+        2,
+        "right loop output should be recorded once per iteration: {run:?}"
+    );
     assert!(
-        completed_count(&run, "left") >= 2
-            && completed_count(&run, "right") >= 2
-            && completed_count(&run, "join") >= 1,
-        "step ledger should show both loop bodies and the downstream join completing: {run:?}"
+        completed_count(&run, "join") >= 1,
+        "step ledger should show the downstream join completing: {run:?}"
     );
 }
 

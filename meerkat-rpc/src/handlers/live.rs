@@ -7,15 +7,18 @@
 //! (deferred to a follow-up PR with real signaling shape).
 
 use std::sync::Arc;
+#[cfg(feature = "live-webrtc")]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use meerkat_client::realtime_session::RealtimeSessionFactory;
 use meerkat_client::realtime_session::RealtimeSessionOpenConfig;
 use meerkat_contracts::{
-    LiveChannelParams, LiveCommitInputParams, LiveInputChunkWire, LiveOpenParams, LiveOpenResult,
-    LiveOpenTransport, LiveRefreshResult, LiveSendInputParams, LiveStatusResult,
+    LiveChannelParams, LiveCloseResult, LiveCommitInputParams, LiveInputChunkWire, LiveOpenParams,
+    LiveOpenResult, LiveOpenTransport, LiveRefreshResult, LiveSendInputParams, LiveStatusResult,
     LiveTruncateParams, LiveWebrtcAnswerParams, LiveWebrtcAnswerResult, RealtimeTurningMode,
-    WireLiveAdapterStatus,
+    WireLiveAdapterStatus, WireLiveDegradationReason,
 };
+use meerkat_core::SessionLlmIdentity;
 use meerkat_core::live_adapter::{
     LiveAdapterCommand, LiveChannelCapabilities, LiveContinuityMode, LiveInputChunk,
     LiveProjectionSnapshot, LiveTransportBootstrap,
@@ -29,6 +32,552 @@ use serde::{Deserialize, Serialize};
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::{LiveOpenPrecheckError, SessionRuntime};
+
+#[cfg(feature = "live-webrtc")]
+fn live_webrtc_now_ms() -> Result<u64, String> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| format!("system time is before Unix epoch: {err}"))?;
+    u64::try_from(elapsed.as_millis())
+        .map_err(|_| "system time milliseconds overflow u64".to_string())
+}
+
+#[cfg(feature = "live-webrtc")]
+fn live_webrtc_duration_ms(duration: std::time::Duration) -> Result<u64, String> {
+    u64::try_from(duration.as_millis())
+        .map_err(|_| "WebRTC token TTL milliseconds overflow u64".to_string())
+}
+
+fn live_refresh_result_from_machine_authority(
+    authority: &meerkat_runtime::meerkat_machine::LiveRefreshResultAuthority,
+) -> Result<LiveRefreshResult, String> {
+    match authority.status {
+        meerkat_runtime::meerkat_machine::dsl::LiveRefreshPublicStatus::Queued
+            if authority.refresh_enqueued =>
+        {
+            Ok(LiveRefreshResult::queued())
+        }
+        other => Err(format!(
+            "LiveRefreshResultResolved emitted unsupported status {other:?} with refresh_enqueued={}",
+            authority.refresh_enqueued
+        )),
+    }
+}
+
+fn live_close_result_from_machine_authority(
+    authority: &meerkat_runtime::meerkat_machine::LiveCloseResultAuthority,
+) -> Result<LiveCloseResult, String> {
+    match authority.status {
+        meerkat_runtime::meerkat_machine::dsl::LiveClosePublicStatus::Closed
+            if authority.closed =>
+        {
+            Ok(LiveCloseResult::closed())
+        }
+        other => Err(format!(
+            "LiveCloseResultResolved emitted unsupported status {other:?} with closed={}",
+            authority.closed
+        )),
+    }
+}
+
+fn live_command_result_from_machine_authority(
+    authority: &meerkat_runtime::meerkat_machine::LiveCommandResultAuthority,
+    expected: meerkat_runtime::meerkat_machine::dsl::LiveCommandPublicKind,
+) -> Result<serde_json::Value, String> {
+    use meerkat_runtime::meerkat_machine::dsl::LiveCommandPublicKind;
+
+    if authority.command != expected || !authority.accepted {
+        return Err(format!(
+            "LiveCommandResultResolved emitted command {:?} accepted={} for expected {:?}",
+            authority.command, authority.accepted, expected
+        ));
+    }
+
+    match expected {
+        LiveCommandPublicKind::SendInput => Ok(serde_json::json!({"sent": true})),
+        LiveCommandPublicKind::CommitInput => Ok(serde_json::json!({"committed": true})),
+        LiveCommandPublicKind::Interrupt => Ok(serde_json::json!({"interrupted": true})),
+        LiveCommandPublicKind::TruncateAssistantOutput => {
+            Ok(serde_json::json!({"truncated": true}))
+        }
+    }
+}
+
+async fn live_command_session_id_from_machine_authority(
+    runtime: &Arc<SessionRuntime>,
+    channel_id: &LiveChannelId,
+) -> Option<SessionId> {
+    live_session_id_from_machine_authority(runtime, channel_id).await
+}
+
+async fn live_session_id_from_machine_authority(
+    runtime: &Arc<SessionRuntime>,
+    channel_id: &LiveChannelId,
+) -> Option<SessionId> {
+    runtime
+        .runtime_adapter()
+        .live_session_for_active_channel(channel_id)
+        .await
+}
+
+fn live_command_rejection_response_from_machine_authority(
+    id: Option<RpcId>,
+    authority: &meerkat_runtime::meerkat_machine::LiveCommandRejectionAuthority,
+    expected: meerkat_runtime::meerkat_machine::dsl::LiveCommandPublicKind,
+    channel_id: &LiveChannelId,
+    host_error: &LiveAdapterHostError,
+) -> RpcResponse {
+    use meerkat_runtime::meerkat_machine::dsl::{
+        LiveCommandRejectionPublicErrorClass, LiveCommandRejectionReason,
+    };
+
+    if authority.command != expected {
+        return RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            format!(
+                "LiveCommandRejectionResolved emitted command {:?} for expected {:?}",
+                authority.command, expected
+            ),
+        );
+    }
+
+    let code = match authority.public_error_class {
+        LiveCommandRejectionPublicErrorClass::InvalidParams => error::INVALID_PARAMS,
+        LiveCommandRejectionPublicErrorClass::InternalError => error::INTERNAL_ERROR,
+    };
+    let message = match authority.rejection {
+        LiveCommandRejectionReason::ChannelNotFound => format!("channel {channel_id} not found"),
+        LiveCommandRejectionReason::NoAdapter => {
+            format!("channel {channel_id} has no adapter attached")
+        }
+        LiveCommandRejectionReason::ChannelNotReady
+        | LiveCommandRejectionReason::UnsupportedCommand
+        | LiveCommandRejectionReason::AdapterError
+        | LiveCommandRejectionReason::InternalHostError => host_error.to_string(),
+    };
+    RpcResponse::error(id, code, message)
+}
+
+async fn live_command_error_response(
+    id: Option<RpcId>,
+    runtime: &Arc<SessionRuntime>,
+    session_id: &SessionId,
+    channel_id: &LiveChannelId,
+    command: meerkat_runtime::meerkat_machine::dsl::LiveCommandPublicKind,
+    host_error: &LiveAdapterHostError,
+) -> RpcResponse {
+    let authority = match runtime
+        .runtime_adapter()
+        .resolve_live_command_rejection_result(session_id, channel_id, command, host_error)
+        .await
+    {
+        Ok(authority) => authority,
+        Err(error) => {
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("live command rejection authority rejected result: {error}"),
+            );
+        }
+    };
+    live_command_rejection_response_from_machine_authority(
+        id, &authority, command, channel_id, host_error,
+    )
+}
+
+async fn live_unbound_command_error_response(
+    id: Option<RpcId>,
+    runtime: &Arc<SessionRuntime>,
+    channel_id: &LiveChannelId,
+    command: meerkat_runtime::meerkat_machine::dsl::LiveCommandPublicKind,
+) -> RpcResponse {
+    let authority = match runtime
+        .runtime_adapter()
+        .resolve_unbound_live_command_rejection_result(channel_id, command)
+        .await
+    {
+        Ok(authority) => authority,
+        Err(error) => {
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("unbound live command rejection authority rejected result: {error}"),
+            );
+        }
+    };
+    let host_error = LiveAdapterHostError::ChannelNotFound(channel_id.clone());
+    live_command_rejection_response_from_machine_authority(
+        id,
+        &authority,
+        command,
+        channel_id,
+        &host_error,
+    )
+}
+
+fn live_channel_request_rejection_response_from_machine_authority(
+    id: Option<RpcId>,
+    authority: &meerkat_runtime::meerkat_machine::LiveChannelRequestRejectionAuthority,
+    expected: meerkat_runtime::meerkat_machine::dsl::LiveChannelRequestPublicKind,
+    channel_id: &LiveChannelId,
+    detail: Option<String>,
+) -> RpcResponse {
+    use meerkat_runtime::meerkat_machine::dsl::{
+        LiveChannelRequestRejectionPublicErrorClass, LiveChannelRequestRejectionReason,
+    };
+
+    if authority.request != expected {
+        return RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            format!(
+                "LiveChannelRequestRejectionResolved emitted request {:?} for expected {:?}",
+                authority.request, expected
+            ),
+        );
+    }
+
+    let code = match authority.public_error_class {
+        LiveChannelRequestRejectionPublicErrorClass::InvalidParams => error::INVALID_PARAMS,
+        LiveChannelRequestRejectionPublicErrorClass::InternalError => error::INTERNAL_ERROR,
+    };
+    let message = match authority.rejection {
+        LiveChannelRequestRejectionReason::ChannelNotFound => {
+            format!("channel {channel_id} not found")
+        }
+        LiveChannelRequestRejectionReason::NoAdapter => {
+            format!("channel {channel_id} has no adapter attached")
+        }
+        LiveChannelRequestRejectionReason::InvalidToken
+        | LiveChannelRequestRejectionReason::InvalidPayload
+        | LiveChannelRequestRejectionReason::WebrtcAnswerError
+        | LiveChannelRequestRejectionReason::InternalHostError => detail.unwrap_or_else(|| {
+            format!(
+                "live channel request {:?} rejected for channel {}",
+                authority.request, channel_id
+            )
+        }),
+    };
+    RpcResponse::error(id, code, message)
+}
+
+async fn live_channel_request_error_response(
+    id: Option<RpcId>,
+    runtime: &Arc<SessionRuntime>,
+    session_id: &SessionId,
+    channel_id: &LiveChannelId,
+    request: meerkat_runtime::meerkat_machine::dsl::LiveChannelRequestPublicKind,
+    host_error: &LiveAdapterHostError,
+) -> RpcResponse {
+    let authority = match runtime
+        .runtime_adapter()
+        .resolve_live_channel_request_rejection_result(session_id, channel_id, request, host_error)
+        .await
+    {
+        Ok(authority) => authority,
+        Err(error) => {
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("live channel request rejection authority rejected result: {error}"),
+            );
+        }
+    };
+    live_channel_request_rejection_response_from_machine_authority(
+        id,
+        &authority,
+        request,
+        channel_id,
+        Some(host_error.to_string()),
+    )
+}
+
+async fn live_unbound_channel_request_error_response(
+    id: Option<RpcId>,
+    runtime: &Arc<SessionRuntime>,
+    channel_id: &LiveChannelId,
+    request: meerkat_runtime::meerkat_machine::dsl::LiveChannelRequestPublicKind,
+) -> RpcResponse {
+    let authority = match runtime
+        .runtime_adapter()
+        .resolve_unbound_live_channel_request_rejection_result(channel_id, request)
+        .await
+    {
+        Ok(authority) => authority,
+        Err(error) => {
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!(
+                    "unbound live channel request rejection authority rejected result: {error}"
+                ),
+            );
+        }
+    };
+    let host_error = LiveAdapterHostError::ChannelNotFound(channel_id.clone());
+    live_channel_request_rejection_response_from_machine_authority(
+        id,
+        &authority,
+        request,
+        channel_id,
+        Some(host_error.to_string()),
+    )
+}
+
+#[cfg(feature = "live-webrtc")]
+fn live_webrtc_answer_rejection_reason(
+    error: &meerkat_live::LiveWebrtcError,
+) -> meerkat_runtime::meerkat_machine::dsl::LiveChannelRequestRejectionReason {
+    use meerkat_runtime::meerkat_machine::dsl::LiveChannelRequestRejectionReason;
+
+    match error {
+        meerkat_live::LiveWebrtcError::ChannelNotFound(_) => {
+            LiveChannelRequestRejectionReason::ChannelNotFound
+        }
+        meerkat_live::LiveWebrtcError::Json(_) => LiveChannelRequestRejectionReason::InvalidPayload,
+        meerkat_live::LiveWebrtcError::Webrtc(_)
+        | meerkat_live::LiveWebrtcError::Audio(_)
+        | meerkat_live::LiveWebrtcError::MissingLocalDescription => {
+            LiveChannelRequestRejectionReason::WebrtcAnswerError
+        }
+    }
+}
+
+#[cfg(feature = "live-webrtc")]
+fn live_webrtc_answer_rejection_detail(error: &meerkat_live::LiveWebrtcError) -> String {
+    match error {
+        meerkat_live::LiveWebrtcError::ChannelNotFound(channel) => {
+            format!("channel {channel} not found")
+        }
+        meerkat_live::LiveWebrtcError::Json(err) => err.to_string(),
+        other => format!("failed to answer WebRTC offer: {other}"),
+    }
+}
+
+#[cfg(feature = "live-webrtc")]
+async fn live_webrtc_answer_error_response(
+    id: Option<RpcId>,
+    runtime: &Arc<SessionRuntime>,
+    session_id: &SessionId,
+    channel_id: &LiveChannelId,
+    error: &meerkat_live::LiveWebrtcError,
+) -> RpcResponse {
+    let request_kind =
+        meerkat_runtime::meerkat_machine::dsl::LiveChannelRequestPublicKind::WebrtcAnswer;
+    let rejection = live_webrtc_answer_rejection_reason(error);
+    let authority = match runtime
+        .runtime_adapter()
+        .resolve_live_channel_request_rejection_reason_result(
+            session_id,
+            channel_id,
+            request_kind,
+            rejection,
+        )
+        .await
+    {
+        Ok(authority) => authority,
+        Err(error) => {
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("live WebRTC answer rejection authority rejected result: {error}"),
+            );
+        }
+    };
+    live_channel_request_rejection_response_from_machine_authority(
+        id,
+        &authority,
+        request_kind,
+        channel_id,
+        Some(live_webrtc_answer_rejection_detail(error)),
+    )
+}
+
+#[cfg(feature = "live-webrtc")]
+async fn live_webrtc_answer_malformed_admission_response(
+    id: Option<RpcId>,
+    runtime: &Arc<SessionRuntime>,
+    session_id: &SessionId,
+    channel_id: &LiveChannelId,
+    detail: String,
+) -> RpcResponse {
+    use meerkat_runtime::meerkat_machine::dsl::{
+        LiveChannelRequestPublicKind, LiveChannelRequestRejectionReason,
+    };
+
+    let request_kind = LiveChannelRequestPublicKind::WebrtcAnswer;
+    let authority = match runtime
+        .runtime_adapter()
+        .resolve_live_channel_request_rejection_reason_result(
+            session_id,
+            channel_id,
+            request_kind,
+            LiveChannelRequestRejectionReason::InternalHostError,
+        )
+        .await
+    {
+        Ok(authority) => authority,
+        Err(error) => {
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("live WebRTC malformed admission rejection authority failed: {error}"),
+            );
+        }
+    };
+    live_channel_request_rejection_response_from_machine_authority(
+        id,
+        &authority,
+        request_kind,
+        channel_id,
+        Some(detail),
+    )
+}
+
+#[cfg(feature = "live-webrtc")]
+async fn live_webrtc_answer_admission_error_response_from_machine_authority(
+    id: Option<RpcId>,
+    runtime: &Arc<SessionRuntime>,
+    session_id: &SessionId,
+    authority: &meerkat_runtime::meerkat_machine::LiveWebrtcAnswerAdmissionAuthority,
+    channel_id: &LiveChannelId,
+) -> RpcResponse {
+    use meerkat_runtime::meerkat_machine::dsl::{
+        LiveChannelRequestRejectionPublicErrorClass, LiveWebrtcAnswerAdmissionRejection,
+    };
+
+    if authority.admitted {
+        return live_webrtc_answer_malformed_admission_response(
+            id,
+            runtime,
+            session_id,
+            channel_id,
+            "LiveWebrtcAnswerAdmissionResolved admitted token on error path".to_string(),
+        )
+        .await;
+    }
+
+    let Some(public_error_class) = authority.public_error_class else {
+        return live_webrtc_answer_malformed_admission_response(
+            id,
+            runtime,
+            session_id,
+            channel_id,
+            "LiveWebrtcAnswerAdmissionResolved omitted generated public error class".to_string(),
+        )
+        .await;
+    };
+    let Some(rejection) = authority.rejection else {
+        return live_webrtc_answer_malformed_admission_response(
+            id,
+            runtime,
+            session_id,
+            channel_id,
+            "LiveWebrtcAnswerAdmissionResolved omitted generated rejection reason".to_string(),
+        )
+        .await;
+    };
+
+    let code = match public_error_class {
+        LiveChannelRequestRejectionPublicErrorClass::InvalidParams => error::INVALID_PARAMS,
+        LiveChannelRequestRejectionPublicErrorClass::InternalError => error::INTERNAL_ERROR,
+    };
+    let message = match rejection {
+        LiveWebrtcAnswerAdmissionRejection::TokenNotFound => {
+            "invalid WebRTC live token: not found".to_string()
+        }
+        LiveWebrtcAnswerAdmissionRejection::TokenExpired => {
+            "invalid WebRTC live token: expired".to_string()
+        }
+        LiveWebrtcAnswerAdmissionRejection::TokenChannelMismatch => {
+            "invalid WebRTC live token: channel mismatch".to_string()
+        }
+        LiveWebrtcAnswerAdmissionRejection::TokenAlreadyConsumed => {
+            "invalid WebRTC live token: already consumed".to_string()
+        }
+        LiveWebrtcAnswerAdmissionRejection::ChannelNotBound => {
+            format!("channel {channel_id} not found")
+        }
+    };
+    RpcResponse::error(id, code, message)
+}
+
+#[cfg(feature = "live-webrtc")]
+fn live_webrtc_answer_result_from_machine_authority(
+    authority: &meerkat_runtime::meerkat_machine::LiveWebrtcAnswerResultAuthority,
+    answer_sdp: String,
+) -> Result<LiveWebrtcAnswerResult, String> {
+    match authority.status {
+        meerkat_runtime::meerkat_machine::dsl::LiveWebrtcAnswerPublicStatus::Answered
+            if authority.answered =>
+        {
+            Ok(LiveWebrtcAnswerResult { answer_sdp })
+        }
+        other => Err(format!(
+            "LiveWebrtcAnswerResultResolved emitted unsupported status {other:?} with answered={}",
+            authority.answered
+        )),
+    }
+}
+
+fn live_status_result_from_machine_authority(
+    channel_id: String,
+    authority: &meerkat_runtime::meerkat_machine::LiveChannelStatusAuthority,
+) -> Result<LiveStatusResult, String> {
+    Ok(LiveStatusResult {
+        channel_id,
+        status: wire_live_status_from_machine_authority(authority)?,
+    })
+}
+
+fn wire_live_status_from_machine_authority(
+    authority: &meerkat_runtime::meerkat_machine::LiveChannelStatusAuthority,
+) -> Result<WireLiveAdapterStatus, String> {
+    use meerkat_runtime::meerkat_machine::dsl::LiveChannelPublicStatus;
+
+    match authority.status {
+        LiveChannelPublicStatus::Idle => Ok(WireLiveAdapterStatus::Idle),
+        LiveChannelPublicStatus::Opening => Ok(WireLiveAdapterStatus::Opening),
+        LiveChannelPublicStatus::Ready => Ok(WireLiveAdapterStatus::Ready),
+        LiveChannelPublicStatus::Closing => Ok(WireLiveAdapterStatus::Closing),
+        LiveChannelPublicStatus::Closed => Ok(WireLiveAdapterStatus::Closed),
+        LiveChannelPublicStatus::Degraded => {
+            let reason = authority.degradation_reason.ok_or_else(|| {
+                "LiveChannelStatusResolved emitted degraded status without reason".to_string()
+            })?;
+            Ok(WireLiveAdapterStatus::Degraded {
+                reason: wire_live_degradation_reason_from_machine_authority(
+                    reason,
+                    authority.degradation_detail.as_deref(),
+                ),
+            })
+        }
+    }
+}
+
+fn wire_live_degradation_reason_from_machine_authority(
+    reason: meerkat_runtime::meerkat_machine::dsl::LiveChannelDegradationReason,
+    detail: Option<&str>,
+) -> WireLiveDegradationReason {
+    use meerkat_runtime::meerkat_machine::dsl::LiveChannelDegradationReason;
+
+    match reason {
+        LiveChannelDegradationReason::RateLimited => WireLiveDegradationReason::RateLimited,
+        LiveChannelDegradationReason::ProviderThrottled => {
+            WireLiveDegradationReason::ProviderThrottled
+        }
+        LiveChannelDegradationReason::NetworkUnstable => WireLiveDegradationReason::NetworkUnstable,
+        LiveChannelDegradationReason::Other => WireLiveDegradationReason::Other {
+            detail: detail.unwrap_or_default().to_string(),
+        },
+        LiveChannelDegradationReason::Unknown => WireLiveDegradationReason::Unknown {
+            debug: detail
+                .unwrap_or("unknown live channel degradation")
+                .to_string(),
+        },
+    }
+}
 
 /// P1#4: pinned audio format for the live WebSocket transport.
 ///
@@ -152,6 +701,88 @@ fn continuity_from_snapshot(snapshot: &LiveProjectionSnapshot) -> LiveContinuity
     }
 }
 
+async fn abandon_live_open_admission(
+    runtime: &Arc<SessionRuntime>,
+    session_id: &SessionId,
+    channel_id: &LiveChannelId,
+) {
+    if let Err(err) = runtime
+        .runtime_adapter()
+        .abandon_live_open_admission(session_id, channel_id)
+        .await
+    {
+        tracing::warn!(
+            target: "meerkat_rpc::handlers::live",
+            ?channel_id,
+            ?session_id,
+            ?err,
+            "generated live-open admission abandonment failed"
+        );
+    }
+}
+
+async fn close_live_channel_after_open_failure(
+    host: &LiveAdapterHost,
+    runtime: &Arc<SessionRuntime>,
+    session_id: &SessionId,
+    channel_id: &LiveChannelId,
+) {
+    match host.reserve_channel_close_observation(channel_id).await {
+        Ok(observation) => {
+            let authority = match runtime
+                .runtime_adapter()
+                .resolve_live_close_result(session_id, &observation)
+                .await
+            {
+                Ok(authority) => authority,
+                Err(err) => {
+                    tracing::warn!(
+                        target: "meerkat_rpc::handlers::live",
+                        ?channel_id,
+                        ?session_id,
+                        ?err,
+                        "generated live-close authority rejected open-failure cleanup"
+                    );
+                    return;
+                }
+            };
+            let Some(close_commit_authority) = authority.channel_close_commit_authority() else {
+                tracing::warn!(
+                    target: "meerkat_rpc::handlers::live",
+                    ?channel_id,
+                    ?session_id,
+                    "generated live-close result omitted host commit authority"
+                );
+                return;
+            };
+            if let Err(err) = host
+                .commit_channel_close_observation(&observation, close_commit_authority)
+                .await
+            {
+                tracing::warn!(
+                    target: "meerkat_rpc::handlers::live",
+                    ?channel_id,
+                    ?session_id,
+                    ?err,
+                    "host live-close commit failed after generated open-failure cleanup"
+                );
+            }
+        }
+        Err(LiveAdapterHostError::ChannelNotFound(_)) => {
+            abandon_live_open_admission(runtime, session_id, channel_id).await;
+        }
+        Err(err) => {
+            tracing::warn!(
+                target: "meerkat_rpc::handlers::live",
+                ?channel_id,
+                ?session_id,
+                ?err,
+                "failed to close live channel after open failure"
+            );
+        }
+    }
+}
+
 pub struct LiveOpenHandlerContext<'a> {
     pub host: &'a LiveAdapterHost,
     pub live_ws: Option<&'a LiveWsState>,
@@ -205,16 +836,114 @@ pub async fn handle_live_open(
         );
     }
 
-    let channel_id = match host.open_channel(session_id.clone()).await {
-        Ok(ch) => ch,
-        Err(LiveAdapterHostError::SessionAlreadyBound(sid)) => {
+    // R3-1 (P1): honor the caller's optional `turning_mode` override.
+    // Default = `ProviderManaged` (back-compat with pre-R3-1 callers).
+    // Callers that need the G9 typed text-only `live/commit_input`
+    // path must pass `ExplicitCommit` here — the OpenAI realtime API
+    // rejects `input_audio_buffer.commit` unless the session was
+    // opened in explicit-commit mode, and the rejected commit
+    // surfaces as a terminal `LiveAdapterObservation::Error` that
+    // closes the channel.
+    let turning_mode = parsed
+        .turning_mode
+        .unwrap_or(RealtimeTurningMode::ProviderManaged);
+    let prepared_open_config = if session_factory.is_some() {
+        match runtime
+            .live_open_config_for_session(&session_id, turning_mode)
+            .await
+        {
+            Ok(config) => Some(config),
+            Err(err) => {
+                return RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!("failed to build session config: {err}"),
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let live_open_identity = match prepared_open_config.as_ref() {
+        Some(config) => config.llm_identity.clone(),
+        None => match runtime.live_llm_identity_for_session(&session_id).await {
+            Ok(identity) => identity,
+            Err(err) => {
+                return RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!("failed to resolve live channel identity: {err}"),
+                );
+            }
+        },
+    };
+
+    let candidate_channel_id = LiveChannelId::random_uuid();
+    let open_authority = match runtime
+        .runtime_adapter()
+        .resolve_live_open_admission(&session_id, &candidate_channel_id, &live_open_identity)
+        .await
+    {
+        Ok(authority) => authority,
+        Err(err) => {
             return RpcResponse::error(
                 id,
-                error::INVALID_PARAMS,
-                format!("session {sid} already has an active live channel"),
+                error::INTERNAL_ERROR,
+                format!("live open authority rejected admission: {err}"),
+            );
+        }
+    };
+    if !open_authority.admitted() {
+        return match open_authority.rejection() {
+            Some(meerkat_runtime::meerkat_machine::dsl::LiveOpenAdmissionRejection::AlreadyBound) => {
+                RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!("session {session_id} already has an active live channel"),
+                )
+            }
+            Some(
+                meerkat_runtime::meerkat_machine::dsl::LiveOpenAdmissionRejection::ChannelAlreadyBound,
+            ) => RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("generated duplicate live channel id {candidate_channel_id}"),
+            ),
+            None => RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                "live open authority rejected admission without a reason".to_string(),
+            ),
+        };
+    }
+
+    let Some(channel_open_authority) = open_authority.channel_open_authority() else {
+        abandon_live_open_admission(runtime, &session_id, &candidate_channel_id).await;
+        return RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            "live open admission was accepted without a generated host handoff".to_string(),
+        );
+    };
+
+    let channel_id = match host
+        .open_channel_with_authority(channel_open_authority)
+        .await
+    {
+        Ok(ch) => ch,
+        Err(LiveAdapterHostError::SessionAlreadyBound(sid)) => {
+            abandon_live_open_admission(runtime, &session_id, &candidate_channel_id).await;
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!(
+                    "live host transport cache still has active channel for session {sid} \
+                     after generated admission"
+                ),
             );
         }
         Err(err) => {
+            abandon_live_open_admission(runtime, &session_id, &candidate_channel_id).await;
             return RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string());
         }
     };
@@ -246,7 +975,7 @@ pub async fn handle_live_open(
         // transport, surfacing only as an opaque WebSocket handshake error
         // at provider connect time.
         if let Err(precheck_err) = runtime.precheck_live_open(&session_id).await {
-            let _ = host.close_channel(&channel_id).await;
+            close_live_channel_after_open_failure(host, runtime, &session_id, &channel_id).await;
             let (code, message) = match &precheck_err {
                 LiveOpenPrecheckError::ModelNotRealtime { model, provider } => (
                     error::INVALID_PARAMS,
@@ -265,36 +994,19 @@ pub async fn handle_live_open(
             return RpcResponse::error(id, code, message);
         }
 
-        // R3-1 (P1): honor the caller's optional `turning_mode` override.
-        // Default = `ProviderManaged` (back-compat with pre-R3-1 callers).
-        // Callers that need the G9 typed text-only `live/commit_input`
-        // path must pass `ExplicitCommit` here — the OpenAI realtime API
-        // rejects `input_audio_buffer.commit` unless the session was
-        // opened in explicit-commit mode, and the rejected commit
-        // surfaces as a terminal `LiveAdapterObservation::Error` that
-        // closes the channel.
-        let turning_mode = parsed
-            .turning_mode
-            .unwrap_or(RealtimeTurningMode::ProviderManaged);
-        let open_config = match runtime
-            .live_open_config_for_session(&session_id, turning_mode)
-            .await
-        {
-            Ok(config) => config,
-            Err(err) => {
-                let _ = host.close_channel(&channel_id).await;
-                return RpcResponse::error(
-                    id,
-                    error::INTERNAL_ERROR,
-                    format!("failed to build session config: {err}"),
-                );
-            }
+        let Some(open_config) = prepared_open_config.as_ref() else {
+            close_live_channel_after_open_failure(host, runtime, &session_id, &channel_id).await;
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                "session factory was wired without a prepared live open config".to_string(),
+            );
         };
         // E25: open a provider-native `LiveAdapter` directly. The OpenAI
         // factory implements `open_live_adapter` to bypass the
         // `Box<dyn RealtimeSession>` boxing layer that the legacy
         // `ProviderSessionAdapter` wrapper required.
-        match factory.open_live_adapter(&open_config).await {
+        match factory.open_live_adapter(open_config).await {
             Ok(adapter) => {
                 // P2#3: query the adapter's real capability set before
                 // handing ownership to the host. `Arc<dyn LiveAdapter>` is
@@ -302,35 +1014,12 @@ pub async fn handle_live_open(
                 // receives the canonical reference via `attach_adapter`.
                 capabilities = adapter.capabilities();
                 if let Err(err) = host.attach_adapter(&channel_id, adapter).await {
-                    let _ = host.close_channel(&channel_id).await;
+                    close_live_channel_after_open_failure(host, runtime, &session_id, &channel_id)
+                        .await;
                     return RpcResponse::error(
                         id,
                         error::INTERNAL_ERROR,
                         format!("failed to attach adapter: {err}"),
-                    );
-                }
-                // R11: record the LLM identity the channel was opened with so
-                // `propagate_config_to_live_channels` can detect a later
-                // `config/patch` model/provider swap and route to a clean
-                // close instead of dispatching `Refresh` (which the OpenAI
-                // realtime adapter rejects via the R1 guard because
-                // `session.update` cannot change model). A failure here is
-                // logged but does not abort `live/open` — the worst-case
-                // fallthrough is the legacy Refresh-then-ConfigRejected path
-                // that R11 is designed to replace, not a correctness break
-                // on this open.
-                if let Err(err) = host
-                    .set_channel_llm_identity(&channel_id, open_config.llm_identity.clone())
-                    .await
-                {
-                    tracing::warn!(
-                        target: "meerkat_rpc::handlers::live",
-                        ?channel_id,
-                        ?session_id,
-                        ?err,
-                        "failed to record bound llm identity for live channel; \
-                         model-swap detection on config/patch will fall back \
-                         to legacy Refresh routing"
                     );
                 }
                 // R2: do NOT dispatch `LiveAdapterCommand::Open { snapshot }`
@@ -345,11 +1034,12 @@ pub async fn handle_live_open(
                 // (resume, cross-session attach) where no factory-time
                 // seeding has happened yet — `live/open` relies on
                 // factory-time seeding.
-                let snapshot = build_live_projection_snapshot(&session_id, &open_config);
+                let snapshot = build_live_projection_snapshot(&session_id, open_config);
                 continuity = continuity_from_snapshot(&snapshot);
             }
             Err(err) => {
-                let _ = host.close_channel(&channel_id).await;
+                close_live_channel_after_open_failure(host, runtime, &session_id, &channel_id)
+                    .await;
                 return RpcResponse::error(
                     id,
                     error::INTERNAL_ERROR,
@@ -360,7 +1050,7 @@ pub async fn handle_live_open(
     }
 
     if let Err(err) = runtime.ensure_live_peer_ingress(&session_id).await {
-        let _ = host.close_channel(&channel_id).await;
+        close_live_channel_after_open_failure(host, runtime, &session_id, &channel_id).await;
         return RpcResponse::error(id, err.code, err.message);
     }
 
@@ -374,7 +1064,7 @@ pub async fn handle_live_open(
         None if live_ws.is_some() => LiveOpenTransport::Websocket,
         None if webrtc_configured => LiveOpenTransport::Webrtc,
         None => {
-            let _ = host.close_channel(&channel_id).await;
+            close_live_channel_after_open_failure(host, runtime, &session_id, &channel_id).await;
             return RpcResponse::error(
                 id,
                 error::INTERNAL_ERROR,
@@ -390,7 +1080,8 @@ pub async fn handle_live_open(
             let (ws_state, base_url) = match (live_ws, live_ws_base_url) {
                 (Some(ws), Some(url)) => (ws, url),
                 _ => {
-                    let _ = host.close_channel(&channel_id).await;
+                    close_live_channel_after_open_failure(host, runtime, &session_id, &channel_id)
+                        .await;
                     return RpcResponse::error(
                         id,
                         error::INVALID_PARAMS,
@@ -398,7 +1089,18 @@ pub async fn handle_live_open(
                     );
                 }
             };
-            let token = ws_state.mint_token(channel_id.clone()).await;
+            let token = match ws_state.mint_token(&session_id, channel_id.clone()).await {
+                Ok(token) => token,
+                Err(err) => {
+                    close_live_channel_after_open_failure(host, runtime, &session_id, &channel_id)
+                        .await;
+                    return RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("live WebSocket token authority rejected issue: {err}"),
+                    );
+                }
+            };
             let token_str = token.to_string();
             // G38: pin the bearer token to the channel via a `channel` query
             // param so a leaked token cannot be replayed against a different
@@ -417,7 +1119,8 @@ pub async fn handle_live_open(
             #[cfg(feature = "live-webrtc")]
             {
                 let Some(webrtc_state) = live_webrtc else {
-                    let _ = host.close_channel(&channel_id).await;
+                    close_live_channel_after_open_failure(host, runtime, &session_id, &channel_id)
+                        .await;
                     return RpcResponse::error(
                         id,
                         error::INVALID_PARAMS,
@@ -425,15 +1128,70 @@ pub async fn handle_live_open(
                     );
                 };
                 let token = webrtc_state.mint_token(channel_id.clone()).await;
+                let token_str = token.to_string();
+                let issued_at_ms = match live_webrtc_now_ms() {
+                    Ok(now) => now,
+                    Err(err) => {
+                        close_live_channel_after_open_failure(
+                            host,
+                            runtime,
+                            &session_id,
+                            &channel_id,
+                        )
+                        .await;
+                        return RpcResponse::error(id, error::INTERNAL_ERROR, err);
+                    }
+                };
+                let ttl_ms = match live_webrtc_duration_ms(webrtc_state.token_ttl()) {
+                    Ok(ttl) => ttl,
+                    Err(err) => {
+                        close_live_channel_after_open_failure(
+                            host,
+                            runtime,
+                            &session_id,
+                            &channel_id,
+                        )
+                        .await;
+                        return RpcResponse::error(id, error::INTERNAL_ERROR, err);
+                    }
+                };
+                let token_authority = match runtime
+                    .runtime_adapter()
+                    .record_live_webrtc_token_issued(
+                        &session_id,
+                        &channel_id,
+                        &token_str,
+                        issued_at_ms,
+                        ttl_ms,
+                    )
+                    .await
+                {
+                    Ok(authority) => authority,
+                    Err(err) => {
+                        close_live_channel_after_open_failure(
+                            host,
+                            runtime,
+                            &session_id,
+                            &channel_id,
+                        )
+                        .await;
+                        return RpcResponse::error(
+                            id,
+                            error::INTERNAL_ERROR,
+                            format!("live WebRTC token authority rejected issue: {err}"),
+                        );
+                    }
+                };
                 LiveTransportBootstrap::Webrtc {
-                    token: token.to_string(),
+                    token: token_authority.token,
                     answer_method: LIVE_WEBRTC_ANSWER_METHOD.to_string(),
                     http_url: None,
                 }
             }
             #[cfg(not(feature = "live-webrtc"))]
             {
-                let _ = host.close_channel(&channel_id).await;
+                close_live_channel_after_open_failure(host, runtime, &session_id, &channel_id)
+                    .await;
                 return RpcResponse::error(
                     id,
                     error::INVALID_PARAMS,
@@ -443,7 +1201,7 @@ pub async fn handle_live_open(
         }
         #[allow(unreachable_patterns)]
         _ => {
-            let _ = host.close_channel(&channel_id).await;
+            close_live_channel_after_open_failure(host, runtime, &session_id, &channel_id).await;
             return RpcResponse::error(
                 id,
                 error::INVALID_PARAMS,
@@ -497,43 +1255,104 @@ pub async fn handle_live_webrtc_answer(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
     live_webrtc: &LiveWebrtcState,
+    runtime: &Arc<SessionRuntime>,
 ) -> RpcResponse {
     let parsed: LiveWebrtcAnswerParams = match super::parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp,
     };
     let channel_id = LiveChannelId::new(parsed.channel_id.clone());
-
-    match live_webrtc
-        .answer_offer(channel_id, &parsed.token, parsed.offer_sdp)
+    let request_kind =
+        meerkat_runtime::meerkat_machine::dsl::LiveChannelRequestPublicKind::WebrtcAnswer;
+    let session_id = match runtime
+        .runtime_adapter()
+        .live_session_for_webrtc_token(&parsed.token)
         .await
     {
-        Ok(answer_sdp) => match serde_json::to_value(LiveWebrtcAnswerResult { answer_sdp }) {
-            Ok(value) => RpcResponse::success(id, value),
-            Err(err) => RpcResponse::error(
+        Some(session_id) => session_id,
+        None => match live_session_id_from_machine_authority(runtime, &channel_id).await {
+            Some(session_id) => session_id,
+            None => {
+                return live_unbound_channel_request_error_response(
+                    id,
+                    runtime,
+                    &channel_id,
+                    request_kind,
+                )
+                .await;
+            }
+        },
+    };
+
+    let observed_at_ms = match live_webrtc_now_ms() {
+        Ok(now) => now,
+        Err(err) => return RpcResponse::error(id, error::INTERNAL_ERROR, err),
+    };
+    let admission = match runtime
+        .runtime_adapter()
+        .resolve_live_webrtc_answer_admission(
+            &session_id,
+            &channel_id,
+            &parsed.token,
+            observed_at_ms,
+        )
+        .await
+    {
+        Ok(admission) => admission,
+        Err(error) => {
+            return RpcResponse::error(
                 id,
                 error::INTERNAL_ERROR,
-                format!("failed to serialize LiveWebrtcAnswerResult: {err}"),
-            ),
-        },
-        Err(meerkat_live::LiveWebrtcError::InvalidToken(err)) => RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            format!("invalid WebRTC live token: {err}"),
-        ),
-        Err(meerkat_live::LiveWebrtcError::ChannelNotFound(channel)) => RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            format!("channel {channel} not found"),
-        ),
-        Err(meerkat_live::LiveWebrtcError::Json(err)) => {
-            RpcResponse::error(id, error::INVALID_PARAMS, err.to_string())
+                format!("live WebRTC answer admission authority rejected result: {error}"),
+            );
         }
-        Err(err) => RpcResponse::error(
+    };
+    if !admission.admitted {
+        return live_webrtc_answer_admission_error_response_from_machine_authority(
             id,
-            error::INVALID_PARAMS,
-            format!("failed to answer WebRTC offer: {err}"),
-        ),
+            runtime,
+            &session_id,
+            &admission,
+            &channel_id,
+        )
+        .await;
+    }
+
+    match live_webrtc
+        .answer_offer(channel_id.clone(), parsed.offer_sdp)
+        .await
+    {
+        Ok(answer) => {
+            let authority = match runtime
+                .runtime_adapter()
+                .resolve_live_webrtc_answer_result(
+                    &session_id,
+                    &channel_id,
+                    answer.answer_observation_sequence,
+                )
+                .await
+            {
+                Ok(authority) => authority,
+                Err(error) => {
+                    return RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("live WebRTC answer result authority rejected result: {error}"),
+                    );
+                }
+            };
+            match live_webrtc_answer_result_from_machine_authority(&authority, answer.answer_sdp)
+                .and_then(|result| {
+                    serde_json::to_value(result)
+                        .map_err(|err| format!("failed to serialize LiveWebrtcAnswerResult: {err}"))
+                }) {
+                Ok(value) => RpcResponse::success(id, value),
+                Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err),
+            }
+        }
+        Err(err) => {
+            live_webrtc_answer_error_response(id, runtime, &session_id, &channel_id, &err).await
+        }
     }
 }
 
@@ -541,6 +1360,7 @@ pub async fn handle_live_status(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
     host: &LiveAdapterHost,
+    runtime: &Arc<SessionRuntime>,
 ) -> RpcResponse {
     let parsed: LiveChannelParams = match super::parse_params(params) {
         Ok(p) => p,
@@ -548,17 +1368,45 @@ pub async fn handle_live_status(
     };
     let channel_id = LiveChannelId::new(&parsed.channel_id);
 
-    match host.channel_status(&channel_id).await {
-        Ok(status) => {
-            // R6-3 (P2): convert core → typed wire mirror so SDK codegen
-            // emits a discriminated union for `status` instead of an
-            // opaque `Value`/`Any`.
-            let result = LiveStatusResult {
-                channel_id: parsed.channel_id,
-                status: WireLiveAdapterStatus::from(status),
+    let request_kind = meerkat_runtime::meerkat_machine::dsl::LiveChannelRequestPublicKind::Status;
+    let session_id = match runtime
+        .runtime_adapter()
+        .live_session_for_status_channel(&channel_id)
+        .await
+    {
+        Some(session_id) => session_id,
+        None => {
+            return live_unbound_channel_request_error_response(
+                id,
+                runtime,
+                &channel_id,
+                request_kind,
+            )
+            .await;
+        }
+    };
+
+    match host.channel_status_observation(&channel_id).await {
+        Ok(observation) => {
+            let authority = match runtime
+                .runtime_adapter()
+                .resolve_live_channel_status_result(&session_id, &observation)
+                .await
+            {
+                Ok(authority) => authority,
+                Err(error) => {
+                    return RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("live status authority rejected result: {error}"),
+                    );
+                }
             };
-            // N75: see `handle_live_open` — same INTERNAL_ERROR fallback for
-            // a serialization failure that should never happen in practice.
+            let result =
+                match live_status_result_from_machine_authority(parsed.channel_id, &authority) {
+                    Ok(result) => result,
+                    Err(error) => return RpcResponse::error(id, error::INTERNAL_ERROR, error),
+                };
             match serde_json::to_value(result) {
                 Ok(value) => RpcResponse::success(id, value),
                 Err(err) => RpcResponse::error(
@@ -568,12 +1416,17 @@ pub async fn handle_live_status(
                 ),
             }
         }
-        Err(LiveAdapterHostError::ChannelNotFound(_)) => RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            format!("channel {} not found", parsed.channel_id),
-        ),
-        Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
+        Err(err) => {
+            live_channel_request_error_response(
+                id,
+                runtime,
+                &session_id,
+                &channel_id,
+                request_kind,
+                &err,
+            )
+            .await
+        }
     }
 }
 
@@ -581,6 +1434,7 @@ pub async fn handle_live_close(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
     host: &LiveAdapterHost,
+    runtime: &Arc<SessionRuntime>,
 ) -> RpcResponse {
     let parsed: LiveChannelParams = match super::parse_params(params) {
         Ok(p) => p,
@@ -588,14 +1442,80 @@ pub async fn handle_live_close(
     };
     let channel_id = LiveChannelId::new(&parsed.channel_id);
 
-    match host.close_channel(&channel_id).await {
-        Ok(()) => RpcResponse::success(id, serde_json::json!({"closed": true})),
-        Err(LiveAdapterHostError::ChannelNotFound(_)) => RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            format!("channel {} not found", parsed.channel_id),
-        ),
-        Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
+    let request_kind = meerkat_runtime::meerkat_machine::dsl::LiveChannelRequestPublicKind::Close;
+    let session_id = match live_session_id_from_machine_authority(runtime, &channel_id).await {
+        Some(session_id) => session_id,
+        None => {
+            return live_unbound_channel_request_error_response(
+                id,
+                runtime,
+                &channel_id,
+                request_kind,
+            )
+            .await;
+        }
+    };
+
+    match host.reserve_channel_close_observation(&channel_id).await {
+        Ok(observation) => {
+            let authority = match runtime
+                .runtime_adapter()
+                .resolve_live_close_result(&session_id, &observation)
+                .await
+            {
+                Ok(authority) => authority,
+                Err(error) => {
+                    return RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("live close authority rejected result: {error}"),
+                    );
+                }
+            };
+            let Some(close_commit_authority) = authority.channel_close_commit_authority() else {
+                return RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    "live close authority omitted host commit handoff".to_string(),
+                );
+            };
+            if let Err(error) = host
+                .commit_channel_close_observation(&observation, close_commit_authority)
+                .await
+            {
+                return RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!("live close host commit failed after generated authority: {error}"),
+                );
+            }
+            let result = match live_close_result_from_machine_authority(&authority) {
+                Ok(result) => result,
+                Err(error) => return RpcResponse::error(id, error::INTERNAL_ERROR, error),
+            };
+            let body = match serde_json::to_value(result) {
+                Ok(body) => body,
+                Err(error) => {
+                    return RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("live close authority projection failed: {error}"),
+                    );
+                }
+            };
+            RpcResponse::success(id, body)
+        }
+        Err(err) => {
+            live_channel_request_error_response(
+                id,
+                runtime,
+                &session_id,
+                &channel_id,
+                request_kind,
+                &err,
+            )
+            .await
+        }
     }
 }
 
@@ -618,8 +1538,9 @@ pub async fn handle_live_close(
 /// identity is bound at WebSocket handshake time.
 ///
 /// Triggered by upstream session-state changes (mutable-config edits via
-/// `config/patch`, instructions drift after a session edit, etc.). Maps to
-/// [`LiveAdapterCommand::Refresh { snapshot }`].
+/// `config/patch`, instructions drift after a session edit, etc.). The host
+/// maps this to [`LiveAdapterCommand::Refresh { snapshot }`] and returns typed
+/// queue-acceptance evidence.
 ///
 /// The adapter does not decide whether the refresh is legal — the runtime
 /// builds a snapshot from the same `live_open_config_for_session` helper
@@ -628,15 +1549,12 @@ pub async fn handle_live_close(
 /// observation.
 ///
 /// **R7 — honest response shape.** The reply field is `refresh_enqueued`,
-/// not `refreshed`. `LiveAdapterHost::send_command` queues the command on
-/// the adapter's mpsc command channel and returns once the queue accepts
-/// it; the adapter pump applies the refresh asynchronously. The RPC reply
-/// only confirms enqueue. Callers that need the actual refresh outcome
-/// must observe the adapter's realtime stream — failures surface as
-/// `LiveAdapterObservation::Error`. A future revision may add a oneshot
-/// ack from the adapter pump back through the command channel; today the
-/// pump is fire-and-forget and adding the ack would require coordinated
-/// changes in every provider's pump (out of scope for this fix wave).
+/// not `refreshed`. `LiveAdapterHost::enqueue_refresh` queues the command on
+/// the adapter command channel and returns typed queue-acceptance evidence;
+/// generated MeerkatMachine authority projects that evidence to the public
+/// result class. The adapter pump applies the refresh asynchronously. Callers
+/// that need the actual refresh outcome must observe the adapter's realtime
+/// stream — failures surface as `LiveAdapterObservation::Error`.
 pub async fn handle_live_refresh(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
@@ -649,16 +1567,18 @@ pub async fn handle_live_refresh(
     };
     let channel_id = LiveChannelId::new(&parsed.channel_id);
 
-    let session_id = match host.channel_session(&channel_id).await {
-        Ok(id) => id,
-        Err(LiveAdapterHostError::ChannelNotFound(_)) => {
-            return RpcResponse::error(
+    let request_kind = meerkat_runtime::meerkat_machine::dsl::LiveChannelRequestPublicKind::Refresh;
+    let session_id = match live_session_id_from_machine_authority(runtime, &channel_id).await {
+        Some(session_id) => session_id,
+        None => {
+            return live_unbound_channel_request_error_response(
                 id,
-                error::INVALID_PARAMS,
-                format!("channel {} not found", parsed.channel_id),
-            );
+                runtime,
+                &channel_id,
+                request_kind,
+            )
+            .await;
         }
-        Err(err) => return RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
     };
 
     let open_config = match runtime
@@ -682,44 +1602,66 @@ pub async fn handle_live_refresh(
     let mut snapshot = build_live_projection_snapshot(&session_id, &open_config);
     match host.next_snapshot_version(&channel_id).await {
         Ok(v) => snapshot.snapshot_version = v,
-        Err(LiveAdapterHostError::ChannelNotFound(_)) => {
-            return RpcResponse::error(
+        Err(err) => {
+            return live_channel_request_error_response(
                 id,
-                error::INVALID_PARAMS,
-                format!("channel {} not found", parsed.channel_id),
-            );
+                runtime,
+                &session_id,
+                &channel_id,
+                request_kind,
+                &err,
+            )
+            .await;
         }
-        Err(err) => return RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
     }
 
-    match host
-        .send_command(&channel_id, LiveAdapterCommand::Refresh { snapshot })
-        .await
-    {
-        // R7 + R4-5: typed `LiveRefreshResult { status: queued,
-        // refresh_enqueued: true }`. The host has accepted the command
-        // onto the adapter's mpsc queue, but the adapter pump applies it
-        // asynchronously — the realtime stream is the source of truth for
-        // the actual outcome (failures appear as `Error` observations).
-        // The `refresh_enqueued` field is preserved for back-compat with
-        // R7-era clients; new code should route on the typed `status`
-        // discriminator. See doc-comment on `handle_live_refresh`.
-        Ok(()) => {
-            let body = serde_json::to_value(LiveRefreshResult::queued())
-                .unwrap_or_else(|_| serde_json::json!({"refresh_enqueued": true}));
+    match host.enqueue_refresh(&channel_id, snapshot).await {
+        // R7 + Dogma #1: host queue acceptance is an observation only. The
+        // public `status: queued` discriminator and the back-compat
+        // `refresh_enqueued` mirror are emitted by generated MeerkatMachine
+        // authority before the RPC surface projects the wire payload.
+        Ok(acceptance) => {
+            let authority = match runtime
+                .runtime_adapter()
+                .resolve_live_refresh_queued_result(&session_id, &acceptance)
+                .await
+            {
+                Ok(authority) => authority,
+                Err(error) => {
+                    return RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("live refresh queued authority rejected result: {error}"),
+                    );
+                }
+            };
+            let result = match live_refresh_result_from_machine_authority(&authority) {
+                Ok(result) => result,
+                Err(error) => return RpcResponse::error(id, error::INTERNAL_ERROR, error),
+            };
+            let body = match serde_json::to_value(result) {
+                Ok(body) => body,
+                Err(error) => {
+                    return RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("live refresh queued authority projection failed: {error}"),
+                    );
+                }
+            };
             RpcResponse::success(id, body)
         }
-        Err(LiveAdapterHostError::ChannelNotFound(_)) => RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            format!("channel {} not found", parsed.channel_id),
-        ),
-        Err(LiveAdapterHostError::NoAdapter(_)) => RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            format!("channel {} has no adapter attached", parsed.channel_id),
-        ),
-        Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
+        Err(err) => {
+            live_channel_request_error_response(
+                id,
+                runtime,
+                &session_id,
+                &channel_id,
+                request_kind,
+                &err,
+            )
+            .await
+        }
     }
 }
 
@@ -803,6 +1745,7 @@ pub async fn handle_live_send_input(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
     host: &LiveAdapterHost,
+    runtime: &Arc<SessionRuntime>,
 ) -> RpcResponse {
     let parsed: LiveSendInputParams = match super::parse_params(params) {
         Ok(p) => p,
@@ -816,19 +1759,41 @@ pub async fn handle_live_send_input(
         }
     };
 
-    match host.send_input(&channel_id, chunk).await {
-        Ok(()) => RpcResponse::success(id, serde_json::json!({"sent": true})),
-        Err(LiveAdapterHostError::ChannelNotFound(_)) => RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            format!("channel {} not found", parsed.channel_id),
-        ),
-        Err(LiveAdapterHostError::NoAdapter(_)) => RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            format!("channel {} has no adapter attached", parsed.channel_id),
-        ),
-        Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
+    let command_kind = meerkat_runtime::meerkat_machine::dsl::LiveCommandPublicKind::SendInput;
+    let session_id =
+        match live_command_session_id_from_machine_authority(runtime, &channel_id).await {
+            Some(session_id) => session_id,
+            None => {
+                return live_unbound_command_error_response(id, runtime, &channel_id, command_kind)
+                    .await;
+            }
+        };
+
+    match host.send_input_observed(&channel_id, chunk).await {
+        Ok(acceptance) => {
+            let authority = match runtime
+                .runtime_adapter()
+                .resolve_live_command_result(&session_id, &acceptance)
+                .await
+            {
+                Ok(authority) => authority,
+                Err(error) => {
+                    return RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("live send_input authority rejected result: {error}"),
+                    );
+                }
+            };
+            match live_command_result_from_machine_authority(&authority, command_kind) {
+                Ok(value) => RpcResponse::success(id, value),
+                Err(error) => RpcResponse::error(id, error::INTERNAL_ERROR, error),
+            }
+        }
+        Err(err) => {
+            live_command_error_response(id, runtime, &session_id, &channel_id, command_kind, &err)
+                .await
+        }
     }
 }
 
@@ -842,6 +1807,7 @@ pub async fn handle_live_commit_input(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
     host: &LiveAdapterHost,
+    runtime: &Arc<SessionRuntime>,
 ) -> RpcResponse {
     let parsed: LiveCommitInputParams = match super::parse_params(params) {
         Ok(p) => p,
@@ -864,25 +1830,47 @@ pub async fn handle_live_commit_input(
         None => None,
     };
 
+    let command_kind = meerkat_runtime::meerkat_machine::dsl::LiveCommandPublicKind::CommitInput;
+    let session_id =
+        match live_command_session_id_from_machine_authority(runtime, &channel_id).await {
+            Some(session_id) => session_id,
+            None => {
+                return live_unbound_command_error_response(id, runtime, &channel_id, command_kind)
+                    .await;
+            }
+        };
+
     match host
-        .send_command(
+        .send_command_observed(
             &channel_id,
             LiveAdapterCommand::CommitInput { response_modality },
         )
         .await
     {
-        Ok(()) => RpcResponse::success(id, serde_json::json!({"committed": true})),
-        Err(LiveAdapterHostError::ChannelNotFound(_)) => RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            format!("channel {} not found", parsed.channel_id),
-        ),
-        Err(LiveAdapterHostError::NoAdapter(_)) => RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            format!("channel {} has no adapter attached", parsed.channel_id),
-        ),
-        Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
+        Ok(acceptance) => {
+            let authority = match runtime
+                .runtime_adapter()
+                .resolve_live_command_result(&session_id, &acceptance)
+                .await
+            {
+                Ok(authority) => authority,
+                Err(error) => {
+                    return RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("live commit_input authority rejected result: {error}"),
+                    );
+                }
+            };
+            match live_command_result_from_machine_authority(&authority, command_kind) {
+                Ok(value) => RpcResponse::success(id, value),
+                Err(error) => RpcResponse::error(id, error::INTERNAL_ERROR, error),
+            }
+        }
+        Err(err) => {
+            live_command_error_response(id, runtime, &session_id, &channel_id, command_kind, &err)
+                .await
+        }
     }
 }
 
@@ -912,6 +1900,7 @@ pub async fn handle_live_interrupt(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
     host: &LiveAdapterHost,
+    runtime: &Arc<SessionRuntime>,
     #[cfg(feature = "live-webrtc")] webrtc_state: Option<&meerkat_live::LiveWebrtcState>,
 ) -> RpcResponse {
     let parsed: LiveChannelParams = match super::parse_params(params) {
@@ -919,27 +1908,48 @@ pub async fn handle_live_interrupt(
         Err(resp) => return resp,
     };
     let channel_id = LiveChannelId::new(&parsed.channel_id);
+    let command_kind = meerkat_runtime::meerkat_machine::dsl::LiveCommandPublicKind::Interrupt;
+    let session_id =
+        match live_command_session_id_from_machine_authority(runtime, &channel_id).await {
+            Some(session_id) => session_id,
+            None => {
+                return live_unbound_command_error_response(id, runtime, &channel_id, command_kind)
+                    .await;
+            }
+        };
     #[cfg(feature = "live-webrtc")]
     if let Some(state) = webrtc_state {
         state.discard_output_audio(&channel_id).await;
     }
 
     match host
-        .send_command(&channel_id, LiveAdapterCommand::Interrupt)
+        .send_command_observed(&channel_id, LiveAdapterCommand::Interrupt)
         .await
     {
-        Ok(()) => RpcResponse::success(id, serde_json::json!({"interrupted": true})),
-        Err(LiveAdapterHostError::ChannelNotFound(_)) => RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            format!("channel {} not found", parsed.channel_id),
-        ),
-        Err(LiveAdapterHostError::NoAdapter(_)) => RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            format!("channel {} has no adapter attached", parsed.channel_id),
-        ),
-        Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
+        Ok(acceptance) => {
+            let authority = match runtime
+                .runtime_adapter()
+                .resolve_live_command_result(&session_id, &acceptance)
+                .await
+            {
+                Ok(authority) => authority,
+                Err(error) => {
+                    return RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("live interrupt authority rejected result: {error}"),
+                    );
+                }
+            };
+            match live_command_result_from_machine_authority(&authority, command_kind) {
+                Ok(value) => RpcResponse::success(id, value),
+                Err(error) => RpcResponse::error(id, error::INTERNAL_ERROR, error),
+            }
+        }
+        Err(err) => {
+            live_command_error_response(id, runtime, &session_id, &channel_id, command_kind, &err)
+                .await
+        }
     }
 }
 
@@ -949,6 +1959,7 @@ pub async fn handle_live_truncate(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
     host: &LiveAdapterHost,
+    runtime: &Arc<SessionRuntime>,
     #[cfg(feature = "live-webrtc")] webrtc_state: Option<&meerkat_live::LiveWebrtcState>,
 ) -> RpcResponse {
     let parsed: LiveTruncateParams = match super::parse_params(params) {
@@ -968,6 +1979,16 @@ pub async fn handle_live_truncate(
     }
 
     let channel_id = LiveChannelId::new(&parsed.channel_id);
+    let command_kind =
+        meerkat_runtime::meerkat_machine::dsl::LiveCommandPublicKind::TruncateAssistantOutput;
+    let session_id =
+        match live_command_session_id_from_machine_authority(runtime, &channel_id).await {
+            Some(session_id) => session_id,
+            None => {
+                return live_unbound_command_error_response(id, runtime, &channel_id, command_kind)
+                    .await;
+            }
+        };
     #[cfg(feature = "live-webrtc")]
     if let Some(state) = webrtc_state {
         state.discard_output_audio(&channel_id).await;
@@ -978,19 +1999,31 @@ pub async fn handle_live_truncate(
         audio_played_ms: parsed.audio_played_ms,
     };
 
-    match host.send_command(&channel_id, command).await {
-        Ok(()) => RpcResponse::success(id, serde_json::json!({"truncated": true})),
-        Err(LiveAdapterHostError::ChannelNotFound(_)) => RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            format!("channel {} not found", parsed.channel_id),
-        ),
-        Err(LiveAdapterHostError::NoAdapter(_)) => RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            format!("channel {} has no adapter attached", parsed.channel_id),
-        ),
-        Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
+    match host.send_command_observed(&channel_id, command).await {
+        Ok(acceptance) => {
+            let authority = match runtime
+                .runtime_adapter()
+                .resolve_live_command_result(&session_id, &acceptance)
+                .await
+            {
+                Ok(authority) => authority,
+                Err(error) => {
+                    return RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("live truncate authority rejected result: {error}"),
+                    );
+                }
+            };
+            match live_command_result_from_machine_authority(&authority, command_kind) {
+                Ok(value) => RpcResponse::success(id, value),
+                Err(error) => RpcResponse::error(id, error::INTERNAL_ERROR, error),
+            }
+        }
+        Err(err) => {
+            live_command_error_response(id, runtime, &session_id, &channel_id, command_kind, &err)
+                .await
+        }
     }
 }
 
@@ -1004,6 +2037,37 @@ mod tests {
     use meerkat_core::live_adapter::{
         LiveAdapterStatus, LiveChannelCapabilities, LiveContinuityMode,
     };
+
+    fn test_live_identity() -> SessionLlmIdentity {
+        SessionLlmIdentity {
+            model: "gpt-realtime-2".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        }
+    }
+
+    async fn open_test_channel(
+        host: &meerkat_live::LiveAdapterHost,
+        session_id: meerkat_core::types::SessionId,
+    ) -> meerkat_live::LiveChannelId {
+        let machine = meerkat_runtime::meerkat_machine::MeerkatMachine::ephemeral();
+        machine.register_session(session_id.clone()).await;
+        let channel_id = meerkat_live::LiveChannelId::random_uuid();
+        let identity = test_live_identity();
+        let authority = machine
+            .resolve_live_open_admission(&session_id, &channel_id, &identity)
+            .await
+            .expect("generated live open admission");
+        host.open_channel_with_authority(
+            authority
+                .channel_open_authority()
+                .expect("generated live open handoff"),
+        )
+        .await
+        .expect("open_channel")
+    }
 
     fn round_trip<T>(value: &T) -> T
     where
@@ -1225,6 +2289,78 @@ mod tests {
     }
 
     #[test]
+    fn live_status_success_reply_is_machine_owned() {
+        let authority = meerkat_runtime::meerkat_machine::LiveChannelStatusAuthority {
+            status: meerkat_runtime::meerkat_machine::dsl::LiveChannelPublicStatus::Degraded,
+            sequence: 1,
+            status_observation_sequence: 3,
+            degradation_reason: Some(
+                meerkat_runtime::meerkat_machine::dsl::LiveChannelDegradationReason::Other,
+            ),
+            degradation_detail: Some("provider reported degraded mode".to_string()),
+            channel_status_commit_authority: None,
+        };
+
+        let reply = serde_json::to_value(
+            live_status_result_from_machine_authority("live_1".to_string(), &authority)
+                .expect("generated status authority should project to wire"),
+        )
+        .expect("LiveStatusResult must round-trip through serde");
+
+        assert_eq!(reply["channel_id"], "live_1");
+        assert_eq!(reply["status"]["status"], "degraded");
+        assert_eq!(reply["status"]["reason"]["kind"], "other");
+        assert_eq!(
+            reply["status"]["reason"]["detail"],
+            "provider reported degraded mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_close_success_reply_is_machine_owned() {
+        let host = meerkat_live::LiveAdapterHost::new(std::sync::Arc::new(
+            meerkat_live::NoOpProjectionSink,
+        ));
+        let machine = meerkat_runtime::meerkat_machine::MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        machine.register_session(session_id.clone()).await;
+        let channel_id = LiveChannelId::random_uuid();
+        let identity = test_live_identity();
+        let open_authority = machine
+            .resolve_live_open_admission(&session_id, &channel_id, &identity)
+            .await
+            .expect("generated live open admission");
+        host.open_channel_with_authority(
+            open_authority
+                .channel_open_authority()
+                .expect("generated live open handoff"),
+        )
+        .await
+        .expect("open_channel");
+        let close_observation = host
+            .reserve_channel_close_observation(&channel_id)
+            .await
+            .expect("reserve close observation");
+        let authority = machine
+            .resolve_live_close_result(&session_id, &close_observation)
+            .await
+            .expect("generated live close authority");
+        assert!(
+            authority.channel_close_commit_authority().is_some(),
+            "generated live close authority should carry host commit handoff"
+        );
+
+        let reply = serde_json::to_value(
+            live_close_result_from_machine_authority(&authority)
+                .expect("generated close authority should project to wire"),
+        )
+        .expect("LiveCloseResult must round-trip through serde");
+
+        assert_eq!(reply["status"], "closed");
+        assert_eq!(reply["closed"], true);
+    }
+
+    #[test]
     fn live_input_chunk_wire_text_roundtrip() {
         let v = LiveInputChunkWire::Text {
             text: "hello".into(),
@@ -1337,9 +2473,8 @@ mod tests {
     /// must produce a URL that contains `?token=`, `&channel=`, and
     /// `&format=pcm_24k_mono` in that order. Reconstruct it with the same
     /// constant the handler uses; if a future refactor drops the `format=`
-    /// query parameter, the WS server will silently reject every binary
-    /// frame as `binary_format_unnegotiated` and audio will appear to
-    /// "vanish" mid-call.
+    /// query parameter, the WS server will fail closed on every binary
+    /// frame and audio will appear to "vanish" mid-call.
     #[test]
     fn live_open_url_carries_token_and_format_params() {
         let base_url = "ws://localhost:9999";
@@ -1436,12 +2571,12 @@ mod tests {
 
     // ---------------------------------------------------------------------
     // P1#5: live/refresh dispatches LiveAdapterCommand::Refresh through
-    // LiveAdapterHost::send_command on the channel's adapter.
+    // LiveAdapterHost::enqueue_refresh on the channel's adapter.
     // ---------------------------------------------------------------------
 
     /// P1#5: an adapter that records every command it receives so the test
     /// can assert that `Refresh { snapshot }` actually propagates through
-    /// `LiveAdapterHost::send_command`.
+    /// `LiveAdapterHost::enqueue_refresh`.
     struct RecordingAdapter {
         log: Arc<tokio::sync::Mutex<Vec<LiveAdapterCommand>>>,
     }
@@ -1471,13 +2606,10 @@ mod tests {
         }
     }
 
-    /// P1#5: the host-level send_command path must forward
+    /// P1#5: the host-level refresh enqueue path must forward
     /// `LiveAdapterCommand::Refresh { snapshot }` verbatim to the channel's
-    /// adapter. `handle_live_refresh` calls `host.send_command(channel_id,
-    /// Refresh { snapshot })` after building a fresh snapshot from the
-    /// session's runtime config; this test pins the host-side dispatch
-    /// half of that path so a future refactor that drops the Refresh arm
-    /// or routes it elsewhere fails here.
+    /// adapter and mint typed queue-acceptance evidence. `handle_live_refresh`
+    /// consumes that evidence before projecting the generated machine result.
     #[tokio::test]
     async fn host_forwards_refresh_command_to_adapter() {
         use meerkat_core::live_adapter::LiveProjectionSnapshot;
@@ -1488,10 +2620,7 @@ mod tests {
             meerkat_live::NoOpProjectionSink,
         ));
         let session_id = SessionId::new();
-        let channel_id = host
-            .open_channel(session_id.clone())
-            .await
-            .expect("open_channel");
+        let channel_id = open_test_channel(&host, session_id.clone()).await;
         let log: Arc<tokio::sync::Mutex<Vec<LiveAdapterCommand>>> =
             Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let adapter: Arc<dyn meerkat_core::live_adapter::LiveAdapter> =
@@ -1513,14 +2642,12 @@ mod tests {
             audio_config: None,
             runtime_system_context: vec![],
         };
-        host.send_command(
-            &channel_id,
-            LiveAdapterCommand::Refresh {
-                snapshot: snapshot.clone(),
-            },
-        )
-        .await
-        .expect("send Refresh command");
+        let acceptance = host
+            .enqueue_refresh(&channel_id, snapshot.clone())
+            .await
+            .expect("enqueue Refresh command");
+        assert_eq!(acceptance.channel_id(), channel_id.as_str());
+        assert_eq!(acceptance.acceptance_sequence(), 1);
 
         let recorded = log.lock().await;
         assert_eq!(recorded.len(), 1, "exactly one command should be recorded");
@@ -1562,10 +2689,7 @@ mod tests {
             meerkat_live::NoOpProjectionSink,
         ));
         let session_id = SessionId::new();
-        let channel_id = host
-            .open_channel(session_id.clone())
-            .await
-            .expect("open_channel");
+        let channel_id = open_test_channel(&host, session_id.clone()).await;
         let log: Arc<tokio::sync::Mutex<Vec<LiveAdapterCommand>>> =
             Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let adapter: Arc<dyn meerkat_core::live_adapter::LiveAdapter> =
@@ -1588,10 +2712,11 @@ mod tests {
 
     // ---------------------------------------------------------------------
     // R7: live/refresh's reply field is `refresh_enqueued`, not
-    // `refreshed`, because `LiveAdapterHost::send_command` returns when the
-    // command is queued on the adapter's mpsc channel — not when the pump
-    // has applied it. The field name documents the honest semantics; the
-    // realtime stream is the source of truth for the actual outcome.
+    // `refreshed`, because `LiveAdapterHost::enqueue_refresh` returns typed
+    // evidence that the command was queued on the adapter command channel —
+    // not that the pump has applied it. The field name documents the honest
+    // semantics; the realtime stream is the source of truth for the actual
+    // outcome.
     // ---------------------------------------------------------------------
 
     /// R7: reconstruct the success-reply shape `handle_live_refresh` emits
@@ -1599,14 +2724,20 @@ mod tests {
     /// true` (back-compat) and must NOT contain a `refreshed` key.
     ///
     /// R4-5 (P3): the same payload now also carries the typed
-    /// `status: "queued"` discriminator from `LiveRefreshResult`.
+    /// `status: "queued"` discriminator projected from generated authority.
     #[test]
     fn live_refresh_success_reply_is_refresh_enqueued_not_refreshed() {
-        // Mirror of the typed payload `handle_live_refresh`'s Ok arm now
-        // emits — `LiveRefreshResult::queued()` round-trips through the same
-        // serde shape the handler ships on the wire.
-        let reply = serde_json::to_value(LiveRefreshResult::queued())
-            .expect("LiveRefreshResult must round-trip through serde");
+        let authority = meerkat_runtime::meerkat_machine::LiveRefreshResultAuthority {
+            status: meerkat_runtime::meerkat_machine::dsl::LiveRefreshPublicStatus::Queued,
+            refresh_enqueued: true,
+            sequence: 1,
+            queue_acceptance_sequence: 1,
+        };
+        let reply = serde_json::to_value(
+            live_refresh_result_from_machine_authority(&authority)
+                .expect("generated queued authority should project to wire"),
+        )
+        .expect("LiveRefreshResult must round-trip through serde");
         assert_eq!(
             reply.get("refresh_enqueued"),
             Some(&serde_json::json!(true)),
@@ -1618,8 +2749,8 @@ mod tests {
              pump is async and the field name was a lie about completion timing"
         );
         // R4-5 (P3): typed status discriminator coexists with the legacy
-        // boolean. New SDK code routes on `status` and treats unknown
-        // variants as "outcome unknown — observe the realtime stream".
+        // boolean. SDKs fail closed for statuses outside their generated
+        // contract.
         assert_eq!(
             reply.get("status"),
             Some(&serde_json::Value::String("queued".into())),
@@ -1646,7 +2777,7 @@ mod tests {
             meerkat_live::NoOpProjectionSink,
         ));
         let session_id = SessionId::new();
-        let channel_id = host.open_channel(session_id).await.expect("open_channel");
+        let channel_id = open_test_channel(&host, session_id).await;
         let v1 = host.next_snapshot_version(&channel_id).await.expect("v1");
         let v2 = host.next_snapshot_version(&channel_id).await.expect("v2");
         let v3 = host.next_snapshot_version(&channel_id).await.expect("v3");
@@ -1670,10 +2801,7 @@ mod tests {
             meerkat_live::NoOpProjectionSink,
         ));
         let session_id = SessionId::new();
-        let channel_id = host
-            .open_channel(session_id.clone())
-            .await
-            .expect("open_channel");
+        let channel_id = open_test_channel(&host, session_id.clone()).await;
         let log: Arc<tokio::sync::Mutex<Vec<LiveAdapterCommand>>> =
             Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let adapter: Arc<dyn meerkat_core::live_adapter::LiveAdapter> =
@@ -1703,9 +2831,9 @@ mod tests {
                 .next_snapshot_version(&channel_id)
                 .await
                 .expect("next_snapshot_version");
-            host.send_command(&channel_id, LiveAdapterCommand::Refresh { snapshot })
+            host.enqueue_refresh(&channel_id, snapshot)
                 .await
-                .expect("send Refresh");
+                .expect("enqueue Refresh");
         }
 
         let recorded = log.lock().await;

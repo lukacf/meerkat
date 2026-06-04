@@ -5,11 +5,9 @@ use meerkat_core::types::HandlingMode;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::driver::PostAdmissionSignal;
-use crate::input::Input;
-use crate::input_state::InputState;
+use crate::input_state::{InputState, InputStateSeed};
+use crate::meerkat_machine::dsl as mm_dsl;
 use crate::policy::PolicyDecision;
-use crate::policy_table::DefaultPolicyTable;
 use crate::runtime_state::RuntimeState;
 
 // `AcceptOutcome` is a domain envelope. The wire shape lives in
@@ -54,15 +52,143 @@ pub struct CoarseAdmissionFlags {
     pub wake_if_idle: bool,
 }
 
+/// Typed machine input that authorized a live admission resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MachineAdmissionAuthority {
+    input_id: String,
+    input_kind: mm_dsl::AdmissionInputKind,
+    requested_lane: Option<mm_dsl::InputLane>,
+    continuation_kind: mm_dsl::AdmissionContinuationKind,
+    silent_intent_match: bool,
+    existing_superseded_input_id: Option<String>,
+    runtime_running: bool,
+    active_turn_boundary_available: bool,
+    without_wake: bool,
+}
+
+impl MachineAdmissionAuthority {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        input_id: String,
+        input_kind: mm_dsl::AdmissionInputKind,
+        requested_lane: Option<mm_dsl::InputLane>,
+        continuation_kind: mm_dsl::AdmissionContinuationKind,
+        silent_intent_match: bool,
+        existing_superseded_input_id: Option<InputId>,
+        runtime_running: bool,
+        active_turn_boundary_available: bool,
+        without_wake: bool,
+    ) -> Self {
+        Self {
+            input_id,
+            input_kind,
+            requested_lane,
+            continuation_kind,
+            silent_intent_match,
+            existing_superseded_input_id: existing_superseded_input_id.map(|id| id.to_string()),
+            runtime_running,
+            active_turn_boundary_available,
+            without_wake,
+        }
+    }
+
+    pub(crate) fn input_id(&self) -> &str {
+        &self.input_id
+    }
+
+    pub(crate) fn without_wake(&self) -> bool {
+        self.without_wake
+    }
+
+    pub(crate) fn active_turn_boundary_available(&self) -> bool {
+        self.active_turn_boundary_available
+    }
+
+    pub(crate) fn to_dsl_input(&self) -> mm_dsl::MeerkatMachineInput {
+        mm_dsl::MeerkatMachineInput::ResolveAdmissionPlan {
+            input_id: self.input_id.clone(),
+            input_kind: self.input_kind,
+            requested_lane: self.requested_lane,
+            continuation_kind: self.continuation_kind,
+            silent_intent_match: self.silent_intent_match,
+            existing_superseded_input_id: self.existing_superseded_input_id.clone(),
+            runtime_running: self.runtime_running,
+            active_turn_boundary_available: self.active_turn_boundary_available,
+            without_wake: self.without_wake,
+        }
+    }
+}
+
 /// Machine-owned resolution of an accepted input's semantic admission path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAdmission {
-    pub policy: PolicyDecision,
-    pub handling_mode: HandlingMode,
-    pub runtime_semantics: crate::ingress_types::RuntimeInputSemantics,
-    pub primitive_projection: crate::ingress_types::RuntimeInputProjection,
-    pub admission_plan: AdmissionPlan,
-    pub coarse_flags: CoarseAdmissionFlags,
+    policy: PolicyDecision,
+    handling_mode: HandlingMode,
+    runtime_semantics: crate::ingress_types::RuntimeInputSemantics,
+    primitive_projection: crate::ingress_types::RuntimeInputProjection,
+    admission_plan: AdmissionPlan,
+    coarse_flags: CoarseAdmissionFlags,
+    requires_active_pre_admission: bool,
+    authority: MachineAdmissionAuthority,
+}
+
+impl ResolvedAdmission {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_machine_resolution(
+        policy: PolicyDecision,
+        handling_mode: HandlingMode,
+        runtime_semantics: crate::ingress_types::RuntimeInputSemantics,
+        primitive_projection: crate::ingress_types::RuntimeInputProjection,
+        admission_plan: AdmissionPlan,
+        coarse_flags: CoarseAdmissionFlags,
+        requires_active_pre_admission: bool,
+        authority: MachineAdmissionAuthority,
+    ) -> Self {
+        Self {
+            policy,
+            handling_mode,
+            runtime_semantics,
+            primitive_projection,
+            admission_plan,
+            coarse_flags,
+            requires_active_pre_admission,
+            authority,
+        }
+    }
+
+    pub(crate) fn coarse_flags(&self) -> CoarseAdmissionFlags {
+        self.coarse_flags
+    }
+
+    pub(crate) fn requires_active_runtime_pre_admission(&self) -> bool {
+        self.requires_active_pre_admission
+    }
+
+    pub(crate) fn stages_run_boundary(&self) -> bool {
+        self.policy.apply_mode == crate::policy::ApplyMode::StageRunBoundary
+    }
+
+    pub(crate) fn authority(&self) -> &MachineAdmissionAuthority {
+        &self.authority
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        PolicyDecision,
+        HandlingMode,
+        crate::ingress_types::RuntimeInputSemantics,
+        crate::ingress_types::RuntimeInputProjection,
+        AdmissionPlan,
+    ) {
+        (
+            self.policy,
+            self.handling_mode,
+            self.runtime_semantics,
+            self.primitive_projection,
+            self.admission_plan,
+        )
+    }
 }
 
 /// Typed reason why an input was rejected at the accept boundary.
@@ -123,6 +249,8 @@ pub enum AcceptOutcome {
         policy: PolicyDecision,
         /// Current input state.
         state: InputState,
+        /// Machine-owned lifecycle seed paired with `state`.
+        seed: InputStateSeed,
     },
     /// Input was deduplicated (idempotency key matched an existing input).
     Deduplicated {
@@ -155,63 +283,6 @@ impl AcceptOutcome {
     }
 }
 
-/// Classify the machine-owned admission disposition for an accepted input.
-///
-/// This is the semantic answer to “what happens to an accepted input?” Helpers
-/// should only apply the already-decided queue/lifecycle mutations.
-pub fn admission_plan_from_policy(
-    policy: &PolicyDecision,
-    handling_mode: HandlingMode,
-    existing_superseded_id: Option<InputId>,
-) -> AdmissionPlan {
-    if policy.apply_mode == crate::policy::ApplyMode::Ignore
-        && policy.consume_point == crate::policy::ConsumePoint::OnAccept
-    {
-        return AdmissionPlan::ConsumedOnAccept;
-    }
-
-    if policy.apply_mode == crate::policy::ApplyMode::Ignore {
-        return AdmissionPlan::Queued {
-            persist_and_queue: false,
-            queue_action: AdmissionQueueAction::None,
-            existing_action: None,
-        };
-    }
-
-    match policy.queue_mode {
-        crate::policy::QueueMode::Coalesce => AdmissionPlan::Queued {
-            persist_and_queue: true,
-            queue_action: AdmissionQueueAction::EnqueueTo {
-                target: handling_mode,
-            },
-            existing_action: existing_superseded_id
-                .map(|existing_id| ExistingQueuedAdmissionAction::Coalesce { existing_id }),
-        },
-        crate::policy::QueueMode::Supersede => AdmissionPlan::Queued {
-            persist_and_queue: true,
-            queue_action: AdmissionQueueAction::EnqueueTo {
-                target: handling_mode,
-            },
-            existing_action: existing_superseded_id
-                .map(|existing_id| ExistingQueuedAdmissionAction::Supersede { existing_id }),
-        },
-        crate::policy::QueueMode::Priority => AdmissionPlan::Queued {
-            persist_and_queue: true,
-            queue_action: AdmissionQueueAction::EnqueueFront {
-                target: handling_mode,
-            },
-            existing_action: None,
-        },
-        crate::policy::QueueMode::Fifo | crate::policy::QueueMode::None => AdmissionPlan::Queued {
-            persist_and_queue: true,
-            queue_action: AdmissionQueueAction::EnqueueTo {
-                target: handling_mode,
-            },
-            existing_action: None,
-        },
-    }
-}
-
 /// Derive the handling mode from a resolved policy decision.
 pub fn handling_mode_from_policy(policy: &PolicyDecision) -> HandlingMode {
     match policy.routing_disposition {
@@ -225,100 +296,6 @@ pub fn handling_mode_from_policy(policy: &PolicyDecision) -> HandlingMode {
             HandlingMode::Steer
         }
         _ => HandlingMode::Queue,
-    }
-}
-
-/// Whether this input requests immediate processing after admission.
-///
-/// This remains narrower than "routes through the steer lane". Some inputs
-/// route through checkpoint/steer paths for batching, but only explicit steer
-/// intent should request in-turn processing.
-pub fn requests_immediate_processing(input: &Input) -> bool {
-    matches!(input.handling_mode(), Some(HandlingMode::Steer))
-}
-
-/// Whether this input carries the "wake the runtime loop once the session
-/// reaches idle" intent.
-///
-/// Derived from the kind-level policy with `runtime_idle = false` (the
-/// Running-phase arm is where this flag actually matters; the Idle /
-/// Attached queued arms already emit `WakeLoop` unconditionally). Drives
-/// the DSL `wake_if_idle` field on `AcceptWithCompletion` so the machine
-/// emits `PostAdmissionSignal::WakeLoop` for late peer-response terminals
-/// and other queue-bound wake-if-idle inputs that arrive mid-turn.
-pub fn requests_wake_if_idle(input: &Input) -> bool {
-    matches!(
-        DefaultPolicyTable::resolve(input, false).wake_mode,
-        crate::WakeMode::WakeIfIdle,
-    )
-}
-
-/// Resolve the machine-owned semantic admission path for an accepted input.
-///
-/// Runtime helpers may still perform mechanical queue lookups (for example,
-/// determining which existing queued input would be superseded), but the
-/// semantic decision about policy, routing, and admission disposition is owned
-/// here rather than inside the driver helper.
-pub fn resolve_admission(
-    input: &Input,
-    runtime_idle: bool,
-    silent_intents: &[String],
-    existing_superseded_id: Option<InputId>,
-) -> ResolvedAdmission {
-    let mut policy = DefaultPolicyTable::resolve(input, runtime_idle);
-    crate::silent_intent::apply_silent_intent_override(input, silent_intents, &mut policy);
-    let handling_mode = handling_mode_from_policy(&policy);
-    let runtime_semantics =
-        crate::ingress_types::RuntimeInputSemantics::from_policy_and_input(&policy, input);
-    let primitive_projection = crate::input::runtime_input_projection(input);
-    let admission_plan = admission_plan_from_policy(&policy, handling_mode, existing_superseded_id);
-    let request_immediate_processing = !runtime_idle && requests_immediate_processing(input);
-    let interrupt_yielding = !request_immediate_processing
-        && matches!(policy.wake_mode, crate::WakeMode::InterruptYielding);
-    let wake_if_idle =
-        !request_immediate_processing && matches!(policy.wake_mode, crate::WakeMode::WakeIfIdle);
-
-    ResolvedAdmission {
-        policy,
-        handling_mode,
-        runtime_semantics,
-        primitive_projection,
-        admission_plan,
-        coarse_flags: CoarseAdmissionFlags {
-            request_immediate_processing,
-            interrupt_yielding,
-            wake_if_idle,
-        },
-    }
-}
-
-/// Classify the machine-owned post-admission control signal for a resolved
-/// accept outcome.
-///
-/// Admission-time wake / interrupt / immediate-processing semantics are owned
-/// by the checked-in Meerkat machine. The runtime helper may still carry other
-/// wake signals for non-admission bookkeeping, but plain accept classification
-/// should flow through this function.
-pub fn post_admission_signal_from_accept_outcome(
-    outcome: &AcceptOutcome,
-    request_immediate_processing: bool,
-) -> PostAdmissionSignal {
-    if !matches!(outcome, AcceptOutcome::Accepted { .. }) {
-        return PostAdmissionSignal::None;
-    }
-    if request_immediate_processing {
-        return PostAdmissionSignal::RequestImmediateProcessing;
-    }
-
-    match outcome {
-        AcceptOutcome::Accepted { policy, .. } => match policy.wake_mode {
-            crate::WakeMode::InterruptYielding => PostAdmissionSignal::InterruptYielding,
-            crate::WakeMode::WakeIfIdle => PostAdmissionSignal::WakeLoop,
-            crate::WakeMode::None => PostAdmissionSignal::None,
-        },
-        AcceptOutcome::Deduplicated { .. } | AcceptOutcome::Rejected { .. } => {
-            PostAdmissionSignal::None
-        }
     }
 }
 
@@ -347,6 +324,7 @@ mod tests {
                 policy_version: PolicyVersion(1),
             },
             state: InputState::new_accepted(InputId::new()),
+            seed: InputStateSeed::new_accepted(),
         };
         assert!(outcome.is_accepted());
         assert!(!outcome.is_deduplicated());
@@ -446,51 +424,5 @@ mod tests {
         };
 
         assert_eq!(handling_mode_from_policy(&policy), HandlingMode::Steer);
-    }
-
-    #[test]
-    fn idle_peer_steer_resolves_to_wake_loop_not_immediate() {
-        let input = Input::Peer(crate::input::PeerInput {
-            header: crate::input::InputHeader {
-                id: InputId::new(),
-                timestamp: chrono::Utc::now(),
-                source: crate::input::InputOrigin::Operator,
-                durability: crate::input::InputDurability::Durable,
-                visibility: crate::input::InputVisibility::default(),
-                idempotency_key: None,
-                supersession_key: None,
-                correlation_id: None,
-            },
-            convention: Some(crate::input::PeerConvention::Request {
-                request_id: "request-1".into(),
-                intent: "inspect".into(),
-            }),
-            body: "inspect this host".into(),
-            payload: None,
-            blocks: None,
-            handling_mode: Some(HandlingMode::Steer),
-        });
-
-        let resolved = resolve_admission(&input, true, &[], None);
-
-        assert_eq!(resolved.policy.apply_mode, ApplyMode::StageRunStart);
-        assert_eq!(resolved.handling_mode, HandlingMode::Steer);
-        assert!(
-            !resolved.coarse_flags.request_immediate_processing,
-            "idle steer must wake a fresh turn rather than request an active-turn immediate boundary"
-        );
-        assert!(resolved.coarse_flags.wake_if_idle);
-
-        let running_resolved = resolve_admission(&input, false, &[], None);
-
-        assert_eq!(
-            running_resolved.policy.apply_mode,
-            ApplyMode::StageRunBoundary
-        );
-        assert!(
-            running_resolved.coarse_flags.request_immediate_processing,
-            "running steer should still request active-turn immediate processing"
-        );
-        assert!(!running_resolved.coarse_flags.wake_if_idle);
     }
 }

@@ -11,7 +11,6 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
-use parking_lot::RwLock;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::Framed;
 
@@ -19,7 +18,6 @@ use crate::identity::{Keypair, Signature};
 use crate::inbox::{AdmissionOutcome, DropReason, InboxSender};
 use crate::transport::TransportError;
 use crate::transport::codec::{EnvelopeFrame, TransportCodec};
-use crate::trust::TrustedPeers;
 use crate::types::{Envelope, MessageKind};
 
 /// Handle an incoming connection.
@@ -31,14 +29,11 @@ use crate::types::{Envelope, MessageKind};
 /// * `stream` - The async read/write stream (e.g., TcpStream or UnixStream)
 /// * `keypair` - Our keypair for signing acks
 /// * `require_peer_auth` - Whether to enforce signature+trusted-peer validation
-/// * `trusted` - Router-owned trust set. `InboxSender` consults this on the
-///   raw fallback path so ingress trust still has a single semantic owner.
 /// * `inbox_sender` - Channel to send validated messages to the inbox
 pub async fn handle_connection<S>(
     stream: S,
     require_peer_auth: bool,
     keypair: &Keypair,
-    trusted: &Arc<RwLock<TrustedPeers>>,
     inbox_sender: &InboxSender,
 ) -> Result<(), IoTaskError>
 where
@@ -84,7 +79,7 @@ where
     // Admit through the inbox seam first. Typed admission outcome: explicit
     // drops are surfaced as `IoTaskError` so the IO task can react (close
     // connection, log, etc.) rather than silently returning `Ok(())`.
-    match inbox_sender.send_connection_ingress(envelope.clone(), require_peer_auth, trusted) {
+    match inbox_sender.send_connection_ingress(envelope.clone(), require_peer_auth) {
         AdmissionOutcome::Admitted => {
             if should_ack(&envelope.kind) {
                 let ack = create_ack(&envelope, keypair);
@@ -156,11 +151,13 @@ pub enum IoTaskError {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::classify::test_support;
     use crate::identity::PubKey;
     use crate::inbox::Inbox;
-    use crate::trust::TrustedPeer;
+    use crate::trust::{TrustedPeer, TrustedPeers};
     use crate::types::InboxItem;
     use futures::StreamExt;
+    use parking_lot::RwLock;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_util::codec::FramedRead;
     use uuid::Uuid;
@@ -170,14 +167,22 @@ mod tests {
     }
 
     fn make_trusted_peers(pubkey: &PubKey) -> Arc<RwLock<TrustedPeers>> {
-        Arc::new(RwLock::new(TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: "test-peer".to_string(),
-                pubkey: *pubkey,
-                addr: "tcp://127.0.0.1:4200".to_string(),
-                meta: crate::PeerMeta::default(),
-            }],
-        }))
+        Arc::new(RwLock::new(TrustedPeers::from_peers(vec![TrustedPeer {
+            name: "test-peer".to_string(),
+            pubkey: *pubkey,
+            addr: "tcp://127.0.0.1:4200".to_string(),
+            meta: crate::PeerMeta::default(),
+        }])))
+    }
+
+    fn classified_inbox_for_trust(
+        trusted: &Arc<RwLock<TrustedPeers>>,
+        require_peer_auth: bool,
+    ) -> (Inbox, InboxSender) {
+        Inbox::new_classified(test_support::classification_context_shared(
+            trusted.clone(),
+            require_peer_auth,
+        ))
     }
 
     fn make_signed_envelope(from_keypair: &Keypair, to: PubKey, kind: MessageKind) -> Envelope {
@@ -274,7 +279,7 @@ mod tests {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key());
-        let (mut inbox, inbox_sender) = Inbox::new();
+        let (mut inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         // Create envelope with invalid signature
         let envelope = Envelope {
@@ -297,12 +302,11 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        let result =
-            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await;
+        let result = handle_connection(server, true, &receiver_keypair, &inbox_sender).await;
         assert!(result.is_ok()); // Silent drop, not an error
 
         // No item in inbox
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert!(items.is_empty());
     }
 
@@ -312,7 +316,7 @@ mod tests {
         let receiver_keypair = make_keypair();
         let untrusted_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key()); // Only trust sender_keypair
-        let (mut inbox, inbox_sender) = Inbox::new();
+        let (mut inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         // Create envelope from untrusted peer
         let envelope = make_signed_envelope(
@@ -333,15 +337,14 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        let result =
-            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await;
+        let result = handle_connection(server, true, &receiver_keypair, &inbox_sender).await;
         assert!(matches!(
             result,
             Err(IoTaskError::IngressDropped(DropReason::UntrustedSender))
         ));
 
         // No item in inbox
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert!(items.is_empty());
     }
 
@@ -350,7 +353,7 @@ mod tests {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
         let trusted = make_trusted_peers(&make_keypair().public_key());
-        let (mut inbox, inbox_sender) = Inbox::new();
+        let (mut inbox, inbox_sender) = classified_inbox_for_trust(&trusted, false);
 
         let envelope = Envelope {
             id: Uuid::new_v4(),
@@ -373,7 +376,7 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        handle_connection(server, false, &receiver_keypair, &trusted, &inbox_sender)
+        handle_connection(server, false, &receiver_keypair, &inbox_sender)
             .await
             .unwrap();
 
@@ -383,9 +386,9 @@ mod tests {
             _ => panic!("expected Ack"),
         }
 
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert_eq!(items.len(), 1);
-        match &items[0] {
+        match &items[0].item {
             InboxItem::External { envelope } => assert_eq!(envelope.id, expected_id),
             _ => panic!("expected External"),
         }
@@ -397,7 +400,7 @@ mod tests {
         let receiver_keypair = make_keypair();
         let untrusted_keypair = make_keypair();
         let trusted = make_trusted_peers(&untrusted_keypair.public_key()); // not relevant in no-auth mode
-        let (mut inbox, inbox_sender) = Inbox::new();
+        let (mut inbox, inbox_sender) = classified_inbox_for_trust(&trusted, false);
 
         let envelope = make_signed_envelope(
             &sender_keypair, // not in trusted list
@@ -418,7 +421,7 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        handle_connection(server, false, &receiver_keypair, &trusted, &inbox_sender)
+        handle_connection(server, false, &receiver_keypair, &inbox_sender)
             .await
             .unwrap();
 
@@ -428,9 +431,9 @@ mod tests {
             _ => panic!("expected Ack"),
         }
 
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert_eq!(items.len(), 1);
-        match &items[0] {
+        match &items[0].item {
             InboxItem::External { envelope } => assert_eq!(envelope.id, expected_id),
             _ => panic!("expected External"),
         }
@@ -441,7 +444,7 @@ mod tests {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key());
-        let (_inbox, inbox_sender) = Inbox::new();
+        let (_inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         let envelope = make_signed_envelope(
             &sender_keypair,
@@ -465,7 +468,7 @@ mod tests {
 
         // Handle connection
         let handle = tokio::spawn(async move {
-            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await
+            handle_connection(server, true, &receiver_keypair, &inbox_sender).await
         });
 
         // Read ack from client side
@@ -487,7 +490,7 @@ mod tests {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key());
-        let (mut inbox, inbox_sender) = Inbox::new();
+        let (mut inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         let envelope = make_signed_envelope(
             &sender_keypair,
@@ -511,14 +514,14 @@ mod tests {
             let _ = client_read.read(&mut buf).await;
         });
 
-        handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender)
+        handle_connection(server, true, &receiver_keypair, &inbox_sender)
             .await
             .unwrap();
 
         // Check inbox
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert_eq!(items.len(), 1);
-        match &items[0] {
+        match &items[0].item {
             InboxItem::External { envelope } => {
                 assert_eq!(envelope.id, envelope_id);
             }
@@ -531,7 +534,7 @@ mod tests {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key());
-        let (_inbox, inbox_sender) = Inbox::new();
+        let (_inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         let envelope = make_signed_envelope(
             &sender_keypair,
@@ -553,7 +556,7 @@ mod tests {
         });
 
         let handle = tokio::spawn(async move {
-            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await
+            handle_connection(server, true, &receiver_keypair, &inbox_sender).await
         });
 
         // Should receive an ack
@@ -571,7 +574,7 @@ mod tests {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key());
-        let (_inbox, inbox_sender) = Inbox::new();
+        let (_inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         let envelope = make_signed_envelope(
             &sender_keypair,
@@ -596,7 +599,7 @@ mod tests {
         });
 
         let handle = tokio::spawn(async move {
-            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await
+            handle_connection(server, true, &receiver_keypair, &inbox_sender).await
         });
 
         let ack = read_one_envelope(&mut client_read).await.unwrap();
@@ -613,7 +616,7 @@ mod tests {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key());
-        let (_inbox, inbox_sender) = Inbox::new();
+        let (_inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         let envelope = make_signed_envelope(
             &sender_keypair,
@@ -636,7 +639,7 @@ mod tests {
         });
 
         let handle = tokio::spawn(async move {
-            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await
+            handle_connection(server, true, &receiver_keypair, &inbox_sender).await
         });
 
         // Should receive an ack
@@ -654,7 +657,7 @@ mod tests {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key());
-        let (_inbox, inbox_sender) = Inbox::new();
+        let (_inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         let envelope = make_signed_envelope(
             &sender_keypair,
@@ -672,7 +675,7 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender)
+        handle_connection(server, true, &receiver_keypair, &inbox_sender)
             .await
             .unwrap();
 
@@ -686,7 +689,7 @@ mod tests {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key());
-        let (_inbox, inbox_sender) = Inbox::new();
+        let (_inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         let envelope = make_signed_envelope(
             &sender_keypair,
@@ -708,7 +711,7 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender)
+        handle_connection(server, true, &receiver_keypair, &inbox_sender)
             .await
             .unwrap();
 
@@ -725,7 +728,7 @@ mod tests {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key());
-        let (mut inbox, inbox_sender) = Inbox::new();
+        let (mut inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         // Create envelope with invalid signature
         let envelope = Envelope {
@@ -748,7 +751,7 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender)
+        handle_connection(server, true, &receiver_keypair, &inbox_sender)
             .await
             .unwrap();
 
@@ -757,7 +760,7 @@ mod tests {
         assert!(result.is_err(), "Should not send ack for invalid signature");
 
         // No inbox item
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert!(items.is_empty());
     }
 
@@ -767,7 +770,7 @@ mod tests {
         let receiver_keypair = make_keypair();
         let other_keypair = make_keypair();
         let trusted = make_trusted_peers(&other_keypair.public_key()); // sender NOT trusted
-        let (mut inbox, inbox_sender) = Inbox::new();
+        let (mut inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         let envelope = make_signed_envelope(
             &sender_keypair, // Not trusted
@@ -787,8 +790,7 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        let result =
-            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await;
+        let result = handle_connection(server, true, &receiver_keypair, &inbox_sender).await;
         assert!(matches!(
             result,
             Err(IoTaskError::IngressDropped(DropReason::UntrustedSender))
@@ -799,7 +801,7 @@ mod tests {
         assert!(result.is_err(), "Should not send ack for untrusted sender");
 
         // No inbox item
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert!(items.is_empty());
     }
 
@@ -810,7 +812,7 @@ mod tests {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
         let trusted = make_trusted_peers(&sender_keypair.public_key());
-        let (inbox, inbox_sender) = Inbox::new();
+        let (inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
         drop(inbox);
 
         let envelope = make_signed_envelope(
@@ -831,8 +833,7 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        let result =
-            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await;
+        let result = handle_connection(server, true, &receiver_keypair, &inbox_sender).await;
         assert!(matches!(result, Err(IoTaskError::InboxClosed)));
 
         let read_result = read_one_envelope(&mut client_read).await;
@@ -855,8 +856,8 @@ mod tests {
         // Start with an EMPTY trust set. If the IO task snapshotted at
         // spawn time, the subsequent add below would not be visible and
         // the envelope would be silently dropped.
-        let trusted = Arc::new(RwLock::new(TrustedPeers { peers: vec![] }));
-        let (mut inbox, inbox_sender) = Inbox::new();
+        let trusted = Arc::new(RwLock::new(TrustedPeers::new()));
+        let (mut inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
 
         let envelope = make_signed_envelope(
             &sender_keypair,
@@ -876,7 +877,7 @@ mod tests {
         // Mutate the trust set AFTER the IO task would normally have
         // snapshotted, but BEFORE the envelope is delivered. The live
         // read must observe this mutation.
-        trusted.write().peers.push(crate::TrustedPeer {
+        trusted.write().push_unchecked_for_test(crate::TrustedPeer {
             name: "sender".to_string(),
             pubkey: sender_keypair.public_key(),
             addr: "tcp://127.0.0.1:0".to_string(),
@@ -890,13 +891,13 @@ mod tests {
             let _ = client_read.read(&mut buf).await;
         });
 
-        handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender)
+        handle_connection(server, true, &receiver_keypair, &inbox_sender)
             .await
             .unwrap();
 
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert_eq!(items.len(), 1, "envelope should be admitted via live trust");
-        match &items[0] {
+        match &items[0].item {
             InboxItem::External { envelope } => assert_eq!(envelope.id, envelope_id),
             _ => panic!("expected External"),
         }

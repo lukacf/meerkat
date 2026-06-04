@@ -7,8 +7,12 @@ use meerkat_core::handles::{DslTransitionError, TurnStateHandle, TurnStateSnapsh
 use meerkat_core::lifecycle::RunId;
 use meerkat_core::ops::{AsyncOpRef, OperationId, WaitPolicy};
 use meerkat_core::retry::LlmRetrySchedule;
+#[cfg(test)]
+use meerkat_core::turn_execution_authority::TurnFailureSourceKind;
 use meerkat_core::turn_execution_authority::{
-    TurnFailureReason, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
+    ContentShape, LlmFailureRecoveryKind, TurnExecutionEffect, TurnExecutionInput,
+    TurnFailureReason, TurnFailureSource, TurnPhase, TurnPrimitiveKind, TurnTerminalCauseKind,
+    TurnTerminalOutcome, terminal_outcome_for_budget_exceeded,
 };
 
 use super::HandleDslAuthority;
@@ -32,12 +36,305 @@ impl RuntimeTurnStateHandle {
     }
 }
 
+fn parse_effect_run_id(
+    run_id: &mm_dsl::RunId,
+    context: &'static str,
+) -> Result<RunId, DslTransitionError> {
+    uuid::Uuid::parse_str(&run_id.0)
+        .map(RunId::from_uuid)
+        .map_err(|err| {
+            DslTransitionError::guard_rejected(
+                context,
+                format!(
+                    "generated MeerkatMachine turn effect carried malformed run_id `{}`: {err}",
+                    run_id.0
+                ),
+            )
+        })
+}
+
+fn map_generated_turn_effect(
+    effect: mm_dsl::MeerkatMachineEffect,
+    context: &'static str,
+) -> Result<Option<TurnExecutionEffect>, DslTransitionError> {
+    Ok(Some(match effect {
+        mm_dsl::MeerkatMachineEffect::TurnRunStarted { run_id } => {
+            TurnExecutionEffect::RunStarted {
+                run_id: parse_effect_run_id(&run_id, context)?,
+            }
+        }
+        mm_dsl::MeerkatMachineEffect::TurnBoundaryApplied {
+            run_id,
+            boundary_sequence,
+        } => TurnExecutionEffect::BoundaryApplied {
+            run_id: parse_effect_run_id(&run_id, context)?,
+            boundary_sequence,
+        },
+        mm_dsl::MeerkatMachineEffect::TurnRunCompleted { run_id, .. } => {
+            TurnExecutionEffect::RunCompleted {
+                run_id: parse_effect_run_id(&run_id, context)?,
+            }
+        }
+        mm_dsl::MeerkatMachineEffect::TurnRunFailed {
+            run_id,
+            terminal_cause_kind,
+            error,
+        } => {
+            let cause_kind: TurnTerminalCauseKind = terminal_cause_kind.into();
+            if !cause_kind.is_specific_failure_cause() {
+                return Err(DslTransitionError::guard_rejected(
+                    context,
+                    "generated MeerkatMachine TurnRunFailed effect carried unknown terminal_cause_kind",
+                ));
+            }
+            TurnExecutionEffect::RunFailed {
+                run_id: parse_effect_run_id(&run_id, context)?,
+                reason: TurnFailureReason::with_cause(
+                    cause_kind,
+                    cause_kind.agent_error_class(),
+                    error,
+                ),
+            }
+        }
+        mm_dsl::MeerkatMachineEffect::TurnRunCancelled { run_id, .. } => {
+            TurnExecutionEffect::RunCancelled {
+                run_id: parse_effect_run_id(&run_id, context)?,
+            }
+        }
+        mm_dsl::MeerkatMachineEffect::TurnCheckCompaction => TurnExecutionEffect::CheckCompaction,
+        mm_dsl::MeerkatMachineEffect::LlmFailureRecoveryClassified { recovery } => {
+            TurnExecutionEffect::LlmFailureRecoveryClassified {
+                recovery: match recovery {
+                    mm_dsl::LlmFailureRecoveryKind::Recover => LlmFailureRecoveryKind::Recover,
+                    mm_dsl::LlmFailureRecoveryKind::Exhausted => LlmFailureRecoveryKind::Exhausted,
+                    mm_dsl::LlmFailureRecoveryKind::Fatal => LlmFailureRecoveryKind::Fatal,
+                },
+            }
+        }
+        _ => return Ok(None),
+    }))
+}
+
 impl TurnStateHandle for RuntimeTurnStateHandle {
+    fn apply_turn_input(
+        &self,
+        input: TurnExecutionInput,
+    ) -> Result<Vec<TurnExecutionEffect>, DslTransitionError> {
+        let context = "TurnStateHandle::apply_turn_input";
+        let dsl_input = match input {
+            TurnExecutionInput::StartConversationRun {
+                run_id,
+                primitive_kind,
+                admitted_content_shape,
+                vision_enabled,
+                image_tool_results_enabled,
+                max_extraction_retries,
+            } => mm_dsl::MeerkatMachineInput::StartConversationRun {
+                run_id: mm_dsl::RunId::from_domain(&run_id),
+                primitive_kind: mm_dsl::TurnPrimitiveKind::from(primitive_kind),
+                admitted_content_shape: mm_dsl::ContentShape::from(admitted_content_shape),
+                vision_enabled,
+                image_tool_results_enabled,
+                max_extraction_retries,
+            },
+            TurnExecutionInput::StartImmediateAppend { run_id } => {
+                mm_dsl::MeerkatMachineInput::StartImmediateAppend {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                }
+            }
+            TurnExecutionInput::StartImmediateContext { run_id } => {
+                mm_dsl::MeerkatMachineInput::StartImmediateContext {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                }
+            }
+            TurnExecutionInput::PrimitiveApplied { run_id } => {
+                mm_dsl::MeerkatMachineInput::PrimitiveApplied {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                }
+            }
+            TurnExecutionInput::LlmReturnedToolCalls { run_id, tool_count } => {
+                mm_dsl::MeerkatMachineInput::LlmReturnedToolCalls {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                    tool_count: u64::from(tool_count),
+                }
+            }
+            TurnExecutionInput::LlmReturnedTerminal { run_id } => {
+                mm_dsl::MeerkatMachineInput::LlmReturnedTerminal {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                }
+            }
+            TurnExecutionInput::RegisterPendingOps {
+                run_id,
+                op_refs,
+                barrier_operation_ids,
+                ..
+            } => mm_dsl::MeerkatMachineInput::RegisterPendingOps {
+                run_id: mm_dsl::RunId::from_domain(&run_id),
+                op_refs: op_refs
+                    .iter()
+                    .map(|op_ref| op_ref.operation_id.to_string())
+                    .collect(),
+                barrier_operation_ids: barrier_operation_ids
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+            },
+            TurnExecutionInput::ToolCallsResolved { run_id } => {
+                mm_dsl::MeerkatMachineInput::ToolCallsResolved {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                }
+            }
+            TurnExecutionInput::OpsBarrierSatisfied {
+                run_id,
+                operation_ids,
+            } => mm_dsl::MeerkatMachineInput::OpsBarrierSatisfied {
+                run_id: mm_dsl::RunId::from_domain(&run_id),
+                operation_ids: operation_ids.iter().map(ToString::to_string).collect(),
+            },
+            TurnExecutionInput::BoundaryContinue { run_id } => {
+                mm_dsl::MeerkatMachineInput::BoundaryContinue {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                }
+            }
+            TurnExecutionInput::BoundaryComplete { run_id } => {
+                mm_dsl::MeerkatMachineInput::BoundaryComplete {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                }
+            }
+            TurnExecutionInput::RecoverableFailure { run_id, retry } => {
+                mm_dsl::MeerkatMachineInput::RecoverableFailure {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                    failure_kind: retry.failure.kind.into(),
+                    retry_attempt: u64::from(retry.plan.attempt),
+                    max_retries: u64::from(retry.plan.max_retries),
+                    selected_delay_ms: retry.plan.selected_delay_ms,
+                    error: retry.failure.message,
+                }
+            }
+            TurnExecutionInput::FatalFailure { run_id, failure } => {
+                mm_dsl::MeerkatMachineInput::FatalFailure {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                    terminal_failure_source: mm_dsl::RunFailureSourceKind::from(
+                        failure.source_kind,
+                    ),
+                    error: failure.message,
+                }
+            }
+            TurnExecutionInput::RetryRequested {
+                run_id,
+                retry_attempt,
+            } => mm_dsl::MeerkatMachineInput::RetryRequested {
+                run_id: mm_dsl::RunId::from_domain(&run_id),
+                retry_attempt: u64::from(retry_attempt),
+            },
+            TurnExecutionInput::ClassifyLlmFailureRecovery {
+                failure_kind,
+                retry_attempt,
+                max_retries,
+            } => mm_dsl::MeerkatMachineInput::ClassifyLlmFailureRecovery {
+                failure_kind: failure_kind.map(Into::into),
+                retry_attempt: u64::from(retry_attempt),
+                max_retries: u64::from(max_retries),
+            },
+            TurnExecutionInput::CancelNow { run_id } => mm_dsl::MeerkatMachineInput::CancelNow {
+                run_id: mm_dsl::RunId::from_domain(&run_id),
+            },
+            TurnExecutionInput::CancelAfterBoundary { run_id } => {
+                mm_dsl::MeerkatMachineInput::RequestCancelAfterBoundary {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                }
+            }
+            TurnExecutionInput::CancellationObserved { run_id } => {
+                mm_dsl::MeerkatMachineInput::CancellationObserved {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                }
+            }
+            TurnExecutionInput::AcknowledgeTerminal { run_id } => {
+                let outcome = self.snapshot().terminal_outcome.ok_or_else(|| {
+                    DslTransitionError::guard_rejected(
+                        context,
+                        "generated MeerkatMachine terminal outcome missing for AcknowledgeTerminal",
+                    )
+                })?;
+                mm_dsl::MeerkatMachineInput::AcknowledgeTerminal {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                    outcome: mm_dsl::TurnTerminalOutcome::from(outcome),
+                }
+            }
+            TurnExecutionInput::TurnLimitReached { run_id } => {
+                mm_dsl::MeerkatMachineInput::TurnLimitReached {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                }
+            }
+            TurnExecutionInput::BudgetExhausted { run_id } => {
+                mm_dsl::MeerkatMachineInput::BudgetExhausted {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                }
+            }
+            TurnExecutionInput::TimeBudgetExceeded { run_id } => {
+                mm_dsl::MeerkatMachineInput::TimeBudgetExceeded {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                }
+            }
+            TurnExecutionInput::BudgetLimitExceeded { run_id, exceeded } => {
+                match terminal_outcome_for_budget_exceeded(exceeded) {
+                    TurnTerminalOutcome::TimeBudgetExceeded => {
+                        mm_dsl::MeerkatMachineInput::TimeBudgetExceeded {
+                            run_id: mm_dsl::RunId::from_domain(&run_id),
+                        }
+                    }
+                    TurnTerminalOutcome::BudgetExhausted => {
+                        mm_dsl::MeerkatMachineInput::BudgetExhausted {
+                            run_id: mm_dsl::RunId::from_domain(&run_id),
+                        }
+                    }
+                    _ => unreachable!("budget exceeded maps only to budget terminal outcomes"),
+                }
+            }
+            TurnExecutionInput::EnterExtraction {
+                run_id,
+                max_retries,
+            } => mm_dsl::MeerkatMachineInput::EnterExtraction {
+                run_id: mm_dsl::RunId::from_domain(&run_id),
+                max_extraction_retries: u64::from(max_retries),
+            },
+            TurnExecutionInput::ExtractionValidationPassed { run_id } => {
+                mm_dsl::MeerkatMachineInput::ExtractionValidationPassed {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                }
+            }
+            TurnExecutionInput::ExtractionValidationFailed { run_id, error } => {
+                mm_dsl::MeerkatMachineInput::ExtractionValidationFailed {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                    error,
+                }
+            }
+            TurnExecutionInput::ExtractionFailed { run_id, error } => {
+                mm_dsl::MeerkatMachineInput::ExtractionFailed {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                    error,
+                }
+            }
+            TurnExecutionInput::ExtractionStart { run_id } => {
+                mm_dsl::MeerkatMachineInput::ExtractionStart {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                }
+            }
+            TurnExecutionInput::ForceCancelNoRun => mm_dsl::MeerkatMachineInput::ForceCancelNoRun,
+        };
+        self.dsl
+            .apply_input_with_effects(dsl_input, context)?
+            .into_iter()
+            .map(|effect| map_generated_turn_effect(effect, context))
+            .filter_map(Result::transpose)
+            .collect()
+    }
+
     fn start_conversation_run(
         &self,
         run_id: RunId,
         primitive_kind: TurnPrimitiveKind,
-        admitted_content_shape: meerkat_core::turn_execution_authority::ContentShape,
+        admitted_content_shape: ContentShape,
         vision_enabled: bool,
         image_tool_results_enabled: bool,
         max_extraction_retries: u64,
@@ -76,221 +373,172 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         )
     }
 
-    fn primitive_applied(&self) -> Result<(), DslTransitionError> {
+    fn primitive_applied(&self, run_id: RunId) -> Result<(), DslTransitionError> {
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::PrimitiveApplied,
+            mm_dsl::MeerkatMachineInput::PrimitiveApplied {
+                run_id: mm_dsl::RunId::from_domain(&run_id),
+            },
             "TurnStateHandle::primitive_applied",
         )
     }
 
-    fn llm_returned_tool_calls(&self, tool_count: u64) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::LlmReturnedToolCalls { tool_count },
-            "TurnStateHandle::llm_returned_tool_calls",
-        )
+    fn llm_returned_tool_calls(
+        &self,
+        run_id: RunId,
+        tool_count: u64,
+    ) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::LlmReturnedToolCalls {
+            run_id,
+            tool_count: u32::try_from(tool_count).map_err(|_| {
+                DslTransitionError::guard_rejected(
+                    "TurnStateHandle::llm_returned_tool_calls",
+                    "tool_count exceeds u32 turn input range",
+                )
+            })?,
+        })
+        .map(|_| ())
     }
 
-    fn llm_returned_terminal(&self) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::LlmReturnedTerminal,
-            "TurnStateHandle::llm_returned_terminal",
-        )
+    fn llm_returned_terminal(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::LlmReturnedTerminal { run_id })
+            .map(|_| ())
     }
 
     fn register_pending_ops(
         &self,
+        run_id: RunId,
         op_refs: BTreeSet<AsyncOpRef>,
         barrier_operation_ids: BTreeSet<OperationId>,
     ) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::RegisterPendingOps {
-                op_refs: op_refs
-                    .iter()
-                    .map(|op_ref| op_ref.operation_id.to_string())
-                    .collect(),
-                barrier_operation_ids: barrier_operation_ids
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect(),
-            },
-            "TurnStateHandle::register_pending_ops",
-        )
+        let has_barrier_ops = !barrier_operation_ids.is_empty();
+        self.apply_turn_input(TurnExecutionInput::RegisterPendingOps {
+            run_id,
+            op_refs: op_refs.into_iter().collect(),
+            barrier_operation_ids: barrier_operation_ids.into_iter().collect(),
+            has_barrier_ops,
+        })
+        .map(|_| ())
     }
 
-    fn tool_calls_resolved(&self) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::ToolCallsResolved,
-            "TurnStateHandle::tool_calls_resolved",
-        )
+    fn tool_calls_resolved(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::ToolCallsResolved { run_id })
+            .map(|_| ())
     }
 
     fn ops_barrier_satisfied(
         &self,
+        run_id: RunId,
         operation_ids: BTreeSet<OperationId>,
     ) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::OpsBarrierSatisfied {
-                operation_ids: operation_ids.iter().map(ToString::to_string).collect(),
-            },
-            "TurnStateHandle::ops_barrier_satisfied",
-        )
+        self.apply_turn_input(TurnExecutionInput::OpsBarrierSatisfied {
+            run_id,
+            operation_ids: operation_ids.into_iter().collect(),
+        })
+        .map(|_| ())
     }
 
-    fn boundary_continue(&self) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::BoundaryContinue,
-            "TurnStateHandle::boundary_continue",
-        )
+    fn boundary_continue(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::BoundaryContinue { run_id })
+            .map(|_| ())
     }
 
-    fn boundary_complete(&self) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::BoundaryComplete,
-            "TurnStateHandle::boundary_complete",
-        )
+    fn boundary_complete(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::BoundaryComplete { run_id })
+            .map(|_| ())
     }
 
-    fn enter_extraction(&self, max_retries: u32) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::EnterExtraction {
-                max_extraction_retries: u64::from(max_retries),
-            },
-            "TurnStateHandle::enter_extraction",
-        )
+    fn enter_extraction(&self, run_id: RunId, max_retries: u32) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::EnterExtraction {
+            run_id,
+            max_retries,
+        })
+        .map(|_| ())
     }
 
-    fn extraction_start(&self) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::ExtractionStart,
-            "TurnStateHandle::extraction_start",
-        )
+    fn extraction_start(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::ExtractionStart { run_id })
+            .map(|_| ())
     }
 
-    fn extraction_validation_passed(&self) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::ExtractionValidationPassed,
-            "TurnStateHandle::extraction_validation_passed",
-        )
+    fn extraction_validation_passed(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::ExtractionValidationPassed { run_id })
+            .map(|_| ())
     }
 
-    fn extraction_validation_failed(&self, error: String) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::ExtractionValidationFailed { error },
-            "TurnStateHandle::extraction_validation_failed",
-        )
+    fn extraction_validation_failed(
+        &self,
+        run_id: RunId,
+        error: String,
+    ) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::ExtractionValidationFailed { run_id, error })
+            .map(|_| ())
     }
 
-    fn extraction_failed(&self, error: String) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::ExtractionFailed { error },
-            "TurnStateHandle::extraction_failed",
-        )
+    fn extraction_failed(&self, run_id: RunId, error: String) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::ExtractionFailed { run_id, error })
+            .map(|_| ())
     }
 
-    fn recoverable_failure(&self, retry: LlmRetrySchedule) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::RecoverableFailure {
-                failure_kind: retry.failure.kind.into(),
-                retry_attempt: u64::from(retry.plan.attempt),
-                max_retries: u64::from(retry.plan.max_retries),
-                selected_delay_ms: retry.plan.selected_delay_ms,
-                error: retry.failure.message,
-            },
-            "TurnStateHandle::recoverable_failure",
-        )
+    fn recoverable_failure(
+        &self,
+        run_id: RunId,
+        retry: LlmRetrySchedule,
+    ) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::RecoverableFailure { run_id, retry })
+            .map(|_| ())
     }
 
-    fn fatal_failure(&self, reason: TurnFailureReason) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::FatalFailure {
-                terminal_cause_kind: mm_dsl::TurnTerminalCauseKind::from(reason.cause_kind),
-                error: reason.message,
-            },
-            "TurnStateHandle::fatal_failure",
-        )
+    fn fatal_failure(
+        &self,
+        run_id: RunId,
+        failure: TurnFailureSource,
+    ) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::FatalFailure { run_id, failure })
+            .map(|_| ())
     }
 
-    fn retry_requested(&self, retry_attempt: u32) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::RetryRequested {
-                retry_attempt: u64::from(retry_attempt),
-            },
-            "TurnStateHandle::retry_requested",
-        )
+    fn retry_requested(&self, run_id: RunId, retry_attempt: u32) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::RetryRequested {
+            run_id,
+            retry_attempt,
+        })
+        .map(|_| ())
     }
 
-    fn cancel_now(&self) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::CancelNow,
-            "TurnStateHandle::cancel_now",
-        )
+    fn cancel_now(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::CancelNow { run_id })
+            .map(|_| ())
     }
 
-    fn request_cancel_after_boundary(&self) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::RequestCancelAfterBoundary,
-            "TurnStateHandle::request_cancel_after_boundary",
-        )
+    fn request_cancel_after_boundary(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::CancelAfterBoundary { run_id })
+            .map(|_| ())
     }
 
-    fn cancellation_observed(&self) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::CancellationObserved,
-            "TurnStateHandle::cancellation_observed",
-        )
+    fn cancellation_observed(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::CancellationObserved { run_id })
+            .map(|_| ())
     }
 
-    fn acknowledge_terminal(&self, outcome: TurnTerminalOutcome) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::AcknowledgeTerminal {
-                outcome: mm_dsl::TurnTerminalOutcome::from(outcome),
-            },
-            "TurnStateHandle::acknowledge_terminal",
-        )
+    fn acknowledge_terminal(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::AcknowledgeTerminal { run_id })
+            .map(|_| ())
     }
 
-    fn turn_limit_reached(&self) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::TurnLimitReached,
-            "TurnStateHandle::turn_limit_reached",
-        )
+    fn turn_limit_reached(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::TurnLimitReached { run_id })
+            .map(|_| ())
     }
 
-    fn budget_exhausted(&self) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::BudgetExhausted,
-            "TurnStateHandle::budget_exhausted",
-        )
+    fn budget_exhausted(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::BudgetExhausted { run_id })
+            .map(|_| ())
     }
 
-    fn time_budget_exceeded(&self) -> Result<(), DslTransitionError> {
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::TimeBudgetExceeded,
-            "TurnStateHandle::time_budget_exceeded",
-        )
+    fn time_budget_exceeded(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::TimeBudgetExceeded { run_id })
+            .map(|_| ())
     }
 
     fn force_cancel_no_run(&self) -> Result<(), DslTransitionError> {
@@ -325,43 +573,41 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         Ok(())
     }
 
+    #[allow(clippy::expect_used)]
     fn snapshot(&self) -> TurnStateSnapshot {
         let state = self.dsl.snapshot_state();
         let turn_phase = map_turn_phase(state.turn_phase);
         let barrier_operation_ids: BTreeSet<_> = state
             .barrier_operation_ids
             .iter()
-            .filter_map(|id| parse_operation_id(id))
+            .map(|id| parse_operation_id(id))
             .collect();
         let pending_op_refs = state
             .pending_op_refs
             .iter()
-            .filter_map(|id| {
-                parse_operation_id(id).map(|operation_id| AsyncOpRef {
+            .map(|id| {
+                let operation_id = parse_operation_id(id);
+                AsyncOpRef {
                     wait_policy: if barrier_operation_ids.contains(&operation_id) {
                         WaitPolicy::Barrier
                     } else {
                         WaitPolicy::Detached
                     },
                     operation_id,
-                })
+                }
             })
             .collect();
-        let active_run_id = if matches!(
-            turn_phase,
-            TurnPhase::Completed | TurnPhase::Failed | TurnPhase::Cancelled
-        ) {
+        let turn_terminal = classify_turn_terminal(&state);
+        let active_run_id = if turn_terminal {
             None
         } else {
-            state
-                .current_run_id
-                .as_ref()
-                .and_then(|run_id| uuid::Uuid::parse_str(&run_id.0).ok().map(RunId::from_uuid))
+            state.current_run_id.as_ref().map(parse_snapshot_run_id)
         };
         TurnStateSnapshot {
             active_run_id,
             loop_state: map_loop_state(state.turn_phase),
             turn_phase,
+            turn_terminal,
             primitive_kind: state.primitive_kind.map(TurnPrimitiveKind::from),
             admitted_content_shape: state.admitted_content_shape.map(Into::into),
             vision_enabled: state.vision_enabled,
@@ -377,15 +623,58 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
             terminal_cause_kind: state.terminal_cause_kind.map(Into::into),
             extraction_attempts: state.extraction_attempts,
             max_extraction_retries: state.max_extraction_retries,
-            llm_retry_attempt: u32::try_from(state.llm_retry_attempt).unwrap_or(u32::MAX),
-            llm_retry_max_retries: u32::try_from(state.llm_retry_max_retries).unwrap_or(u32::MAX),
+            llm_retry_attempt: u32::try_from(state.llm_retry_attempt)
+                .expect("generated MeerkatMachine llm_retry_attempt must fit u32"),
+            llm_retry_max_retries: u32::try_from(state.llm_retry_max_retries)
+                .expect("generated MeerkatMachine llm_retry_max_retries must fit u32"),
             llm_retry_selected_delay_ms: state.llm_retry_selected_delay_ms,
         }
     }
 }
 
-fn parse_operation_id(value: &str) -> Option<OperationId> {
-    uuid::Uuid::parse_str(value).ok().map(OperationId)
+#[allow(clippy::expect_used)]
+fn parse_operation_id(value: &str) -> OperationId {
+    uuid::Uuid::parse_str(value)
+        .map(OperationId)
+        .expect("generated MeerkatMachine operation id projection must be well formed")
+}
+
+#[allow(clippy::expect_used)]
+fn parse_snapshot_run_id(run_id: &mm_dsl::RunId) -> RunId {
+    uuid::Uuid::parse_str(&run_id.0)
+        .map(RunId::from_uuid)
+        .expect("generated MeerkatMachine current_run_id projection must be well formed")
+}
+
+/// Mirror the canonical MeerkatMachine turn-terminality verdict over the
+/// recovered turn state.
+///
+/// The terminality verdict (which turn phases are terminal) is a machine fact:
+/// this owner extracts no fact — it recovers a read-only authority from the DSL
+/// state, drives the `ClassifyTurnTerminality` input, and mirrors the emitted
+/// `TurnTerminalityClassified.terminal`. It decides nothing. Fails closed:
+/// an unclassifiable state is treated as terminal so a live run is never assumed
+/// to still be active off an unreadable snapshot.
+fn classify_turn_terminal(state: &mm_dsl::MeerkatMachineState) -> bool {
+    let Ok(mut authority) = mm_dsl::MeerkatMachineAuthority::recover_from_state(state.clone())
+    else {
+        return true;
+    };
+    let Ok(transition) = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ClassifyTurnTerminality {},
+    ) else {
+        return true;
+    };
+    let mut classified = None;
+    for effect in transition.effects() {
+        if let mm_dsl::MeerkatMachineEffect::TurnTerminalityClassified { terminal } = effect
+            && classified.replace(*terminal).is_some()
+        {
+            return true;
+        }
+    }
+    classified.unwrap_or(true)
 }
 
 /// Exhaustive 1-to-1 projection of the DSL's typed turn phase into the
@@ -438,17 +727,25 @@ mod tests {
     use uuid::Uuid;
 
     fn retry_schedule(attempt: u32) -> LlmRetrySchedule {
+        retry_schedule_with_kind(attempt, 3, LlmRetryFailureKind::RateLimited)
+    }
+
+    fn retry_schedule_with_kind(
+        attempt: u32,
+        max_retries: u32,
+        kind: LlmRetryFailureKind,
+    ) -> LlmRetrySchedule {
         LlmRetrySchedule {
             failure: LlmRetryFailure {
                 provider: "test".to_string(),
-                kind: LlmRetryFailureKind::RateLimited,
+                kind,
                 retry_after_ms: Some(1_000),
                 duration_ms: None,
                 message: "rate limited".to_string(),
             },
             plan: LlmRetryPlan {
                 attempt,
-                max_retries: 3,
+                max_retries,
                 computed_delay_ms: 500,
                 selected_delay_ms: 1_000,
                 retry_after_hint_ms: Some(1_000),
@@ -458,19 +755,29 @@ mod tests {
         }
     }
 
-    fn unknown_terminal_cause_reason(message: &'static str) -> TurnFailureReason {
-        TurnFailureReason::with_cause(
-            meerkat_core::TurnTerminalCauseKind::Unknown,
-            meerkat_core::event::AgentErrorClass::Internal,
-            message,
-        )
+    fn start_running_conversation_turn(handle: &RuntimeTurnStateHandle, run_id: &RunId) {
+        handle
+            .start_conversation_run(
+                run_id.clone(),
+                TurnPrimitiveKind::ConversationTurn,
+                meerkat_core::turn_execution_authority::ContentShape::Conversation,
+                false,
+                false,
+                0,
+            )
+            .unwrap();
+        handle.primitive_applied(run_id.clone()).unwrap();
     }
 
-    fn specific_terminal_cause_reason(
-        cause_kind: meerkat_core::TurnTerminalCauseKind,
+    fn unknown_failure_source(message: &'static str) -> TurnFailureSource {
+        TurnFailureSource::new(TurnFailureSourceKind::Unknown, message)
+    }
+
+    fn failure_source(
+        source_kind: TurnFailureSourceKind,
         message: &'static str,
-    ) -> TurnFailureReason {
-        TurnFailureReason::with_cause(cause_kind, cause_kind.agent_error_class(), message)
+    ) -> TurnFailureSource {
+        TurnFailureSource::new(source_kind, message)
     }
 
     #[test]
@@ -499,13 +806,14 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_clears_active_run_id_after_terminal_turn() {
+    fn primitive_applied_rejects_mismatched_run_id() {
         let handle = RuntimeTurnStateHandle::ephemeral();
-        let run_id = RunId(Uuid::from_u128(8));
+        let run_id = RunId(Uuid::from_u128(21));
+        let stale_run_id = RunId(Uuid::from_u128(22));
 
         handle
             .start_conversation_run(
-                run_id,
+                run_id.clone(),
                 TurnPrimitiveKind::ConversationTurn,
                 meerkat_core::turn_execution_authority::ContentShape::Conversation,
                 false,
@@ -513,9 +821,55 @@ mod tests {
                 0,
             )
             .unwrap();
-        handle.primitive_applied().unwrap();
-        handle.llm_returned_terminal().unwrap();
-        handle.boundary_complete().unwrap();
+
+        assert!(handle.primitive_applied(stale_run_id).is_err());
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.active_run_id, Some(run_id));
+        assert_eq!(snapshot.turn_phase, TurnPhase::ApplyingPrimitive);
+    }
+
+    #[test]
+    fn post_primitive_observation_rejects_mismatched_run_id() {
+        let handle = RuntimeTurnStateHandle::ephemeral();
+        let run_id = RunId(Uuid::from_u128(23));
+        let stale_run_id = RunId(Uuid::from_u128(24));
+
+        handle
+            .start_conversation_run(
+                run_id.clone(),
+                TurnPrimitiveKind::ConversationTurn,
+                meerkat_core::turn_execution_authority::ContentShape::Conversation,
+                false,
+                false,
+                0,
+            )
+            .unwrap();
+        handle.primitive_applied(run_id.clone()).unwrap();
+
+        assert!(handle.llm_returned_terminal(stale_run_id).is_err());
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.active_run_id, Some(run_id));
+        assert_eq!(snapshot.turn_phase, TurnPhase::CallingLlm);
+    }
+
+    #[test]
+    fn snapshot_clears_active_run_id_after_terminal_turn() {
+        let handle = RuntimeTurnStateHandle::ephemeral();
+        let run_id = RunId(Uuid::from_u128(8));
+
+        handle
+            .start_conversation_run(
+                run_id.clone(),
+                TurnPrimitiveKind::ConversationTurn,
+                meerkat_core::turn_execution_authority::ContentShape::Conversation,
+                false,
+                false,
+                0,
+            )
+            .unwrap();
+        handle.primitive_applied(run_id.clone()).unwrap();
+        handle.llm_returned_terminal(run_id.clone()).unwrap();
+        handle.boundary_complete(run_id).unwrap();
 
         let snapshot = handle.snapshot();
         assert_eq!(snapshot.turn_phase, TurnPhase::Completed);
@@ -529,7 +883,7 @@ mod tests {
 
         handle
             .start_conversation_run(
-                run_id,
+                run_id.clone(),
                 TurnPrimitiveKind::ConversationTurn,
                 meerkat_core::turn_execution_authority::ContentShape::Conversation,
                 false,
@@ -537,14 +891,16 @@ mod tests {
                 0,
             )
             .unwrap();
-        handle.primitive_applied().unwrap();
-        handle.llm_returned_tool_calls(1).unwrap();
+        handle.primitive_applied(run_id.clone()).unwrap();
+        handle.llm_returned_tool_calls(run_id.clone(), 1).unwrap();
         handle
-            .register_pending_ops(BTreeSet::new(), BTreeSet::new())
+            .register_pending_ops(run_id.clone(), BTreeSet::new(), BTreeSet::new())
             .unwrap();
-        handle.tool_calls_resolved().unwrap();
-        handle.request_cancel_after_boundary().unwrap();
-        handle.boundary_continue().unwrap();
+        handle.tool_calls_resolved(run_id.clone()).unwrap();
+        handle
+            .request_cancel_after_boundary(run_id.clone())
+            .unwrap();
+        handle.boundary_continue(run_id).unwrap();
 
         let snapshot = handle.snapshot();
         assert_eq!(snapshot.turn_phase, TurnPhase::Cancelled);
@@ -563,7 +919,7 @@ mod tests {
 
         handle
             .start_conversation_run(
-                run_id,
+                run_id.clone(),
                 TurnPrimitiveKind::ConversationTurn,
                 meerkat_core::turn_execution_authority::ContentShape::Conversation,
                 false,
@@ -571,10 +927,12 @@ mod tests {
                 0,
             )
             .unwrap();
-        handle.primitive_applied().unwrap();
-        handle.llm_returned_terminal().unwrap();
-        handle.request_cancel_after_boundary().unwrap();
-        handle.boundary_complete().unwrap();
+        handle.primitive_applied(run_id.clone()).unwrap();
+        handle.llm_returned_terminal(run_id.clone()).unwrap();
+        handle
+            .request_cancel_after_boundary(run_id.clone())
+            .unwrap();
+        handle.boundary_complete(run_id).unwrap();
 
         let snapshot = handle.snapshot();
         assert_eq!(snapshot.turn_phase, TurnPhase::Cancelled);
@@ -604,9 +962,11 @@ mod tests {
         let handle = RuntimeTurnStateHandle::ephemeral();
         let run_id = RunId(Uuid::from_u128(20));
 
-        handle.start_immediate_append(run_id).unwrap();
-        handle.request_cancel_after_boundary().unwrap();
-        handle.primitive_applied().unwrap();
+        handle.start_immediate_append(run_id.clone()).unwrap();
+        handle
+            .request_cancel_after_boundary(run_id.clone())
+            .unwrap();
+        handle.primitive_applied(run_id).unwrap();
 
         let snapshot = handle.snapshot();
         assert_eq!(snapshot.turn_phase, TurnPhase::Cancelled);
@@ -625,7 +985,7 @@ mod tests {
 
         handle
             .start_conversation_run(
-                run_id,
+                run_id.clone(),
                 TurnPrimitiveKind::ConversationTurn,
                 meerkat_core::turn_execution_authority::ContentShape::Conversation,
                 false,
@@ -633,9 +993,11 @@ mod tests {
                 0,
             )
             .unwrap();
-        handle.primitive_applied().unwrap();
+        handle.primitive_applied(run_id.clone()).unwrap();
 
-        handle.recoverable_failure(retry_schedule(2)).unwrap();
+        handle
+            .recoverable_failure(run_id.clone(), retry_schedule(2))
+            .unwrap();
 
         let snapshot = handle.snapshot();
         assert_eq!(snapshot.turn_phase, TurnPhase::ErrorRecovery);
@@ -643,19 +1005,51 @@ mod tests {
         assert_eq!(snapshot.llm_retry_max_retries, 3);
         assert_eq!(snapshot.llm_retry_selected_delay_ms, 1_000);
 
-        assert!(handle.retry_requested(1).is_err());
-        handle.retry_requested(2).unwrap();
+        assert!(handle.retry_requested(run_id.clone(), 1).is_err());
+        handle.retry_requested(run_id, 2).unwrap();
         assert_eq!(handle.snapshot().turn_phase, TurnPhase::CallingLlm);
     }
 
+    /// P0 Dogma Invariant 1: the machine — not the shell `RetryPolicy` — is the
+    /// authority on retry exhaustion. A `RecoverableFailure` whose one-based
+    /// `retry_attempt` exceeds `max_retries` must be machine-rejected so the
+    /// turn cannot enter `ErrorRecovery` past exhaustion.
     #[test]
-    fn fatal_failure_unknown_terminal_cause_rejects_before_machine_apply() {
+    fn recoverable_failure_past_exhaustion_is_machine_rejected() {
+        let handle = RuntimeTurnStateHandle::ephemeral();
+        let run_id = RunId(Uuid::from_u128(31));
+        start_running_conversation_turn(&handle, &run_id);
+
+        // attempt 4 with max_retries 3 is past exhaustion.
+        let exhausted = retry_schedule_with_kind(4, 3, LlmRetryFailureKind::RateLimited);
+        let err = handle
+            .recoverable_failure(run_id.clone(), exhausted)
+            .expect_err("exhausted retry must be rejected by the machine");
+        assert!(err.is_guard_rejected(), "expected guard rejection: {err:?}");
+
+        // The turn never entered recovery; it remains in CallingLlm.
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::CallingLlm);
+        assert_eq!(snapshot.llm_retry_attempt, 0);
+
+        // A retry at the exhaustion boundary (attempt == max_retries) is still
+        // legitimate and the machine accepts it.
+        let last = retry_schedule_with_kind(3, 3, LlmRetryFailureKind::NetworkTimeout);
+        handle.recoverable_failure(run_id, last).unwrap();
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::ErrorRecovery);
+        assert_eq!(snapshot.llm_retry_attempt, 3);
+        assert_eq!(snapshot.llm_retry_max_retries, 3);
+    }
+
+    #[test]
+    fn fatal_failure_unknown_source_rejects_before_machine_apply() {
         let handle = RuntimeTurnStateHandle::ephemeral();
         let run_id = RunId(Uuid::from_u128(11));
 
         handle
             .start_conversation_run(
-                run_id,
+                run_id.clone(),
                 TurnPrimitiveKind::ConversationTurn,
                 meerkat_core::turn_execution_authority::ContentShape::Conversation,
                 false,
@@ -665,10 +1059,11 @@ mod tests {
             .unwrap();
 
         let err = handle
-            .fatal_failure(unknown_terminal_cause_reason(
-                "display text must not classify fatal failure",
-            ))
-            .expect_err("Unknown fatal cause should reject before state mutation");
+            .fatal_failure(
+                run_id.clone(),
+                unknown_failure_source("display text must not classify fatal failure"),
+            )
+            .expect_err("unknown fatal source should reject before state mutation");
 
         assert!(err.is_guard_rejected(), "expected guard rejection: {err:?}");
         let snapshot = handle.snapshot();
@@ -676,11 +1071,11 @@ mod tests {
         assert_eq!(snapshot.terminal_cause_kind, None);
 
         handle
-            .fatal_failure(specific_terminal_cause_reason(
-                meerkat_core::TurnTerminalCauseKind::FatalFailure,
-                "explicit fatal failure",
-            ))
-            .expect("specific fatal cause should remain accepted");
+            .fatal_failure(
+                run_id,
+                failure_source(TurnFailureSourceKind::InternalError, "fatal failure"),
+            )
+            .expect("specific fatal source should remain accepted");
         assert_eq!(
             handle.snapshot().terminal_cause_kind,
             Some(meerkat_core::TurnTerminalCauseKind::FatalFailure)
@@ -706,7 +1101,11 @@ mod tests {
         handle
             .run_failed(
                 run_id.clone(),
-                unknown_terminal_cause_reason("display text must not classify run failure"),
+                TurnFailureReason::with_cause(
+                    meerkat_core::TurnTerminalCauseKind::Unknown,
+                    meerkat_core::event::AgentErrorClass::Internal,
+                    "display text must not classify run failure",
+                ),
             )
             .expect("runtime-backed run_failed effect is observation-only");
 

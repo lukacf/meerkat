@@ -143,6 +143,7 @@ rust_test(
         "//meerkat-capabilities:meerkat_capabilities",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
+        "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
     ] + all_crate_deps(
         package_name = "meerkat-comms",
@@ -198,6 +199,7 @@ rust_test(
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
+        "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
     ] + all_crate_deps(
         package_name = "meerkat-comms",
@@ -252,6 +254,7 @@ rust_test(
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
+        "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
     ] + all_crate_deps(
         package_name = "meerkat-comms",
@@ -306,6 +309,7 @@ rust_test(
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
+        "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
     ] + all_crate_deps(
         package_name = "meerkat-comms",
@@ -360,6 +364,7 @@ rust_test(
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
+        "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
     ] + all_crate_deps(
         package_name = "meerkat-comms",
@@ -414,6 +419,7 @@ rust_test(
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
+        "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
     ] + all_crate_deps(
         package_name = "meerkat-comms",
@@ -468,6 +474,7 @@ rust_test(
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
+        "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
     ] + all_crate_deps(
         package_name = "meerkat-comms",

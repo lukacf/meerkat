@@ -146,16 +146,6 @@ pub enum WorkStatus {
     Failed,
 }
 
-impl WorkStatus {
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Cancelled | Self::Failed)
-    }
-
-    pub fn is_terminal_success(self) -> bool {
-        matches!(self, Self::Completed)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -356,13 +346,6 @@ pub struct WorkClaim {
     pub lease_expires_at: Option<DateTime<Utc>>,
 }
 
-impl WorkClaim {
-    pub fn is_active_at(&self, now: DateTime<Utc>) -> bool {
-        self.lease_expires_at
-            .is_none_or(|lease_expires_at| lease_expires_at > now)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ExternalWorkRef {
@@ -372,15 +355,63 @@ pub struct ExternalWorkRef {
     pub url: Option<String>,
 }
 
+/// Typed classification of confirmation evidence.
+///
+/// This is the canonical signal the `WorkGraphLifecycleMachine` consumes to
+/// decide completion-policy satisfaction. The producer
+/// (`confirmation_evidence_for_policy`) sets this field; the raw
+/// [`WorkEvidenceRef::kind`] string remains only as opaque provenance/display
+/// and is never re-read to classify evidence for the satisfaction decision.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WorkEvidenceKind {
+    /// Generic / self-attested evidence that does not satisfy any
+    /// confirmation policy on its own.
+    #[default]
+    SelfAttest,
+    HostConfirmation,
+    PrincipalConfirmation,
+    SupervisorConfirmation,
+    ReviewerConfirmation,
+}
+
+impl WorkEvidenceKind {
+    pub(crate) fn to_machine(self) -> wg_dsl::WorkEvidenceKind {
+        match self {
+            Self::SelfAttest => wg_dsl::WorkEvidenceKind::SelfAttest,
+            Self::HostConfirmation => wg_dsl::WorkEvidenceKind::HostConfirmation,
+            Self::PrincipalConfirmation => wg_dsl::WorkEvidenceKind::PrincipalConfirmation,
+            Self::SupervisorConfirmation => wg_dsl::WorkEvidenceKind::SupervisorConfirmation,
+            Self::ReviewerConfirmation => wg_dsl::WorkEvidenceKind::ReviewerConfirmation,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WorkEvidenceRef {
+    /// Opaque provenance/display label for the evidence. NOT used to classify
+    /// evidence for the completion-policy satisfaction decision — see
+    /// [`WorkEvidenceRef::confirmation_kind`].
     pub kind: String,
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// Typed confirmation classification set by the trusted producer. Drives the
+    /// machine-owned completion-policy satisfaction decision. Generic evidence
+    /// leaves this unset (treated as `SelfAttest`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation_kind: Option<WorkEvidenceKind>,
+    /// Typed identity of the confirming owner for supervisor/reviewer
+    /// confirmations. Set by the trusted producer; the machine records distinct
+    /// owners per confirmation kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirming_owner_key: Option<WorkOwnerKey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -450,16 +481,6 @@ pub enum WorkAttentionStatus {
     },
     Superseded,
     Stopped,
-}
-
-impl WorkAttentionStatus {
-    pub fn is_active_at(&self, now: DateTime<Utc>) -> bool {
-        match self {
-            Self::Active => true,
-            Self::Paused { until } => until.is_some_and(|until| until <= now),
-            Self::Superseded | Self::Stopped => false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -832,7 +853,7 @@ fn legacy_workgraph_machine_state(wire: &WorkItemWire) -> WorkGraphMachineState 
     machine_state
 }
 
-fn work_lifecycle_state_from_status(status: WorkStatus) -> wg_dsl::WorkLifecycleState {
+pub(crate) fn work_lifecycle_state_from_status(status: WorkStatus) -> wg_dsl::WorkLifecycleState {
     match status {
         WorkStatus::Open => wg_dsl::WorkLifecycleState::Open,
         WorkStatus::InProgress => wg_dsl::WorkLifecycleState::InProgress,
@@ -843,16 +864,19 @@ fn work_lifecycle_state_from_status(status: WorkStatus) -> wg_dsl::WorkLifecycle
     }
 }
 
-fn work_owner_key_to_machine(owner: &WorkOwnerKey) -> wg_dsl::WorkOwnerKey {
-    let kind = match owner.kind {
+pub(crate) fn work_owner_kind_to_machine(kind: WorkOwnerKind) -> wg_dsl::WorkOwnerKind {
+    match kind {
         WorkOwnerKind::Principal => wg_dsl::WorkOwnerKind::Principal,
         WorkOwnerKind::Agent => wg_dsl::WorkOwnerKind::Agent,
         WorkOwnerKind::Session => wg_dsl::WorkOwnerKind::Session,
         WorkOwnerKind::Mob => wg_dsl::WorkOwnerKind::Mob,
         WorkOwnerKind::Label => wg_dsl::WorkOwnerKind::Label,
-    };
+    }
+}
+
+pub(crate) fn work_owner_key_to_machine(owner: &WorkOwnerKey) -> wg_dsl::WorkOwnerKey {
     wg_dsl::WorkOwnerKey {
-        kind,
+        kind: work_owner_kind_to_machine(owner.kind),
         id: owner.id.clone(),
     }
 }
@@ -1398,12 +1422,19 @@ pub struct AttentionProjectionParentContext {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProjectedAttentionAuthority {
+    pub can_get: bool,
     pub can_add_evidence: bool,
-    pub can_request_closure: bool,
+    pub can_release: bool,
+    pub can_update: bool,
+    pub can_block: bool,
+    pub can_create: bool,
+    pub can_link: bool,
+    pub can_link_parent: bool,
+    pub can_link_related: bool,
+    pub can_link_derived_from: bool,
     #[serde(default)]
     pub can_close_own_review_item: bool,
     pub can_close_if_policy_allows: bool,
-    pub can_close_parent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

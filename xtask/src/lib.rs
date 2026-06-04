@@ -56,16 +56,38 @@ enum Commands {
 
 pub fn run() -> Result<()> {
     match Cli::parse().command {
-        Commands::Codegen(args) => machines::machine_codegen(args),
-        Commands::Verify(args) => machines::machine_verify(args),
+        Commands::Codegen(args) => {
+            run_machine_authority_task(move || machines::machine_codegen(args))
+        }
+        Commands::Verify(args) => {
+            run_machine_authority_task(move || machines::machine_verify(args))
+        }
         #[cfg(feature = "machine-authority")]
-        Commands::Hopcroft(args) => machines::machine_hopcroft(args),
-        Commands::CheckDrift(args) => machines::machine_check_drift(args),
+        Commands::Hopcroft(args) => {
+            run_machine_authority_task(move || machines::machine_hopcroft(args))
+        }
+        Commands::CheckDrift(args) => {
+            run_machine_authority_task(move || machines::machine_check_drift(args))
+        }
         Commands::SeamInventory(args) => seam_inventory::run_seam_inventory(args),
         Commands::ProtocolCodegen => protocol_codegen::run_protocol_codegen(),
         Commands::RmatAudit(args) => rmat_audit::rmat_audit(args),
         Commands::OwnershipLedger(args) => ownership_ledger::run_ownership_ledger(args),
-        Commands::AuditGeneratedHeaders => run_audit_generated_headers_command(),
+        Commands::AuditGeneratedHeaders => {
+            run_machine_authority_task(run_audit_generated_headers_command)
+        }
+    }
+}
+
+fn run_machine_authority_task(task: impl FnOnce() -> Result<()> + Send + 'static) -> Result<()> {
+    const MACHINE_AUTHORITY_STACK_SIZE: usize = 64 * 1024 * 1024;
+    let handle = std::thread::Builder::new()
+        .name("machine-authority-task".to_owned())
+        .stack_size(MACHINE_AUTHORITY_STACK_SIZE)
+        .spawn(task)?;
+    match handle.join() {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
     }
 }
 

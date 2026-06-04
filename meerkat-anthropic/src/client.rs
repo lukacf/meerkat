@@ -321,6 +321,7 @@ fn project_anthropic_replay_messages(messages: &[Message]) -> Result<Vec<Message
             Message::User(user) => Some(Message::User(meerkat_core::UserMessage {
                 content: project_anthropic_content_blocks(&user.content),
                 render_metadata: user.render_metadata.clone(),
+                transcript_role: user.transcript_role,
                 created_at: user.created_at,
             })),
             Message::Assistant(assistant) => {

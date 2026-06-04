@@ -163,12 +163,6 @@ pub trait ArchiveRuntimeMobState: Send + Sync {
         &self,
         session_id: &SessionId,
     ) -> Result<(), meerkat_core::service::SessionError>;
-
-    /// Whether session-scoped mob state still exists for `session_id`
-    /// after the service-side archive failed. The archive flow uses
-    /// this to distinguish "session never existed" from "session is
-    /// retained for follow-up cleanup".
-    async fn has_retained_cleanup(&self, session_id: &SessionId) -> bool;
 }
 
 /// Surface-agnostic archive cleanup orchestrator.
@@ -195,19 +189,6 @@ pub struct ArchiveRuntimeCleanup {
 }
 
 impl ArchiveRuntimeCleanup {
-    /// Whether the mob cleanup hook reports retained per-session state
-    /// after the service-side archive returned `NotFound`. Used by the
-    /// archive flow to decide whether to surface the not-found error or
-    /// treat the archive as a benign no-op.
-    pub async fn has_retained_mob_cleanup(&self, session_id: &SessionId) -> bool {
-        if let Some(mob_state) = self.mob_state.as_ref()
-            && mob_state.has_retained_cleanup(session_id).await
-        {
-            return true;
-        }
-        false
-    }
-
     /// Run the durable-store archive step. Surfaces that already
     /// archived through the service skip this and call [`run`]
     /// directly.

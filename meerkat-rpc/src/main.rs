@@ -361,29 +361,42 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         "rkat-rpc",
     )
     .await?;
-    let live_host = if live_transport_enabled {
-        // Wave-3: install the surface projection sink so adapter observations
-        // become canonical Meerkat semantic facts (A1-A6, A14). The host is
-        // shared by every enabled transport; surfaces stay thin skins.
-        let projection_sink: std::sync::Arc<dyn meerkat_live::LiveProjectionSink> =
-            std::sync::Arc::new(
+    let (live_host, live_close_feedback, live_status_feedback, live_ws_token_authority) =
+        if live_transport_enabled {
+            // Wave-3: install the surface projection sink so adapter observations
+            // become canonical Meerkat semantic facts (A1-A6, A14). The host is
+            // shared by every enabled transport; surfaces stay thin skins.
+            let live_authority_sink = std::sync::Arc::new(
                 meerkat_rpc::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
                     &runtime,
                 )),
             );
-        // G6 (P2): every production live channel runs with the canonical
-        // per-tool-call dispatch deadline.
-        let live_tool_timeout = cli
-            .live_tool_timeout_ms
-            .map(std::time::Duration::from_millis)
-            .unwrap_or(meerkat_live::DEFAULT_LIVE_TOOL_TIMEOUT);
-        Some(std::sync::Arc::new(
-            meerkat_live::LiveAdapterHost::new(projection_sink)
-                .with_tool_timeout(live_tool_timeout),
-        ))
-    } else {
-        None
-    };
+            let projection_sink: std::sync::Arc<dyn meerkat_live::LiveProjectionSink> =
+                live_authority_sink.clone();
+            let close_feedback: std::sync::Arc<dyn meerkat_live::LiveChannelCloseFeedback> =
+                live_authority_sink.clone();
+            let status_feedback: std::sync::Arc<dyn meerkat_live::LiveChannelStatusFeedback> =
+                live_authority_sink.clone();
+            let token_authority: std::sync::Arc<dyn meerkat_live::LiveWsTokenAuthority> =
+                live_authority_sink;
+            // G6 (P2): every production live channel runs with the canonical
+            // per-tool-call dispatch deadline.
+            let live_tool_timeout = cli
+                .live_tool_timeout_ms
+                .map(std::time::Duration::from_millis)
+                .unwrap_or(meerkat_live::DEFAULT_LIVE_TOOL_TIMEOUT);
+            (
+                Some(std::sync::Arc::new(
+                    meerkat_live::LiveAdapterHost::new(projection_sink)
+                        .with_tool_timeout(live_tool_timeout),
+                )),
+                Some(close_feedback),
+                Some(status_feedback),
+                Some(token_authority),
+            )
+        } else {
+            (None, None, None, None)
+        };
 
     #[cfg(feature = "live-webrtc")]
     let live_webrtc_state = if cli.live_webrtc {
@@ -394,8 +407,16 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             "rkat-rpc live-webrtc signaling enabled over JSON-RPC method {}",
             meerkat_live::LIVE_WEBRTC_ANSWER_METHOD
         );
+        let Some(close_feedback) = live_close_feedback.as_ref() else {
+            return Err("internal error: live close feedback missing for --live-webrtc".into());
+        };
+        let Some(status_feedback) = live_status_feedback.as_ref() else {
+            return Err("internal error: live status feedback missing for --live-webrtc".into());
+        };
         Some(std::sync::Arc::new(meerkat_live::LiveWebrtcState::new(
             std::sync::Arc::clone(host),
+            std::sync::Arc::clone(close_feedback),
+            std::sync::Arc::clone(status_feedback),
         )))
     } else {
         None
@@ -412,8 +433,21 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         let Some(host) = live_host.as_ref() else {
             return Err("internal error: live host missing for --live-ws".into());
         };
-        let ws_state =
-            std::sync::Arc::new(meerkat_live::LiveWsState::new(std::sync::Arc::clone(host)));
+        let Some(close_feedback) = live_close_feedback.as_ref() else {
+            return Err("internal error: live close feedback missing for --live-ws".into());
+        };
+        let Some(status_feedback) = live_status_feedback.as_ref() else {
+            return Err("internal error: live status feedback missing for --live-ws".into());
+        };
+        let Some(token_authority) = live_ws_token_authority.as_ref() else {
+            return Err("internal error: live token authority missing for --live-ws".into());
+        };
+        let ws_state = std::sync::Arc::new(meerkat_live::LiveWsState::new(
+            std::sync::Arc::clone(host),
+            std::sync::Arc::clone(close_feedback),
+            std::sync::Arc::clone(status_feedback),
+            std::sync::Arc::clone(token_authority),
+        ));
         let ws_state_clone = std::sync::Arc::clone(&ws_state);
         #[cfg(feature = "live-webrtc")]
         let webrtc_state_for_http = live_webrtc_state.clone();

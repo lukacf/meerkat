@@ -51,7 +51,7 @@ fn tlc_success_uses_process_status_not_stdout_folklore() {
 #[test]
 fn owner_tests_are_registered_only_for_remaining_canonical_surfaces() {
     let meerkat = owner_test_specs_for_machine("meerkat_machine");
-    assert_eq!(meerkat.len(), 6);
+    assert_eq!(meerkat.len(), 4);
     assert!(
         meerkat
             .iter()

@@ -13,15 +13,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Notify, mpsc};
 
-use crate::classify::IngressClassificationContext;
-use crate::classify::PreparedIngressItem;
+use crate::classify::{IngressClassificationContext, PeerCommsHandleSlot, PreparedIngressItem};
 use crate::peer_types::PeerIngressState;
 use crate::trust::TrustedPeers;
 use crate::types::{Envelope, InboxItem};
 use meerkat_core::{
     InteractionId, PeerIngressAdmissionDiagnostic, PeerIngressAuthDecision,
-    PeerIngressDiagnosticDisplay, PeerIngressEntrySnapshot, PeerIngressFact, PeerIngressKind,
-    PeerIngressQueueSnapshot, PeerInputClass, TerminalityClass,
+    PeerIngressDequeueAuthority, PeerIngressDequeueFacts, PeerIngressDiagnosticDisplay,
+    PeerIngressEntrySnapshot, PeerIngressFact, PeerIngressKind, PeerIngressQueueSnapshot,
+    PeerIngressReceiveAuthority, PeerIngressReceiveFacts, PeerIngressReceiveOutcome,
+    PeerInputClass, TerminalityClass,
 };
 
 const DEFAULT_INBOX_CAPACITY: usize = 1024;
@@ -108,6 +109,9 @@ pub(crate) struct ClassifiedInboxEntry {
     pub(crate) raw_item_id: InteractionId,
     pub(crate) item: InboxItem,
     pub(crate) class: PeerInputClass,
+    /// Machine-owned actionable grouping verdict, mirrored from the
+    /// MeerkatMachine PeerIngress classification effect (via `PreparedIngressItem`).
+    pub(crate) actionable: bool,
     pub(crate) auth: PeerIngressAuthDecision,
     pub(crate) kind: PeerIngressKind,
     pub(crate) from_peer: Option<String>,
@@ -128,7 +132,12 @@ pub(crate) struct AdmissionDecision {
     pub(crate) admission_diagnostic: Option<PeerIngressAdmissionDiagnostic>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
+struct AdmissionPushDecision {
+    outcome: AdmissionOutcome,
+    is_actionable: bool,
+}
+
 struct ClassifiedInboxQueue {
     capacity: usize,
     closed: bool,
@@ -144,19 +153,26 @@ struct ClassifiedInboxQueue {
     /// classification (T0) and admission (T2) cannot admit an envelope
     /// that was no longer trusted at T2 — see C-H3.
     trusted_peers: Arc<RwLock<TrustedPeers>>,
+    peer_comms_handle: PeerCommsHandleSlot,
     phase: PeerIngressState,
     dropped_count: Arc<AtomicU64>,
     capacity_notify: Arc<Notify>,
 }
 
 impl ClassifiedInboxQueue {
-    fn new(capacity: usize, auth_required: bool, trusted_peers: Arc<RwLock<TrustedPeers>>) -> Self {
+    fn new(
+        capacity: usize,
+        auth_required: bool,
+        trusted_peers: Arc<RwLock<TrustedPeers>>,
+        peer_comms_handle: PeerCommsHandleSlot,
+    ) -> Self {
         Self {
             capacity,
             closed: false,
             entries: VecDeque::new(),
             auth_required,
             trusted_peers,
+            peer_comms_handle,
             phase: PeerIngressState::Absent,
             dropped_count: Arc::new(AtomicU64::new(0)),
             capacity_notify: Arc::new(Notify::new()),
@@ -171,15 +187,59 @@ impl ClassifiedInboxQueue {
         self.capacity_notify.clone()
     }
 
-    /// Admit a prepared item into the peer-ingress lifecycle.
+    fn resolve_receive_authority(
+        &self,
+        facts: PeerIngressReceiveFacts,
+    ) -> Option<PeerIngressReceiveAuthority> {
+        let handle = self.peer_comms_handle.read().clone();
+        let Some(handle) = handle else {
+            tracing::warn!(
+                "classified peer ingress has no machine receive authority; rejecting item"
+            );
+            return None;
+        };
+
+        match handle.resolve_peer_ingress_receive(facts) {
+            Ok(authority) => Some(authority),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "peer ingress receive rejected by machine authority"
+                );
+                None
+            }
+        }
+    }
+
+    fn resolve_dequeue_authority(
+        &self,
+        facts: PeerIngressDequeueFacts,
+    ) -> Option<PeerIngressDequeueAuthority> {
+        let handle = self.peer_comms_handle.read().clone();
+        let Some(handle) = handle else {
+            tracing::warn!(
+                "classified peer ingress has no machine dequeue authority; leaving phase projection unchanged"
+            );
+            return None;
+        };
+
+        match handle.resolve_peer_ingress_dequeue(facts) {
+            Ok(authority) => Some(authority),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "peer ingress dequeue rejected by machine authority"
+                );
+                None
+            }
+        }
+    }
+
+    /// Resolve admission for a prepared item through peer-ingress authority.
     ///
-    /// Returns a typed `AdmissionDecision`:
-    /// - Plain events are always admitted, with no trust diagnostic.
-    /// - External envelopes consult the canonical trust set
-    ///   (`Arc<RwLock<TrustedPeers>>` shared with the router) plus the
-    ///   auth-required policy. Untrusted senders with auth required are
-    ///   `Dropped { reason: UntrustedSender }`; the trust diagnostic still
-    ///   records the decision for queue visibility.
+    /// Plain events and external envelopes both pass queue/admission-time
+    /// observations to the generated peer-ingress authority, which emits the
+    /// admission outcome, optional diagnostic, and public phase.
     ///
     /// C-H3 — the trust check is re-read from the canonical
     /// `trusted_peers` store **inside** this queue's `Mutex` scope, not
@@ -190,86 +250,117 @@ impl ClassifiedInboxQueue {
     /// observation said trusted. The prepared bool is retained for
     /// diagnostics only (TOCTOU observability).
     ///
-    /// Auth-exempt items (bridge bootstrap / idempotency-ack) bypass the
-    /// peer-trust gate unconditionally so bootstrapping can complete
-    /// before trust edges exist. The typed auth decision flows from
-    /// the prepared item so this single admission seam can distinguish
-    /// "admit as trusted" from "admit as exempt" — no parallel outer
-    /// branch, no classification-time bool that can drift.
-    ///
-    /// Updates `phase` to track the observable lifecycle:
-    /// `Absent → Received` (admitted), `Received → Received` (more work),
-    /// `Absent → Dropped` (untrusted with empty queue), untrusted with queued
-    /// work keeps `Received`.
+    /// The queue stores only the emitted phase projection for snapshots; it
+    /// does not derive phase or trust/admission legality locally.
     fn admit_peer_receive(&mut self, prepared: &PreparedIngressItem) -> AdmissionDecision {
-        let InboxItem::External { envelope } = &prepared.item else {
-            return AdmissionDecision {
-                outcome: AdmissionOutcome::Admitted,
-                admission_diagnostic: None,
-            };
-        };
         // Authoritative trust check at admission time. The read lock on
         // `trusted_peers` runs while we hold the queue `Mutex`, so any
         // concurrent `router.{add,remove}_trusted_peer` serializes with
         // this check — classification's stale view is ignored.
-        let trusted = self.trusted_peers.read().is_trusted(&envelope.from);
-        // Auth-exempt items always admit; otherwise admission is gated by
-        // the authoritative trust read against the require_peer_auth
-        // policy. The prepared classification observation is NOT consulted
-        // here — only the admission-time read is authoritative.
-        let admitted = prepared.auth.is_exempt() || trusted || !self.auth_required;
-        let had_queued_work = !self.entries.is_empty();
-
-        if admitted {
-            self.phase = PeerIngressState::Received;
-            AdmissionDecision {
-                outcome: AdmissionOutcome::Admitted,
-                admission_diagnostic: Some(PeerIngressAdmissionDiagnostic::from_trusted(trusted)),
+        let trusted = match &prepared.item {
+            InboxItem::External { envelope } => {
+                self.trusted_peers.read().is_trusted(&envelope.from)
             }
-        } else {
-            if had_queued_work {
-                self.phase = PeerIngressState::Received;
-            } else {
-                self.phase = PeerIngressState::Dropped;
-            }
-            AdmissionDecision {
-                outcome: AdmissionOutcome::Dropped {
-                    reason: DropReason::UntrustedSender,
-                },
-                admission_diagnostic: Some(PeerIngressAdmissionDiagnostic::UntrustedAtAdmission),
-            }
-        }
-    }
-
-    /// Advance `phase` on dequeue.
-    ///
-    /// External items drive the transition: an empty queue after dequeue moves
-    /// to `Delivered`; otherwise we stay in `Received`. Plain events do not
-    /// drive the peer-ingress phase. Auth-exempt entries (bridge bootstrap
-    /// / idempotency-ack envelopes) bypass the phase machinery entirely.
-    fn note_peer_dequeue(&mut self, entry: &ClassifiedInboxEntry) {
-        if entry.auth.is_exempt() {
-            return;
-        }
-        let InboxItem::External { .. } = &entry.item else {
-            return;
+            InboxItem::PlainEvent { .. } => false,
         };
-        if self.entries.is_empty() {
-            self.phase = PeerIngressState::Delivered;
-        } else {
-            self.phase = PeerIngressState::Received;
+        let had_queued_work = !self.entries.is_empty();
+        let Some(authority) = self.resolve_receive_authority(PeerIngressReceiveFacts {
+            kind: prepared.kind,
+            current_phase: self.phase.into(),
+            auth_required: self.auth_required,
+            auth_exempt: prepared.auth.is_exempt(),
+            trusted,
+            queued_work_present: had_queued_work,
+            queue_closed: self.closed,
+            queue_capacity_available: self.entries.len() < self.capacity,
+        }) else {
+            return AdmissionDecision {
+                outcome: AdmissionOutcome::Dropped {
+                    reason: DropReason::ClassificationRejected,
+                },
+                admission_diagnostic: None,
+            };
+        };
+
+        self.phase = authority.authority_phase.into();
+        let outcome = match authority.outcome {
+            PeerIngressReceiveOutcome::Admitted => AdmissionOutcome::Admitted,
+            PeerIngressReceiveOutcome::DroppedUntrustedSender => AdmissionOutcome::Dropped {
+                reason: DropReason::UntrustedSender,
+            },
+            PeerIngressReceiveOutcome::DroppedSessionClosed => AdmissionOutcome::Dropped {
+                reason: DropReason::SessionClosed,
+            },
+            PeerIngressReceiveOutcome::DroppedInboxFull => AdmissionOutcome::Dropped {
+                reason: DropReason::InboxFull,
+            },
+        };
+        AdmissionDecision {
+            outcome,
+            admission_diagnostic: authority.admission_diagnostic,
         }
     }
 
-    fn try_push(&mut self, entry: ClassifiedInboxEntry) -> Result<(), InboxError> {
-        if self.closed {
-            return Err(InboxError::Closed);
+    fn admit_and_push(&mut self, prepared: PreparedIngressItem) -> AdmissionPushDecision {
+        let kind = prepared.kind;
+        let decision = self.admit_peer_receive(&prepared);
+        if let AdmissionOutcome::Dropped { reason } = decision.outcome {
+            if let InboxItem::External { envelope } = &prepared.item {
+                let request_id_for_log =
+                    prepared.request_id.map(|request_id| request_id.to_string());
+                tracing::warn!(
+                    peer_id = %envelope.from.to_peer_id(),
+                    from_peer = prepared.from_peer.as_deref().unwrap_or("<unresolved>"),
+                    class = ?prepared.class,
+                    kind = ?kind,
+                    request_id = request_id_for_log.as_deref().unwrap_or("<none>"),
+                    auth_required = self.auth_required,
+                    trusted_sender = prepared.trusted_sender,
+                    reason = ?reason,
+                    "classified inbox dropped external peer ingress at generated admission"
+                );
+            }
+            return AdmissionPushDecision {
+                outcome: decision.outcome,
+                is_actionable: false,
+            };
         }
-        if self.entries.len() >= self.capacity {
-            return Err(InboxError::Full);
-        }
+
+        let entry = ClassifiedInboxEntry {
+            raw_item_id: prepared.raw_item_id,
+            item: prepared.item,
+            class: prepared.class,
+            actionable: prepared.actionable,
+            auth: prepared.auth,
+            kind,
+            from_peer: prepared.from_peer,
+            ingress_fact: prepared.ingress_fact,
+            lifecycle_peer: prepared.lifecycle_peer,
+            request_id: prepared.request_id,
+            admission_diagnostic: decision.admission_diagnostic,
+            response_terminality: prepared.response_terminality,
+            text_projection: prepared.text_projection,
+        };
+        let is_actionable = entry.actionable;
         self.entries.push_back(entry);
-        Ok(())
+        AdmissionPushDecision {
+            outcome: AdmissionOutcome::Admitted,
+            is_actionable,
+        }
+    }
+
+    /// Project the generated peer-ingress authority phase after dequeue.
+    ///
+    /// The queue supplies the generated ingress kind/auth fact plus remaining
+    /// occupancy. The machine decides whether the public phase changes.
+    fn note_peer_dequeue(&mut self, entry: &ClassifiedInboxEntry) {
+        if let Some(authority) = self.resolve_dequeue_authority(PeerIngressDequeueFacts {
+            kind: entry.kind,
+            auth: entry.auth,
+            queued_work_remaining: !self.entries.is_empty(),
+        }) {
+            self.phase = authority.authority_phase.into();
+        }
     }
 
     fn drain(&mut self) -> Vec<ClassifiedInboxEntry> {
@@ -301,7 +392,7 @@ impl ClassifiedInboxQueue {
         let queued_entries: Vec<_> = self.entries.iter().map(snapshot_entry).collect();
         let actionable_count = queued_entries
             .iter()
-            .filter(|entry| entry.class.is_actionable())
+            .filter(|entry| entry.actionable)
             .count();
         let response_count = queued_entries
             .iter()
@@ -370,6 +461,9 @@ pub struct Inbox {
 /// The sending end of the inbox, cloned to IO tasks.
 #[derive(Clone)]
 pub struct InboxSender {
+    // Kept to hold the raw channel open for legacy receivers; raw semantic
+    // sends fail closed unless a classified machine context is installed.
+    #[allow(dead_code)]
     tx: mpsc::Sender<InboxItem>,
     /// Notifier to wake waiting tasks when messages arrive.
     notify: Arc<Notify>,
@@ -384,12 +478,17 @@ pub struct InboxSender {
 }
 
 impl Inbox {
-    /// Create a new inbox, returning both the inbox and a sender.
+    /// Create a raw transport-only inbox, returning both the inbox and a sender.
+    ///
+    /// Raw inboxes do not own Meerkat peer/event admission authority. Sending
+    /// semantic `InboxItem`s through the public sender fails closed; runtime
+    /// peer/event ingress must use [`Self::new_classified`] with an installed
+    /// machine handle.
     pub fn new() -> (Self, InboxSender) {
         Self::new_with_capacity(DEFAULT_INBOX_CAPACITY)
     }
 
-    /// Create a new inbox with a bounded capacity.
+    /// Create a raw transport-only inbox with a bounded capacity.
     pub fn new_with_capacity(capacity: usize) -> (Self, InboxSender) {
         let (tx, rx) = mpsc::channel(capacity);
         let notify = Arc::new(Notify::new());
@@ -422,13 +521,29 @@ impl Inbox {
     pub(crate) fn new_classified(
         context: Arc<IngressClassificationContext>,
     ) -> (Self, InboxSender) {
-        let (tx, rx) = mpsc::channel(DEFAULT_INBOX_CAPACITY);
+        Self::new_classified_with_queue_capacity(context, DEFAULT_INBOX_CAPACITY)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_classified_with_capacity_for_test(
+        context: Arc<IngressClassificationContext>,
+        capacity: usize,
+    ) -> (Self, InboxSender) {
+        Self::new_classified_with_queue_capacity(context, capacity)
+    }
+
+    fn new_classified_with_queue_capacity(
+        context: Arc<IngressClassificationContext>,
+        capacity: usize,
+    ) -> (Self, InboxSender) {
+        let (tx, rx) = mpsc::channel(capacity);
         let notify = Arc::new(Notify::new());
         let actionable_notify = Arc::new(Notify::new());
         let queue = ClassifiedInboxQueue::new(
-            DEFAULT_INBOX_CAPACITY,
+            capacity,
             context.require_peer_auth,
             context.trusted_peers.clone(),
+            context.peer_comms_handle.clone(),
         );
         let dropped_count = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
@@ -570,35 +685,16 @@ impl InboxSender {
         // flip trust state before admission runs. This is the critical
         // T0→T1 window that the pre-C-H3 code would have leaked.
         pause();
-        let kind = result.kind;
         let decision = {
             let mut queue = classified_queue.lock();
-            queue.admit_peer_receive(&result)
+            queue.admit_and_push(result)
         };
-        if let AdmissionOutcome::Dropped { reason } = decision.outcome {
-            return self.record_drop(reason);
-        }
-        let entry = ClassifiedInboxEntry {
-            raw_item_id: result.raw_item_id,
-            item: result.item,
-            class: result.class,
-            auth: result.auth,
-            kind,
-            from_peer: result.from_peer,
-            ingress_fact: result.ingress_fact,
-            lifecycle_peer: result.lifecycle_peer,
-            request_id: result.request_id,
-            admission_diagnostic: decision.admission_diagnostic,
-            response_terminality: result.response_terminality,
-            text_projection: result.text_projection,
-        };
-        match classified_queue.lock().try_push(entry) {
-            Ok(()) => {
+        match decision.outcome {
+            AdmissionOutcome::Admitted => {
                 self.notify.notify_waiters();
                 AdmissionOutcome::Admitted
             }
-            Err(InboxError::Closed) => self.record_drop(DropReason::SessionClosed),
-            Err(InboxError::Full) => self.record_drop(DropReason::InboxFull),
+            AdmissionOutcome::Dropped { reason } => self.record_drop(reason),
         }
     }
 
@@ -606,45 +702,32 @@ impl InboxSender {
     ///
     /// This keeps trust ownership inside `InboxSender` instead of the
     /// transport task. Classified runtimes route through `send_classified()`;
-    /// raw inboxes enforce the same auth-required admission rule here so
-    /// `handle_connection()` does not branch on trust itself.
+    /// raw inboxes are transport-only and cannot assert semantic peer ingress
+    /// admission without machine authority.
     pub fn send_connection_ingress(
         &self,
         envelope: Envelope,
         require_peer_auth: bool,
-        trusted_peers: &Arc<RwLock<TrustedPeers>>,
     ) -> AdmissionOutcome {
         if self.classification_context.is_some() {
             return self.send_classified(InboxItem::External { envelope });
         }
 
-        // Raw inbox ingress is transport mechanics only. It must not reconstruct
-        // auth exemptions, lifecycle intent, or response terminality from the
-        // compatibility classifier; those facts exist only on the classified
-        // runtime/machine path.
-        let auth = PeerIngressAuthDecision::Required;
-        if require_peer_auth
-            && !auth.is_exempt()
-            && !trusted_peers.read().is_trusted(&envelope.from)
-        {
-            tracing::warn!(
-                peer_id = %envelope.from.to_peer_id(),
-                auth_required = require_peer_auth,
-                auth_exempt = auth.is_exempt(),
-                reason = ?DropReason::UntrustedSender,
-                "raw inbox dropped external peer ingress at admission"
-            );
-            return self.record_drop(DropReason::UntrustedSender);
-        }
-
-        self.send(InboxItem::External { envelope })
+        let _ = require_peer_auth;
+        tracing::warn!(
+            peer_id = %envelope.from.to_peer_id(),
+            reason = ?DropReason::ClassificationRejected,
+            "raw inbox rejected external peer ingress because no machine classification context is installed"
+        );
+        self.record_drop(DropReason::ClassificationRejected)
     }
 
     /// Send an item to the inbox.
     ///
     /// On classified runtimes, delegates to `send_classified()` so the item
-    /// goes through the classified queue (the sole consumer). On non-classified
-    /// runtimes, enqueues on the raw channel directly.
+    /// goes through the classified queue (the sole consumer). On raw inboxes,
+    /// semantic peer/event items fail closed because no machine authority is
+    /// installed to classify admission or public result facts.
     ///
     /// Returns a typed `AdmissionOutcome`. Drops are never surfaced as `Ok(())`.
     pub fn send(&self, item: InboxItem) -> AdmissionOutcome {
@@ -652,26 +735,12 @@ impl InboxSender {
         if self.classification_context.is_some() {
             return self.send_classified(item);
         }
-        match self.tx.try_send(item) {
-            Ok(()) => {
-                self.notify.notify_waiters();
-                AdmissionOutcome::Admitted
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                tracing::warn!(
-                    reason = ?DropReason::SessionClosed,
-                    "raw inbox dropped item: queue closed"
-                );
-                self.record_drop(DropReason::SessionClosed)
-            }
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                tracing::warn!(
-                    reason = ?DropReason::InboxFull,
-                    "raw inbox dropped item: queue full"
-                );
-                self.record_drop(DropReason::InboxFull)
-            }
-        }
+        let _ = item;
+        tracing::warn!(
+            reason = ?DropReason::ClassificationRejected,
+            "raw inbox rejected semantic item because no machine classification context is installed"
+        );
+        self.record_drop(DropReason::ClassificationRejected)
     }
 
     /// Send an item with classification through the classified queue.
@@ -691,30 +760,11 @@ impl InboxSender {
         let (Some(ctx), Some(classified_queue)) =
             (&self.classification_context, &self.classified_queue)
         else {
-            // Non-classified fallback: enqueue on raw and report back as typed
-            // outcome. Use try_send directly to avoid infinite recursion with
-            // `send()` (which delegates to us when a classification context is
-            // present).
-            return match self.tx.try_send(item) {
-                Ok(()) => {
-                    self.notify.notify_waiters();
-                    AdmissionOutcome::Admitted
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    tracing::warn!(
-                        reason = ?DropReason::SessionClosed,
-                        "classified inbox send_classified fell back to raw and found queue closed"
-                    );
-                    self.record_drop(DropReason::SessionClosed)
-                }
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    tracing::warn!(
-                        reason = ?DropReason::InboxFull,
-                        "classified inbox send_classified fell back to raw and found queue full"
-                    );
-                    self.record_drop(DropReason::InboxFull)
-                }
-            };
+            tracing::warn!(
+                reason = ?DropReason::ClassificationRejected,
+                "classified inbox send requested without machine classification context"
+            );
+            return self.record_drop(DropReason::ClassificationRejected);
         };
 
         let result = match ctx.prepare(item) {
@@ -729,80 +779,27 @@ impl InboxSender {
                 return self.record_drop(DropReason::ClassificationRejected);
             }
         };
-        let kind = result.kind;
-        // C-H3 — the admission decision (trust re-check, auth-exempt
-        // bypass, and phase update) happens inside a single queue-lock
-        // scope so classification's T0 trust observation cannot admit an
-        // envelope that was revoked at T2.
+        // C-H3 — generated admission (trust re-check, auth-exempt bypass,
+        // capacity/closed result, phase update) and enqueue happen inside a
+        // single queue-lock scope so no handwritten post-authority path can
+        // change the public admission result.
         let decision = {
             let mut queue = classified_queue.lock();
-            queue.admit_peer_receive(&result)
+            queue.admit_and_push(result)
         };
         match decision.outcome {
-            AdmissionOutcome::Admitted => {}
-            AdmissionOutcome::Dropped { reason } => {
-                if let InboxItem::External { envelope } = &result.item {
-                    let request_id_for_log =
-                        result.request_id.map(|request_id| request_id.to_string());
-                    tracing::warn!(
-                        peer_id = %envelope.from.to_peer_id(),
-                        from_peer = result.from_peer.as_deref().unwrap_or("<unresolved>"),
-                        class = ?result.class,
-                        kind = ?kind,
-                        request_id = request_id_for_log.as_deref().unwrap_or("<none>"),
-                        auth_required = ctx.require_peer_auth,
-                        trusted_sender = result.trusted_sender,
-                        reason = ?reason,
-                        "classified inbox dropped external peer ingress at admission"
-                    );
-                }
-                return self.record_drop(reason);
-            }
-        }
-        let entry = ClassifiedInboxEntry {
-            raw_item_id: result.raw_item_id,
-            item: result.item,
-            class: result.class,
-            auth: result.auth,
-            kind,
-            from_peer: result.from_peer,
-            ingress_fact: result.ingress_fact,
-            lifecycle_peer: result.lifecycle_peer,
-            request_id: result.request_id,
-            admission_diagnostic: decision.admission_diagnostic,
-            response_terminality: result.response_terminality,
-            text_projection: result.text_projection,
-        };
-        // Enqueue only on classified queue (no raw double-enqueue).
-        // drain_classified_inbox_interactions() is the sole consumer.
-        let is_actionable = entry.class.is_actionable();
-        let push_result = classified_queue.lock().try_push(entry);
-        match push_result {
-            Ok(()) => {
+            AdmissionOutcome::Admitted => {
                 // Fire actionable notify only for actionable classes.
-                if is_actionable && let Some(ref actionable) = self.actionable_notify {
+                if decision.is_actionable
+                    && let Some(ref actionable) = self.actionable_notify
+                {
                     actionable.notify_waiters();
                 }
                 // Always fire broad notify.
                 self.notify.notify_waiters();
                 AdmissionOutcome::Admitted
             }
-            Err(InboxError::Closed) => {
-                tracing::warn!(
-                    kind = ?kind,
-                    reason = ?DropReason::SessionClosed,
-                    "classified inbox dropped item: queue closed"
-                );
-                self.record_drop(DropReason::SessionClosed)
-            }
-            Err(InboxError::Full) => {
-                tracing::warn!(
-                    kind = ?kind,
-                    reason = ?DropReason::InboxFull,
-                    "classified inbox dropped item: queue full"
-                );
-                self.record_drop(DropReason::InboxFull)
-            }
+            AdmissionOutcome::Dropped { reason } => self.record_drop(reason),
         }
     }
 
@@ -816,26 +813,23 @@ impl InboxSender {
         if self.classification_context.is_some() {
             return self.send_classified_wait(item).await;
         }
-        match self.tx.send(item).await {
-            Ok(()) => {
-                self.notify.notify_waiters();
-                AdmissionOutcome::Admitted
-            }
-            Err(_) => {
-                tracing::warn!(
-                    reason = ?DropReason::SessionClosed,
-                    "raw inbox dropped item while waiting: queue closed"
-                );
-                self.record_drop(DropReason::SessionClosed)
-            }
-        }
+        let _ = item;
+        tracing::warn!(
+            reason = ?DropReason::ClassificationRejected,
+            "raw inbox rejected semantic item while waiting because no machine classification context is installed"
+        );
+        self.record_drop(DropReason::ClassificationRejected)
     }
 
     async fn send_classified_wait(&self, item: InboxItem) -> AdmissionOutcome {
         let (Some(ctx), Some(classified_queue)) =
             (&self.classification_context, &self.classified_queue)
         else {
-            return self.send_wait_raw_fallback(item).await;
+            tracing::warn!(
+                reason = ?DropReason::ClassificationRejected,
+                "classified inbox send_wait requested without machine classification context"
+            );
+            return self.record_drop(DropReason::ClassificationRejected);
         };
 
         let result = match ctx.prepare(item) {
@@ -849,7 +843,6 @@ impl InboxSender {
             }
         };
         let kind = result.kind;
-        let is_actionable = result.class.is_actionable();
         let mut prepared = Some(result);
         let capacity_notify = classified_queue.lock().capacity_notifier();
 
@@ -861,12 +854,25 @@ impl InboxSender {
             {
                 let mut queue = classified_queue.lock();
                 if queue.closed {
-                    tracing::warn!(
-                        kind = ?kind,
-                        reason = ?DropReason::SessionClosed,
-                        "classified inbox dropped item while waiting: queue closed"
-                    );
-                    return self.record_drop(DropReason::SessionClosed);
+                    let Some(result) = prepared.take() else {
+                        tracing::error!(
+                            kind = ?kind,
+                            reason = ?DropReason::SessionClosed,
+                            "classified inbox send_wait reached closed admission after item was already consumed"
+                        );
+                        return self.record_drop(DropReason::SessionClosed);
+                    };
+                    let decision = queue.admit_and_push(result);
+                    if let AdmissionOutcome::Dropped { reason } = decision.outcome {
+                        return self.record_drop(reason);
+                    }
+                    if decision.is_actionable
+                        && let Some(ref actionable) = self.actionable_notify
+                    {
+                        actionable.notify_waiters();
+                    }
+                    self.notify.notify_waiters();
+                    return AdmissionOutcome::Admitted;
                 }
                 if queue.entries.len() < queue.capacity {
                     let Some(result) = prepared.take() else {
@@ -877,25 +883,13 @@ impl InboxSender {
                         );
                         return self.record_drop(DropReason::SessionClosed);
                     };
-                    let decision = queue.admit_peer_receive(&result);
+                    let decision = queue.admit_and_push(result);
                     if let AdmissionOutcome::Dropped { reason } = decision.outcome {
                         return self.record_drop(reason);
                     }
-                    queue.entries.push_back(ClassifiedInboxEntry {
-                        raw_item_id: result.raw_item_id,
-                        item: result.item,
-                        class: result.class,
-                        auth: result.auth,
-                        kind,
-                        from_peer: result.from_peer,
-                        ingress_fact: result.ingress_fact,
-                        lifecycle_peer: result.lifecycle_peer,
-                        request_id: result.request_id,
-                        admission_diagnostic: decision.admission_diagnostic,
-                        response_terminality: result.response_terminality,
-                        text_projection: result.text_projection,
-                    });
-                    if is_actionable && let Some(ref actionable) = self.actionable_notify {
+                    if decision.is_actionable
+                        && let Some(ref actionable) = self.actionable_notify
+                    {
                         actionable.notify_waiters();
                     }
                     self.notify.notify_waiters();
@@ -904,16 +898,6 @@ impl InboxSender {
             }
             run_classified_send_wait_before_await_hook();
             notified.await;
-        }
-    }
-
-    async fn send_wait_raw_fallback(&self, item: InboxItem) -> AdmissionOutcome {
-        match self.tx.send(item).await {
-            Ok(()) => {
-                self.notify.notify_waiters();
-                AdmissionOutcome::Admitted
-            }
-            Err(_) => self.record_drop(DropReason::SessionClosed),
         }
     }
 
@@ -941,6 +925,7 @@ fn snapshot_entry(entry: &ClassifiedInboxEntry) -> PeerIngressEntrySnapshot {
             InboxItem::PlainEvent { interaction_id, .. } => interaction_id.map(InteractionId),
         },
         class: entry.class,
+        actionable: entry.actionable,
         kind: entry.kind,
         from_peer_display: entry
             .from_peer
@@ -1054,68 +1039,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_inbox_sender_send() {
+    async fn test_raw_inbox_sender_send_fails_closed_without_machine_context() {
         let (_inbox, sender) = Inbox::new();
         let item = InboxItem::External {
             envelope: make_test_envelope(),
         };
         let result = sender.send(item);
-        assert!(result.is_admitted());
-    }
-
-    #[tokio::test]
-    async fn test_inbox_recv() {
-        let (mut inbox, sender) = Inbox::new();
-        let envelope = make_test_envelope();
-        let envelope_id = envelope.id;
-
-        sender
-            .send(InboxItem::External { envelope })
-            .into_result()
-            .unwrap();
-
-        let received = inbox.recv().await;
-        assert!(received.is_some());
-        match received.unwrap() {
-            InboxItem::External { envelope } => {
-                assert_eq!(envelope.id, envelope_id);
+        assert_eq!(
+            result,
+            AdmissionOutcome::Dropped {
+                reason: DropReason::ClassificationRejected
             }
-            _ => panic!("expected External variant"),
-        }
+        );
     }
 
     #[tokio::test]
-    async fn test_inbox_try_drain() {
+    async fn test_raw_inbox_send_does_not_enqueue_semantic_item() {
         let (mut inbox, sender) = Inbox::new();
 
-        // Send multiple items
+        let outcome = sender.send(InboxItem::External {
+            envelope: make_test_envelope(),
+        });
+
+        assert_eq!(
+            outcome,
+            AdmissionOutcome::Dropped {
+                reason: DropReason::ClassificationRejected
+            }
+        );
+        assert!(inbox.try_drain().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_raw_inbox_try_drain_stays_empty_after_rejected_sends() {
+        let (mut inbox, sender) = Inbox::new();
+
+        // Raw inboxes cannot classify semantic peer ingress without machine authority.
         for i in 0..3 {
             let mut envelope = make_test_envelope();
             envelope.id = Uuid::from_u128(i as u128);
-            sender
-                .send(InboxItem::External { envelope })
-                .into_result()
-                .unwrap();
+            assert_eq!(
+                sender.send(InboxItem::External { envelope }),
+                AdmissionOutcome::Dropped {
+                    reason: DropReason::ClassificationRejected
+                }
+            );
         }
 
-        // Give a moment for items to be queued
         tokio::task::yield_now().await;
 
-        // Drain all at once
-        let items = inbox.try_drain();
-        assert_eq!(items.len(), 3);
-
-        // Verify IDs
-        for (i, item) in items.into_iter().enumerate() {
-            match item {
-                InboxItem::External { envelope } => {
-                    assert_eq!(envelope.id.as_u128(), i as u128);
-                }
-                _ => panic!("expected External variant"),
-            }
-        }
-
-        // No more items
         let items = inbox.try_drain();
         assert!(items.is_empty());
     }
@@ -1131,7 +1103,7 @@ mod tests {
         assert!(matches!(
             result,
             AdmissionOutcome::Dropped {
-                reason: DropReason::SessionClosed
+                reason: DropReason::ClassificationRejected
             }
         ));
     }
@@ -1170,35 +1142,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sender_notifies_on_send() {
+    async fn test_raw_sender_does_not_notify_after_rejected_send() {
         let (inbox, sender) = Inbox::new();
         let notify = inbox.notify();
 
         // Spawn a task that waits for notification
         let notified = notify.notified();
 
-        // Send a message - this should notify waiters
-        sender
-            .send(InboxItem::External {
-                envelope: make_test_envelope(),
-            })
-            .into_result()
-            .unwrap();
+        let outcome = sender.send(InboxItem::External {
+            envelope: make_test_envelope(),
+        });
+        assert_eq!(
+            outcome,
+            AdmissionOutcome::Dropped {
+                reason: DropReason::ClassificationRejected
+            }
+        );
 
-        // The notification should complete immediately (message was sent before we awaited)
-        // Use timeout to ensure we don't hang if notify doesn't work
-        let result = tokio::time::timeout(std::time::Duration::from_millis(100), notified).await;
+        let result = tokio::time::timeout(std::time::Duration::from_millis(50), notified).await;
 
-        assert!(result.is_ok(), "Should have been notified after send");
+        assert!(
+            result.is_err(),
+            "raw rejected send must not notify inbox consumers"
+        );
     }
 
     #[tokio::test]
-    async fn test_notify_wakes_waiting_task() {
+    async fn test_raw_rejected_send_does_not_wake_waiting_task() {
         let (inbox, sender) = Inbox::new();
         let notify = inbox.notify();
 
         // Spawn a task that waits for notification
-        let handle = tokio::spawn(async move {
+        let mut handle = tokio::spawn(async move {
             notify.notified().await;
             "woken"
         });
@@ -1206,29 +1181,40 @@ mod tests {
         // Give the task time to start waiting
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
-        // Send a message - this should wake the waiting task
-        sender
-            .send(InboxItem::External {
-                envelope: make_test_envelope(),
-            })
-            .into_result()
-            .unwrap();
+        let outcome = sender.send(InboxItem::External {
+            envelope: make_test_envelope(),
+        });
+        assert_eq!(
+            outcome,
+            AdmissionOutcome::Dropped {
+                reason: DropReason::ClassificationRejected
+            }
+        );
 
-        // The task should complete
-        let result = tokio::time::timeout(std::time::Duration::from_millis(100), handle).await;
+        let result = tokio::time::timeout(std::time::Duration::from_millis(50), &mut handle).await;
 
-        assert!(result.is_ok(), "Task should have completed");
-        assert_eq!(result.unwrap().unwrap(), "woken");
+        assert!(result.is_err(), "Task should remain parked");
+        handle.abort();
     }
 
     // === Classified inbox tests ===
 
-    use crate::classify::IngressClassificationContext;
+    use crate::classify::{IngressClassificationContext, test_support};
     use crate::trust::{TrustedPeer, TrustedPeers};
-    use meerkat_core::PeerIngressMachinePolicy;
     use std::sync::atomic::AtomicUsize;
 
     fn make_classification_context(
+        trusted: TrustedPeers,
+        require_auth: bool,
+    ) -> Arc<IngressClassificationContext> {
+        make_classification_context_with_machine(
+            trusted,
+            require_auth,
+            Some(test_support::runtime_peer_comms_handle()),
+        )
+    }
+
+    fn make_classification_context_without_machine(
         trusted: TrustedPeers,
         require_auth: bool,
     ) -> Arc<IngressClassificationContext> {
@@ -1243,32 +1229,42 @@ mod tests {
         Arc::new(IngressClassificationContext {
             require_peer_auth: require_auth,
             trusted_peers: Arc::new(parking_lot::RwLock::new(trusted)),
-            ingress_policy: Arc::new(PeerIngressMachinePolicy::default()),
             peer_comms_handle: Arc::new(parking_lot::RwLock::new(peer_comms_handle)),
-            require_machine_authority: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             inproc_namespace: None,
         })
     }
 
+    fn make_classified_queue(
+        capacity: usize,
+        ctx: &Arc<IngressClassificationContext>,
+    ) -> ClassifiedInboxQueue {
+        ClassifiedInboxQueue::new(
+            capacity,
+            ctx.require_peer_auth,
+            ctx.trusted_peers.clone(),
+            ctx.peer_comms_handle.clone(),
+        )
+    }
+
     fn make_trusted(name: &str, pubkey: &PubKey) -> TrustedPeers {
-        TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: name.to_string(),
-                pubkey: *pubkey,
-                addr: "inproc://test".to_string(),
-                meta: crate::PeerMeta::default(),
-            }],
-        }
+        TrustedPeers::from_peers(vec![TrustedPeer {
+            name: name.to_string(),
+            pubkey: *pubkey,
+            addr: "inproc://test".to_string(),
+            meta: crate::PeerMeta::default(),
+        }])
     }
 
     struct RejectingPeerCommsHandle {
         external_calls: AtomicUsize,
+        delegate: Arc<dyn meerkat_core::handles::PeerCommsHandle>,
     }
 
     impl RejectingPeerCommsHandle {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 external_calls: AtomicUsize::new(0),
+                delegate: test_support::runtime_peer_comms_handle(),
             })
         }
 
@@ -1295,14 +1291,34 @@ mod tests {
             facts: meerkat_core::PeerIngressPlainEventFacts,
         ) -> Result<meerkat_core::PeerIngressAdmission, meerkat_core::handles::DslTransitionError>
         {
-            Ok(PeerIngressMachinePolicy::default().classify_plain_event_facts(&facts))
+            self.delegate.classify_plain_event(facts)
+        }
+
+        fn resolve_peer_ingress_receive(
+            &self,
+            facts: meerkat_core::PeerIngressReceiveFacts,
+        ) -> Result<
+            meerkat_core::PeerIngressReceiveAuthority,
+            meerkat_core::handles::DslTransitionError,
+        > {
+            self.delegate.resolve_peer_ingress_receive(facts)
+        }
+
+        fn resolve_peer_ingress_dequeue(
+            &self,
+            facts: meerkat_core::PeerIngressDequeueFacts,
+        ) -> Result<
+            meerkat_core::PeerIngressDequeueAuthority,
+            meerkat_core::handles::DslTransitionError,
+        > {
+            self.delegate.resolve_peer_ingress_dequeue(facts)
         }
 
         fn set_peer_ingress_context(
             &self,
-            _keep_alive: bool,
+            keep_alive: bool,
         ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-            Ok(())
+            self.delegate.set_peer_ingress_context(keep_alive)
         }
     }
 
@@ -1742,7 +1758,7 @@ mod tests {
         assert_eq!(
             drained.len(),
             1,
-            "admission was governed by policy, not reconstructed from the snapshot"
+            "admission was governed by authority, not reconstructed from the snapshot"
         );
     }
 
@@ -1816,8 +1832,8 @@ mod tests {
     #[tokio::test]
     async fn test_runtime_required_response_without_machine_authority_fails_closed() {
         let sender_pubkey = PubKey::new([1u8; 32]);
-        let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), true);
-        ctx.require_machine_authority.store(true, Ordering::SeqCst);
+        let ctx =
+            make_classification_context_without_machine(make_trusted("peer", &sender_pubkey), true);
         let (mut inbox, sender) = Inbox::new_classified(ctx);
 
         let outcome = sender.send_classified(InboxItem::External {
@@ -1829,7 +1845,7 @@ mod tests {
             AdmissionOutcome::Dropped {
                 reason: DropReason::ClassificationRejected
             },
-            "runtime-backed peer response must not be accepted or terminalized by the compatibility classifier"
+            "peer response must not be accepted or terminalized without machine authority"
         );
         assert_eq!(inbox.dropped_count(), Some(1));
         assert_eq!(inbox.try_drain_classified().len(), 0);
@@ -1848,7 +1864,7 @@ mod tests {
         // directly and then driving it.
         let actionable_notify = Arc::new(Notify::new());
         let notify = Arc::new(Notify::new());
-        let queue = ClassifiedInboxQueue::new(1, ctx.require_peer_auth, ctx.trusted_peers.clone());
+        let queue = make_classified_queue(1, &ctx);
         let counter = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
         let (tx, _rx) = mpsc::channel::<InboxItem>(1);
@@ -1885,7 +1901,7 @@ mod tests {
         let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), false);
         let actionable_notify = Arc::new(Notify::new());
         let notify = Arc::new(Notify::new());
-        let queue = ClassifiedInboxQueue::new(1, ctx.require_peer_auth, ctx.trusted_peers.clone());
+        let queue = make_classified_queue(1, &ctx);
         let counter = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
         let (tx, _rx) = mpsc::channel::<InboxItem>(1);
@@ -1937,7 +1953,7 @@ mod tests {
         let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), true);
         let actionable_notify = Arc::new(Notify::new());
         let notify = Arc::new(Notify::new());
-        let queue = ClassifiedInboxQueue::new(1, ctx.require_peer_auth, ctx.trusted_peers.clone());
+        let queue = make_classified_queue(1, &ctx);
         let counter = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
         let (tx, _rx) = mpsc::channel::<InboxItem>(1);
@@ -1995,7 +2011,7 @@ mod tests {
         let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), false);
         let actionable_notify = Arc::new(Notify::new());
         let notify = Arc::new(Notify::new());
-        let queue = ClassifiedInboxQueue::new(1, ctx.require_peer_auth, ctx.trusted_peers.clone());
+        let queue = make_classified_queue(1, &ctx);
         let counter = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
         let (tx, _rx) = mpsc::channel::<InboxItem>(1);
@@ -2064,7 +2080,7 @@ mod tests {
         let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), false);
         let actionable_notify = Arc::new(Notify::new());
         let notify = Arc::new(Notify::new());
-        let queue = ClassifiedInboxQueue::new(1, ctx.require_peer_auth, ctx.trusted_peers.clone());
+        let queue = make_classified_queue(1, &ctx);
         let counter = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
         let (tx, _rx) = mpsc::channel::<InboxItem>(1);
@@ -2130,8 +2146,7 @@ mod tests {
         let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), true);
         let actionable_notify = Arc::new(Notify::new());
         let notify = Arc::new(Notify::new());
-        let queue =
-            ClassifiedInboxQueue::new(CAPACITY, ctx.require_peer_auth, ctx.trusted_peers.clone());
+        let queue = make_classified_queue(CAPACITY, &ctx);
         let counter = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
         let (tx, _rx) = mpsc::channel::<InboxItem>(CAPACITY);
@@ -2200,10 +2215,9 @@ mod tests {
     fn test_raw_connection_ingress_rejects_untrusted_bridge_without_machine_authority() {
         // Raw transport ingress is not a classification authority. Without the
         // classified runtime/machine path, it cannot infer supervisor-bridge
-        // auth exemption from a local compatibility policy.
+        // auth exemption from a local compatibility path.
         let receiver = crate::identity::Keypair::generate();
         let sender = crate::identity::Keypair::generate();
-        let trusted = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
         let (mut inbox, inbox_sender) = Inbox::new();
 
         let mut envelope = Envelope {
@@ -2220,11 +2234,11 @@ mod tests {
         };
         envelope.sign(&sender);
 
-        let outcome = inbox_sender.send_connection_ingress(envelope, true, &trusted);
+        let outcome = inbox_sender.send_connection_ingress(envelope, true);
         assert_eq!(
             outcome,
             AdmissionOutcome::Dropped {
-                reason: DropReason::UntrustedSender
+                reason: DropReason::ClassificationRejected
             }
         );
 

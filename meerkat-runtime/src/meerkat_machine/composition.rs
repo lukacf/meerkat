@@ -229,7 +229,7 @@ impl MeerkatConsumerSurface {
 
     async fn resolve_session(
         &self,
-        variant: &InputVariantId,
+        _variant: &InputVariantId,
         projected: &[(FieldId, OwnedFieldValue)],
     ) -> Result<SessionId, String> {
         // Typed session_id is the canonical source (Shape 4 — producer DSL
@@ -251,51 +251,11 @@ impl MeerkatConsumerSurface {
             (Some(pinned), _) => Ok(pinned.clone()),
             (None, Some(sid)) => SessionId::parse(&sid)
                 .map_err(|e| format!("routed session_id `{sid}` is not a valid UUID: {e}")),
-            (None, None) if variant == &seam_facts::inputs::ingest() => {
-                let runtime_id = project_str(projected, &seam_facts::fields::runtime_id())?;
-                self.machine
-                    .resolve_registered_session_for_runtime_id(&mm_dsl::AgentRuntimeId::from(
-                        runtime_id.to_string(),
-                    ))
-                    .await
-            }
             (None, None) => Err(
                 "routed input did not project `session_id` and surface is not pinned \
                  to a session — no session can be resolved"
                     .into(),
             ),
-        }
-    }
-}
-
-impl MeerkatMachine {
-    async fn resolve_registered_session_for_runtime_id(
-        &self,
-        runtime_id: &mm_dsl::AgentRuntimeId,
-    ) -> Result<SessionId, String> {
-        let sessions = self.sessions.read().await;
-        let mut matches = Vec::new();
-
-        for (session_id, entry) in sessions.iter() {
-            let authority = entry
-                .dsl_authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if authority.state.active_runtime_id.as_ref() == Some(runtime_id) {
-                matches.push(session_id.clone());
-            }
-        }
-
-        match matches.len() {
-            0 => Err(format!(
-                "routed Ingest runtime_id `{}` did not match any registered session active_runtime_id",
-                runtime_id.0
-            )),
-            1 => Ok(matches.remove(0)),
-            count => Err(format!(
-                "routed Ingest runtime_id `{}` matched {count} registered sessions; refusing ambiguous delivery",
-                runtime_id.0
-            )),
         }
     }
 }
@@ -318,6 +278,20 @@ fn project_u64(fields: &[(FieldId, OwnedFieldValue)], field: &FieldId) -> Result
                 field.as_str()
             )),
         })
+}
+
+fn project_optional_u64(
+    fields: &[(FieldId, OwnedFieldValue)],
+    field: &FieldId,
+) -> Result<Option<u64>, String> {
+    match fields.iter().find(|(id, _)| id == field) {
+        None => Ok(None),
+        Some((_, OwnedFieldValue::U64(n))) => Ok(Some(*n)),
+        Some((_, other)) => Err(format!(
+            "projected field `{}` is not U64: {other:?}",
+            field.as_str()
+        )),
+    }
 }
 
 fn project_str<'a>(
@@ -372,24 +346,32 @@ impl ConsumerSurface for MeerkatConsumerSurface {
         let input = if variant == seam_facts::inputs::prepare_bindings() {
             let rt = project_str(&projected, &seam_facts::fields::agent_runtime_id())?;
             let fence = project_u64(&projected, &seam_facts::fields::fence_token())?;
-            let gen_ = project_u64(&projected, &seam_facts::fields::generation())?;
+            let generation = project_u64(&projected, &seam_facts::fields::generation())?;
             let sid = project_str(&projected, &seam_facts::fields::session_id())?;
             mm_dsl::MeerkatMachineInput::PrepareBindings {
                 agent_runtime_id: mm_dsl::AgentRuntimeId::from(rt.to_string()),
                 fence_token: mm_dsl::FenceToken(fence),
-                generation: mm_dsl::Generation(gen_),
+                generation: Some(mm_dsl::Generation(generation)),
+                runtime_epoch_id: None,
                 session_id: mm_dsl::SessionId::from(sid.to_string()),
             }
         } else if variant == seam_facts::inputs::ingest() {
             // Route binding `work_request_reaches_meerkat` delivers
             // producer `agent_runtime_id` into the consumer's canonical
-            // `runtime_id` field; producer `work_id` → consumer
-            // `work_id`; producer `origin` → consumer `origin`.
+            // `runtime_id` field and also carries the MobMachine-owned
+            // binding facts that MeerkatMachine validates before admission.
+            let sid = project_str(&projected, &seam_facts::fields::session_id())?;
             let rt = project_str(&projected, &seam_facts::fields::runtime_id())?;
+            let fence = project_u64(&projected, &seam_facts::fields::fence_token())?;
+            let generation = project_optional_u64(&projected, &seam_facts::fields::generation())?;
             let work_id = project_str(&projected, &seam_facts::fields::work_id())?;
             let origin = project_work_origin(&projected, &seam_facts::fields::origin())?;
             mm_dsl::MeerkatMachineInput::Ingest {
+                session_id: mm_dsl::SessionId::from(sid.to_string()),
                 runtime_id: mm_dsl::AgentRuntimeId::from(rt.to_string()),
+                fence_token: mm_dsl::FenceToken(fence),
+                generation: generation.map(mm_dsl::Generation),
+                runtime_epoch_id: None,
                 work_id: mm_dsl::WorkId::from(work_id.to_string()),
                 origin,
             }
@@ -548,12 +530,15 @@ mod tests {
         let surface = MeerkatConsumerSurface::new(Arc::clone(&machine));
         let session_id = sid("00000000-0000-0000-0000-000000000001");
         machine.register_session(session_id.clone()).await;
+        bind_runtime(&surface, &session_id, "rt-other").await;
 
         surface
             .apply_routed_input(
                 iv("Ingest"),
                 vec![
                     (fld("runtime_id"), OwnedFieldValue::Str("rt-other".into())),
+                    (fld("fence_token"), OwnedFieldValue::U64(1)),
+                    (fld("generation"), OwnedFieldValue::U64(0)),
                     (fld("work_id"), OwnedFieldValue::Str("work-1".into())),
                     (
                         fld("origin"),
@@ -570,18 +555,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ingest_resolves_session_from_runtime_id_when_session_id_absent() {
+    async fn ingest_requires_projected_session_id() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let surface = MeerkatConsumerSurface::new(Arc::clone(&machine));
         let session_id = sid("00000000-0000-0000-0000-000000000001");
         machine.register_session(session_id.clone()).await;
         bind_runtime(&surface, &session_id, "rt-match").await;
 
-        surface
+        let err = surface
             .apply_routed_input(
                 iv("Ingest"),
                 vec![
                     (fld("runtime_id"), OwnedFieldValue::Str("rt-match".into())),
+                    (fld("fence_token"), OwnedFieldValue::U64(1)),
+                    (fld("generation"), OwnedFieldValue::U64(0)),
                     (fld("work_id"), OwnedFieldValue::Str("work-1".into())),
                     (
                         fld("origin"),
@@ -590,63 +577,39 @@ mod tests {
                 ],
             )
             .await
-            .expect("runtime_id resolves to the registered session");
+            .expect_err("session_id is required for routed ingest");
+        assert!(err.contains("session_id"), "{err}");
     }
 
     #[tokio::test]
-    async fn ingest_without_matching_runtime_id_is_refused() {
+    async fn ingest_without_matching_generated_binding_is_refused() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let surface = MeerkatConsumerSurface::new(Arc::clone(&machine));
-        machine
-            .register_session(sid("00000000-0000-0000-0000-000000000001"))
-            .await;
+        let session_id = sid("00000000-0000-0000-0000-000000000001");
+        machine.register_session(session_id.clone()).await;
+        bind_runtime(&surface, &session_id, "rt-current").await;
 
         let err = surface
             .apply_routed_input(
                 iv("Ingest"),
                 vec![
                     (fld("runtime_id"), OwnedFieldValue::Str("rt-missing".into())),
+                    (fld("fence_token"), OwnedFieldValue::U64(1)),
+                    (fld("generation"), OwnedFieldValue::U64(0)),
                     (fld("work_id"), OwnedFieldValue::Str("work-1".into())),
                     (
                         fld("origin"),
                         OwnedFieldValue::Opaque(Arc::new(mm_dsl::WorkOrigin::Ingest)),
                     ),
-                ],
-            )
-            .await
-            .expect_err("runtime_id has no registered owner");
-        assert!(
-            err.contains("did not match any registered session"),
-            "{err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn ingest_with_ambiguous_runtime_id_is_refused() {
-        let machine = Arc::new(MeerkatMachine::ephemeral());
-        let surface = MeerkatConsumerSurface::new(Arc::clone(&machine));
-        let first = sid("00000000-0000-0000-0000-000000000001");
-        let second = sid("00000000-0000-0000-0000-000000000002");
-        machine.register_session(first.clone()).await;
-        machine.register_session(second.clone()).await;
-        bind_runtime(&surface, &first, "rt-shared").await;
-        bind_runtime(&surface, &second, "rt-shared").await;
-
-        let err = surface
-            .apply_routed_input(
-                iv("Ingest"),
-                vec![
-                    (fld("runtime_id"), OwnedFieldValue::Str("rt-shared".into())),
-                    (fld("work_id"), OwnedFieldValue::Str("work-1".into())),
                     (
-                        fld("origin"),
-                        OwnedFieldValue::Opaque(Arc::new(mm_dsl::WorkOrigin::Ingest)),
+                        fld("session_id"),
+                        OwnedFieldValue::Str(session_id.to_string()),
                     ),
                 ],
             )
             .await
-            .expect_err("runtime_id is ambiguous");
-        assert!(err.contains("ambiguous delivery"), "{err}");
+            .expect_err("generated binding guard rejects the routed input");
+        assert!(err.contains("Ingest"), "{err}");
     }
 
     #[derive(Default)]
@@ -691,7 +654,8 @@ mod tests {
                 mm_dsl::MeerkatMachineInput::PrepareBindings {
                     agent_runtime_id: mm_dsl::AgentRuntimeId("rt-1".into()),
                     fence_token: mm_dsl::FenceToken(11),
-                    generation: mm_dsl::Generation(0),
+                    generation: Some(mm_dsl::Generation(0)),
+                    runtime_epoch_id: None,
                     session_id: mm_dsl::SessionId(session_id.to_string()),
                 },
             )
@@ -780,11 +744,11 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             assert!(
-                authority.state.active_runtime_id.is_none(),
+                authority.state().active_runtime_id.is_none(),
                 "local resource preparation must leave binding identity unclaimed"
             );
             assert!(
-                authority.state.active_fence_token.is_none(),
+                authority.state().active_fence_token.is_none(),
                 "local resource preparation must leave binding fence unclaimed"
             );
         }
@@ -795,7 +759,8 @@ mod tests {
                 mm_dsl::MeerkatMachineInput::PrepareBindings {
                     agent_runtime_id: mm_dsl::AgentRuntimeId("rt-authoritative".into()),
                     fence_token: mm_dsl::FenceToken(13),
-                    generation: mm_dsl::Generation(0),
+                    generation: Some(mm_dsl::Generation(0)),
+                    runtime_epoch_id: None,
                     session_id: mm_dsl::SessionId(session_id.to_string()),
                 },
             )
@@ -816,10 +781,10 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             assert!(
-                matches!(&authority.state.active_runtime_id, Some(value) if value.0 == "rt-authoritative")
+                matches!(&authority.state().active_runtime_id, Some(value) if value.0 == "rt-authoritative")
             );
             assert!(matches!(
-                authority.state.active_fence_token,
+                authority.state().active_fence_token,
                 Some(mm_dsl::FenceToken(13))
             ));
         }
@@ -879,7 +844,8 @@ mod tests {
                 mm_dsl::MeerkatMachineInput::PrepareBindings {
                     agent_runtime_id: mm_dsl::AgentRuntimeId("operator-rt:0".into()),
                     fence_token: mm_dsl::FenceToken(17),
-                    generation: mm_dsl::Generation(0),
+                    generation: Some(mm_dsl::Generation(0)),
+                    runtime_epoch_id: None,
                     session_id: mm_dsl::SessionId(session_id.to_string()),
                 },
             )
@@ -891,8 +857,7 @@ mod tests {
             .await
             .expect_err("session-owned binding must not overwrite mob-owned authority");
         assert!(
-            err.to_string()
-                .contains("already has authoritative runtime binding"),
+            err.to_string().contains("DSL authority (PrepareBindings)"),
             "{err}"
         );
 

@@ -657,8 +657,9 @@ impl AgentToolDispatcher for CompositeDispatcher {
 
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(ref mgr) = self.job_manager {
-            let drained = mgr.drain_completed().await;
-            update.background_completions.extend(drained);
+            // Cleanup marker only. Agent-visible completion publication comes
+            // from the canonical completion feed, not external update polling.
+            let _ = mgr.drain_completed().await;
         }
 
         update

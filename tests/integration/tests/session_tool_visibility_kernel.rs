@@ -101,28 +101,6 @@ fn owner_witness(owner_key: &str) -> KernelValue {
     )
 }
 
-fn provenance_witness(source_id: &str) -> KernelValue {
-    named_value(
-        "ToolVisibilityWitness",
-        KernelValue::Map(BTreeMap::from([(
-            string_key("last_seen_provenance"),
-            named_value(
-                "ToolProvenance",
-                KernelValue::Map(BTreeMap::from([
-                    (
-                        string_key("kind"),
-                        named_string("ToolSourceKind", "Callback"),
-                    ),
-                    (
-                        string_key("source_id"),
-                        KernelValue::String(source_id.to_string()),
-                    ),
-                ])),
-            ),
-        )])),
-    )
-}
-
 fn string_set(values: &[&str]) -> KernelValue {
     KernelValue::Set(
         values
@@ -179,7 +157,7 @@ fn prepared_meerkat_state(kernel: &GeneratedMachineKernel) -> KernelState {
         )
         .expect("register session")
         .next_state;
-    kernel
+    let prepared = kernel
         .transition(
             &registered,
             &KernelInput {
@@ -191,11 +169,44 @@ fn prepared_meerkat_state(kernel: &GeneratedMachineKernel) -> KernelState {
                     ),
                     (field("fence_token"), named_u64("FenceToken", 3)),
                     (field("generation"), named_u64("Generation", 1)),
+                    (field("runtime_epoch_id"), KernelValue::None),
                     (field("session_id"), named_string("SessionId", "session-1")),
                 ]),
             },
         )
         .expect("prepare bindings")
+        .next_state;
+    let with_deferred_catalog = kernel
+        .transition(
+            &prepared,
+            &KernelInput {
+                variant: input("ReplaceDeferredToolAuthorityCatalog"),
+                fields: BTreeMap::from([(
+                    field("catalog"),
+                    witness_map(&[
+                        ("search", owner_witness("callback:search")),
+                        ("view_image", owner_witness("callback:view-image")),
+                    ]),
+                )]),
+            },
+        )
+        .expect("replace deferred catalog")
+        .next_state;
+    kernel
+        .transition(
+            &with_deferred_catalog,
+            &KernelInput {
+                variant: input("ReplaceFilterToolAuthorityCatalog"),
+                fields: BTreeMap::from([(
+                    field("catalog"),
+                    witness_map(&[
+                        ("search", owner_witness("callback:search")),
+                        ("view_image", owner_witness("callback:view-image")),
+                    ]),
+                )]),
+            },
+        )
+        .expect("replace filter catalog")
         .next_state
 }
 
@@ -278,6 +289,8 @@ fn session_tool_visibility_kernel_publishes_committed_deferred_set_with_structur
 
 #[test]
 fn session_tool_visibility_kernel_rejects_witness_when_source_kind_binding_changes() {
+    let base_kernel = GeneratedMachineKernel::new(meerkat::schema());
+    let attached = prepared_meerkat_state(&base_kernel);
     let mut schema = meerkat::schema();
     schema
         .named_types
@@ -288,7 +301,6 @@ fn session_tool_visibility_kernel_rejects_witness_when_source_kind_binding_chang
         variants: vec![enum_variant("Builtin")],
     };
     let kernel = GeneratedMachineKernel::new(schema);
-    let attached = prepared_meerkat_state(&kernel);
     let names = string_set(&["search"]);
     let authorities = witness_map(&[("search", owner_witness("callback:search"))]);
 
@@ -319,12 +331,13 @@ fn session_tool_visibility_kernel_rejects_witness_when_source_kind_binding_chang
 
 #[test]
 fn session_tool_visibility_kernel_rejects_witness_when_provenance_binding_is_missing() {
+    let base_kernel = GeneratedMachineKernel::new(meerkat::schema());
+    let attached = prepared_meerkat_state(&base_kernel);
     let mut schema = meerkat::schema();
     schema
         .named_types
         .retain(|binding| binding.name.as_str() != "ToolProvenance");
     let kernel = GeneratedMachineKernel::new(schema);
-    let attached = prepared_meerkat_state(&kernel);
     let names = string_set(&["search"]);
     let authorities = witness_map(&[("search", owner_witness("callback:search"))]);
 
@@ -355,6 +368,8 @@ fn session_tool_visibility_kernel_rejects_witness_when_provenance_binding_is_mis
 
 #[test]
 fn session_tool_visibility_kernel_rejects_witness_when_provenance_binding_changes_shape() {
+    let base_kernel = GeneratedMachineKernel::new(meerkat::schema());
+    let attached = prepared_meerkat_state(&base_kernel);
     let mut schema = meerkat::schema();
     schema
         .named_types
@@ -363,7 +378,6 @@ fn session_tool_visibility_kernel_rejects_witness_when_provenance_binding_change
         .expect("ToolProvenance binding")
         .rust = RustTypeAtom::String;
     let kernel = GeneratedMachineKernel::new(schema);
-    let attached = prepared_meerkat_state(&kernel);
     let names = string_set(&["search"]);
     let authorities = witness_map(&[("search", owner_witness("callback:search"))]);
 
@@ -482,10 +496,7 @@ fn session_tool_visibility_kernel_accepts_deferred_request_without_phase_change(
                 variant: input("RequestDeferredTools"),
                 fields: BTreeMap::from([(
                     field("authorities"),
-                    witness_map(&[
-                        ("search", owner_witness("callback:search")),
-                        ("view_image", provenance_witness("view-image")),
-                    ]),
+                    witness_map(&[("search", owner_witness("callback:search"))]),
                 )]),
             },
         )
@@ -538,7 +549,7 @@ fn session_tool_visibility_kernel_rejects_deferred_names_without_witnesses() {
                 fields: BTreeMap::from([(field("authorities"), KernelValue::Map(BTreeMap::new()))]),
             },
         )
-        .expect_err("empty authority set must be rejected before staging names");
+        .expect_err("empty authority map must be rejected before staging names");
 
     assert!(
         format!("{err:?}").contains("NoMatchingTransition"),

@@ -1154,6 +1154,7 @@ mod tests {
                 text: "peer terminal: pty=42".into(),
                 source: Some("peer_terminal".into()),
                 idempotency_key: Some("k1".into()),
+                source_kind: crate::session::SystemContextSource::Normal,
                 accepted_at: SystemTime::UNIX_EPOCH,
             }],
         };

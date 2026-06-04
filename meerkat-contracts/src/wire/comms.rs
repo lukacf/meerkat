@@ -10,7 +10,7 @@
 pub use meerkat_core::comms::{
     CommsCommandError, InputSource, InputStreamMode, PeerAddress, PeerCapabilitySet,
     PeerDirectoryEntry, PeerDirectoryListing, PeerDirectorySource, PeerId, PeerLifecycleKind,
-    PeerName, PeerReachability, PeerReachabilityReason, PeerSendability, PeerTransport,
+    PeerName, PeerSendability, PeerTransport,
 };
 pub use meerkat_core::interaction::ResponseStatus;
 pub use meerkat_core::types::HandlingMode;

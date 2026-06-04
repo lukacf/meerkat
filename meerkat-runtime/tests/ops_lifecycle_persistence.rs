@@ -9,7 +9,7 @@ use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutorError}
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
 use meerkat_core::lifecycle::{CoreExecutor, RunId};
 use meerkat_core::ops_lifecycle::{
-    OperationKind, OperationResult, OperationSpec, OpsLifecycleRegistry,
+    CompletionCursorConsumer, OperationKind, OperationResult, OperationSpec, OpsLifecycleRegistry,
 };
 use meerkat_core::runtime_epoch::{EpochCursorState, RuntimeEpochId};
 use meerkat_core::types::SessionId;
@@ -26,6 +26,7 @@ fn bg_spec(name: &str) -> OperationSpec {
         owner_session_id: SessionId::new(),
         display_name: name.into(),
         source_label: "test-persistence".into(),
+        operation_source: None,
         child_session_id: None,
         expect_peer_channel: false,
     }
@@ -58,7 +59,9 @@ fn persisted_ops_snapshot_serde_round_trip() {
         .complete_operation(&op_id, op_result(&op_id))
         .unwrap();
 
-    let snapshot = registry.capture_persistence_snapshot(epoch_id.clone(), &cursor_state);
+    let snapshot = registry
+        .capture_persistence_snapshot(epoch_id.clone(), &cursor_state)
+        .unwrap();
 
     // Serialize and deserialize
     let json = serde_json::to_string(&snapshot).expect("serialize");
@@ -74,9 +77,32 @@ fn persisted_ops_snapshot_serde_round_trip() {
 #[test]
 fn persisted_ops_snapshot_preserves_cursor_values() {
     let registry = RuntimeOpsLifecycleRegistry::new();
-    let cursor_state = Arc::new(EpochCursorState::from_recovered(5, 3, 2));
+    let cursor_state = Arc::new(EpochCursorState::new());
+    registry
+        .advance_completion_cursor(
+            CompletionCursorConsumer::AgentApplied,
+            5,
+            Some(&cursor_state),
+        )
+        .unwrap();
+    registry
+        .advance_completion_cursor(
+            CompletionCursorConsumer::RuntimeObserved,
+            3,
+            Some(&cursor_state),
+        )
+        .unwrap();
+    registry
+        .advance_completion_cursor(
+            CompletionCursorConsumer::RuntimeInjected,
+            2,
+            Some(&cursor_state),
+        )
+        .unwrap();
 
-    let snapshot = registry.capture_persistence_snapshot(RuntimeEpochId::new(), &cursor_state);
+    let snapshot = registry
+        .capture_persistence_snapshot(RuntimeEpochId::new(), &cursor_state)
+        .unwrap();
 
     assert_eq!(snapshot.cursors.agent_applied_cursor, 5);
     assert_eq!(snapshot.cursors.runtime_observed_seq, 3);
@@ -104,10 +130,12 @@ fn recovered_registry_contains_terminal_completion_entries() {
         .unwrap();
     // specs[2] stays in-progress (non-terminal)
 
-    let snapshot = registry.capture_persistence_snapshot(RuntimeEpochId::new(), &cursor_state);
+    let snapshot = registry
+        .capture_persistence_snapshot(RuntimeEpochId::new(), &cursor_state)
+        .unwrap();
 
     // Recover
-    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot);
+    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
     let feed = recovered
         .completion_feed()
         .expect("recovered registry should have feed");
@@ -143,17 +171,19 @@ fn recovered_registry_strips_non_terminal_ops() {
         .provisioning_succeeded(&nonterminal_spec.id)
         .unwrap();
 
-    let snapshot = registry.capture_persistence_snapshot(RuntimeEpochId::new(), &cursor_state);
-    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot);
+    let snapshot = registry
+        .capture_persistence_snapshot(RuntimeEpochId::new(), &cursor_state)
+        .unwrap();
+    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
 
     // Terminal op present
     assert!(
-        recovered.snapshot(&terminal_spec.id).is_some(),
+        recovered.snapshot(&terminal_spec.id).unwrap().is_some(),
         "terminal op should survive recovery"
     );
     // Non-terminal op stripped
     assert!(
-        recovered.snapshot(&nonterminal_spec.id).is_none(),
+        recovered.snapshot(&nonterminal_spec.id).unwrap().is_none(),
         "non-terminal op should NOT survive recovery"
     );
 }
@@ -178,10 +208,12 @@ fn recovered_feed_list_since_persisted_cursor_returns_unsurfaced() {
         .complete_operation(&spec_b.id, op_result(&spec_b.id))
         .unwrap();
 
-    let snapshot = registry.capture_persistence_snapshot(RuntimeEpochId::new(), &cursor_state);
+    let snapshot = registry
+        .capture_persistence_snapshot(RuntimeEpochId::new(), &cursor_state)
+        .unwrap();
 
     // Recover
-    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot);
+    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
     let feed = recovered
         .completion_feed()
         .expect("recovered registry should have feed");
@@ -214,8 +246,10 @@ fn recovered_registry_clears_wait_state() {
         .complete_operation(&spec.id, op_result(&spec.id))
         .unwrap();
 
-    let snapshot = registry.capture_persistence_snapshot(RuntimeEpochId::new(), &cursor_state);
-    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot);
+    let snapshot = registry
+        .capture_persistence_snapshot(RuntimeEpochId::new(), &cursor_state)
+        .unwrap();
+    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
 
     // Should be usable — no panic from stale wait state
     let new_spec = bg_spec("post-recovery-op");
@@ -232,7 +266,9 @@ fn recovered_epoch_id_matches_persisted() {
     let cursor_state = Arc::new(EpochCursorState::new());
     let epoch_id = RuntimeEpochId::new();
 
-    let snapshot = registry.capture_persistence_snapshot(epoch_id.clone(), &cursor_state);
+    let snapshot = registry
+        .capture_persistence_snapshot(epoch_id.clone(), &cursor_state)
+        .unwrap();
     assert_eq!(snapshot.epoch_id, epoch_id, "persisted epoch_id must match");
 }
 
@@ -250,8 +286,10 @@ fn recovered_feed_watermark_matches_persisted_sequence() {
         registry.complete_operation(&id, op_result(&id)).unwrap();
     }
 
-    let snapshot = registry.capture_persistence_snapshot(RuntimeEpochId::new(), &cursor_state);
-    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot);
+    let snapshot = registry
+        .capture_persistence_snapshot(RuntimeEpochId::new(), &cursor_state)
+        .unwrap();
+    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
     let feed = recovered.completion_feed().unwrap();
 
     // Watermark should be at least 3 (3 completions)
@@ -284,15 +322,22 @@ fn snapshot_captures_entries_beyond_authority_retention() {
         registry.complete_operation(&id, op_result(&id)).unwrap();
     }
 
-    let snapshot = registry.capture_persistence_snapshot(RuntimeEpochId::new(), &cursor_state);
+    let snapshot = registry
+        .capture_persistence_snapshot(RuntimeEpochId::new(), &cursor_state)
+        .unwrap();
 
     // Snapshot should contain all 4 completion entries (from feed buffer),
     // even though authority only retains 2 terminal ops
     assert_eq!(
         snapshot.completion_entries.len(),
         4,
-        "snapshot should capture all feed entries ({} found), not just authority-retained",
+        "snapshot should capture all feed projection entries ({} found), not just authority-retained",
         snapshot.completion_entries.len()
+    );
+    assert_eq!(
+        snapshot.authority_state.completion_feed_count(),
+        4,
+        "generated feed authority should retain every public completion"
     );
 
     // Authority state should only have 2 ops (eviction)
@@ -353,7 +398,7 @@ fn terminal_persistence_queue_captures_burst_without_loss_for_recovery() {
         "latest persisted snapshot must include the full terminal completion feed"
     );
 
-    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(latest_snapshot);
+    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(latest_snapshot).unwrap();
     let recovered_feed = recovered
         .completion_feed()
         .expect("recovered registry should expose completion feed");
@@ -436,7 +481,7 @@ impl RuntimeStore for FailingOpsLifecycleStore {
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
         session_delta: Option<meerkat_runtime::SessionDelta>,
         receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
-        input_updates: Vec<meerkat_runtime::input_state::StoredInputState>,
+        input_updates: Vec<meerkat_runtime::input_state::InputStatePersistenceRecord>,
         session_store_key: Option<SessionId>,
     ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
         self.inner
@@ -512,7 +557,7 @@ impl RuntimeStore for FailingOpsLifecycleStore {
     async fn persist_input_state(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
-        state: &meerkat_runtime::input_state::StoredInputState,
+        state: &meerkat_runtime::input_state::InputStatePersistenceRecord,
     ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
         self.inner.persist_input_state(runtime_id, state).await
     }
@@ -528,18 +573,18 @@ impl RuntimeStore for FailingOpsLifecycleStore {
         self.inner.load_input_state(runtime_id, input_id).await
     }
 
-    async fn load_runtime_state(
+    async fn load_machine_lifecycle_record(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
-    ) -> Result<Option<meerkat_runtime::RuntimeState>, meerkat_runtime::RuntimeStoreError> {
-        self.inner.load_runtime_state(runtime_id).await
+    ) -> Result<Option<Vec<u8>>, meerkat_runtime::RuntimeStoreError> {
+        self.inner.load_machine_lifecycle_record(runtime_id).await
     }
 
     async fn commit_machine_lifecycle(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
         commit: meerkat_runtime::store::MachineLifecycleCommit,
-        input_states: &[meerkat_runtime::input_state::StoredInputState],
+        input_states: &[meerkat_runtime::input_state::InputStatePersistenceRecord],
     ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
         self.inner
             .commit_machine_lifecycle(runtime_id, commit, input_states)
@@ -566,7 +611,7 @@ impl RuntimeStore for FailingOpsLifecycleStore {
     ) -> Result<Option<PersistedOpsSnapshot>, meerkat_runtime::RuntimeStoreError> {
         if self.fail_ops_load_for.as_ref() == Some(runtime_id) {
             return Err(meerkat_runtime::RuntimeStoreError::ReadFailed(
-                "synthetic legacy ops lifecycle load failure".to_string(),
+                "synthetic ops lifecycle load failure".to_string(),
             ));
         }
         self.inner.load_ops_lifecycle(runtime_id).await
@@ -582,7 +627,8 @@ async fn terminal_transition_surfaces_store_write_failure_after_persistence_requ
     let session_id = SessionId::new();
     adapter
         .register_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
     let bindings = adapter
         .prepare_bindings(session_id.clone())
         .await
@@ -657,7 +703,8 @@ async fn cold_ensure_session_with_executor_uses_shared_recovery_path() {
     // Go straight to register_session_with_executor — no prior register_session.
     adapter
         .register_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     // The session should be registered with valid bindings.
     let bindings = adapter
@@ -677,7 +724,7 @@ async fn cold_ensure_session_with_executor_uses_shared_recovery_path() {
         .await
         .expect("registry should exist");
     assert!(
-        direct.snapshot(&op_id).is_some(),
+        direct.snapshot(&op_id).unwrap().is_some(),
         "cold attach-first registry must be the same instance as prepare_bindings"
     );
 }
@@ -704,7 +751,9 @@ async fn cold_persistent_adapter_recovers_persisted_epoch() {
         .complete_operation(&op_id, op_result(&op_id))
         .unwrap();
 
-    let snapshot = registry.capture_persistence_snapshot(epoch_id.clone(), &cursor_state);
+    let snapshot = registry
+        .capture_persistence_snapshot(epoch_id.clone(), &cursor_state)
+        .unwrap();
     let runtime_id = meerkat_runtime::identifiers::LogicalRuntimeId::for_session(&session_id);
     store
         .persist_ops_lifecycle(&runtime_id, &snapshot)
@@ -740,8 +789,9 @@ async fn cold_persistent_adapter_keeps_canonical_ops_snapshot_over_more_advanced
     let session_id = SessionId::new();
     let canonical_epoch = RuntimeEpochId::new();
     let canonical_registry = meerkat_runtime::RuntimeOpsLifecycleRegistry::new();
-    let canonical_snapshot =
-        canonical_registry.capture_persistence_snapshot(canonical_epoch, &EpochCursorState::new());
+    let canonical_snapshot = canonical_registry
+        .capture_persistence_snapshot(canonical_epoch, &EpochCursorState::new())
+        .unwrap();
     store
         .persist_ops_lifecycle(
             &LogicalRuntimeId::for_session(&session_id),
@@ -760,8 +810,9 @@ async fn cold_persistent_adapter_keeps_canonical_ops_snapshot_over_more_advanced
     legacy_registry
         .complete_operation(&op_id, op_result(&op_id))
         .unwrap();
-    let legacy_snapshot =
-        legacy_registry.capture_persistence_snapshot(legacy_epoch.clone(), &legacy_cursor_state);
+    let legacy_snapshot = legacy_registry
+        .capture_persistence_snapshot(legacy_epoch.clone(), &legacy_cursor_state)
+        .unwrap();
     store
         .persist_ops_lifecycle(
             &LogicalRuntimeId::legacy_session_uuid_alias(&session_id),
@@ -808,7 +859,9 @@ async fn cold_persistent_adapter_keeps_canonical_ops_snapshot_when_legacy_alias_
     registry
         .complete_operation(&op_id, op_result(&op_id))
         .unwrap();
-    let snapshot = registry.capture_persistence_snapshot(canonical_epoch.clone(), &cursor_state);
+    let snapshot = registry
+        .capture_persistence_snapshot(canonical_epoch.clone(), &cursor_state)
+        .unwrap();
     store
         .inner
         .persist_ops_lifecycle(&canonical_runtime_id, &snapshot)
@@ -832,6 +885,70 @@ async fn cold_persistent_adapter_keeps_canonical_ops_snapshot_when_legacy_alias_
     assert_eq!(batch.entries[0].operation_id, op_id);
 }
 
+#[tokio::test]
+async fn cold_persistent_adapter_fails_closed_on_canonical_ops_snapshot_load_failure() {
+    let session_id = SessionId::new();
+    let canonical_runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let store = Arc::new(FailingOpsLifecycleStore::fail_ops_load_for(
+        canonical_runtime_id,
+    ));
+
+    let adapter = meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+        Arc::clone(&store) as Arc<dyn RuntimeStore>
+    );
+
+    let err = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect_err("ops lifecycle load failure must not rotate to a fresh empty epoch");
+    assert!(
+        err.to_string()
+            .contains("failed to load ops lifecycle from durable store"),
+        "unexpected prepare error: {err}"
+    );
+    assert!(
+        err.to_string()
+            .contains("synthetic ops lifecycle load failure"),
+        "unexpected prepare error: {err}"
+    );
+    assert!(
+        !adapter.contains_session(&session_id).await,
+        "failed ops lifecycle recovery must not leave a fresh session binding"
+    );
+}
+
+#[tokio::test]
+async fn cold_executor_attach_fails_closed_on_canonical_ops_snapshot_load_failure() {
+    let session_id = SessionId::new();
+    let canonical_runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let store = Arc::new(FailingOpsLifecycleStore::fail_ops_load_for(
+        canonical_runtime_id,
+    ));
+
+    let adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+        Arc::clone(&store) as Arc<dyn RuntimeStore>,
+    ));
+
+    let err = adapter
+        .register_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
+        .await
+        .expect_err("executor attach must not report success after ops authority load failure");
+    assert!(
+        err.to_string()
+            .contains("failed to load ops lifecycle from durable store"),
+        "unexpected attach error: {err}"
+    );
+    assert!(
+        err.to_string()
+            .contains("synthetic ops lifecycle load failure"),
+        "unexpected attach error: {err}"
+    );
+    assert!(
+        !adapter.contains_session(&session_id).await,
+        "failed executor attach recovery must not leave a fresh session binding"
+    );
+}
+
 /// Same test but via the ensure_session_with_executor cold path.
 #[tokio::test]
 async fn cold_ensure_session_with_executor_recovers_persisted_epoch() {
@@ -852,7 +969,9 @@ async fn cold_ensure_session_with_executor_recovers_persisted_epoch() {
         .complete_operation(&op_id, op_result(&op_id))
         .unwrap();
 
-    let snapshot = registry.capture_persistence_snapshot(epoch_id.clone(), &cursor_state);
+    let snapshot = registry
+        .capture_persistence_snapshot(epoch_id.clone(), &cursor_state)
+        .unwrap();
     let runtime_id = meerkat_runtime::identifiers::LogicalRuntimeId::for_session(&session_id);
     store
         .persist_ops_lifecycle(&runtime_id, &snapshot)
@@ -865,7 +984,8 @@ async fn cold_ensure_session_with_executor_recovers_persisted_epoch() {
     ));
     adapter
         .register_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     // Verify epoch recovered
     let bindings = adapter.prepare_bindings(session_id.clone()).await.unwrap();

@@ -7,16 +7,16 @@ use chrono::Utc;
 use meerkat_core::BlobStore;
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::{InputId, RunId};
-use meerkat_runtime::PersistentRuntimeDriver;
 use meerkat_runtime::identifiers::LogicalRuntimeId;
 use meerkat_runtime::input::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PromptInput,
 };
 use meerkat_runtime::input_state::{
-    InputLifecycleState, InputState, InputStateSeed, StoredInputState,
+    InputLifecycleState, InputState, InputStatePersistenceRecord, InputStateSeed, StoredInputState,
 };
 use meerkat_runtime::store::{InMemoryRuntimeStore, RuntimeStore};
 use meerkat_runtime::traits::RuntimeDriver;
+use meerkat_runtime::{EphemeralRuntimeDriver, PersistentRuntimeDriver};
 use meerkat_store::MemoryBlobStore;
 use uuid::Uuid;
 
@@ -51,10 +51,10 @@ fn stamp_runtime_metadata(state: &mut InputState, input: &Input) {
     let policy = meerkat_runtime::DefaultPolicyTable::resolve(input, true);
     let policy_version = policy.policy_version;
     state.runtime_semantics = Some(
-        meerkat_runtime::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
-            &policy,
-            input.kind(),
-        ),
+        meerkat_runtime::ingress_types::RuntimeInputSemantics::try_from_generated_admission(
+            input, true,
+        )
+        .expect("generated admission semantics"),
     );
     state.policy = Some(meerkat_runtime::input_state::PolicySnapshot {
         version: policy_version,
@@ -78,8 +78,17 @@ fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> Stored
             last_boundary_sequence: Some(sequence),
             terminal_outcome: None,
             attempt_count: 1,
+            admission_sequence: None,
+            recovery_lane: Some(meerkat_core::types::HandlingMode::Queue),
         },
     }
+}
+
+fn persistable(stored: StoredInputState) -> InputStatePersistenceRecord {
+    let mut driver = EphemeralRuntimeDriver::new(make_runtime_id("persistence-record"));
+    driver
+        .recover_input_state_persistence_record(stored)
+        .expect("test input-state seed should pass generated recovery authority")
 }
 
 fn sorted_ids(ids: impl IntoIterator<Item = InputId>) -> Vec<String> {
@@ -100,11 +109,17 @@ async fn recovery_replay_red_ok_requeues_missing_boundary_contributors_through_p
     let store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
 
     store
-        .persist_input_state(&runtime_id, &applied_pending_state(&first, &run_id, 0))
+        .persist_input_state(
+            &runtime_id,
+            &persistable(applied_pending_state(&first, &run_id, 0)),
+        )
         .await
         .expect("persist first applied state");
     store
-        .persist_input_state(&runtime_id, &applied_pending_state(&second, &run_id, 0))
+        .persist_input_state(
+            &runtime_id,
+            &persistable(applied_pending_state(&second, &run_id, 0)),
+        )
         .await
         .expect("persist second applied state");
 

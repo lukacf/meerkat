@@ -58,6 +58,33 @@ fn request_sent_rejects_duplicate() {
 }
 
 #[test]
+fn response_reply_terminality_comes_from_machine_signal() {
+    let handle = new_handle();
+    assert_eq!(
+        handle
+            .classify_response_reply(meerkat_core::ResponseStatus::Accepted)
+            .unwrap(),
+        meerkat_core::TerminalityClass::Progress
+    );
+    assert_eq!(
+        handle
+            .classify_response_reply(meerkat_core::ResponseStatus::Completed)
+            .unwrap(),
+        meerkat_core::TerminalityClass::Terminal {
+            disposition: meerkat_core::TerminalDisposition::Completed,
+        }
+    );
+    assert_eq!(
+        handle
+            .classify_response_reply(meerkat_core::ResponseStatus::Failed)
+            .unwrap(),
+        meerkat_core::TerminalityClass::Terminal {
+            disposition: meerkat_core::TerminalDisposition::Failed,
+        }
+    );
+}
+
+#[test]
 fn progress_advances_state_to_accepted() {
     let handle = new_handle();
     let corr_id = PeerCorrelationId::new();
@@ -111,6 +138,25 @@ fn terminal_failed_removes_entry() {
 }
 
 #[test]
+fn response_rejected_removes_entry() {
+    let handle = new_handle();
+    let corr_id = PeerCorrelationId::new();
+    handle.request_sent(corr_id, "peer-a".into()).unwrap();
+    handle.response_rejected(corr_id).unwrap();
+    assert!(handle.outbound_state(corr_id).is_none());
+}
+
+#[test]
+fn response_rejected_rejects_unknown_corr_id() {
+    let handle = new_handle();
+    let corr_id = PeerCorrelationId::new();
+    let err = handle
+        .response_rejected(corr_id)
+        .expect_err("rejection on unknown corr_id must reject");
+    assert_eq!(err.context, "PeerInteractionHandle::response_rejected");
+}
+
+#[test]
 fn timeout_removes_entry_and_emits_cleanup() {
     let handle = new_handle();
     let corr_id = PeerCorrelationId::new();
@@ -129,22 +175,31 @@ fn inbound_received_then_replied_advances_and_removes() {
     let handle = new_handle();
     let corr_id = PeerCorrelationId::new();
     assert!(handle.inbound_state(corr_id).is_none());
-    handle.request_received(corr_id).unwrap();
+    handle
+        .request_received(corr_id, meerkat_core::types::HandlingMode::Queue)
+        .unwrap();
     assert_eq!(
         handle.inbound_state(corr_id),
         Some(InboundPeerRequestState::Received)
     );
+    assert_eq!(
+        handle.inbound_handling_mode(corr_id),
+        Some(meerkat_core::types::HandlingMode::Queue)
+    );
     handle.response_replied(corr_id).unwrap();
     assert!(handle.inbound_state(corr_id).is_none());
+    assert!(handle.inbound_handling_mode(corr_id).is_none());
 }
 
 #[test]
 fn inbound_received_rejects_duplicate() {
     let handle = new_handle();
     let corr_id = PeerCorrelationId::new();
-    handle.request_received(corr_id).unwrap();
+    handle
+        .request_received(corr_id, meerkat_core::types::HandlingMode::Queue)
+        .unwrap();
     let err = handle
-        .request_received(corr_id)
+        .request_received(corr_id, meerkat_core::types::HandlingMode::Queue)
         .expect_err("duplicate inbound receipt must reject");
     assert_eq!(err.context, "PeerInteractionHandle::request_received");
 }
@@ -207,7 +262,13 @@ fn cleanup_observer_fires_on_terminal_transitions() {
     // Inbound reply does NOT fire `PeerInteractionCleanup` (it emits the
     // inbound state-change effect on a different variant).
     let d = PeerCorrelationId::new();
-    handle.request_received(d).unwrap();
+    handle
+        .request_received(d, meerkat_core::types::HandlingMode::Steer)
+        .unwrap();
+    assert_eq!(
+        handle.inbound_handling_mode(d),
+        Some(meerkat_core::types::HandlingMode::Steer)
+    );
     handle.response_replied(d).unwrap();
     assert_eq!(
         rec.0.lock().unwrap().clone(),
@@ -270,7 +331,9 @@ fn outbound_inbound_are_independent_namespaces() {
     let handle = new_handle();
     let corr_id = PeerCorrelationId::new();
     handle.request_sent(corr_id, "peer-a".into()).unwrap();
-    handle.request_received(corr_id).unwrap();
+    handle
+        .request_received(corr_id, meerkat_core::types::HandlingMode::Queue)
+        .unwrap();
     assert_eq!(
         handle.outbound_state(corr_id),
         Some(OutboundPeerRequestState::Sent)

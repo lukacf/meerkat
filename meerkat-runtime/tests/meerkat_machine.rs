@@ -5,9 +5,8 @@
     clippy::unwrap_used
 )]
 
-use std::collections::HashMap;
 use std::sync::{
-    Arc, Mutex,
+    Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::Duration;
@@ -18,7 +17,10 @@ use meerkat_core::lifecycle::{
     InputId, RunBoundaryReceipt, RunId, run_primitive::RunApplyBoundary,
 };
 use meerkat_core::types::SessionId;
-use meerkat_runtime::input_state::{InputAbandonReason, InputTerminalOutcome, StoredInputState};
+use meerkat_runtime::input_state::{
+    InputAbandonReason, InputStatePersistenceRecord, InputTerminalOutcome, StoredInputState,
+};
+use meerkat_runtime::store::load_runtime_state;
 use meerkat_runtime::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, LogicalRuntimeId,
     MeerkatMachine, PromptInput, RuntimeDriverError, RuntimeState, RuntimeStore, RuntimeStoreError,
@@ -138,7 +140,7 @@ struct HarnessRuntimeStore {
     load_input_states_delay: Duration,
     fail_persist_input_state_after: Option<usize>,
     persist_input_state_calls: AtomicUsize,
-    runtime_state_overrides: Mutex<HashMap<LogicalRuntimeId, RuntimeState>>,
+    fail_lifecycle_load_for: Option<LogicalRuntimeId>,
 }
 
 impl HarnessRuntimeStore {
@@ -154,7 +156,7 @@ impl HarnessRuntimeStore {
             load_input_states_delay: Duration::ZERO,
             fail_persist_input_state_after: None,
             persist_input_state_calls: AtomicUsize::new(0),
-            runtime_state_overrides: Mutex::new(HashMap::new()),
+            fail_lifecycle_load_for: None,
         }
     }
 
@@ -168,6 +170,13 @@ impl HarnessRuntimeStore {
     fn delayed_recover(delay: Duration) -> Self {
         Self {
             load_input_states_delay: delay,
+            ..Self::new()
+        }
+    }
+
+    fn fail_lifecycle_load_for(runtime_id: LogicalRuntimeId) -> Self {
+        Self {
+            fail_lifecycle_load_for: Some(runtime_id),
             ..Self::new()
         }
     }
@@ -208,17 +217,6 @@ impl HarnessRuntimeStore {
         self.fail_commit_machine_lifecycle_now
             .store(fail, Ordering::SeqCst);
     }
-
-    fn seed_runtime_state_projection(
-        &self,
-        runtime_id: LogicalRuntimeId,
-        runtime_state: RuntimeState,
-    ) {
-        self.runtime_state_overrides
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(runtime_id, runtime_state);
-    }
 }
 
 #[async_trait::async_trait]
@@ -238,7 +236,7 @@ impl RuntimeStore for HarnessRuntimeStore {
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
         session_delta: Option<SessionDelta>,
         receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
-        input_updates: Vec<StoredInputState>,
+        input_updates: Vec<InputStatePersistenceRecord>,
         session_store_key: Option<meerkat_core::types::SessionId>,
     ) -> Result<(), RuntimeStoreError> {
         if self.fail_atomic_apply {
@@ -316,7 +314,7 @@ impl RuntimeStore for HarnessRuntimeStore {
     async fn persist_input_state(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
-        state: &StoredInputState,
+        state: &InputStatePersistenceRecord,
     ) -> Result<(), RuntimeStoreError> {
         let call_index = self
             .persist_input_state_calls
@@ -340,27 +338,23 @@ impl RuntimeStore for HarnessRuntimeStore {
         self.inner.load_input_state(runtime_id, input_id).await
     }
 
-    async fn load_runtime_state(
+    async fn load_machine_lifecycle_record(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
-    ) -> Result<Option<RuntimeState>, RuntimeStoreError> {
-        if let Some(runtime_state) = self
-            .runtime_state_overrides
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(runtime_id)
-            .copied()
-        {
-            return Ok(Some(runtime_state));
+    ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+        if self.fail_lifecycle_load_for.as_ref() == Some(runtime_id) {
+            return Err(RuntimeStoreError::ReadFailed(
+                "synthetic legacy lifecycle load failure".to_string(),
+            ));
         }
-        self.inner.load_runtime_state(runtime_id).await
+        self.inner.load_machine_lifecycle_record(runtime_id).await
     }
 
     async fn commit_machine_lifecycle(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
         commit: meerkat_runtime::store::MachineLifecycleCommit,
-        input_states: &[StoredInputState],
+        input_states: &[InputStatePersistenceRecord],
     ) -> Result<(), RuntimeStoreError> {
         let call_index = self
             .commit_machine_lifecycle_calls
@@ -465,9 +459,12 @@ async fn persistent_adapter_accept() {
 }
 
 #[tokio::test]
-async fn lifecycle_commit_failure_restores_staged_session_dsl_state() {
+async fn lifecycle_commit_failure_preserves_generated_retire_authority() {
     let store = Arc::new(HarnessRuntimeStore::failing_lifecycle_commit());
-    let adapter = Arc::new(MeerkatMachine::persistent(store, memory_blob_store()));
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    ));
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
     let runtime_id = LogicalRuntimeId::for_session(&sid);
@@ -489,13 +486,20 @@ async fn lifecycle_commit_failure_restores_staged_session_dsl_state() {
     );
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
-        RuntimeState::Idle,
-        "failed retire must restore the session DSL phase",
+        RuntimeState::Retired,
+        "failed retire must preserve the generated Retire transition",
     );
     assert_eq!(
         adapter.list_active_inputs(&sid).await.unwrap(),
         vec![input_id],
-        "failed retire must restore active input projection",
+        "failed retire must not abandon active input projection without generated input lifecycle authority",
+    );
+    assert_ne!(
+        load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .unwrap(),
+        Some(RuntimeState::Retired),
+        "failed retire must not claim durable retired truth when persistence rejected it",
     );
 }
 
@@ -538,7 +542,9 @@ async fn destroy_lifecycle_commit_failure_restores_staged_session_dsl_state() {
         "failed destroy must restore active input projection",
     );
     assert_ne!(
-        store.load_runtime_state(&runtime_id).await.unwrap(),
+        load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .unwrap(),
         Some(RuntimeState::Destroyed),
         "failed destroy must not persist destroyed runtime truth",
     );
@@ -646,7 +652,9 @@ async fn destroy_does_not_publish_destroyed_while_lifecycle_commit_is_in_flight(
         "in-flight durable destroy commit must not publish visible Destroyed state"
     );
     assert_ne!(
-        store.load_runtime_state(&runtime_id).await.unwrap(),
+        load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .unwrap(),
         Some(RuntimeState::Destroyed),
         "in-flight durable destroy commit must not publish durable Destroyed state"
     );
@@ -733,7 +741,8 @@ async fn async_stop_lifecycle_commit_failure_does_not_publish_stopped() {
                 cleanup_called: Arc::clone(&cleanup_called),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     adapter
         .stop_runtime_executor(&sid, "async stop lifecycle failure")
@@ -756,8 +765,7 @@ async fn async_stop_lifecycle_commit_failure_does_not_publish_stopped() {
         "failed durable stop commit must not publish visible Stopped state"
     );
     assert_ne!(
-        store
-            .load_runtime_state(&LogicalRuntimeId::for_session(&sid))
+        load_runtime_state(store.as_ref(), &LogicalRuntimeId::for_session(&sid))
             .await
             .unwrap(),
         Some(RuntimeState::Stopped),
@@ -820,7 +828,8 @@ async fn async_stop_does_not_publish_stopped_while_lifecycle_commit_is_in_flight
                 stop_called: Arc::clone(&stop_called),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let baseline_commits = store.commit_machine_lifecycle_calls();
     let stop_adapter = Arc::clone(&adapter);
@@ -886,7 +895,9 @@ async fn cold_reregister_preserves_canonical_destroyed_runtime_state() {
         "cold re-registration must preserve canonical durable destroyed runtime truth",
     );
     assert_eq!(
-        store.load_runtime_state(&runtime_id).await.unwrap(),
+        load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .unwrap(),
         Some(RuntimeState::Destroyed),
         "cold re-registration must not rewrite canonical durable destroyed runtime truth",
     );
@@ -894,10 +905,11 @@ async fn cold_reregister_preserves_canonical_destroyed_runtime_state() {
 
 #[tokio::test]
 async fn cold_reregister_ignores_legacy_session_uuid_runtime_state_alias() {
-    let store = Arc::new(HarnessRuntimeStore::delayed_recover(Duration::ZERO));
     let sid = SessionId::new();
     let legacy_runtime_alias = LogicalRuntimeId::legacy_session_uuid_alias(&sid);
-    store.seed_runtime_state_projection(legacy_runtime_alias, RuntimeState::Destroyed);
+    let store = Arc::new(HarnessRuntimeStore::fail_lifecycle_load_for(
+        legacy_runtime_alias,
+    ));
 
     let adapter = Arc::new(MeerkatMachine::persistent(
         Arc::clone(&store) as Arc<dyn RuntimeStore>,
@@ -913,12 +925,11 @@ async fn cold_reregister_ignores_legacy_session_uuid_runtime_state_alias() {
 
 #[tokio::test]
 async fn cold_reregister_prefers_canonical_runtime_state_over_stale_legacy_alias() {
-    let store = Arc::new(HarnessRuntimeStore::delayed_recover(Duration::ZERO));
     let sid = SessionId::new();
-    let canonical_runtime_id = LogicalRuntimeId::for_session(&sid);
     let legacy_runtime_alias = LogicalRuntimeId::legacy_session_uuid_alias(&sid);
-    store.seed_runtime_state_projection(canonical_runtime_id, RuntimeState::Idle);
-    store.seed_runtime_state_projection(legacy_runtime_alias, RuntimeState::Retired);
+    let store = Arc::new(HarnessRuntimeStore::fail_lifecycle_load_for(
+        legacy_runtime_alias,
+    ));
 
     let adapter = Arc::new(MeerkatMachine::persistent(
         Arc::clone(&store) as Arc<dyn RuntimeStore>,
@@ -1096,7 +1107,7 @@ async fn recycle_preserves_persistent_queued_work() {
 }
 
 #[tokio::test]
-async fn recycle_lifecycle_commit_failure_restores_retired_projection() {
+async fn recycle_lifecycle_commit_failure_preserves_generated_recycle_authority() {
     let store = Arc::new(HarnessRuntimeStore::failing_lifecycle_commit_after(2));
     let adapter = Arc::new(MeerkatMachine::persistent(
         store.clone() as Arc<dyn RuntimeStore>,
@@ -1114,7 +1125,9 @@ async fn recycle_lifecycle_commit_failure_restores_retired_projection() {
         RuntimeState::Retired
     );
     assert_eq!(
-        store.load_runtime_state(&runtime_id).await.unwrap(),
+        load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .unwrap(),
         Some(RuntimeState::Retired)
     );
 
@@ -1128,11 +1141,13 @@ async fn recycle_lifecycle_commit_failure_restores_retired_projection() {
     );
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
-        RuntimeState::Retired,
-        "failed recycle must restore visible retired projection",
+        RuntimeState::Idle,
+        "failed recycle must preserve the generated Recycle transition",
     );
     assert_eq!(
-        store.load_runtime_state(&runtime_id).await.unwrap(),
+        load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .unwrap(),
         Some(RuntimeState::Retired),
         "failed recycle must not persist idle runtime truth",
     );
@@ -1201,11 +1216,13 @@ async fn recycle_keeps_waiters_for_preserved_pending_input() {
 
     adapter
         .register_session_with_executor(sid.clone(), Box::new(NoResultExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let result = tokio::time::timeout(Duration::from_secs(1), handle.wait())
         .await
-        .expect("completion should resolve after recycle + executor attach");
+        .expect("completion should resolve after recycle + executor attach")
+        .expect("completion waiter should resolve");
     assert!(
         matches!(
             result,
@@ -1302,7 +1319,8 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
                 apply_calls: Arc::clone(&apply_calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let (outcome, handle) = adapter
         .accept_input_with_completion(&sid, make_progress_input("recycle-attached"))
@@ -1319,7 +1337,8 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
 
     let result = tokio::time::timeout(Duration::from_secs(1), handle.wait())
         .await
-        .expect("attached runtime should wake and drain recycled queued work");
+        .expect("attached runtime should wake and drain recycled queued work")
+        .expect("completion waiter should resolve");
     assert!(
         matches!(
             result,
@@ -1357,7 +1376,10 @@ async fn unregister_session_terminates_pending_completion_waiters() {
 
     adapter.unregister_session(&sid).await;
 
-    let result = handle.wait().await;
+    let result = handle
+        .wait()
+        .await
+        .expect("completion waiter should resolve");
     assert!(
         matches!(
             result,
@@ -1431,7 +1453,8 @@ async fn accept_with_executor_triggers_loop() {
     });
     adapter
         .register_session_with_executor(sid.clone(), executor)
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     // Accept input — should trigger the loop
     let input = make_prompt("hello from executor test");
@@ -1458,7 +1481,10 @@ async fn accept_with_executor_triggers_loop() {
 async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
     use meerkat_comms::runtime::comms_runtime::CommsRuntime as InprocCommsRuntime;
     use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
-    use meerkat_core::comms::{CommsCommand, InputStreamMode, PeerName, PeerRoute, SendReceipt};
+    use meerkat_core::comms::{
+        CommsCommand, InputStreamMode, PeerAddress, PeerName, PeerRoute, PeerTransport,
+        SendReceipt, TrustedPeerDescriptor,
+    };
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
@@ -1468,6 +1494,7 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
         HandlingMode, InteractionContent, InteractionId, PeerCorrelationId, ResponseStatus,
     };
     use meerkat_runtime::PeerConvention;
+    use meerkat_runtime::meerkat_machine::dsl as mm_dsl;
     use tokio::sync::Notify;
     use uuid::Uuid;
 
@@ -1556,13 +1583,28 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
         .expect("classified inbox should receive request")
     }
 
+    fn descriptor_for_runtime(
+        runtime: &InprocCommsRuntime,
+    ) -> Result<TrustedPeerDescriptor, String> {
+        Ok(TrustedPeerDescriptor {
+            peer_id: runtime.public_key().to_peer_id(),
+            name: PeerName::new(runtime.participant_name().to_string())?,
+            address: PeerAddress::new(PeerTransport::Inproc, runtime.participant_name()),
+            pubkey: *runtime.public_key().as_bytes(),
+        })
+    }
+
     let suffix = Uuid::new_v4().simple().to_string();
     let name_a = format!("runtime-requester-{suffix}");
     let name_b = format!("runtime-responder-{suffix}");
-    let (requester_comms, responder_comms) =
-        InprocCommsRuntime::inproc_pair_with_mutual_trust(&name_a, &name_b)
-            .await
-            .expect("inproc comms pair");
+    let requester_comms =
+        Arc::new(InprocCommsRuntime::inproc_only(&name_a).expect("requester comms runtime"));
+    let responder_comms =
+        Arc::new(InprocCommsRuntime::inproc_only(&name_b).expect("responder comms runtime"));
+    let requester_descriptor =
+        descriptor_for_runtime(requester_comms.as_ref()).expect("requester descriptor");
+    let responder_descriptor =
+        descriptor_for_runtime(responder_comms.as_ref()).expect("responder descriptor");
 
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
@@ -1570,7 +1612,9 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
         .prepare_bindings(sid.clone())
         .await
         .expect("prepare runtime bindings");
-    requester_comms.install_peer_comms_handle(Arc::clone(bindings.peer_comms()));
+    bindings
+        .install_peer_comms_on(requester_comms.as_ref())
+        .expect("install requester peer-comms handle");
     requester_comms.install_peer_request_response_authority(
         meerkat_comms::PeerRequestResponseAuthority::new(
             Arc::clone(bindings.peer_interaction()),
@@ -1580,15 +1624,37 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
     let responder_adapter = Arc::new(MeerkatMachine::ephemeral());
     let responder_sid = SessionId::new();
     let responder_bindings = responder_adapter
-        .prepare_bindings(responder_sid)
+        .prepare_bindings(responder_sid.clone())
         .await
         .expect("prepare responder runtime bindings");
+    responder_bindings
+        .install_peer_comms_on(responder_comms.as_ref())
+        .expect("install responder peer-comms handle");
     responder_comms.install_peer_request_response_authority(
         meerkat_comms::PeerRequestResponseAuthority::new(
             Arc::clone(responder_bindings.peer_interaction()),
             Arc::clone(responder_bindings.interaction_stream()),
         ),
     );
+
+    let requester_for_trust: Arc<dyn CoreCommsRuntime> = requester_comms.clone();
+    adapter
+        .stage_add_direct_peer_endpoint(
+            &sid,
+            mm_dsl::PeerEndpoint::from(&responder_descriptor),
+            requester_for_trust,
+        )
+        .await
+        .expect("requester generated trust should apply");
+    let responder_for_trust: Arc<dyn CoreCommsRuntime> = responder_comms.clone();
+    responder_adapter
+        .stage_add_direct_peer_endpoint(
+            &responder_sid,
+            mm_dsl::PeerEndpoint::from(&requester_descriptor),
+            responder_for_trust,
+        )
+        .await
+        .expect("responder generated trust should apply");
 
     let calls = Arc::new(AtomicUsize::new(0));
     let first_apply_started = Arc::new(Notify::new());
@@ -1606,7 +1672,8 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
                 terminal_context_keys: Arc::clone(&terminal_context_keys),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let requester_for_drain: Arc<dyn CoreCommsRuntime> = requester_comms.clone();
     assert!(
@@ -1652,7 +1719,10 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
     ));
     responder_bindings
         .peer_interaction()
-        .request_received(PeerCorrelationId::from_uuid(request_id))
+        .request_received(
+            PeerCorrelationId::from_uuid(request_id),
+            meerkat_core::types::HandlingMode::Queue,
+        )
         .expect("seed responder inbound request state");
 
     CoreCommsRuntime::send(
@@ -1783,7 +1853,8 @@ async fn failed_executor_does_not_strand_input_in_apc() {
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(FailingExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_prompt("hello failing");
     let input_id = input.id().clone();
@@ -1866,7 +1937,8 @@ async fn failed_executor_stops_retrying_after_stage_budget_exhausted() {
                 calls: Arc::clone(&calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_prompt("hello failing forever");
     let input_id = input.id().clone();
@@ -1985,7 +2057,8 @@ async fn failed_executor_continues_processing_backlog() {
                 first_apply_started: Arc::clone(&first_apply_started),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let first = make_prompt("first");
     let first_id = first.id().clone();
@@ -2097,7 +2170,8 @@ async fn ensure_session_with_executor_upgrades_registered_session() {
                 called: Arc::clone(&apply_called),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     wait_for_atomic_bool(
         &apply_called,
@@ -2196,7 +2270,8 @@ async fn ensure_session_with_executor_upgrades_racy_registration() {
                         called: apply_called,
                     }),
                 )
-                .await;
+                .await
+                .expect("runtime executor registration should succeed");
         })
     };
 
@@ -2316,7 +2391,8 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(PanicOnStopExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
         RuntimeState::Attached
@@ -2351,7 +2427,8 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
                 called: Arc::clone(&apply_called),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_prompt("repair stale attachment");
     let input_id = input.id().clone();
@@ -2462,7 +2539,8 @@ async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
                 interrupt_calls: Arc::clone(&interrupt_calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let stop_adapter = Arc::clone(&adapter);
     let stop_sid = sid.clone();
@@ -2626,7 +2704,8 @@ async fn completed_boundary_commit_failure_unwinds_runtime_loop_state() {
                 stop_called: Arc::clone(&stop_called),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_prompt("loop boundary failure");
     let input_id = input.id().clone();
@@ -2698,7 +2777,8 @@ async fn completed_boundary_commit_failure_terminates_runtime_loop_completion_wa
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(SuccessExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let (outcome, handle) = adapter
         .accept_input_with_completion(&sid, make_prompt("loop boundary waiter failure"))
@@ -2709,7 +2789,8 @@ async fn completed_boundary_commit_failure_terminates_runtime_loop_completion_wa
 
     let result = tokio::time::timeout(Duration::from_secs(1), handle.wait())
         .await
-        .expect("completion waiter should resolve when the runtime loop exits");
+        .expect("completion waiter should resolve when the runtime loop exits")
+        .expect("completion waiter should resolve");
     assert!(
         matches!(
             result,
@@ -2790,7 +2871,8 @@ async fn completed_run_runtime_loop_skips_terminal_lifecycle_snapshot_writer() {
                 stop_called: Arc::clone(&stop_called),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let (outcome, handle) = adapter
         .accept_input_with_completion(&sid, make_prompt("loop skips terminal lifecycle snapshot"))
@@ -2804,6 +2886,7 @@ async fn completed_run_runtime_loop_skips_terminal_lifecycle_snapshot_writer() {
             .wait(),
     )
     .await
+    .expect("completion waiter should resolve")
     .expect("completion waiter should resolve");
     assert!(
         matches!(
@@ -2940,7 +3023,8 @@ async fn dedup_terminal_input_returns_none_handle() {
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(ResultExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     // Accept first input with idempotency key
     let key = IdempotencyKey::new("gate-a2");
@@ -2956,7 +3040,11 @@ async fn dedup_terminal_input_returns_none_handle() {
     assert!(handle1.is_some(), "accepted input should have a handle");
 
     // Wait for it to complete
-    let result = handle1.unwrap().wait().await;
+    let result = handle1
+        .unwrap()
+        .wait()
+        .await
+        .expect("completion waiter should resolve");
     assert!(
         matches!(
             result,
@@ -3050,7 +3138,8 @@ async fn dedup_inflight_input_returns_handle_that_resolves() {
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(SlowExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     // Accept first input with idempotency key
     let key = IdempotencyKey::new("gate-a3");
@@ -3086,8 +3175,16 @@ async fn dedup_inflight_input_returns_handle_that_resolves() {
     );
 
     // Both handles should resolve when the original completes
-    let result1 = handle1.unwrap().wait().await;
-    let result2 = handle2.unwrap().wait().await;
+    let result1 = handle1
+        .unwrap()
+        .wait()
+        .await
+        .expect("original completion waiter should resolve");
+    let result2 = handle2
+        .unwrap()
+        .wait()
+        .await
+        .expect("deduplicated completion waiter should resolve");
     assert!(
         matches!(result1, meerkat_runtime::completion::CompletionOutcome::Completed(ref r) if r.text == "slow done"),
         "original handle should complete with result"
@@ -3189,7 +3286,8 @@ async fn completion_handle_resolves_without_result() {
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(NoResultExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_prompt("context append");
     let (outcome, handle) = adapter
@@ -3198,7 +3296,11 @@ async fn completion_handle_resolves_without_result() {
         .unwrap();
     assert!(outcome.is_accepted());
 
-    let result = handle.unwrap().wait().await;
+    let result = handle
+        .unwrap()
+        .wait()
+        .await
+        .expect("completion waiter should resolve");
     assert!(
         matches!(
             result,
@@ -3245,7 +3347,8 @@ async fn completion_handle_resolves_cancelled_executor_separately() {
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(CancelledExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_prompt("cancelled");
     let input_id = input.id().clone();
@@ -3255,7 +3358,11 @@ async fn completion_handle_resolves_cancelled_executor_separately() {
         .unwrap();
     assert!(outcome.is_accepted());
 
-    let result = handle.unwrap().wait().await;
+    let result = handle
+        .unwrap()
+        .wait()
+        .await
+        .expect("completion waiter should resolve");
     assert!(
         matches!(
             result,
@@ -3350,7 +3457,8 @@ async fn persistent_cancelled_executor_persists_cancelled_terminal_not_failed_re
     let runtime_id = LogicalRuntimeId::for_session(&sid);
     adapter
         .register_session_with_executor(sid.clone(), Box::new(CancelledExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_prompt("persistent cancelled");
     let input_id = input.id().clone();
@@ -3360,7 +3468,11 @@ async fn persistent_cancelled_executor_persists_cancelled_terminal_not_failed_re
         .unwrap();
     assert!(outcome.is_accepted());
 
-    let result = handle.unwrap().wait().await;
+    let result = handle
+        .unwrap()
+        .wait()
+        .await
+        .expect("completion waiter should resolve");
     assert!(matches!(
         result,
         meerkat_runtime::completion::CompletionOutcome::Cancelled
@@ -3372,7 +3484,9 @@ async fn persistent_cancelled_executor_persists_cancelled_terminal_not_failed_re
         "cancelled persistent run should publish pre-run phase after durable commit"
     );
     assert_eq!(
-        store.load_runtime_state(&runtime_id).await.unwrap(),
+        load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .unwrap(),
         Some(RuntimeState::Idle),
         "persistent storage maps live Attached back to Idle for recovery"
     );
@@ -3418,7 +3532,11 @@ async fn reset_runtime_resolves_pending_waiters() {
     adapter.reset_runtime(&sid).await.unwrap();
 
     // Handle should resolve as terminated
-    let result = handle.unwrap().wait().await;
+    let result = handle
+        .unwrap()
+        .wait()
+        .await
+        .expect("completion waiter should resolve");
     assert!(
         matches!(
             result,
@@ -3448,7 +3566,11 @@ async fn retire_without_loop_resolves_waiters() {
     adapter.retire_runtime(&sid).await.unwrap();
 
     // Handle should resolve as terminated since no loop will drain
-    let result = handle.unwrap().wait().await;
+    let result = handle
+        .unwrap()
+        .wait()
+        .await
+        .expect("completion waiter should resolve");
     assert!(
         matches!(
             result,
@@ -3657,7 +3779,8 @@ async fn attached_sessions_do_not_spawn_comms_drains_without_keep_alive() {
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(NoopExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let comms: Arc<dyn CommsRuntime> = Arc::new(IdleDrainRuntime::new());
     let spawned = adapter
@@ -3725,7 +3848,8 @@ async fn successful_execution_fires_boundary_applied() {
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(SuccessExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_prompt("hello success");
     let input_id = input.id().clone();
@@ -3820,7 +3944,8 @@ async fn executor_attached_session_is_executor_ready() {
 
     adapter
         .ensure_session_with_executor(sid.clone(), Box::new(NoopExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     assert!(
         adapter.session_has_executor(&sid).await,

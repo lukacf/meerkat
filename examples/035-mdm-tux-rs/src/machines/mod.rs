@@ -2,7 +2,6 @@ pub mod direct_registration;
 pub mod kennel_lease;
 pub mod kennel_target_control;
 pub mod target_attachment;
-pub mod target_kennel_control;
 pub mod target_kennel_session;
 pub mod target_session_binding;
 pub mod tux_claim;

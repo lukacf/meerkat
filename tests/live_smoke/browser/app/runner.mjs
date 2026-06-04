@@ -1,6 +1,9 @@
 const logNode = document.querySelector('#log');
 const statusNode = document.querySelector('#status');
-const LIVE_LLM_TIMEOUT_MS = 15_000;
+const LIVE_LLM_TIMEOUT_MS = Number.parseInt(
+  globalThis.MEERKAT_BROWSER_LIVE_SMOKE_TIMEOUT_MS ?? '180000',
+  10,
+);
 
 function write(message) {
   const line = typeof message === 'string' ? message : JSON.stringify(message);

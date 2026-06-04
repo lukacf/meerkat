@@ -40,9 +40,14 @@ impl SessionAdmissionHandle for RuntimeSessionAdmissionHandle {
         origin: InputSource,
     ) -> Result<(), DslTransitionError> {
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
+        let state = self.dsl.snapshot_state();
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::Ingest {
+                session_id: state.session_id.unwrap_or_default(),
                 runtime_id: mm_dsl::AgentRuntimeId::from(runtime_id.to_string()),
+                fence_token: state.active_fence_token.unwrap_or_default(),
+                generation: state.active_runtime_generation,
+                runtime_epoch_id: state.active_runtime_epoch_id,
                 work_id: mm_dsl::WorkId::from(work_id.to_string()),
                 origin: mm_dsl::WorkOrigin::from(origin),
             },

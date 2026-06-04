@@ -2,15 +2,28 @@
 //!
 //! This module intentionally does not define or export a handwritten
 //! authority/state-machine surface. It holds the stable enums and transition
-//! payloads shared by the standalone core fallback and runtime-backed handles.
+//! payloads shared by core unit-test adapters and runtime-backed handles.
 
 use crate::budget::{BudgetDimension, BudgetExceeded};
 use crate::error::AgentError;
 use crate::event::AgentErrorClass;
 use crate::lifecycle::RunId;
 use crate::ops::{AsyncOpRef, OperationId};
-use crate::retry::LlmRetrySchedule;
+use crate::retry::{LlmRetryFailureKind, LlmRetrySchedule};
 use serde::{Deserialize, Serialize};
+
+/// P0 Dogma Invariant 1: machine-owned LLM-failure recovery verdict, mirrored
+/// across the turn-execution boundary. The agent loop drives
+/// `TurnExecutionInput::ClassifyLlmFailureRecovery` and mirrors this verdict
+/// emitted by MeerkatMachine's `ClassifyLlmFailureRecovery` classifier: the
+/// machine — not the shell `RetryPolicy` — owns whether an LLM failure may
+/// `Recover`, is `Exhausted`, or is `Fatal`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmFailureRecoveryKind {
+    Recover,
+    Exhausted,
+    Fatal,
+}
 
 /// Canonical phases for turn execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,10 +42,6 @@ pub enum TurnPhase {
 }
 
 impl TurnPhase {
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
-    }
-
     pub fn is_extracting(self) -> bool {
         matches!(self, Self::Extracting)
     }
@@ -100,40 +109,6 @@ pub enum TurnTerminalCauseKind {
 }
 
 impl TurnTerminalCauseKind {
-    pub fn from_agent_error(error: &AgentError) -> Self {
-        match error {
-            AgentError::HookDenied { .. } => Self::HookDenied,
-            AgentError::HookTimeout { .. }
-            | AgentError::HookExecutionFailed { .. }
-            | AgentError::HookConfigInvalid { .. } => Self::HookFailure,
-            AgentError::Llm { .. } => Self::LlmFailure,
-            AgentError::ToolError(_) | AgentError::InvalidToolAccess { .. } => Self::ToolFailure,
-            AgentError::StructuredOutputValidationFailed { .. }
-            | AgentError::InvalidOutputSchema(_) => Self::StructuredOutputValidationFailed,
-            AgentError::TokenBudgetExceeded { .. } | AgentError::ToolCallBudgetExceeded { .. } => {
-                Self::BudgetExhausted
-            }
-            AgentError::TimeBudgetExceeded { .. } => Self::TimeBudgetExceeded,
-            AgentError::MaxTurnsReached { .. } => Self::TurnLimitReached,
-            AgentError::TerminalFailure { cause_kind, .. } => *cause_kind,
-            _ => Self::FatalFailure,
-        }
-    }
-
-    pub fn from_error_class(class: AgentErrorClass) -> Self {
-        match class {
-            AgentErrorClass::Hook => Self::HookFailure,
-            AgentErrorClass::Llm => Self::LlmFailure,
-            AgentErrorClass::Tool => Self::ToolFailure,
-            AgentErrorClass::StructuredOutput | AgentErrorClass::InvalidOutputSchema => {
-                Self::StructuredOutputValidationFailed
-            }
-            AgentErrorClass::Budget => Self::BudgetExhausted,
-            AgentErrorClass::MaxTurns => Self::TurnLimitReached,
-            _ => Self::FatalFailure,
-        }
-    }
-
     pub fn agent_error_class(self) -> AgentErrorClass {
         match self {
             Self::HookDenied | Self::HookFailure => AgentErrorClass::Hook,
@@ -170,6 +145,120 @@ impl TurnTerminalCauseKind {
     }
 }
 
+/// Raw failure source fact reported to generated turn authority.
+///
+/// This is not a terminal cause or grouped terminal class. The variant names
+/// mirror the failure source that observed the error; MeerkatMachine owns the
+/// mapping from these source facts to terminal outcome/cause and emits the
+/// authorized [`TurnTerminalCauseKind`] on `TurnRunFailed`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnFailureSourceKind {
+    Unknown,
+    Llm,
+    StoreError,
+    ToolError,
+    McpError,
+    SessionNotFound,
+    TokenBudgetExceeded,
+    TimeBudgetExceeded,
+    ToolCallBudgetExceeded,
+    MaxTokensReached,
+    ContentFiltered,
+    MaxTurnsReached,
+    Cancelled,
+    InvalidStateTransition,
+    OperationNotFound,
+    DepthLimitExceeded,
+    ConcurrencyLimitExceeded,
+    ConfigError,
+    InvalidToolAccess,
+    InternalError,
+    BuildError,
+    AuthReauthRequired,
+    CallbackPending,
+    StructuredOutputValidationFailed,
+    InvalidOutputSchema,
+    HookDenied,
+    HookTimeout,
+    HookExecutionFailed,
+    HookConfigInvalid,
+    TerminalFailure,
+    NoPendingBoundary,
+    LlmRetryExhausted,
+}
+
+impl TurnFailureSourceKind {
+    pub fn from_agent_error(error: &AgentError) -> Self {
+        match error {
+            AgentError::Llm { .. } => Self::Llm,
+            AgentError::StoreError(_) => Self::StoreError,
+            AgentError::ToolError(_) => Self::ToolError,
+            AgentError::McpError(_) => Self::McpError,
+            AgentError::SessionNotFound(_) => Self::SessionNotFound,
+            AgentError::TokenBudgetExceeded { .. } => Self::TokenBudgetExceeded,
+            AgentError::TimeBudgetExceeded { .. } => Self::TimeBudgetExceeded,
+            AgentError::ToolCallBudgetExceeded { .. } => Self::ToolCallBudgetExceeded,
+            AgentError::MaxTokensReached { .. } => Self::MaxTokensReached,
+            AgentError::ContentFiltered { .. } => Self::ContentFiltered,
+            AgentError::MaxTurnsReached { .. } => Self::MaxTurnsReached,
+            AgentError::Cancelled => Self::Cancelled,
+            AgentError::InvalidStateTransition { .. } => Self::InvalidStateTransition,
+            AgentError::OperationNotFound(_) => Self::OperationNotFound,
+            AgentError::DepthLimitExceeded { .. } => Self::DepthLimitExceeded,
+            AgentError::ConcurrencyLimitExceeded => Self::ConcurrencyLimitExceeded,
+            AgentError::ConfigError(_) => Self::ConfigError,
+            AgentError::InvalidToolAccess { .. } => Self::InvalidToolAccess,
+            AgentError::InternalError(_) => Self::InternalError,
+            AgentError::BuildError(_) => Self::BuildError,
+            AgentError::AuthReauthRequired { .. } => Self::AuthReauthRequired,
+            AgentError::CallbackPending { .. } => Self::CallbackPending,
+            AgentError::StructuredOutputValidationFailed { .. } => {
+                Self::StructuredOutputValidationFailed
+            }
+            AgentError::InvalidOutputSchema(_) => Self::InvalidOutputSchema,
+            AgentError::HookDenied { .. } => Self::HookDenied,
+            AgentError::HookTimeout { .. } => Self::HookTimeout,
+            AgentError::HookExecutionFailed { .. } => Self::HookExecutionFailed,
+            AgentError::HookConfigInvalid { .. } => Self::HookConfigInvalid,
+            AgentError::TerminalFailure { .. } => Self::TerminalFailure,
+            AgentError::NoPendingBoundary => Self::NoPendingBoundary,
+        }
+    }
+
+    pub fn is_known(self) -> bool {
+        !matches!(self, Self::Unknown)
+    }
+}
+
+/// Failure source accepted by the generated turn authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnFailureSource {
+    pub source_kind: TurnFailureSourceKind,
+    pub message: String,
+}
+
+impl TurnFailureSource {
+    pub fn new(source_kind: TurnFailureSourceKind, message: impl Into<String>) -> Self {
+        Self {
+            source_kind,
+            message: message.into(),
+        }
+    }
+
+    pub fn from_agent_error(error: &AgentError) -> Self {
+        Self::new(
+            TurnFailureSourceKind::from_agent_error(error),
+            error.to_string(),
+        )
+    }
+
+    pub fn llm_retry_exhausted(error: &AgentError) -> Self {
+        Self::new(TurnFailureSourceKind::LlmRetryExhausted, error.to_string())
+    }
+}
+
 /// Typed reason for a turn failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnFailureReason {
@@ -179,14 +268,6 @@ pub struct TurnFailureReason {
 }
 
 impl TurnFailureReason {
-    pub fn new(class: AgentErrorClass, message: impl Into<String>) -> Self {
-        Self::with_cause(
-            TurnTerminalCauseKind::from_error_class(class),
-            class,
-            message,
-        )
-    }
-
     pub fn with_cause(
         cause_kind: TurnTerminalCauseKind,
         class: AgentErrorClass,
@@ -197,53 +278,6 @@ impl TurnFailureReason {
             cause_kind,
             message: message.into(),
         }
-    }
-
-    pub fn from_agent_error(error: &AgentError) -> Self {
-        Self::with_cause(
-            TurnTerminalCauseKind::from_agent_error(error),
-            AgentErrorClass::from(error),
-            error.to_string(),
-        )
-    }
-
-    pub fn retry_exhausted(error: &AgentError) -> Self {
-        Self::with_cause(
-            TurnTerminalCauseKind::RetryExhausted,
-            AgentErrorClass::from(error),
-            error.to_string(),
-        )
-    }
-
-    pub fn budget_exceeded(exceeded: BudgetExceeded) -> Self {
-        let class = AgentErrorClass::Budget;
-        let cause_kind = match exceeded.dimension {
-            BudgetDimension::Time => TurnTerminalCauseKind::TimeBudgetExceeded,
-            BudgetDimension::Tokens | BudgetDimension::ToolCalls => {
-                TurnTerminalCauseKind::BudgetExhausted
-            }
-        };
-        let message = match exceeded.dimension {
-            BudgetDimension::Tokens => {
-                format!(
-                    "token budget exceeded: {} > {}",
-                    exceeded.used, exceeded.limit
-                )
-            }
-            BudgetDimension::Time => {
-                format!(
-                    "time budget exceeded: {} > {}",
-                    exceeded.used, exceeded.limit
-                )
-            }
-            BudgetDimension::ToolCalls => {
-                format!(
-                    "tool call budget exceeded: {} > {}",
-                    exceeded.used, exceeded.limit
-                )
-            }
-        };
-        Self::with_cause(cause_kind, class, message)
     }
 }
 
@@ -328,6 +362,11 @@ impl std::fmt::Display for ContentShape {
 pub enum TurnExecutionInput {
     StartConversationRun {
         run_id: RunId,
+        primitive_kind: TurnPrimitiveKind,
+        admitted_content_shape: ContentShape,
+        vision_enabled: bool,
+        image_tool_results_enabled: bool,
+        max_extraction_retries: u64,
     },
     StartImmediateAppend {
         run_id: RunId,
@@ -337,9 +376,6 @@ pub enum TurnExecutionInput {
     },
     PrimitiveApplied {
         run_id: RunId,
-        admitted_content_shape: ContentShape,
-        vision_enabled: bool,
-        image_tool_results_enabled: bool,
     },
     LlmReturnedToolCalls {
         run_id: RunId,
@@ -373,11 +409,22 @@ pub enum TurnExecutionInput {
     },
     FatalFailure {
         run_id: RunId,
-        reason: TurnFailureReason,
+        failure: TurnFailureSource,
     },
     RetryRequested {
         run_id: RunId,
         retry_attempt: u32,
+    },
+    /// P0 Dogma Invariant 1: drive MeerkatMachine's LLM-failure recovery
+    /// classifier. The agent loop extracts the typed `failure_kind` (absent
+    /// when the `AgentError` yields no recoverable kind) and the one-based
+    /// `retry_attempt` / `max_retries`, then mirrors the emitted
+    /// `LlmFailureRecoveryClassified` verdict. Pure classification — no turn
+    /// state mutation.
+    ClassifyLlmFailureRecovery {
+        failure_kind: Option<LlmRetryFailureKind>,
+        retry_attempt: u32,
+        max_retries: u32,
     },
     CancelNow {
         run_id: RunId,
@@ -446,6 +493,12 @@ pub enum TurnExecutionEffect {
         run_id: RunId,
     },
     CheckCompaction,
+    /// P0 Dogma Invariant 1: machine-owned LLM-failure recovery verdict. The
+    /// agent loop mirrors this verdict instead of deciding fatal/exhaustion
+    /// itself.
+    LlmFailureRecoveryClassified {
+        recovery: LlmFailureRecoveryKind,
+    },
 }
 
 /// Successful transition outcome for turn execution.
@@ -558,35 +611,30 @@ mod tests {
     }
 
     #[test]
-    fn terminal_cause_classification_ignores_display_message() {
-        let first = TurnFailureReason::with_cause(
-            TurnTerminalCauseKind::HookDenied,
-            AgentErrorClass::Hook,
-            "display one",
-        );
-        let second = TurnFailureReason::with_cause(
-            TurnTerminalCauseKind::HookDenied,
-            AgentErrorClass::Hook,
-            "display two",
-        );
+    fn terminal_failure_source_ignores_display_message() {
+        let first = TurnFailureSource::new(TurnFailureSourceKind::HookDenied, "display one");
+        let second = TurnFailureSource::new(TurnFailureSourceKind::HookDenied, "display two");
 
-        assert_eq!(first.cause_kind, TurnTerminalCauseKind::HookDenied);
-        assert_eq!(second.cause_kind, TurnTerminalCauseKind::HookDenied);
+        assert_eq!(first.source_kind, TurnFailureSourceKind::HookDenied);
+        assert_eq!(second.source_kind, TurnFailureSourceKind::HookDenied);
         assert_ne!(first.message, second.message);
     }
 
     #[test]
-    fn retry_exhaustion_reason_is_typed_cause_not_llm_display() {
+    fn retry_exhaustion_source_is_not_llm_display() {
         let error = AgentError::llm(
             "mock",
             crate::error::LlmFailureReason::RateLimited { retry_after: None },
             "display text changed",
         );
 
-        let reason = TurnFailureReason::retry_exhausted(&error);
+        let failure = TurnFailureSource::llm_retry_exhausted(&error);
 
-        assert_eq!(reason.cause_kind, TurnTerminalCauseKind::RetryExhausted);
-        assert_ne!(reason.cause_kind, TurnTerminalCauseKind::LlmFailure);
-        assert_eq!(reason.message, error.to_string());
+        assert_eq!(
+            failure.source_kind,
+            TurnFailureSourceKind::LlmRetryExhausted
+        );
+        assert_ne!(failure.source_kind, TurnFailureSourceKind::Llm);
+        assert_eq!(failure.message, error.to_string());
     }
 }

@@ -50,7 +50,7 @@ use meerkat_core::{
 #[cfg(feature = "mcp")]
 use meerkat_mcp::McpRouterAdapter;
 #[cfg(feature = "mob")]
-use meerkat_mob::{FlowId, MobDefinition, RunId};
+use meerkat_mob::{FlowId, MobDefinition, RunId, mob_machine_run_status_is_terminal};
 #[cfg(feature = "mob")]
 use meerkat_mob_pack::archive::MobpackArchive;
 #[cfg(all(feature = "mob", test))]
@@ -3587,7 +3587,7 @@ struct RuntimeScope {
     origin_hint: RealmOrigin,
     context_root: Option<PathBuf>,
     user_config_root: Option<PathBuf>,
-    auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
+    auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     oauth_flow_authority: Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority>,
 }
@@ -3600,10 +3600,15 @@ impl RuntimeScope {
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 fn new_cli_auth_handles() -> (
-    Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
+    meerkat_core::handles::GeneratedAuthLeaseHandle,
     Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority>,
 ) {
     let auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+    let generated_auth_lease =
+        meerkat_runtime::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(
+            Arc::clone(&auth_lease),
+        )
+        .expect("CLI RuntimeAuthLeaseHandle must be certified by generated AuthMachine authority");
     let oauth_flow_authority = Arc::new(
         meerkat_runtime::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
             std::time::Duration::from_secs(10 * 60),
@@ -3611,14 +3616,18 @@ fn new_cli_auth_handles() -> (
         ),
     );
     (
-        auth_lease as Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
+        generated_auth_lease,
         oauth_flow_authority as Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority>,
     )
 }
 
 #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
-fn new_cli_auth_lease() -> Arc<dyn meerkat_core::handles::AuthLeaseHandle> {
-    Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new())
+fn new_cli_auth_lease() -> meerkat_core::handles::GeneratedAuthLeaseHandle {
+    let auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+    meerkat_runtime::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(
+        auth_lease,
+    )
+    .expect("CLI RuntimeAuthLeaseHandle must be certified by generated AuthMachine authority")
 }
 
 fn resolve_runtime_scope(cli: &Cli) -> anyhow::Result<RuntimeScope> {
@@ -4020,7 +4029,7 @@ async fn handle_auth_command(
             let env = meerkat_providers::ResolverEnvironment::with_process_env()
                 .with_token_store(store)
                 .with_refresh_coordinator(Arc::new(InMemoryCoordinator::default()))
-                .with_auth_lease_handle(Arc::clone(&scope.auth_lease));
+                .with_auth_lease_handle(scope.auth_lease.clone());
             let auth_binding = meerkat_core::AuthBindingRef {
                 realm: meerkat_core::RealmId::parse(realm.clone())
                     .map_err(|e| anyhow::anyhow!("invalid realm id '{realm}': {e}"))?,
@@ -4080,13 +4089,13 @@ async fn handle_auth_command(
                     None
                 };
             let projection = project_cli_auth_status(
-                scope.auth_lease.as_ref(),
+                &scope.auth_lease,
                 token_store.as_deref(),
                 &auth_binding,
                 profile,
                 chrono::Utc::now(),
             )
-            .await;
+            .await?;
             println!("state:       {}", projection.phase.as_public_str());
             if let Some(expires_at) = projection.expires_at {
                 println!("expires_at:  {}", expires_at.to_rfc3339());
@@ -4144,7 +4153,7 @@ async fn handle_auth_command(
                     };
                     meerkat_core::clear_tokens_and_publish_lifecycle_released(
                         store.as_ref(),
-                        scope.auth_lease.as_ref(),
+                        &scope.auth_lease,
                         &auth_binding,
                     )
                     .await
@@ -4358,7 +4367,7 @@ async fn refresh_auth_profile(
     let env = ResolverEnvironment::with_process_env()
         .with_token_store(store.clone())
         .with_refresh_coordinator(coord)
-        .with_auth_lease_handle(Arc::clone(&scope.auth_lease))
+        .with_auth_lease_handle(scope.auth_lease.clone())
         .with_force_refresh(true);
     let registry = cli_provider_registry();
     let auth_binding = meerkat_core::AuthBindingRef {
@@ -4392,13 +4401,17 @@ async fn refresh_auth_profile(
     let snapshot = scope.auth_lease.snapshot(&lease_key);
     if !snapshot.credential_present {
         let transition = meerkat_core::publish_token_lifecycle_acquired(
-            scope.auth_lease.as_ref(),
+            &scope.auth_lease,
             &auth_binding,
             after_tokens,
         )
         .map_err(|e| anyhow::anyhow!("AuthMachine lifecycle acquire failed: {e}"))?;
-        let committed =
-            meerkat_core::mark_tokens_lifecycle_published_for_transition(after_tokens, transition);
+        let committed = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+            &key,
+            after_tokens,
+            &transition,
+        )
+        .map_err(|e| anyhow::anyhow!("AuthMachine lifecycle marker handoff failed: {e}"))?;
         if committed != *after_tokens {
             store
                 .save(&key, &committed)
@@ -4914,6 +4927,7 @@ struct CliTokenCommitSnapshot {
     lease_key: meerkat_core::handles::LeaseKey,
     previous: Option<meerkat_providers::auth_store::PersistedTokens>,
     previous_lifecycle: meerkat_core::handles::AuthLeaseSnapshot,
+    previous_lifecycle_restore: meerkat_core::handles::AuthLeaseRestoreSnapshot,
     lifecycle_transition: meerkat_core::handles::AuthLeaseTransition,
 }
 
@@ -4937,14 +4951,15 @@ async fn prepare_cli_token_commit_unlocked(
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
     store: &dyn meerkat_providers::auth_store::TokenStore,
-    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+    auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
     tokens: &meerkat_providers::auth_store::PersistedTokens,
     mark_for_rehydration: bool,
 ) -> anyhow::Result<CliTokenCommitSnapshot> {
     let key = meerkat_providers::auth_store::TokenKey::from_auth_binding(auth_binding);
     let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(auth_binding);
-    let previous_lifecycle = auth_lease.snapshot(&lease_key);
+    let previous_lifecycle_restore = auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
+    let previous_lifecycle = previous_lifecycle_restore.snapshot().clone();
     let previous = store
         .load(&key)
         .await
@@ -4975,6 +4990,7 @@ async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
         lease_key,
         previous,
         previous_lifecycle,
+        previous_lifecycle_restore,
         lifecycle_transition: transition,
     };
     if mark_for_rehydration {
@@ -4987,18 +5003,24 @@ async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn mark_cli_token_commit_lifecycle_published_unlocked(
     store: &dyn meerkat_providers::auth_store::TokenStore,
-    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+    auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     commit: &CliTokenCommitSnapshot,
     tokens: &meerkat_providers::auth_store::PersistedTokens,
 ) -> anyhow::Result<()> {
-    let current_lifecycle = auth_lease.snapshot(&commit.lease_key);
-    let committed_tokens = if current_lifecycle.credential_present {
-        meerkat_core::mark_tokens_lifecycle_published_for_snapshot(tokens, &current_lifecycle)
-    } else {
-        meerkat_core::mark_tokens_lifecycle_published_for_transition(
-            tokens,
-            commit.lifecycle_transition,
-        )
+    let committed_tokens = match meerkat_core::mark_tokens_lifecycle_published_for_transition(
+        &commit.key,
+        tokens,
+        &commit.lifecycle_transition,
+    ) {
+        Ok(committed_tokens) => committed_tokens,
+        Err(e) => match rollback_cli_token_commit(store, auth_lease, commit).await {
+            Ok(()) => anyhow::bail!(
+                "AuthMachine lifecycle marker handoff failed: {e}; token commit rolled back"
+            ),
+            Err(rollback_error) => anyhow::bail!(
+                "AuthMachine lifecycle marker handoff failed: {e}; token commit rollback failed: {rollback_error}"
+            ),
+        },
     };
     if let Err(e) = store.save(&commit.key, &committed_tokens).await {
         match rollback_cli_token_commit(store, auth_lease, commit).await {
@@ -5016,12 +5038,14 @@ async fn mark_cli_token_commit_lifecycle_published_unlocked(
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn save_prepared_cli_tokens_after_terminal_consume_unlocked(
     store: &dyn meerkat_providers::auth_store::TokenStore,
-    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+    auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
     tokens: &meerkat_providers::auth_store::PersistedTokens,
     prepared: CliPreparedTokenCommitSnapshot,
 ) -> anyhow::Result<()> {
-    let previous_lifecycle = auth_lease.snapshot(&prepared.lease_key);
+    let previous_lifecycle_restore =
+        auth_lease.capture_auth_lifecycle_restore_snapshot(&prepared.lease_key);
+    let previous_lifecycle = previous_lifecycle_restore.snapshot().clone();
     let transition =
         match meerkat_core::publish_token_lifecycle_acquired(auth_lease, auth_binding, tokens) {
             Ok(transition) => transition,
@@ -5029,14 +5053,28 @@ async fn save_prepared_cli_tokens_after_terminal_consume_unlocked(
                 anyhow::bail!("AuthMachine lifecycle acquire failed after OAuth consume: {e}")
             }
         };
-    let committed_tokens =
-        meerkat_core::mark_tokens_lifecycle_published_for_transition(tokens, transition);
     let commit = CliTokenCommitSnapshot {
         key: prepared.key,
         lease_key: prepared.lease_key,
         previous: prepared.previous,
         previous_lifecycle,
+        previous_lifecycle_restore,
         lifecycle_transition: transition,
+    };
+    let committed_tokens = match meerkat_core::mark_tokens_lifecycle_published_for_transition(
+        &commit.key,
+        tokens,
+        &commit.lifecycle_transition,
+    ) {
+        Ok(committed_tokens) => committed_tokens,
+        Err(e) => match rollback_cli_token_commit(store, auth_lease, &commit).await {
+            Ok(()) => anyhow::bail!(
+                "AuthMachine lifecycle marker handoff failed after OAuth consume: {e}; AuthMachine lifecycle rolled back"
+            ),
+            Err(rollback_error) => anyhow::bail!(
+                "AuthMachine lifecycle marker handoff failed after OAuth consume: {e}; AuthMachine lifecycle rollback failed: {rollback_error}"
+            ),
+        },
     };
     if let Err(e) = store.save(&commit.key, &committed_tokens).await {
         match rollback_cli_token_commit(store, auth_lease, &commit).await {
@@ -5054,7 +5092,7 @@ async fn save_prepared_cli_tokens_after_terminal_consume_unlocked(
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn save_cli_tokens_and_publish_lifecycle(
     store: &dyn meerkat_providers::auth_store::TokenStore,
-    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+    auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
     tokens: &meerkat_providers::auth_store::PersistedTokens,
 ) -> anyhow::Result<()> {
@@ -5086,7 +5124,7 @@ async fn restore_cli_tokens_after_lifecycle_failure(
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn rollback_cli_token_commit(
     store: &dyn meerkat_providers::auth_store::TokenStore,
-    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+    auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     commit: &CliTokenCommitSnapshot,
 ) -> Result<(), String> {
     match &commit.previous {
@@ -5099,20 +5137,19 @@ async fn rollback_cli_token_commit(
                     .save(&commit.key, previous)
                     .await
                     .map_err(|e| format!("TokenStore rollback save failed: {e}"))?;
-                meerkat_core::restore_token_lifecycle_snapshot(
+                let restored_transition = meerkat_core::restore_token_lifecycle_snapshot(
                     auth_lease,
-                    &commit.lease_key,
-                    &commit.previous_lifecycle,
-                    Some(previous),
+                    &commit.previous_lifecycle_restore,
                 )
                 .map_err(|e| format!("AuthMachine lifecycle rollback failed: {e}"))?;
-                let restored_snapshot = auth_lease.snapshot(&commit.lease_key);
-                if restored_snapshot.credential_present {
+                if let Some(restored_transition) = restored_transition {
                     let restored_previous =
-                        meerkat_core::mark_tokens_lifecycle_published_for_snapshot(
+                        meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                            &commit.key,
                             previous,
-                            &restored_snapshot,
-                        );
+                            &restored_transition,
+                        )
+                        .map_err(|e| format!("AuthMachine rollback marker handoff failed: {e}"))?;
                     store
                         .save(&commit.key, &restored_previous)
                         .await
@@ -5153,7 +5190,7 @@ struct CliBrowserFlowConsume<'a> {
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn save_cli_oauth_tokens_and_consume_browser_flow(
     store: &dyn meerkat_providers::auth_store::TokenStore,
-    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+    auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
     tokens: &meerkat_providers::auth_store::PersistedTokens,
     flow: CliBrowserFlowConsume<'_>,
@@ -5267,7 +5304,7 @@ async fn noninteractive_login(
     let auth_binding = auth_binding_from_token_key(&key);
     save_cli_tokens_and_publish_lifecycle(
         store.as_ref(),
-        scope.auth_lease.as_ref(),
+        &scope.auth_lease,
         &auth_binding,
         &persisted,
     )
@@ -5493,7 +5530,7 @@ async fn interactive_login(
         .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?;
     save_cli_oauth_tokens_and_consume_browser_flow(
         store.as_ref(),
-        scope.auth_lease.as_ref(),
+        &scope.auth_lease,
         &auth_binding,
         &tokens,
         CliBrowserFlowConsume {
@@ -5619,7 +5656,7 @@ async fn interactive_logout(profile_id: &str, scope: &RuntimeScope) -> anyhow::R
             };
             meerkat_core::clear_tokens_and_publish_lifecycle_released(
                 store.as_ref(),
-                scope.auth_lease.as_ref(),
+                &scope.auth_lease,
                 &auth_binding,
             )
             .await
@@ -5664,13 +5701,20 @@ struct CliAuthStatusProjection {
 }
 
 async fn project_cli_auth_status(
-    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+    auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     token_store: Option<&dyn meerkat_providers::auth_store::TokenStore>,
     auth_binding: &AuthBindingRef,
     auth_profile: &meerkat_core::AuthProfile,
     now: chrono::DateTime<chrono::Utc>,
-) -> CliAuthStatusProjection {
+) -> anyhow::Result<CliAuthStatusProjection> {
     let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(auth_binding);
+    auth_lease
+        .observe_credential_freshness(
+            &lease_key,
+            now.timestamp().max(0) as u64,
+            meerkat_core::handles::AUTH_LEASE_TTL_REFRESH_WINDOW_SECS,
+        )
+        .map_err(|err| anyhow::anyhow!("AuthMachine freshness observation failed: {err}"))?;
     let mut snapshot = auth_lease.snapshot(&lease_key);
     let expected_mode = meerkat_providers::auth_store::persisted_auth_mode_for_auth_method(
         &auth_profile.auth_method,
@@ -5685,7 +5729,7 @@ async fn project_cli_auth_status(
         let phase = AuthStatusPhase::from_lease_snapshot(now, &snapshot);
         if phase == AuthStatusPhase::Unknown
             && let Some(expected_mode) = expected_mode
-            && let Ok(Some(rehydrated)) = meerkat_core::rehydrate_marked_oauth_tokens_for_status(
+            && let Ok(Some(rehydrated)) = meerkat_core::rehydrate_marked_tokens_for_status(
                 store,
                 auth_lease,
                 auth_binding,
@@ -5718,18 +5762,9 @@ async fn project_cli_auth_status(
                 && !source_uses_store
         })
         .unwrap_or(false);
-    let oauth_store_missing = source_uses_store && oauth_mode && stored.is_none();
-    let unknown_snapshot;
     let marker_projection_snapshot;
-    let (projection_tokens, projection_snapshot) = if oauth_source_rejected || oauth_store_missing {
-        unknown_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
-            phase: None,
-            expires_at: None,
-            credential_present: false,
-            generation: snapshot.generation,
-            credential_published_at_millis: None,
-        };
-        (None, &unknown_snapshot)
+    let (projection_tokens, projection_snapshot) = if oauth_source_rejected {
+        (None, &snapshot)
     } else {
         marker_projection_snapshot = stored.as_ref().filter(|_| oauth_mode).and_then(|tokens| {
             meerkat_core::oauth_status_projection_snapshot_from_newer_marker(&snapshot, tokens)
@@ -5741,10 +5776,10 @@ async fn project_cli_auth_status(
     };
     let projection =
         meerkat_core::project_published_auth_status(now, projection_tokens, projection_snapshot);
-    CliAuthStatusProjection {
+    Ok(CliAuthStatusProjection {
         phase: projection.phase,
         expires_at: projection.expires_at,
-    }
+    })
 }
 
 fn auth_status_binding_id<'a>(
@@ -6518,6 +6553,8 @@ async fn handle_workgraph_command(
                         id,
                         label,
                         summary,
+                        confirmation_kind: None,
+                        confirming_owner_key: None,
                     },
                     principal: None,
                     trusted_principal: None,
@@ -7157,12 +7194,13 @@ async fn create_mcp_tools(
         None
     };
 
-    // Stage all servers for parallel connection
-    let mut router = match external_surface_handle {
-        Some(handle) => McpRouter::new_with_surface_handle(handle),
-        None => McpRouter::new(),
-    }
-    .with_mcp_auth(mcp_auth.into(), mcp_auth_resolver);
+    // Stage all servers for parallel connection through the generated
+    // session-owned surface authority.
+    let Some(external_surface_handle) = external_surface_handle else {
+        anyhow::bail!("MCP config requires generated external-tool surface authority");
+    };
+    let mut router = McpRouter::new_with_surface_handle(external_surface_handle)
+        .with_mcp_auth(mcp_auth.into(), mcp_auth_resolver);
     for s in &servers_with_scope {
         tracing::info!("Staging MCP server: {}", s.server.name);
         router
@@ -7225,32 +7263,29 @@ async fn load_mcp_external_tools(
     wait_for_mcp: bool,
     mcp_auth: CliMcpAuthMode,
     external_surface_handle: Option<Arc<dyn meerkat_core::ExternalToolSurfaceHandle>>,
-) -> (
+) -> anyhow::Result<(
     Option<Arc<dyn AgentToolDispatcher>>,
     Option<Arc<McpRouterAdapter>>,
-) {
+)> {
     #[cfg(feature = "mcp")]
     {
         match create_mcp_tools(scope, wait_for_mcp, mcp_auth, external_surface_handle).await {
             Ok(Some(adapter)) => {
                 let adapter = Arc::new(adapter);
                 let external: Arc<dyn AgentToolDispatcher> = adapter.clone();
-                (Some(external), Some(adapter))
+                Ok((Some(external), Some(adapter)))
             }
-            Ok(None) => (None, None),
-            Err(e) => {
-                eprintln!("Warning: Failed to load MCP tools: {e}");
-                tracing::warn!("Failed to load MCP tools: {}", e);
-                (None, None)
-            }
+            Ok(None) => Ok((None, None)),
+            Err(e) => Err(e.context("failed to load MCP tools")),
         }
     }
     #[cfg(not(feature = "mcp"))]
     {
+        let _ = scope;
         let _ = wait_for_mcp;
         let _ = mcp_auth;
         let _ = external_surface_handle;
-        (None, None)
+        Ok((None, None))
     }
 }
 
@@ -7333,6 +7368,7 @@ fn cli_terminal_pre_turn_context_appends(
             source: Some(append.key.clone()),
             idempotency_key: Some(append.key.clone()),
             accepted_at,
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
         })
         .collect()
 }
@@ -8033,7 +8069,7 @@ async fn prepare_run_mob_tools(
     session_service: Arc<dyn meerkat_mob::MobSessionService>,
 ) -> anyhow::Result<RunMobToolsContext> {
     let _lock = acquire_mob_registry_lock(scope).await?;
-    let (state, registry) = hydrate_mob_state(
+    let (state, _registry) = hydrate_mob_state(
         scope,
         session_service,
         None,
@@ -8042,7 +8078,12 @@ async fn prepare_run_mob_tools(
         std::collections::BTreeMap::new(),
     )
     .await?;
-    let known_mob_ids = registry.mobs.keys().cloned().collect();
+    let known_mob_ids = state
+        .mob_list()
+        .await
+        .into_iter()
+        .map(|(mob_id, _)| mob_id.to_string())
+        .collect();
     Ok(RunMobToolsContext {
         state,
         known_mob_ids,
@@ -8062,8 +8103,12 @@ async fn prepare_run_mob_tools_from_surface(
         Arc::clone(&surface.mob_state_cache),
     )
     .await?;
-    let registry = load_mob_registry(scope).await?;
-    let known_mob_ids = registry.mobs.keys().cloned().collect();
+    let known_mob_ids = state
+        .mob_list()
+        .await
+        .into_iter()
+        .map(|(mob_id, _)| mob_id.to_string())
+        .collect();
     Ok(RunMobToolsContext {
         state,
         known_mob_ids,
@@ -8630,7 +8675,7 @@ async fn run_agent(
             mcp_auth,
             Some(Arc::clone(bindings.external_tool_surface())),
         )
-        .await;
+        .await?;
         // Mob tools now flow through mob_tools (factory pattern), not external_tools.
         // Only MCP tools remain as external_tools.
         let external_tools = mcp_external_tools;
@@ -8783,7 +8828,10 @@ async fn run_agent(
             });
             runtime_adapter
                 .register_session_with_executor(session_id.clone(), executor)
-                .await;
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("runtime executor registration failed: {error}")
+                })?;
 
             #[cfg(feature = "comms")]
             if stdin_events && keep_alive {
@@ -8840,12 +8888,17 @@ async fn run_agent(
             }
 
             match handle {
-                Some(handle) => completion_outcome_to_cli_runtime_turn_result(
-                    handle.wait().await,
-                    &session_id,
-                    &scope.locator.realm,
-                    true,
-                ),
+                Some(handle) => {
+                    let completion = handle.wait().await.map_err(|err| {
+                        anyhow::anyhow!("runtime completion waiter failed: {err}")
+                    })?;
+                    completion_outcome_to_cli_runtime_turn_result(
+                        completion,
+                        &session_id,
+                        &scope.locator.realm,
+                        true,
+                    )
+                }
                 None => {
                     eprintln!("Warning: duplicate input — already processed");
                     Ok(CliRuntimeTurnResult::Completed(create_result))
@@ -9220,7 +9273,8 @@ async fn resume_session_with_llm_override(
             .builtins(tooling.builtins.resolve(config.tools.builtins_enabled))
             .shell(tooling.shell.resolve(config.tools.shell_enabled))
             .workgraph(tooling.workgraph.resolve(config.tools.workgraph_enabled))
-            .schedule(config.tools.schedule_enabled);
+            .schedule(config.tools.schedule_enabled)
+            .mob(config.tools.mob_enabled);
         if let Some(context_root) = scope.context_root.clone() {
             factory = factory.context_root(context_root);
         }
@@ -9277,7 +9331,7 @@ async fn resume_session_with_llm_override(
             mcp_auth,
             Some(Arc::clone(resume_bindings.external_tool_surface())),
         )
-        .await;
+        .await?;
         // Mob tools now flow through mob_tools (factory pattern), not external_tools.
         // Only MCP tools remain as external_tools.
         let external_tools = mcp_external_tools;
@@ -9445,7 +9499,10 @@ async fn resume_session_with_llm_override(
             });
             resume_adapter
                 .register_session_with_executor(session_id.clone(), executor)
-                .await;
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("runtime executor registration failed: {error}")
+                })?;
 
             #[cfg(feature = "comms")]
             if stdin_events && keep_alive {
@@ -9512,12 +9569,17 @@ async fn resume_session_with_llm_override(
             }
 
             match handle {
-                Some(handle) => completion_outcome_to_cli_runtime_turn_result(
-                    handle.wait().await,
-                    &session_id,
-                    &scope.locator.realm,
-                    false,
-                ),
+                Some(handle) => {
+                    let completion = handle.wait().await.map_err(|err| {
+                        anyhow::anyhow!("runtime completion waiter failed: {err}")
+                    })?;
+                    completion_outcome_to_cli_runtime_turn_result(
+                        completion,
+                        &session_id,
+                        &scope.locator.realm,
+                        false,
+                    )
+                }
                 None => {
                     eprintln!("Warning: duplicate input — already processed");
                     Ok(CliRuntimeTurnResult::Completed(create_result))
@@ -9927,7 +9989,8 @@ impl CliScheduleSessionHost {
                 session_id.clone(),
                 Box::new(self.executor(session_id.clone())),
             )
-            .await;
+            .await
+            .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
         self.update_peer_ingress_context(session_id).await;
         Ok(())
     }
@@ -9949,6 +10012,19 @@ impl CliScheduleSessionHost {
         self.runtime_adapter
             .update_peer_ingress_context(session_id, keep_alive, comms_rt)
             .await;
+    }
+
+    fn accepted_scheduled_input_from_runtime_handle(
+        correlation_id: Option<String>,
+        handle: Option<meerkat_runtime::CompletionHandle>,
+    ) -> AcceptedScheduledInput {
+        match handle {
+            Some(handle) => AcceptedScheduledInput::with_runtime_handle(correlation_id, handle),
+            None => AcceptedScheduledInput::with_authority_unavailable(
+                correlation_id,
+                "runtime completion handle missing after accepted dispatch",
+            ),
+        }
     }
 }
 
@@ -10073,7 +10149,8 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
                 result.session_id.clone(),
                 Box::new(self.executor(result.session_id.clone())),
             )
-            .await;
+            .await
+            .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
         self.update_peer_ingress_context(&result.session_id).await;
         Ok(result.session_id)
     }
@@ -10140,21 +10217,45 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             .accept_input_with_completion(session_id, Input::Prompt(prompt_input))
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
-        if let meerkat_runtime::accept::AcceptOutcome::Rejected { reason } = outcome {
-            return Ok(immediate_delivery_failure(
-                occurrence,
-                reason.to_string(),
-                meerkat::OccurrenceFailureClass::RuntimeRejected,
-                correlation_id,
-                dispatch.materialized_session_id,
-            ));
-        }
+        let accepted = match outcome {
+            meerkat_runtime::accept::AcceptOutcome::Accepted { .. } => {
+                Self::accepted_scheduled_input_from_runtime_handle(correlation_id.clone(), handle)
+            }
+            meerkat_runtime::accept::AcceptOutcome::Deduplicated { existing_id, .. } => {
+                match handle {
+                    Some(handle) => {
+                        AcceptedScheduledInput::with_runtime_handle(correlation_id.clone(), handle)
+                    }
+                    None => AcceptedScheduledInput::with_authority_unavailable(
+                        correlation_id.clone(),
+                        format!(
+                            "runtime completion authority unavailable for terminal deduplicated input {existing_id}"
+                        ),
+                    ),
+                }
+            }
+            meerkat_runtime::accept::AcceptOutcome::Rejected { reason } => {
+                return Ok(immediate_delivery_failure(
+                    occurrence,
+                    reason.to_string(),
+                    meerkat::DeliveryFailureReason::RuntimeRejected,
+                    correlation_id,
+                    dispatch.materialized_session_id,
+                ));
+            }
+            _ => {
+                return Ok(immediate_delivery_failure(
+                    occurrence,
+                    "runtime returned an unknown admission outcome".to_string(),
+                    meerkat::DeliveryFailureReason::RuntimeRejected,
+                    correlation_id,
+                    dispatch.materialized_session_id,
+                ));
+            }
+        };
         Ok(build_dispatch_from_accepted(
             occurrence,
-            AcceptedScheduledInput {
-                correlation_id,
-                handle,
-            },
+            accepted,
             dispatch.materialized_session_id,
         ))
     }
@@ -10201,21 +10302,45 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             .accept_input_with_completion(session_id, input)
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
-        if let meerkat_runtime::accept::AcceptOutcome::Rejected { reason } = outcome {
-            return Ok(immediate_delivery_failure(
-                occurrence,
-                reason.to_string(),
-                meerkat::OccurrenceFailureClass::RuntimeRejected,
-                correlation_id,
-                materialized_session_id,
-            ));
-        }
+        let accepted = match outcome {
+            meerkat_runtime::accept::AcceptOutcome::Accepted { .. } => {
+                Self::accepted_scheduled_input_from_runtime_handle(correlation_id.clone(), handle)
+            }
+            meerkat_runtime::accept::AcceptOutcome::Deduplicated { existing_id, .. } => {
+                match handle {
+                    Some(handle) => {
+                        AcceptedScheduledInput::with_runtime_handle(correlation_id.clone(), handle)
+                    }
+                    None => AcceptedScheduledInput::with_authority_unavailable(
+                        correlation_id.clone(),
+                        format!(
+                            "runtime completion authority unavailable for terminal deduplicated input {existing_id}"
+                        ),
+                    ),
+                }
+            }
+            meerkat_runtime::accept::AcceptOutcome::Rejected { reason } => {
+                return Ok(immediate_delivery_failure(
+                    occurrence,
+                    reason.to_string(),
+                    meerkat::DeliveryFailureReason::RuntimeRejected,
+                    correlation_id,
+                    materialized_session_id,
+                ));
+            }
+            _ => {
+                return Ok(immediate_delivery_failure(
+                    occurrence,
+                    "runtime returned an unknown admission outcome".to_string(),
+                    meerkat::DeliveryFailureReason::RuntimeRejected,
+                    correlation_id,
+                    materialized_session_id,
+                ));
+            }
+        };
         Ok(build_dispatch_from_accepted(
             occurrence,
-            AcceptedScheduledInput {
-                correlation_id,
-                handle,
-            },
+            accepted,
             materialized_session_id,
         ))
     }
@@ -10942,34 +11067,56 @@ async fn interrupt_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()>
             .await
             .map_err(|e| anyhow::anyhow!("Failed to interrupt session: {e}"))?;
 
-        match runtime_adapter
+        let (result, conflict_state) = match runtime_adapter
             .hard_cancel_current_run(&session_id, "CLI session interrupt")
             .await
         {
-            Ok(()) => {
-                println!("Interrupted session: {session_id}");
-                println!(
-                    "Session Ref: {}",
-                    format_session_ref(&scope.locator.realm, &session_id)
-                );
-                Ok(())
-            }
+            Ok(()) => (
+                meerkat_runtime::resolve_user_interrupt_public_result(
+                    meerkat_runtime::UserInterruptObservation::Accepted,
+                    true,
+                    false,
+                ),
+                None,
+            ),
             Err(meerkat_runtime::RuntimeDriverError::NotReady { state })
                 if interrupt_not_ready_is_noop(state) =>
             {
-                println!("Interrupted session: {session_id}");
-                println!(
-                    "Session Ref: {}",
-                    format_session_ref(&scope.locator.realm, &session_id)
-                );
-                Ok(())
+                (
+                    meerkat_runtime::resolve_user_interrupt_public_result(
+                        meerkat_runtime::UserInterruptObservation::NotReady(state),
+                        true,
+                        false,
+                    ),
+                    Some(state),
+                )
             }
             Err(
                 meerkat_runtime::RuntimeDriverError::NotReady {
                     state: meerkat_runtime::RuntimeState::Destroyed,
                 }
                 | meerkat_runtime::RuntimeDriverError::Destroyed,
-            ) => {
+            ) => (
+                meerkat_runtime::resolve_user_interrupt_public_result(
+                    meerkat_runtime::UserInterruptObservation::Destroyed,
+                    true,
+                    false,
+                ),
+                Some(meerkat_runtime::RuntimeState::Destroyed),
+            ),
+            Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => (
+                meerkat_runtime::resolve_user_interrupt_public_result(
+                    meerkat_runtime::UserInterruptObservation::NotReady(state),
+                    true,
+                    false,
+                ),
+                Some(state),
+            ),
+            Err(e) => return Err(anyhow::anyhow!("Failed to interrupt session: {e}")),
+        };
+
+        match result.map_err(|e| anyhow::anyhow!("Failed to classify interrupt result: {e}"))? {
+            meerkat_runtime::UserInterruptPublicResult::Interrupted => {
                 println!("Interrupted session: {session_id}");
                 println!(
                     "Session Ref: {}",
@@ -10977,10 +11124,24 @@ async fn interrupt_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()>
                 );
                 Ok(())
             }
-            Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => Err(anyhow::anyhow!(
-                "Failed to interrupt session: runtime is not interruptible while {state}"
+            meerkat_runtime::UserInterruptPublicResult::NotFound => Err(anyhow::anyhow!(
+                "Failed to interrupt session: session not found"
             )),
-            Err(e) => Err(anyhow::anyhow!("Failed to interrupt session: {e}")),
+            meerkat_runtime::UserInterruptPublicResult::SessionBusy => Err(anyhow::anyhow!(
+                "Failed to interrupt session: session is still being materialized"
+            )),
+            meerkat_runtime::UserInterruptPublicResult::Conflict => {
+                let message = match conflict_state {
+                    Some(state) => {
+                        format!("Failed to interrupt session: runtime is not interruptible while {state}")
+                    }
+                    None => {
+                        "Failed to interrupt session: runtime is not interruptible in its current state"
+                            .to_string()
+                    }
+                };
+                Err(anyhow::anyhow!(message))
+            }
         }
     }
 }
@@ -11593,6 +11754,13 @@ fn mob_registry_lock_path(scope: &RuntimeScope) -> PathBuf {
 }
 
 #[cfg(feature = "mob")]
+fn mob_persistent_runtime_root(scope: &RuntimeScope) -> PathBuf {
+    let paths =
+        meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str());
+    paths.root
+}
+
+#[cfg(feature = "mob")]
 struct MobRegistryLock {
     #[cfg(unix)]
     _lock: nix::fcntl::Flock<std::fs::File>,
@@ -11750,6 +11918,11 @@ async fn save_mob_registry(
 }
 
 #[cfg(feature = "mob")]
+// Compatibility registry snapshots are display-only mirrors; canonical restore
+// reads persistent mob storage instead of this JSON event copy.
+const MOB_REGISTRY_COMPAT_EVENT_LIMIT: usize = 10_000;
+
+#[cfg(feature = "mob")]
 async fn sync_mob_events(
     state: &meerkat_mob_mcp::MobMcpState,
     registry: &mut PersistedMobRegistry,
@@ -11760,7 +11933,11 @@ async fn sync_mob_events(
         .get_mut(mob_id)
         .ok_or_else(|| anyhow::anyhow!("mob not found in persisted registry: {mob_id}"))?;
     mob.events = state
-        .mob_events(&meerkat_mob::MobId::from(mob_id.to_string()), 0, usize::MAX)
+        .mob_events(
+            &meerkat_mob::MobId::from(mob_id.to_string()),
+            0,
+            MOB_REGISTRY_COMPAT_EVENT_LIMIT,
+        )
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     mob.status = Some(
@@ -11827,7 +12004,10 @@ async fn refresh_persisted_run_snapshots(
             }
         };
         let live = state
-            .mob_flow_status(&meerkat_mob::MobId::from(mob_id.to_string()), parsed)
+            .mob_flow_status(
+                &meerkat_mob::MobId::from(mob_id.to_string()),
+                parsed.clone(),
+            )
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         match live {
@@ -11835,7 +12015,10 @@ async fn refresh_persisted_run_snapshots(
                 refreshed.insert(run.run_id.to_string(), run);
             }
             None => {
-                if cached_run.status().is_terminal() {
+                let cached_terminal =
+                    mob_machine_run_status_is_terminal(&parsed, cached_run.status())
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                if cached_terminal {
                     refreshed.insert(run_id, cached_run);
                 }
             }
@@ -11860,32 +12043,6 @@ fn cache_run_snapshot(
 }
 
 #[cfg(feature = "mob")]
-fn cached_run_snapshot(
-    registry: &PersistedMobRegistry,
-    mob_id: &str,
-    run_id: &str,
-) -> Option<meerkat_mob::MobRun> {
-    registry
-        .mobs
-        .get(mob_id)
-        .and_then(|mob| mob.runs.get(run_id))
-        .filter(|run| run.status().is_terminal())
-        .cloned()
-}
-
-#[cfg(feature = "mob")]
-fn parse_mob_state(value: &str) -> Option<meerkat_mob::MobState> {
-    match value {
-        "Creating" => Some(meerkat_mob::MobState::Creating),
-        "Running" => Some(meerkat_mob::MobState::Running),
-        "Stopped" => Some(meerkat_mob::MobState::Stopped),
-        "Completed" => Some(meerkat_mob::MobState::Completed),
-        "Destroyed" => Some(meerkat_mob::MobState::Destroyed),
-        _ => None,
-    }
-}
-
-#[cfg(feature = "mob")]
 type LlmClientProvider =
     Arc<dyn Fn() -> Option<Arc<dyn meerkat_client::LlmClient>> + Send + Sync + 'static>;
 
@@ -11905,6 +12062,7 @@ async fn hydrate_mob_state(
             session_service.clone(),
             runtime_adapter.clone(),
         )
+        .with_persistent_storage_root(Some(mob_persistent_runtime_root(scope)))
         .with_default_llm_client_provider(default_llm_client_provider)
         .with_external_tools_provider(external_tools_provider.clone()),
     );
@@ -11912,94 +12070,6 @@ async fn hydrate_mob_state(
         state
             .mob_insert_handle(meerkat_mob::MobId::from(mob_id.clone()), handle.clone())
             .await;
-    }
-    for (mob_id, persisted) in &registry.mobs {
-        if seeded_handles.contains_key(mob_id) {
-            continue;
-        }
-        let storage = meerkat_mob::MobStorage::in_memory();
-        if persisted.events.is_empty() {
-            let definition = persisted.definition.clone().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "mob registry entry '{mob_id}' has no persisted events and no legacy definition"
-                )
-            })?;
-            storage
-                .events
-                .append(meerkat_mob::NewMobEvent {
-                    mob_id: definition.id.clone(),
-                    timestamp: None,
-                    kind: meerkat_mob::MobEventKind::MobCreated {
-                        definition: Box::new(definition),
-                    },
-                })
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-        } else {
-            for event in &persisted.events {
-                storage
-                    .events
-                    .append(meerkat_mob::NewMobEvent {
-                        mob_id: event.mob_id.clone(),
-                        timestamp: Some(event.timestamp),
-                        kind: event.kind.clone(),
-                    })
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-            }
-        }
-
-        for run in persisted.runs.values() {
-            if !run.status().is_terminal() {
-                continue;
-            }
-            storage
-                .runs
-                .create_run(run.clone())
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-        }
-
-        let mut builder = meerkat_mob::MobBuilder::for_resume(storage)
-            .with_session_service(session_service.clone())
-            .with_default_external_tools_provider(external_tools_provider.clone())
-            .notify_orchestrator_on_resume(false);
-        if let Some(adapter) = runtime_adapter.clone() {
-            builder = builder.with_runtime_adapter(adapter);
-        }
-        let handle = builder.resume().await.map_err(|e| anyhow::anyhow!("{e}"))?;
-        let created = handle.mob_id().clone();
-        if created.as_str() != mob_id {
-            return Err(anyhow::anyhow!(
-                "mob registry id mismatch: key='{mob_id}' definition='{created}'"
-            ));
-        }
-
-        if let Some(target_status) = persisted.status.as_deref().and_then(parse_mob_state) {
-            let current = handle
-                .status()
-                .await
-                .map_err(|e| anyhow::anyhow!("read mob status: {e}"))?;
-            match (current, target_status) {
-                (meerkat_mob::MobState::Running, meerkat_mob::MobState::Stopped) => {
-                    handle.stop().await.map_err(|e| anyhow::anyhow!("{e}"))?;
-                }
-                (meerkat_mob::MobState::Stopped, meerkat_mob::MobState::Running) => {
-                    handle.resume().await.map_err(|e| anyhow::anyhow!("{e}"))?;
-                }
-                (
-                    meerkat_mob::MobState::Running | meerkat_mob::MobState::Stopped,
-                    meerkat_mob::MobState::Completed,
-                ) => {
-                    handle
-                        .complete()
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                }
-                _ => {}
-            }
-        }
-        state.mob_insert_handle(created, handle).await;
     }
     Ok((state, registry))
 }
@@ -12075,7 +12145,9 @@ async fn wait_for_terminal_flow_run(
                 "run '{run_id}' disappeared before reaching terminal state"
             ));
         };
-        if run.status().is_terminal() {
+        let terminal = mob_machine_run_status_is_terminal(&run.run_id, run.status())
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        if terminal {
             return Ok(run);
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -12255,7 +12327,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                     cache_run_snapshot(&mut registry, &mob_id, run.clone())?;
                     Some(run)
                 }
-                None => cached_run_snapshot(&registry, &mob_id, &run_id),
+                None => None,
             };
             sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
             save_mob_registry(scope, &registry).await?;
@@ -12408,24 +12480,47 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             agent_identity,
             initial_message,
         } => {
-            let receipt = state
+            let result = state
                 .mob_respawn(
                     &meerkat_mob::MobId::from(mob_id.clone()),
                     meerkat_mob::AgentIdentity::from(agent_identity),
                     initial_message.map(meerkat_core::ContentInput::from),
                 )
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-            save_mob_registry(scope, &registry).await?;
-            println!(
-                "{}",
-                serde_json::json!({
-                    "status": "completed",
-                    "receipt": receipt,
-                })
-            );
-            Ok(())
+                .await;
+            match result {
+                Ok(receipt) => {
+                    sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
+                    save_mob_registry(scope, &registry).await?;
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "completed",
+                            "receipt": receipt,
+                        })
+                    );
+                    Ok(())
+                }
+                Err(meerkat_mob::MobRespawnError::TopologyRestoreFailed {
+                    receipt,
+                    failed_peer_ids,
+                }) => {
+                    sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
+                    save_mob_registry(scope, &registry).await?;
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "topology_restore_failed",
+                            "receipt": receipt,
+                            "failed_peer_ids": failed_peer_ids
+                                .iter()
+                                .map(std::string::ToString::to_string)
+                                .collect::<Vec<_>>(),
+                        })
+                    );
+                    Ok(())
+                }
+                Err(err) => Err(anyhow::anyhow!("{err}")),
+            }
         }
         MobCommands::WaitKickoff {
             mob_id,
@@ -13034,7 +13129,7 @@ where
     // can read callback_request_tx() during mob creation and resume.
     let callback_rx = runtime.init_callback_channel();
     let (mcp_external_tools, _mcp_adapter_guard) =
-        load_mcp_external_tools(scope, false, CliMcpAuthMode::Stored, None).await;
+        load_mcp_external_tools(scope, false, CliMcpAuthMode::Stored, None).await?;
 
     let external_tools_provider: Option<meerkat_mob::ExternalToolsProvider> = Some(Arc::new({
         let runtime = runtime.clone();
@@ -13319,7 +13414,10 @@ mod tests {
     use futures::stream;
     use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
     use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
-    use meerkat_core::comms::{CommsCommand, SendError, SendReceipt, TrustedPeerDescriptor};
+    use meerkat_core::comms::{
+        CommsCommand, CommsTrustMutation, CommsTrustMutationResult, PeerId, SendError, SendReceipt,
+        TrustedPeerDescriptor,
+    };
     use meerkat_core::error::ToolError;
     use meerkat_core::interaction::{InteractionId, PeerInputCandidate};
     use meerkat_core::service::{
@@ -13443,13 +13541,13 @@ mod tests {
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     #[tokio::test]
     async fn test_cli_login_save_boundary_publishes_binding_scoped_auth_lease() {
-        use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase, LeaseKey};
+        use meerkat_core::handles::{AuthLeasePhase, LeaseKey};
         use meerkat_providers::auth_store::{
             EphemeralTokenStore, PersistedAuthMode, PersistedTokens, TokenKey, TokenStore,
         };
 
         let store = EphemeralTokenStore::new();
-        let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
+        let auth_lease = new_cli_auth_handles().0;
         let auth_binding = meerkat_core::AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").expect("realm id parses"),
             binding: meerkat_core::BindingId::parse("default_openai").expect("binding id parses"),
@@ -13477,13 +13575,19 @@ mod tests {
             Some(AuthLeasePhase::Valid),
             "CLI login must acquire the binding-scoped AuthMachine lease that status reads"
         );
-        assert!(
-            store
-                .load(&TokenKey::from_auth_binding(&auth_binding))
-                .await
-                .expect("token load succeeds")
-                .is_some(),
-            "login save boundary should still persist token material"
+        let stored = store
+            .load(&TokenKey::from_auth_binding(&auth_binding))
+            .await
+            .expect("token load succeeds")
+            .expect("login save boundary should still persist token material");
+        let marker = meerkat_core::tokens_lifecycle_publication(&stored)
+            .expect("login save boundary should stamp generated lifecycle handoff marker");
+        assert_eq!(marker.generation, Some(1));
+        assert_eq!(
+            marker.credential_published_at_millis,
+            auth_lease
+                .snapshot(&lease_key)
+                .credential_published_at_millis
         );
     }
 
@@ -13882,19 +13986,40 @@ mod tests {
     }
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    fn mark_tokens_lifecycle_published_for_test(
+        tokens: &meerkat_providers::auth_store::PersistedTokens,
+        generation: u64,
+        credential_published_at_millis: Option<u64>,
+    ) -> meerkat_providers::auth_store::PersistedTokens {
+        let _ = (generation, credential_published_at_millis);
+        let handle = meerkat_runtime::RuntimeAuthLeaseHandle::new();
+        let key =
+            meerkat_providers::auth_store::TokenKey::from_auth_binding(&openai_auth_binding());
+        let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(&openai_auth_binding());
+        let transition = meerkat_core::handles::AuthLeaseHandle::acquire_lease(
+            &handle,
+            &lease_key,
+            meerkat_core::persisted_token_expires_at_epoch_secs(tokens),
+        )
+        .expect("fixture AuthMachine lease acquire succeeds");
+        meerkat_core::mark_tokens_lifecycle_published_for_transition(&key, tokens, &transition)
+            .expect("runtime AuthMachine transition marks fixture tokens")
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     #[tokio::test]
-    async fn test_cli_auth_status_does_not_rehydrate_marked_oauth_token_after_restart() {
-        use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
+    async fn test_cli_auth_status_rehydrates_marked_oauth_token_after_restart() {
+        use meerkat_core::handles::LeaseKey;
         use meerkat_providers::auth_store::{EphemeralTokenStore, TokenKey, TokenStore};
 
         let store = EphemeralTokenStore::new();
-        let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
+        let auth_lease = new_cli_auth_handles().0;
         let auth_binding = openai_auth_binding();
         let tokens = openai_oauth_tokens();
         store
             .save(
                 &TokenKey::from_auth_binding(&auth_binding),
-                &meerkat_core::mark_tokens_lifecycle_published_for_generation(&tokens, 1),
+                &mark_tokens_lifecycle_published_for_test(&tokens, 1, None),
             )
             .await
             .expect("token save succeeds");
@@ -13916,24 +14041,33 @@ mod tests {
             auth_profile,
             chrono::Utc::now(),
         )
-        .await;
+        .await
+        .expect("AuthMachine freshness observation succeeds");
 
-        assert_eq!(projection.phase, AuthStatusPhase::Unknown);
-        assert!(projection.expires_at.is_none());
+        assert_eq!(projection.phase, AuthStatusPhase::Valid);
+        assert!(projection.expires_at.is_some());
         let snapshot = auth_lease.snapshot(&LeaseKey::from_auth_binding(&auth_binding));
-        assert_eq!(snapshot.phase, None);
-        assert!(!snapshot.credential_present);
+        assert_eq!(
+            snapshot.phase,
+            Some(meerkat_core::handles::AuthLeasePhase::Valid)
+        );
+        assert!(snapshot.credential_present);
     }
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     #[tokio::test]
-    async fn test_cli_auth_status_hides_non_store_oauth_lifecycle() {
+    async fn test_cli_auth_status_reports_non_store_oauth_lifecycle_without_tokens() {
         use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
         use meerkat_providers::auth_store::TokenStore;
 
-        let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
+        let raw_auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+        let auth_lease =
+            meerkat_runtime::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(
+                Arc::clone(&raw_auth_lease),
+            )
+            .expect("CLI test AuthLeaseHandle is certified by generated AuthMachine authority");
         let auth_binding = openai_auth_binding();
-        auth_lease
+        raw_auth_lease
             .acquire_lease(
                 &LeaseKey::from_auth_binding(&auth_binding),
                 (chrono::Utc::now() + chrono::Duration::minutes(30)).timestamp() as u64,
@@ -13960,23 +14094,29 @@ mod tests {
             auth_profile,
             chrono::Utc::now(),
         )
-        .await;
+        .await
+        .expect("AuthMachine freshness observation succeeds");
 
-        assert_eq!(projection.phase, AuthStatusPhase::Unknown);
-        assert!(projection.expires_at.is_none());
+        assert_eq!(projection.phase, AuthStatusPhase::Valid);
+        assert!(projection.expires_at.is_some());
     }
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     #[tokio::test]
     async fn test_cli_oauth_login_save_consumes_runtime_browser_flow() {
-        use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase, LeaseKey};
+        use meerkat_core::handles::{AuthLeasePhase, LeaseKey};
         use meerkat_providers::auth_store::{EphemeralTokenStore, TokenKey, TokenStore};
         use meerkat_providers::oauth_flow::OAuthFlowAuthority;
 
-        let auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+        let raw_auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+        let auth_lease =
+            meerkat_runtime::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(
+                Arc::clone(&raw_auth_lease),
+            )
+            .expect("test AuthLeaseHandle must be certified by generated AuthMachine authority");
         let authority = meerkat_runtime::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
             std::time::Duration::from_secs(60),
-            Arc::clone(&auth_lease),
+            Arc::clone(&raw_auth_lease),
         );
         let store = EphemeralTokenStore::new();
         let auth_binding = openai_auth_binding();
@@ -13993,7 +14133,7 @@ mod tests {
 
         save_cli_oauth_tokens_and_consume_browser_flow(
             &store,
-            auth_lease.as_ref(),
+            &auth_lease,
             &auth_binding,
             &openai_oauth_tokens(),
             CliBrowserFlowConsume {
@@ -14186,10 +14326,10 @@ mod tests {
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     #[tokio::test]
     async fn test_cli_oauth_login_consume_failure_does_not_save_before_durable_claim() {
-        use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase, LeaseKey};
+        use meerkat_core::handles::{AuthLeasePhase, LeaseKey};
         use meerkat_providers::auth_store::{TokenKey, TokenStore};
 
-        let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
+        let auth_lease = new_cli_auth_handles().0;
         let store = SaveCountingCliTokenStore::new();
         let auth_binding = openai_auth_binding();
         let provider = meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
@@ -14454,7 +14594,8 @@ default_model = "gemma"
         });
         runtime_adapter
             .register_session_with_executor(session_id.clone(), executor)
-            .await;
+            .await
+            .expect("runtime executor registration should succeed");
 
         Box::pin(tokio::time::timeout(
             Duration::from_secs(2),
@@ -14520,7 +14661,8 @@ default_model = "gemma"
         });
         runtime_adapter
             .register_session_with_executor(session_id.clone(), executor)
-            .await;
+            .await
+            .expect("runtime executor registration should succeed");
 
         let err = Box::pin(tokio::time::timeout(
             Duration::from_secs(2),
@@ -14741,16 +14883,28 @@ default_model = "gemma"
     }
 
     struct TestCommsRuntime {
-        key: String,
+        name: String,
+        address: String,
+        public_key: [u8; 32],
         trusted: RwLock<HashSet<String>>,
         notify: Arc<tokio::sync::Notify>,
     }
 
     impl TestCommsRuntime {
         fn new(name: &str) -> Self {
-            let _ = name;
+            let mut public_key = [0u8; 32];
+            for (idx, byte) in name.bytes().enumerate() {
+                let slot = idx % public_key.len();
+                public_key[slot] = public_key[slot]
+                    .wrapping_add(byte)
+                    .rotate_left((idx % 8) as u32)
+                    .wrapping_add((idx as u8).wrapping_mul(31));
+            }
+            public_key[0] |= 1;
             Self {
-                key: meerkat_core::comms::PeerId::new().to_string(),
+                name: name.to_string(),
+                address: format!("inproc://{name}"),
+                public_key,
                 trusted: RwLock::new(HashSet::new()),
                 notify: Arc::new(tokio::sync::Notify::new()),
             }
@@ -14759,24 +14913,90 @@ default_model = "gemma"
 
     #[async_trait]
     impl CoreCommsRuntime for TestCommsRuntime {
-        fn public_key(&self) -> Option<String> {
-            Some(self.key.clone())
+        fn peer_id(&self) -> Option<PeerId> {
+            Some(PeerId::from_ed25519_pubkey(&self.public_key))
         }
 
-        async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-            self.trusted.write().await.insert(peer.peer_id.to_string());
-            Ok(())
+        fn public_key(&self) -> Option<String> {
+            use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
+            Some(format!("ed25519:{}", BASE64.encode(self.public_key)))
+        }
+
+        fn public_key_bytes(&self) -> Option<[u8; 32]> {
+            Some(self.public_key)
+        }
+
+        fn comms_name(&self) -> Option<String> {
+            Some(self.name.clone())
+        }
+
+        fn advertised_address(&self) -> Option<String> {
+            Some(self.address.clone())
+        }
+
+        async fn apply_trust_mutation(
+            &self,
+            mutation: CommsTrustMutation,
+        ) -> Result<CommsTrustMutationResult, SendError> {
+            match mutation {
+                CommsTrustMutation::AddTrustedPeer { peer, authority } => {
+                    authority
+                        .validate_public_add(self.peer_id(), &peer)
+                        .map_err(SendError::Validation)?;
+                    TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
+                        .map_err(SendError::Validation)?;
+                    let created = self.trusted.write().await.insert(peer.peer_id.to_string());
+                    Ok(CommsTrustMutationResult::Added { created })
+                }
+                CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
+                    let parsed_peer_id = PeerId::parse(&peer_id)
+                        .map_err(|err| SendError::Validation(err.to_string()))?;
+                    authority
+                        .validate_public_remove(self.peer_id(), parsed_peer_id)
+                        .map_err(SendError::Validation)?;
+                    Ok(CommsTrustMutationResult::Removed {
+                        removed: self.trusted.write().await.remove(&peer_id),
+                    })
+                }
+                CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
+                    authority
+                        .validate_private_add(self.peer_id(), &peer)
+                        .map_err(SendError::Validation)?;
+                    TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
+                        .map_err(SendError::Validation)?;
+                    Ok(CommsTrustMutationResult::Added { created: true })
+                }
+                CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
+                    let parsed_peer_id = PeerId::parse(&peer_id)
+                        .map_err(|err| SendError::Validation(err.to_string()))?;
+                    authority
+                        .validate_private_remove(self.peer_id(), parsed_peer_id)
+                        .map_err(SendError::Validation)?;
+                    Ok(CommsTrustMutationResult::Removed { removed: false })
+                }
+            }
+        }
+
+        async fn add_trusted_peer(&self, _peer: TrustedPeerDescriptor) -> Result<(), SendError> {
+            Err(SendError::Unsupported(
+                "add_trusted_peer requires apply_trust_mutation authority".to_string(),
+            ))
         }
 
         async fn add_private_trusted_peer(
             &self,
             _peer: TrustedPeerDescriptor,
         ) -> Result<(), SendError> {
-            Ok(())
+            Err(SendError::Unsupported(
+                "add_private_trusted_peer requires apply_trust_mutation authority".to_string(),
+            ))
         }
 
-        async fn remove_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
-            Ok(self.trusted.write().await.remove(peer_id))
+        async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
+            Err(SendError::Unsupported(
+                "remove_trusted_peer requires apply_trust_mutation authority".to_string(),
+            ))
         }
 
         async fn send(&self, _cmd: CommsCommand) -> Result<SendReceipt, SendError> {
@@ -14999,6 +15219,13 @@ default_model = "gemma"
             _mob_id: &meerkat_mob::MobId,
         ) -> bool {
             true
+        }
+
+        async fn archive_with_mob_lifecycle_authority(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            <Self as SessionService>::archive(self, session_id).await
         }
     }
 
@@ -19717,20 +19944,18 @@ supports_reasoning = true
         use meerkat_comms::agent::CommsToolDispatcher;
         use meerkat_comms::{CommsConfig, Keypair, TrustedPeers};
         use meerkat_core::AgentToolDispatcher;
-        use parking_lot::RwLock;
 
         // Create mock comms infrastructure
         let keypair = Keypair::generate();
-        let trusted_peers = TrustedPeers::new();
-        let trusted_peers = std::sync::Arc::new(RwLock::new(trusted_peers));
         let (_inbox, inbox_sender) = Inbox::new();
-        let router = std::sync::Arc::new(meerkat_comms::Router::with_shared_peers(
+        let router = std::sync::Arc::new(meerkat_comms::Router::new(
             keypair,
-            trusted_peers.clone(),
+            TrustedPeers::new(),
             CommsConfig::default(),
             inbox_sender,
             true,
         ));
+        let trusted_peers = router.trusted_peers_view();
 
         // Create CommsToolDispatcher with no inner dispatcher
         let dispatcher = CommsToolDispatcher::new(router, trusted_peers);
@@ -20080,77 +20305,6 @@ supports_reasoning = true
 
         let null_json = render_flow_status_json(None).expect("encode null json");
         assert_eq!(null_json, "null");
-    }
-
-    #[cfg(feature = "mob")]
-    #[test]
-    fn test_cached_run_snapshot_returns_only_terminal_runs() {
-        let completed_id = RunId::new();
-        let running_id = RunId::new();
-        let now = chrono::Utc::now();
-        let mut registry = PersistedMobRegistry::default();
-        registry.mobs.insert(
-            "flow-mob".to_string(),
-            PersistedMob {
-                definition: None,
-                status: Some("Running".to_string()),
-                events: Vec::new(),
-                runs: std::collections::BTreeMap::from([
-                    (
-                        completed_id.to_string(),
-                        meerkat_mob::MobRun {
-                            run_id: completed_id.clone(),
-                            mob_id: meerkat_mob::MobId::from("flow-mob"),
-                            flow_id: FlowId::from("demo"),
-                            status: meerkat_mob::MobRunStatus::Completed,
-                            activation_params: serde_json::json!({}),
-                            created_at: now,
-                            completed_at: Some(now),
-                            step_ledger: Vec::new(),
-                            failure_ledger: Vec::new(),
-                            flow_state: Default::default(),
-                            flow_authority_inputs: Vec::new(),
-                            frames: std::collections::BTreeMap::new(),
-                            loops: std::collections::BTreeMap::new(),
-                            loop_iteration_ledger: Vec::new(),
-                            schema_version: 4,
-                            root_step_outputs: Default::default(),
-                            loop_iteration_outputs: Default::default(),
-                        },
-                    ),
-                    (
-                        running_id.to_string(),
-                        meerkat_mob::MobRun {
-                            run_id: running_id.clone(),
-                            mob_id: meerkat_mob::MobId::from("flow-mob"),
-                            flow_id: FlowId::from("demo"),
-                            status: meerkat_mob::MobRunStatus::Running,
-                            activation_params: serde_json::json!({}),
-                            created_at: now,
-                            completed_at: None,
-                            step_ledger: Vec::new(),
-                            failure_ledger: Vec::new(),
-                            flow_state: Default::default(),
-                            flow_authority_inputs: Vec::new(),
-                            frames: std::collections::BTreeMap::new(),
-                            loops: std::collections::BTreeMap::new(),
-                            loop_iteration_ledger: Vec::new(),
-                            schema_version: 4,
-                            root_step_outputs: Default::default(),
-                            loop_iteration_outputs: Default::default(),
-                        },
-                    ),
-                ]),
-            },
-        );
-
-        let completed = cached_run_snapshot(&registry, "flow-mob", &completed_id.to_string());
-        let running = cached_run_snapshot(&registry, "flow-mob", &running_id.to_string());
-        assert!(completed.is_some(), "terminal cached run should resolve");
-        assert!(
-            running.is_none(),
-            "non-terminal cached run must never be treated as authoritative"
-        );
     }
 
     #[test]

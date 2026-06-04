@@ -25,9 +25,18 @@ use crate::inproc::{InprocRegistry, InprocSendError};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::transport::codec::{EnvelopeFrame, TransportCodec};
 use crate::transport::{PeerAddr, TransportError};
-use crate::trust::{TrustError, TrustedPeer, TrustedPeers};
+use crate::trust::{TrustError, TrustedPeer, TrustedPeers, TrustedPeersView};
 use crate::types::{Envelope, MessageKind};
-use meerkat_core::comms::PeerId;
+use meerkat_core::comms::{GeneratedCommsTrustAuthoritySourceKind, PeerId};
+
+type TrustSourceSet = std::collections::BTreeSet<GeneratedCommsTrustAuthoritySourceKind>;
+type PeerIdSet = std::collections::BTreeSet<PeerId>;
+type PubKeyPeerIdMap = std::collections::BTreeMap<crate::identity::PubKey, PeerId>;
+type TrustSourceMap = std::collections::BTreeMap<PeerId, TrustSourceSet>;
+type TrustDescriptorMap = std::collections::BTreeMap<
+    PeerId,
+    std::collections::BTreeMap<GeneratedCommsTrustAuthoritySourceKind, TrustedPeer>,
+>;
 
 /// Derive the canonical [`PeerId`] for a signing [`crate::identity::PubKey`].
 ///
@@ -95,22 +104,32 @@ fn map_inproc_send_error(err: InprocSendError, dest: PeerId) -> SendError {
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub struct Router {
     keypair: Arc<Keypair>,
-    /// Single source of truth for trusted peers. Shared by the Router,
-    /// CommsRuntime, IngressClassificationContext, and any callers of
-    /// `trusted_peers_shared()`. Uses `parking_lot::RwLock` so ingress
-    /// classification can read synchronously.
+    /// Single source of truth for trusted peers. Shared internally by the
+    /// Router, CommsRuntime, and IngressClassificationContext. Uses
+    /// `parking_lot::RwLock` so ingress classification can read
+    /// synchronously, but the mutable lock is not exposed outside this crate.
     trusted_peers: Arc<RwLock<TrustedPeers>>,
     /// Canonical peer IDs supplied at descriptor registration time, keyed by
     /// signing pubkey. This preserves explicit `PeerId`s for descriptor
     /// registrations where the runtime owns a stable routing id in addition
     /// to the peer's signing key.
-    trusted_peer_ids: Arc<RwLock<std::collections::HashMap<crate::identity::PubKey, PeerId>>>,
+    trusted_peer_ids: Arc<RwLock<PubKeyPeerIdMap>>,
     /// Directory-filter side-channel for private (control-plane) trust
     /// edges. Membership here is additive to `trusted_peers`: the peer
     /// is still admitted AND send-resolvable, but `resolve_peer_directory()`
     /// filters it out of the `comms.peers` REST/RPC/MCP surface. Used e.g.
     /// for the supervisor bridge in session-backed mob members.
-    private_peer_ids: Arc<RwLock<std::collections::HashSet<PeerId>>>,
+    private_peer_ids: Arc<RwLock<PeerIdSet>>,
+    /// Mechanical projection of which generated source currently owns each
+    /// trust row. Admission uses the union; generated removals are scoped to
+    /// the source that authorized them.
+    trusted_peer_sources: Arc<RwLock<TrustSourceMap>>,
+    /// Source-owned descriptors for generated trust rows. The public
+    /// `trusted_peers` set remains the send/admission union, but source-scoped
+    /// snapshots read this map so one generated owner cannot rewrite another
+    /// owner's descriptor projection.
+    trusted_peer_descriptors_by_source: Arc<RwLock<TrustDescriptorMap>>,
+    private_peer_sources: Arc<RwLock<TrustSourceMap>>,
     config: CommsConfig,
     require_peer_auth: bool,
     inbox_sender: InboxSender,
@@ -124,19 +143,28 @@ enum TrustedPeerLookup {
 }
 
 impl Router {
+    /// Construct a router with an empty live trust projection.
+    ///
+    /// The `TrustedPeers` argument is retained for source compatibility but is
+    /// intentionally not promoted into send/admission trust. Live trust rows
+    /// are installed only by generated machine/composition mutation authority.
     pub fn new(
         keypair: Keypair,
-        mut trusted_peers: TrustedPeers,
+        _trusted_peers: TrustedPeers,
         config: CommsConfig,
         inbox_sender: InboxSender,
         require_peer_auth: bool,
     ) -> Self {
-        trusted_peers.retain_raw_sendable_identities();
         Self {
             keypair: Arc::new(keypair),
-            trusted_peers: Arc::new(RwLock::new(trusted_peers)),
-            trusted_peer_ids: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            private_peer_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            trusted_peers: Arc::new(RwLock::new(TrustedPeers::new())),
+            trusted_peer_ids: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
+            private_peer_ids: Arc::new(RwLock::new(std::collections::BTreeSet::new())),
+            trusted_peer_sources: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
+            trusted_peer_descriptors_by_source: Arc::new(RwLock::new(
+                std::collections::BTreeMap::new(),
+            )),
+            private_peer_sources: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
             config,
             require_peer_auth,
             inbox_sender,
@@ -144,40 +172,29 @@ impl Router {
         }
     }
 
-    pub fn with_shared_peers(
+    pub(crate) fn with_shared_peers(
         keypair: Keypair,
         trusted_peers: Arc<RwLock<TrustedPeers>>,
         config: CommsConfig,
         inbox_sender: InboxSender,
         require_peer_auth: bool,
     ) -> Self {
-        trusted_peers.write().retain_raw_sendable_identities();
+        *trusted_peers.write() = TrustedPeers::new();
         Self {
             keypair: Arc::new(keypair),
             trusted_peers,
-            trusted_peer_ids: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            private_peer_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            trusted_peer_ids: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
+            private_peer_ids: Arc::new(RwLock::new(std::collections::BTreeSet::new())),
+            trusted_peer_sources: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
+            trusted_peer_descriptors_by_source: Arc::new(RwLock::new(
+                std::collections::BTreeMap::new(),
+            )),
+            private_peer_sources: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
             config,
             require_peer_auth,
             inbox_sender,
             inproc_namespace: None,
         }
-    }
-
-    /// Mark a peer as private (hidden from `resolve_peer_directory`).
-    pub fn mark_private(&self, pubkey: crate::identity::PubKey) {
-        self.mark_private_peer_id(self.peer_id_for_pubkey(&pubkey));
-    }
-
-    /// Mark a peer as private by canonical `PeerId`.
-    pub(crate) fn mark_private_peer_id(&self, peer_id: PeerId) {
-        self.private_peer_ids.write().insert(peer_id);
-    }
-
-    /// Remove the private marker for a peer. Returns `true` if the marker
-    /// was present and removed.
-    pub fn unmark_private(&self, peer_id: &PeerId) -> bool {
-        self.private_peer_ids.write().remove(peer_id)
     }
 
     /// Returns `true` if the peer is currently marked private.
@@ -187,8 +204,35 @@ impl Router {
             .contains(&peer_id_from_pubkey(pubkey))
     }
 
-    pub(crate) fn private_peer_ids(&self) -> std::collections::HashSet<PeerId> {
+    pub(crate) fn private_peer_ids(&self) -> PeerIdSet {
         self.private_peer_ids.read().clone()
+    }
+
+    pub(crate) fn has_trust_source(
+        &self,
+        peer_id: &PeerId,
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    ) -> bool {
+        self.trusted_peer_sources
+            .read()
+            .get(peer_id)
+            .is_some_and(|sources| sources.contains(&source_kind))
+    }
+
+    pub(crate) fn trusted_peers_for_source(
+        &self,
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    ) -> Vec<(PeerId, TrustedPeer)> {
+        self.trusted_peer_descriptors_by_source
+            .read()
+            .iter()
+            .filter_map(|(peer_id, descriptors)| {
+                descriptors
+                    .get(&source_kind)
+                    .cloned()
+                    .map(|peer| (*peer_id, peer))
+            })
+            .collect()
     }
 
     pub(crate) fn peer_id_for_pubkey(&self, pubkey: &crate::identity::PubKey) -> PeerId {
@@ -208,8 +252,13 @@ impl Router {
     pub fn keypair_arc(&self) -> Arc<Keypair> {
         self.keypair.clone()
     }
-    pub fn shared_trusted_peers(&self) -> Arc<parking_lot::RwLock<TrustedPeers>> {
-        self.trusted_peers.clone()
+
+    pub fn trusted_peers_view(&self) -> TrustedPeersView {
+        TrustedPeersView::new(self.trusted_peers.clone())
+    }
+
+    pub fn trusted_peers_snapshot(&self) -> TrustedPeers {
+        self.trusted_peers.read().clone()
     }
     pub fn inbox_sender(&self) -> &InboxSender {
         &self.inbox_sender
@@ -219,41 +268,143 @@ impl Router {
         self.trusted_peers.read().has_peers()
     }
 
-    pub fn add_trusted_peer(&self, peer: TrustedPeer) -> Result<(), TrustError> {
-        let peer_id = peer_id_from_pubkey(&peer.pubkey);
-        self.add_trusted_peer_with_peer_id(peer_id, peer)
-    }
-
+    /// Apply a generated trust-projection add to the router's mechanical
+    /// trust store. Semantic trust authority lives at the machine seam that
+    /// called into `CommsRuntime::apply_trust_mutation`.
     pub(crate) fn add_trusted_peer_with_peer_id(
         &self,
         peer_id: PeerId,
         peer: TrustedPeer,
-    ) -> Result<(), TrustError> {
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
+        private: bool,
+    ) -> Result<bool, TrustError> {
+        let mut trusted_peer_sources = self.trusted_peer_sources.write();
+        let mut descriptors_by_source = self.trusted_peer_descriptors_by_source.write();
+        let mut private_peer_sources = self.private_peer_sources.write();
+
+        if let Some(existing) = descriptors_by_source
+            .get(&peer_id)
+            .and_then(|descriptors| descriptors.get(&source_kind))
+        {
+            let source_private = private_peer_sources
+                .get(&peer_id)
+                .is_some_and(|sources| sources.contains(&source_kind));
+            // Trust material is the routing identity (pubkey + addr); `name` and
+            // discovery `meta` are display-only (a peer-only member's name is
+            // derived heuristically per projection source — an inproc address
+            // embeds the comms name, a non-inproc address falls back to a
+            // synthetic backend-peer label — so it can differ for one peer).
+            // Only a divergent pubkey or addr is a genuine re-add of different
+            // routing material.
+            let same_routing_material =
+                existing.pubkey == peer.pubkey && existing.addr == peer.addr;
+            if same_routing_material && source_private == private {
+                return Ok(false);
+            }
+            return Err(TrustError::ConflictingGeneratedTrustSource {
+                peer_id,
+                source_kind,
+            });
+        }
+        if trusted_peer_sources
+            .get(&peer_id)
+            .is_some_and(|sources| sources.contains(&source_kind))
+        {
+            return Err(TrustError::ConflictingGeneratedTrustSource {
+                peer_id,
+                source_kind,
+            });
+        }
+
         let pubkey = peer.pubkey;
-        self.trusted_peers.write().upsert(peer)?;
+        self.trusted_peers.write().upsert(peer.clone())?;
         self.trusted_peer_ids.write().insert(pubkey, peer_id);
-        Ok(())
+        descriptors_by_source
+            .entry(peer_id)
+            .or_default()
+            .insert(source_kind, peer);
+        let created = trusted_peer_sources
+            .entry(peer_id)
+            .or_default()
+            .insert(source_kind);
+        if private {
+            private_peer_sources
+                .entry(peer_id)
+                .or_default()
+                .insert(source_kind);
+            self.private_peer_ids.write().insert(peer_id);
+        }
+        Ok(created)
     }
 
-    pub fn remove_trusted_peer(&self, peer_id: &PeerId) -> bool {
+    /// Apply a generated trust-projection removal to the router's mechanical
+    /// trust store. Semantic trust authority lives at the machine seam that
+    /// called into `CommsRuntime::apply_trust_mutation`.
+    pub(crate) fn remove_trusted_peer_for_source(
+        &self,
+        peer_id: &PeerId,
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    ) -> bool {
+        let source_removed = {
+            let mut sources = self.trusted_peer_sources.write();
+            let Some(peer_sources) = sources.get_mut(peer_id) else {
+                return false;
+            };
+            if !peer_sources.remove(&source_kind) {
+                return false;
+            }
+            if peer_sources.is_empty() {
+                sources.remove(peer_id);
+            }
+            true
+        };
+        if !source_removed {
+            return false;
+        }
+        let remaining_descriptor = {
+            let mut descriptors_by_source = self.trusted_peer_descriptors_by_source.write();
+            let Some(descriptors) = descriptors_by_source.get_mut(peer_id) else {
+                return false;
+            };
+            descriptors.remove(&source_kind);
+            let remaining = descriptors.values().next().cloned();
+            if descriptors.is_empty() {
+                descriptors_by_source.remove(peer_id);
+            }
+            remaining
+        };
+        {
+            let mut private_sources = self.private_peer_sources.write();
+            if let Some(peer_sources) = private_sources.get_mut(peer_id) {
+                peer_sources.remove(&source_kind);
+                if peer_sources.is_empty() {
+                    private_sources.remove(peer_id);
+                    self.private_peer_ids.write().remove(peer_id);
+                }
+            }
+        }
+        if let Some(peer) = remaining_descriptor {
+            let peer_ids = self.trusted_peer_ids.read().clone();
+            let removed_pubkeys = self
+                .trusted_peers
+                .write()
+                .remove_all_by_resolved_peer_id(&peer_ids, peer_id);
+            let mut trusted_peer_ids = self.trusted_peer_ids.write();
+            for pubkey in removed_pubkeys {
+                trusted_peer_ids.remove(&pubkey);
+            }
+            trusted_peer_ids.insert(peer.pubkey, *peer_id);
+            drop(trusted_peer_ids);
+            return self.trusted_peers.write().upsert(peer).is_ok();
+        }
+        if self.trusted_peer_sources.read().contains_key(peer_id) {
+            return true;
+        }
         let peer_ids = self.trusted_peer_ids.read().clone();
         let removed_pubkeys = {
-            let mut trusted = self.trusted_peers.write();
-            let mut removed_pubkeys = Vec::new();
-            trusted.peers.retain(|peer| {
-                let matches = peer_ids
-                    .get(&peer.pubkey)
-                    .copied()
-                    .unwrap_or_else(|| peer_id_from_pubkey(&peer.pubkey))
-                    == *peer_id;
-                if matches {
-                    removed_pubkeys.push(peer.pubkey);
-                    false
-                } else {
-                    true
-                }
-            });
-            removed_pubkeys
+            self.trusted_peers
+                .write()
+                .remove_all_by_resolved_peer_id(&peer_ids, peer_id)
         };
         if removed_pubkeys.is_empty() {
             return false;
@@ -264,13 +415,18 @@ impl Router {
         }
         drop(trusted_peer_ids);
         self.private_peer_ids.write().remove(peer_id);
+        self.private_peer_sources.write().remove(peer_id);
         true
+    }
+
+    pub(crate) fn is_private_peer_id(&self, peer_id: &PeerId) -> bool {
+        self.private_peer_ids.read().contains(peer_id)
     }
 
     fn trusted_peer_by_peer_id(&self, peer_id: &PeerId) -> TrustedPeerLookup {
         let peer_ids = self.trusted_peer_ids.read().clone();
         let trusted = self.trusted_peers.read();
-        let mut matches = trusted.peers.iter().filter(|peer| {
+        let mut matches = trusted.iter().filter(|peer| {
             !peer.pubkey.is_zero()
                 && peer_ids
                     .get(&peer.pubkey)
@@ -286,15 +442,6 @@ impl Router {
         } else {
             TrustedPeerLookup::Resolved(peer.clone())
         }
-    }
-
-    /// Get the trusted peers Arc.
-    ///
-    /// This is the single source of truth for trust state. The same Arc is
-    /// shared with IngressClassificationContext, so any mutation is
-    /// immediately visible to ingress classification.
-    pub fn classification_peers_arc(&self) -> Arc<parking_lot::RwLock<TrustedPeers>> {
-        self.trusted_peers.clone()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -374,28 +521,11 @@ impl Router {
         envelope_id: Uuid,
         kind: MessageKind,
     ) -> Result<Uuid, SendError> {
-        let inproc_namespace = self.inproc_namespace.as_deref().unwrap_or("");
         let peer = match self.trusted_peer_by_peer_id(&dest) {
             TrustedPeerLookup::Resolved(peer) => peer,
             TrustedPeerLookup::Ambiguous => return Err(SendError::PeerNotFound(dest)),
-            TrustedPeerLookup::Missing if self.require_peer_auth => {
-                return Err(SendError::PeerNotFound(dest));
-            }
             TrustedPeerLookup::Missing => {
-                // Auth-disabled fallback: scan the inproc registry for an
-                // entry whose derived PeerId matches. Display names remain
-                // the inproc lookup key, but the routing match is PeerId.
-                InprocRegistry::global()
-                    .peers_in_namespace(inproc_namespace)
-                    .into_iter()
-                    .find(|p| !p.pubkey.is_zero() && peer_id_from_pubkey(&p.pubkey) == dest)
-                    .map(|p| TrustedPeer {
-                        name: p.name.clone(),
-                        pubkey: p.pubkey,
-                        addr: format!("inproc://{}", p.name),
-                        meta: p.meta,
-                    })
-                    .ok_or(SendError::PeerNotFound(dest))?
+                return Err(SendError::PeerNotFound(dest));
             }
         };
         let addr = PeerAddr::parse(&peer.addr)?;
@@ -477,4 +607,88 @@ impl Router {
 #[cfg(not(target_arch = "wasm32"))]
 fn should_wait_for_ack(kind: &MessageKind) -> bool {
     !matches!(kind, MessageKind::Ack { .. } | MessageKind::Response { .. })
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::identity::PubKey;
+    use crate::inbox::Inbox;
+    use crate::peer_meta::PeerMeta;
+
+    fn test_router() -> Router {
+        let (_inbox, inbox_sender) = Inbox::new();
+        Router::new(
+            Keypair::generate(),
+            TrustedPeers::new(),
+            CommsConfig::default(),
+            inbox_sender,
+            true,
+        )
+    }
+
+    fn peer(name: &str, pubkey: [u8; 32], addr: &str) -> TrustedPeer {
+        TrustedPeer {
+            name: name.to_string(),
+            pubkey: PubKey::new(pubkey),
+            addr: addr.to_string(),
+            meta: PeerMeta::default(),
+        }
+    }
+
+    #[test]
+    fn trust_re_add_ignores_display_name_but_rejects_divergent_address() {
+        // TRUST-1: generated trust identity is the routing material (pubkey +
+        // addr); `name` is display-only and legitimately differs across
+        // projection sources for one peer (an inproc address embeds the comms
+        // name; a non-inproc address falls back to a synthetic backend label).
+        // A re-add under the SAME source with the same pubkey+addr but a
+        // different name must be an idempotent no-op (Ok(false)); only a
+        // divergent pubkey/addr is a genuine conflicting re-add.
+        let router = test_router();
+        let pubkey = [7u8; 32];
+        let peer_id = PeerId::from_ed25519_pubkey(&pubkey);
+        let source = GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection;
+
+        assert!(
+            router
+                .add_trusted_peer_with_peer_id(
+                    peer_id,
+                    peer("member-inproc-name", pubkey, "tcp://10.0.0.1:7001"),
+                    source,
+                    false,
+                )
+                .expect("initial add"),
+            "first add of a new peer creates the trust row"
+        );
+
+        // Same identity, DIFFERENT display name -> idempotent no-op.
+        assert!(
+            !router
+                .add_trusted_peer_with_peer_id(
+                    peer_id,
+                    peer("synthetic-backend-label", pubkey, "tcp://10.0.0.1:7001"),
+                    source,
+                    false,
+                )
+                .expect("re-add under a different name must be accepted, not rejected"),
+            "a name-only divergence is not a new trust row"
+        );
+
+        // Same pubkey, DIVERGENT addr -> genuine conflict.
+        let conflict = router.add_trusted_peer_with_peer_id(
+            peer_id,
+            peer("member-inproc-name", pubkey, "tcp://10.9.9.9:7001"),
+            source,
+            false,
+        );
+        assert!(
+            matches!(
+                conflict,
+                Err(TrustError::ConflictingGeneratedTrustSource { .. })
+            ),
+            "a divergent routing address must conflict, got {conflict:?}"
+        );
+    }
 }

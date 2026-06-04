@@ -179,19 +179,19 @@ pub use meerkat_core::{
 pub use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmResponse};
 pub use meerkat_schedule::{
     CalendarFieldSpec, CalendarTriggerSpec, ClaimDueRequest, ClaimDueResult, CreateScheduleRequest,
-    DeliveryCompletion, DeliveryDispatch, DeliveryReceipt, DeliveryReceiptStage, DeliveryTerminal,
-    DisabledScheduleStore, ForkContextSpec, HelperOptionsSpec, IntervalTriggerSpec,
-    MemoryScheduleStore, MisfirePolicy, MissingTargetPolicy, MobTargetBinding, Occurrence,
-    OccurrenceFailureClass, OccurrenceFilter, OccurrenceId, OccurrenceOrdinal, OccurrencePhase,
-    OverlapPolicy, ResolvedSpawnSnapshot, SCHEDULE_TOOL_CAPABILITY_UNAVAILABLE,
-    SCHEDULE_TOOL_INVALID_ARGUMENTS, SCHEDULE_TOOL_NOT_FOUND, Schedule, ScheduleDomainError,
-    ScheduleDriver, ScheduleDriverConfig, ScheduleFilter, ScheduleId, SchedulePhase,
-    ScheduleRevision, ScheduleService, ScheduleSpawnTooling, ScheduleStore, ScheduleStoreError,
-    ScheduleStoreKind, ScheduleTargetDelivery, ScheduleTargetProbe, ScheduleToolDispatcher,
-    ScheduleToolError, ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode,
-    ScheduledSessionAction, SessionMaterializationSpec, SessionTargetBinding, TargetBinding,
-    TargetProbeOutcome, TriggerSpec, UpdateScheduleRequest, handle_schedule_tools_call,
-    schedule_tools_list,
+    DeliveryCompletion, DeliveryDispatch, DeliveryFailureReason, DeliveryReceipt,
+    DeliveryReceiptStage, DeliveryTerminal, DisabledScheduleStore, ForkContextSpec,
+    HelperOptionsSpec, IntervalTriggerSpec, MemoryScheduleStore, MisfirePolicy,
+    MissingTargetPolicy, MobTargetBinding, Occurrence, OccurrenceFailureClass, OccurrenceFilter,
+    OccurrenceId, OccurrenceOrdinal, OccurrencePhase, OverlapPolicy, ResolvedSpawnSnapshot,
+    SCHEDULE_TOOL_CAPABILITY_UNAVAILABLE, SCHEDULE_TOOL_INVALID_ARGUMENTS, SCHEDULE_TOOL_NOT_FOUND,
+    Schedule, ScheduleDomainError, ScheduleDriver, ScheduleDriverConfig, ScheduleFilter,
+    ScheduleId, SchedulePhase, ScheduleRevision, ScheduleService, ScheduleSpawnTooling,
+    ScheduleStore, ScheduleStoreError, ScheduleStoreKind, ScheduleTargetDelivery,
+    ScheduleTargetProbe, ScheduleToolDispatcher, ScheduleToolError, ScheduledMobAction,
+    ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction,
+    SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TargetProbeOutcome,
+    TriggerSpec, UpdateScheduleRequest, handle_schedule_tools_call, schedule_tools_list,
 };
 pub use meerkat_tools::ToolError;
 #[cfg(not(target_arch = "wasm32"))]
@@ -208,16 +208,18 @@ pub use meerkat_workgraph::{
     GoalStatusResult, GoalTerminalStatus, LinkWorkItemsRequest, MemoryWorkGraphStore,
     ProjectedAttentionAuthority, PublicGoalCompletionPolicy, PublicGoalCreateRequest,
     PublicGoalRequestCloseRequest, ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest,
-    WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY, WORKGRAPH_TOOL_INVALID_ARGUMENTS,
-    WORKGRAPH_TOOL_NOT_FOUND, WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMachine,
-    WorkAttentionMachineState, WorkAttentionMode, WorkAttentionStatus, WorkAttentionTarget,
-    WorkClaim, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceRef, WorkGraphError,
-    WorkGraphEvent, WorkGraphEventFilter, WorkGraphEventKind, WorkGraphEventsResponse,
-    WorkGraphItemsResponse, WorkGraphMachine, WorkGraphMachineState, WorkGraphRestRoute,
-    WorkGraphService, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkGraphStore,
-    WorkGraphStoreKind, WorkGraphToolError, WorkGraphToolSurface, WorkItem, WorkItemFilter,
-    WorkItemId, WorkItemRef, WorkNamespace, WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority,
-    WorkStatus, handle_workgraph_tools_call, validate_workgraph_attention_projection_current,
+    WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY, WORKGRAPH_TOOL_CAPABILITY_UNAVAILABLE,
+    WORKGRAPH_TOOL_CONFLICT, WORKGRAPH_TOOL_INTERNAL_ERROR, WORKGRAPH_TOOL_INVALID_ARGUMENTS,
+    WORKGRAPH_TOOL_INVALID_TRANSITION, WORKGRAPH_TOOL_NOT_FOUND, WORKGRAPH_TOOL_STORE_ERROR,
+    WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMachine, WorkAttentionMachineState,
+    WorkAttentionMode, WorkAttentionStatus, WorkAttentionTarget, WorkClaim, WorkCompletionPolicy,
+    WorkEdge, WorkEdgeKind, WorkEvidenceRef, WorkGraphError, WorkGraphEvent, WorkGraphEventFilter,
+    WorkGraphEventKind, WorkGraphEventsResponse, WorkGraphItemsResponse, WorkGraphMachine,
+    WorkGraphMachineState, WorkGraphPublicErrorClass, WorkGraphRestRoute, WorkGraphService,
+    WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkGraphStore, WorkGraphStoreKind,
+    WorkGraphToolError, WorkGraphToolSurface, WorkItem, WorkItemFilter, WorkItemId, WorkItemRef,
+    WorkNamespace, WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority, WorkStatus,
+    handle_workgraph_tools_call, validate_workgraph_attention_projection_current,
     workgraph_attention_context_append, workgraph_attention_continuation_key,
     workgraph_attention_projection_from_overlay, workgraph_attention_supersession_key,
     workgraph_attention_turn_append, workgraph_rest_path_catalog,
@@ -255,8 +257,8 @@ pub use service_factory::{
 // `docs/wave-d-prep/d-j-staged-session-design.md`.
 mod staged_sessions;
 pub use staged_sessions::{
-    PromotingSlot, StagedLifecycleError, StagedPhase, StagedSessionInfo, StagedSessionRegistry,
-    StagedSlot,
+    GeneratedMachineArchivedResumeAdmission, PromotingSlot, StagedLifecycleError,
+    StagedSessionInfo, StagedSessionRegistry, StagedSlot,
 };
 
 // Surface-agnostic session runtime. Empty during F2 — populated by

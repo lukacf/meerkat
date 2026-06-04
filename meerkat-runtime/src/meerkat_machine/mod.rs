@@ -26,6 +26,7 @@ use std::sync::{Mutex as StdMutex, OnceLock, Weak};
 
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::{InputId, RunId};
+use meerkat_core::tool_scope::ToolScopeTurnOverlay;
 use meerkat_core::types::SessionId;
 use meerkat_core::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
 use meerkat_core::{
@@ -38,15 +39,17 @@ use crate::driver::ephemeral::EphemeralRuntimeDriver;
 use crate::driver::persistent::PersistentRuntimeDriver;
 use crate::identifiers::LogicalRuntimeId;
 use crate::input::Input;
-use crate::input_state::InputLifecycleState;
+use crate::input_state::{
+    InputAbandonReason, InputLifecycleState, InputStateSeed, InputTerminalOutcome,
+};
 use crate::meerkat_machine_types::{
-    HydratedSessionLlmState, MeerkatAdmittedInputSnapshot, MeerkatBindingSnapshot,
-    MeerkatCompletionWaiterSnapshot, MeerkatCompletionWaitersSnapshot, MeerkatControlSnapshot,
-    MeerkatCursorSnapshot, MeerkatDrainSnapshot, MeerkatDriverKind, MeerkatFormalStateProjection,
-    MeerkatInputsSnapshot, MeerkatLedgerSnapshot, MeerkatMachineCommand,
-    MeerkatMachineCommandError, MeerkatMachineCommandResult, MeerkatMachineRunFailure,
-    MeerkatMachineRunPrepared, MeerkatMachineSpineSnapshot, MeerkatOpsSnapshot,
-    SessionLlmCapabilityDelta, SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus,
+    HydratedSessionLlmState, MeerkatAdmittedInputSnapshot, MeerkatArchiveSnapshot,
+    MeerkatBindingSnapshot, MeerkatCompletionWaiterSnapshot, MeerkatCompletionWaitersSnapshot,
+    MeerkatControlSnapshot, MeerkatCursorSnapshot, MeerkatDrainSnapshot, MeerkatDriverKind,
+    MeerkatFormalStateProjection, MeerkatInputsSnapshot, MeerkatLedgerSnapshot,
+    MeerkatMachineCommand, MeerkatMachineCommandError, MeerkatMachineCommandResult,
+    MeerkatMachineRunFailure, MeerkatMachineRunPrepared, MeerkatMachineSpineSnapshot,
+    MeerkatOpsSnapshot, SessionLlmCapabilityDelta, SessionLlmCapabilitySurface,
     SessionLlmReconfigureHost, SessionLlmReconfigureReport, SessionLlmReconfigureRequest,
     SessionToolVisibilityDelta,
 };
@@ -62,6 +65,119 @@ use crate::traits::{
     RuntimeControlPlaneError, RuntimeDriverError,
 };
 
+#[allow(clippy::expect_used)]
+pub(crate) fn recover_projected_authority(
+    state: dsl::MeerkatMachineState,
+    context: &'static str,
+) -> dsl::MeerkatMachineAuthority {
+    dsl::MeerkatMachineAuthority::recover_from_state(state).expect(context)
+}
+
+struct ToolVisibilityOwnerGeneratedAuthorityBridgeToken;
+
+static TOOL_VISIBILITY_OWNER_GENERATED_AUTHORITY_BRIDGE_TOKEN:
+    ToolVisibilityOwnerGeneratedAuthorityBridgeToken =
+    ToolVisibilityOwnerGeneratedAuthorityBridgeToken;
+
+fn tool_visibility_owner_generated_authority_bridge_token()
+-> &'static (dyn std::any::Any + Send + Sync) {
+    &TOOL_VISIBILITY_OWNER_GENERATED_AUTHORITY_BRIDGE_TOKEN
+}
+
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!(
+    "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_tool_visibility_owner_",
+    env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub extern "Rust" fn tool_visibility_owner_generated_authority_bridge_token_is_valid(
+    token: &(dyn std::any::Any + Send + Sync),
+) -> bool {
+    token.is::<ToolVisibilityOwnerGeneratedAuthorityBridgeToken>()
+}
+
+fn generated_tool_visibility_owner(
+    owner: Arc<dyn ToolVisibilityOwner>,
+) -> Result<meerkat_core::GeneratedToolVisibilityOwner, String> {
+    #[allow(improper_ctypes_definitions, unsafe_code)]
+    unsafe extern "Rust" {
+        #[link_name = concat!(
+            "__meerkat_core_runtime_generated_tool_visibility_owner_build_v1_",
+            env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+        )]
+        fn core_runtime_generated_tool_visibility_owner_build(
+            token: &'static (dyn std::any::Any + Send + Sync),
+            owner: Arc<dyn ToolVisibilityOwner>,
+        ) -> Result<meerkat_core::GeneratedToolVisibilityOwner, String>;
+    }
+    #[allow(unsafe_code)]
+    unsafe {
+        core_runtime_generated_tool_visibility_owner_build(
+            tool_visibility_owner_generated_authority_bridge_token(),
+            owner,
+        )
+    }
+}
+
+/// Build a generated visibility owner for standalone facade sessions.
+///
+/// Standalone sessions do not have a runtime loop, but durable tool visibility
+/// is still a machine fact. This owner gives those sessions the same
+/// MeerkatMachine authority path used by runtime-backed sessions instead of
+/// falling back to a handwritten local mutator.
+pub fn standalone_tool_visibility_owner(
+    session_id: &SessionId,
+    current_identity: &meerkat_core::SessionLlmIdentity,
+    model_profile: Option<&meerkat_core::model_profile::ModelProfile>,
+    capability_base_filter: &ToolFilter,
+) -> Result<meerkat_core::GeneratedToolVisibilityOwner, String> {
+    let mut authority = dsl_authority::recover_authority_from_runtime_observation(
+        session_id,
+        RuntimeState::Idle,
+        None,
+        None,
+        None,
+        BTreeSet::new(),
+        None,
+        None,
+        None,
+    )
+    .map_err(|err| dsl_authority::map_error(err, "standalone visibility authority"))?;
+    let (current_capability_surface, current_capability_surface_status) = match model_profile {
+        Some(profile) => (
+            Some(dsl::SessionLlmCapabilitySurface {
+                supports_temperature: profile.supports_temperature,
+                supports_thinking: profile.supports_thinking,
+                supports_reasoning: profile.supports_reasoning,
+                inline_video: profile.inline_video,
+                vision: profile.vision,
+                image_input: profile.image_input,
+                image_tool_results: profile.image_tool_results,
+                supports_web_search: profile.supports_web_search,
+                image_generation: profile.image_generation,
+                realtime: profile.realtime,
+                call_timeout_secs: profile.call_timeout_secs,
+            }),
+            dsl::SessionLlmCapabilitySurfaceStatus::Resolved,
+        ),
+        None => (None, dsl::SessionLlmCapabilitySurfaceStatus::Unresolved),
+    };
+    dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        dsl::MeerkatMachineInput::HydrateSessionLlmState {
+            current_identity: dsl::SessionLlmIdentity::from_domain(current_identity),
+            current_capability_surface,
+            current_capability_surface_status,
+            current_capability_base_filter: dsl::ToolFilter::from_domain(capability_base_filter),
+        },
+    )
+    .map_err(|err| dsl_authority::map_error(err, "standalone visibility hydration"))?;
+    let authority = Arc::new(std::sync::Mutex::new(authority));
+    let owner = Arc::new(MachineToolVisibilityOwner::new());
+    owner.bind_dsl_authority(authority);
+    generated_tool_visibility_owner(owner as Arc<dyn ToolVisibilityOwner>)
+}
+
 /// Error type for [`MeerkatMachine::prepare_bindings`].
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeBindingsError {
@@ -71,6 +187,567 @@ pub enum RuntimeBindingsError {
     /// Machine-owned binding preparation failed before bindings were published.
     #[error("failed to prepare runtime bindings for session {0}: {1}")]
     PrepareFailed(SessionId, String),
+}
+
+/// Generated public projection for an input-state seed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputPublicStateProjection {
+    pub lifecycle_state: dsl::InputPublicLifecycleState,
+    pub terminal_outcome: Option<dsl::InputPublicTerminalOutcome>,
+}
+
+/// Runtime lifecycle/admission facts emitted by generated MeerkatMachine
+/// authority for a public runtime-state projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeLifecycleFacts {
+    pub terminality: dsl::RuntimeLifecycleTerminality,
+    pub input_admission: dsl::RuntimeInputAdmission,
+    pub queue_admission: dsl::RuntimeQueueAdmission,
+    pub prepare_admission: dsl::RuntimePrepareAdmission,
+    pub ingress_admission: dsl::RuntimeIngressAdmission,
+}
+
+impl RuntimeLifecycleFacts {
+    #[must_use]
+    pub fn can_accept_input(self) -> bool {
+        self.input_admission == dsl::RuntimeInputAdmission::AcceptsInput
+    }
+
+    #[must_use]
+    pub fn can_process_queue(self) -> bool {
+        self.queue_admission == dsl::RuntimeQueueAdmission::ProcessesQueue
+    }
+
+    #[must_use]
+    pub fn can_prepare_run(self) -> bool {
+        self.prepare_admission == dsl::RuntimePrepareAdmission::Ready
+    }
+
+    #[must_use]
+    pub fn is_terminal(self) -> bool {
+        self.terminality == dsl::RuntimeLifecycleTerminality::Terminal
+    }
+}
+
+/// Runtime-loop queue-drain admission feedback emitted by generated
+/// MeerkatMachine authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeLoopQueueAdmissionPlan {
+    pub queue_admission: dsl::RuntimeQueueAdmission,
+    pub run_binding: dsl::RuntimeLoopRunBinding,
+}
+
+impl RuntimeLoopQueueAdmissionPlan {
+    #[must_use]
+    pub fn can_process_queue(self) -> bool {
+        self.queue_admission == dsl::RuntimeQueueAdmission::ProcessesQueue
+    }
+
+    #[must_use]
+    pub fn uses_prebound_run(self) -> bool {
+        self.run_binding == dsl::RuntimeLoopRunBinding::UsePrebound
+    }
+}
+
+/// Classify runtime lifecycle/admission facts through generated
+/// MeerkatMachine authority. Callers provide only the observed state variant;
+/// all behavior-affecting facts come back as generated typed feedback.
+pub fn classify_runtime_lifecycle_state(
+    state: RuntimeState,
+) -> Result<RuntimeLifecycleFacts, String> {
+    let observed_state = dsl_authority::observed_runtime_lifecycle_state(state);
+    let mut authority = projection_authority();
+    let transition = dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        dsl::MeerkatMachineInput::ClassifyRuntimeLifecycleState {
+            state: observed_state,
+        },
+    )
+    .map_err(|err| {
+        format!("MeerkatMachine rejected runtime lifecycle classification for {state}: {err}")
+    })?;
+
+    transition
+        .into_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            dsl::MeerkatMachineEffect::RuntimeLifecycleStateClassified {
+                state,
+                terminality,
+                input_admission,
+                queue_admission,
+                prepare_admission,
+                ingress_admission,
+            } if state == observed_state => Some(RuntimeLifecycleFacts {
+                terminality,
+                input_admission,
+                queue_admission,
+                prepare_admission,
+                ingress_admission,
+            }),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            format!("MeerkatMachine emitted no runtime lifecycle classification for {state}")
+        })
+}
+
+/// Classify the store-visible durable runtime lifecycle state through
+/// generated MeerkatMachine authority. The caller supplies only the live
+/// observed state; generated feedback decides the recovery projection.
+pub fn classify_runtime_lifecycle_durable_state(
+    state: RuntimeState,
+) -> Result<RuntimeState, String> {
+    let observed_state = dsl_authority::observed_runtime_lifecycle_state(state);
+    let mut authority = projection_authority();
+    let transition = dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        dsl::MeerkatMachineInput::ClassifyRuntimeLifecycleDurability {
+            state: observed_state,
+        },
+    )
+    .map_err(|err| {
+        format!(
+            "MeerkatMachine rejected runtime lifecycle durability classification for {state}: {err}"
+        )
+    })?;
+
+    transition
+        .into_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            dsl::MeerkatMachineEffect::RuntimeLifecycleDurabilityClassified {
+                state,
+                durable_state,
+            } if state == observed_state => Some(
+                dsl_authority::runtime_state_from_observed_lifecycle_state(durable_state),
+            ),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            format!(
+                "MeerkatMachine emitted no runtime lifecycle durability classification for {state}"
+            )
+        })
+}
+
+/// Classify runtime-loop queue admission through generated MeerkatMachine
+/// authority. The caller provides the observed runtime state and the structural
+/// fact that a current run id is bound; generated feedback decides whether the
+/// queue may drain and whether that bound run id must be reused.
+pub fn classify_runtime_loop_queue_admission(
+    state: RuntimeState,
+    current_run_bound: bool,
+) -> Result<RuntimeLoopQueueAdmissionPlan, String> {
+    let observed_state = dsl_authority::observed_runtime_lifecycle_state(state);
+    let mut authority = projection_authority();
+    let transition = dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        dsl::MeerkatMachineInput::ClassifyRuntimeLoopQueueAdmission {
+            state: observed_state,
+            current_run_bound,
+        },
+    )
+    .map_err(|err| {
+        format!(
+            "MeerkatMachine rejected runtime-loop queue admission for {state} with current_run_bound={current_run_bound}: {err}"
+        )
+    })?;
+
+    transition
+        .into_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            dsl::MeerkatMachineEffect::RuntimeLoopQueueAdmissionClassified {
+                state,
+                current_run_bound: observed_current_run_bound,
+                queue_admission,
+                run_binding,
+            } if state == observed_state && observed_current_run_bound == current_run_bound => {
+                Some(RuntimeLoopQueueAdmissionPlan {
+                    queue_admission,
+                    run_binding,
+                })
+            }
+            _ => None,
+        })
+        .ok_or_else(|| {
+            format!(
+                "MeerkatMachine emitted no runtime-loop queue admission for {state} with current_run_bound={current_run_bound}"
+            )
+        })
+}
+
+/// Machine-owned arbitration verdict between the live DSL lifecycle phase and
+/// the durable control projection, emitted by generated MeerkatMachine
+/// authority. `publish_control` is the terminal-precedence decision (the
+/// published control projection supersedes the live DSL phase);
+/// `selected_raw_phase` is the chosen phase without the visibility rewrite;
+/// `visible_phase` is the externally-visible phase after the
+/// Running+pre_run(Retired)->Retired rewrite. The shell mirrors all three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisibleRuntimePhasePlan {
+    pub publish_control: bool,
+    pub selected_raw_phase: RuntimeState,
+    pub visible_phase: RuntimeState,
+}
+
+/// Resolve the authoritative/visible runtime phase through generated
+/// MeerkatMachine authority. The shell feeds only the five pure
+/// [`RuntimeState`] observations it already holds; the machine owns BOTH the
+/// terminal-precedence `publish_control` policy AND the
+/// Running+pre_run(Retired)->Retired visibility rewrite. The shell mirrors the
+/// emitted verdict and re-derives nothing, failing closed if no verdict is
+/// emitted.
+pub fn resolve_visible_runtime_phase(
+    dsl_phase: RuntimeState,
+    dsl_pre_run_phase: Option<RuntimeState>,
+    control_phase: RuntimeState,
+    control_pre_run_phase: Option<RuntimeState>,
+    has_runtime_persistence: bool,
+) -> Result<VisibleRuntimePhasePlan, String> {
+    let observed_dsl = dsl_authority::observed_runtime_lifecycle_state(dsl_phase);
+    let observed_control = dsl_authority::observed_runtime_lifecycle_state(control_phase);
+    let observed_dsl_pre_run =
+        dsl_pre_run_phase.map(dsl_authority::observed_runtime_lifecycle_state);
+    let observed_control_pre_run =
+        control_pre_run_phase.map(dsl_authority::observed_runtime_lifecycle_state);
+    let mut authority = projection_authority();
+    let transition = dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        dsl::MeerkatMachineInput::ResolveVisibleRuntimePhase {
+            dsl_phase: observed_dsl,
+            dsl_pre_run_phase: observed_dsl_pre_run,
+            control_phase: observed_control,
+            control_pre_run_phase: observed_control_pre_run,
+            has_runtime_persistence,
+        },
+    )
+    .map_err(|err| {
+        format!(
+            "MeerkatMachine rejected visible runtime phase resolution \
+             (dsl={dsl_phase}, control={control_phase}, persistence={has_runtime_persistence}): {err}"
+        )
+    })?;
+
+    transition
+        .into_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            dsl::MeerkatMachineEffect::VisibleRuntimePhaseResolved {
+                publish_control,
+                selected_raw_phase,
+                visible_phase,
+            } => Some(VisibleRuntimePhasePlan {
+                publish_control,
+                selected_raw_phase: dsl_authority::runtime_state_from_observed_lifecycle_state(
+                    selected_raw_phase,
+                ),
+                visible_phase: dsl_authority::runtime_state_from_observed_lifecycle_state(
+                    visible_phase,
+                ),
+            }),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            format!(
+                "MeerkatMachine emitted no visible runtime phase resolution \
+                 (dsl={dsl_phase}, control={control_phase}, persistence={has_runtime_persistence})"
+            )
+        })
+}
+
+/// Resolve the public lifecycle class for a machine-derived input phase
+/// through generated MeerkatMachine authority.
+pub fn resolve_input_public_lifecycle_projection(
+    input_id: &InputId,
+    phase: InputLifecycleState,
+) -> Result<dsl::InputPublicLifecycleState, String> {
+    let input_key = input_id.to_string();
+    let mut authority = projection_authority();
+    let transition = dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        dsl::MeerkatMachineInput::ResolveInputPublicLifecycle {
+            input_id: input_key.clone(),
+            phase: observed_input_phase(phase),
+        },
+    )
+    .map_err(|err| {
+        format!("MeerkatMachine rejected public lifecycle projection for '{input_id}': {err}")
+    })?;
+
+    transition
+        .into_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            dsl::MeerkatMachineEffect::InputPublicLifecycleResolved { input_id, phase }
+                if input_id == input_key =>
+            {
+                Some(phase)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| {
+            format!("MeerkatMachine emitted no public lifecycle projection for '{input_id}'")
+        })
+}
+
+/// Resolve public lifecycle and terminal result classes for a machine-derived
+/// input-state seed through generated MeerkatMachine authority.
+pub fn resolve_input_public_state_projection(
+    input_id: &InputId,
+    seed: &InputStateSeed,
+) -> Result<InputPublicStateProjection, String> {
+    let lifecycle_state = resolve_input_public_lifecycle_projection(input_id, seed.phase)?;
+    let terminal_outcome = resolve_input_public_terminal_projection(input_id, seed)?;
+    Ok(InputPublicStateProjection {
+        lifecycle_state,
+        terminal_outcome,
+    })
+}
+
+pub(crate) fn input_seed_behavioral_terminality_via_authority(
+    input_id: &InputId,
+    seed: &InputStateSeed,
+) -> Result<bool, String> {
+    classify_input_behavioral_terminality(input_id, seed.phase, seed.terminal_outcome.as_ref())
+}
+
+pub(crate) fn input_phase_behavioral_terminality_via_authority(
+    input_id: &InputId,
+    phase: InputLifecycleState,
+    terminal_outcome: Option<InputTerminalOutcome>,
+) -> Result<bool, String> {
+    classify_input_behavioral_terminality(input_id, phase, terminal_outcome.as_ref())
+}
+
+/// Authorize DSL-owned input-state seed facts before they are written to a
+/// runtime store.
+pub(crate) fn authorize_stored_input_state_seed(
+    input_id: &InputId,
+    seed: &InputStateSeed,
+) -> Result<(), String> {
+    let input_key = input_id.to_string();
+    let (terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count) =
+        input_seed_terminal_parts(seed)?;
+    let mut authority = projection_authority();
+    let transition = dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        dsl::MeerkatMachineInput::AuthorizeStoredInputStateSeed {
+            input_id: input_key.clone(),
+            phase: observed_input_phase(seed.phase),
+            terminal_kind,
+            superseded_by,
+            aggregate_id,
+            abandon_reason,
+            abandon_attempt_count,
+            attempt_count: u64::from(seed.attempt_count),
+            run_id: seed
+                .last_run_id
+                .as_ref()
+                .map(std::string::ToString::to_string),
+            boundary_sequence: seed.last_boundary_sequence,
+            admission_sequence: seed.admission_sequence,
+            recovery_lane: seed.recovery_lane.map(dsl::InputLane::from),
+        },
+    )
+    .map_err(|err| {
+        format!("MeerkatMachine rejected stored input-state seed for '{input_id}': {err}")
+    })?;
+
+    transition
+        .into_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            dsl::MeerkatMachineEffect::StoredInputStateSeedAuthorized { input_id }
+                if input_id == input_key =>
+            {
+                Some(())
+            }
+            _ => None,
+        })
+        .ok_or_else(|| {
+            format!("MeerkatMachine emitted no stored input-state seed authority for '{input_id}'")
+        })
+}
+
+fn classify_input_behavioral_terminality(
+    input_id: &InputId,
+    phase: InputLifecycleState,
+    terminal_outcome: Option<&InputTerminalOutcome>,
+) -> Result<bool, String> {
+    let input_key = input_id.to_string();
+    let (terminal_kind, abandon_reason) = input_terminality_parts(terminal_outcome);
+    let mut authority = projection_authority();
+    let transition = dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        dsl::MeerkatMachineInput::ClassifyInputTerminality {
+            input_id: input_key.clone(),
+            phase: observed_input_phase(phase),
+            terminal_kind,
+            abandon_reason,
+        },
+    )
+    .map_err(|err| {
+        format!("MeerkatMachine rejected behavioral input terminality for '{input_id}': {err}")
+    })?;
+
+    let mut terminality = None;
+    for effect in transition.into_effects() {
+        match effect {
+            dsl::MeerkatMachineEffect::InputBehavioralTerminalityResolved {
+                input_id,
+                terminal,
+            } if input_id == input_key => terminality = Some(terminal),
+            other => {
+                return Err(format!(
+                    "MeerkatMachine emitted unexpected behavioral input terminality effect for '{input_id}': {other:?}"
+                ));
+            }
+        }
+    }
+    terminality.ok_or_else(|| {
+        format!("MeerkatMachine emitted no behavioral input terminality for '{input_id}'")
+    })
+}
+
+fn resolve_input_public_terminal_projection(
+    input_id: &InputId,
+    seed: &InputStateSeed,
+) -> Result<Option<dsl::InputPublicTerminalOutcome>, String> {
+    let input_key = input_id.to_string();
+    let (terminal_kind, abandon_reason) = input_terminality_parts(seed.terminal_outcome.as_ref());
+    let mut authority = projection_authority();
+    let transition = dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        dsl::MeerkatMachineInput::ResolveInputPublicTerminalOutcome {
+            input_id: input_key.clone(),
+            phase: observed_input_phase(seed.phase),
+            terminal_kind,
+            abandon_reason,
+        },
+    )
+    .map_err(|err| {
+        format!("MeerkatMachine rejected public terminal projection for '{input_id}': {err}")
+    })?;
+
+    transition
+        .into_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            dsl::MeerkatMachineEffect::InputPublicTerminalOutcomeResolved {
+                input_id,
+                terminal_outcome,
+            } if input_id == input_key => Some(terminal_outcome),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            format!("MeerkatMachine emitted no public terminal projection for '{input_id}'")
+        })
+}
+
+fn projection_authority() -> dsl::MeerkatMachineAuthority {
+    dsl_authority::new_initialized_authority("projection authority must initialize")
+}
+
+#[cfg(feature = "live")]
+fn live_unbound_rejection_authority() -> crate::driver::ephemeral::SharedIngressDslAuthority {
+    Arc::new(std::sync::Mutex::new(
+        dsl_authority::new_initialized_authority(
+            "live unbound rejection authority must initialize",
+        ),
+    ))
+}
+
+fn observed_input_phase(phase: InputLifecycleState) -> dsl::RecoveredInputObservedPhase {
+    match phase {
+        InputLifecycleState::Accepted => dsl::RecoveredInputObservedPhase::Accepted,
+        InputLifecycleState::Queued => dsl::RecoveredInputObservedPhase::Queued,
+        InputLifecycleState::Staged => dsl::RecoveredInputObservedPhase::Staged,
+        InputLifecycleState::Applied => dsl::RecoveredInputObservedPhase::Applied,
+        InputLifecycleState::AppliedPendingConsumption => {
+            dsl::RecoveredInputObservedPhase::AppliedPendingConsumption
+        }
+        InputLifecycleState::Consumed => dsl::RecoveredInputObservedPhase::Consumed,
+        InputLifecycleState::Superseded => dsl::RecoveredInputObservedPhase::Superseded,
+        InputLifecycleState::Coalesced => dsl::RecoveredInputObservedPhase::Coalesced,
+        InputLifecycleState::Abandoned => dsl::RecoveredInputObservedPhase::Abandoned,
+    }
+}
+
+type InputSeedTerminalParts = (
+    Option<dsl::InputTerminalKind>,
+    Option<String>,
+    Option<String>,
+    Option<dsl::InputAbandonReason>,
+    u64,
+);
+
+fn input_seed_terminal_parts(seed: &InputStateSeed) -> Result<InputSeedTerminalParts, String> {
+    match seed.terminal_outcome.as_ref() {
+        None => Ok((None, None, None, None, 0)),
+        Some(InputTerminalOutcome::Consumed) => {
+            Ok((Some(dsl::InputTerminalKind::Consumed), None, None, None, 0))
+        }
+        Some(InputTerminalOutcome::Superseded { superseded_by }) => Ok((
+            Some(dsl::InputTerminalKind::Superseded),
+            Some(superseded_by.to_string()),
+            None,
+            None,
+            0,
+        )),
+        Some(InputTerminalOutcome::Coalesced { aggregate_id }) => Ok((
+            Some(dsl::InputTerminalKind::Coalesced),
+            None,
+            Some(aggregate_id.to_string()),
+            None,
+            0,
+        )),
+        Some(InputTerminalOutcome::Abandoned { reason }) => {
+            let abandon_attempt_count = match reason {
+                InputAbandonReason::MaxAttemptsExhausted { attempts } => u64::from(*attempts),
+                _ => u64::from(seed.attempt_count),
+            };
+            Ok((
+                Some(dsl::InputTerminalKind::Abandoned),
+                None,
+                None,
+                input_terminality_parts(seed.terminal_outcome.as_ref()).1,
+                abandon_attempt_count,
+            ))
+        }
+    }
+}
+
+fn input_terminality_parts(
+    outcome: Option<&InputTerminalOutcome>,
+) -> (
+    Option<dsl::InputTerminalKind>,
+    Option<dsl::InputAbandonReason>,
+) {
+    match outcome {
+        None => (None, None),
+        Some(InputTerminalOutcome::Consumed) => (Some(dsl::InputTerminalKind::Consumed), None),
+        Some(InputTerminalOutcome::Superseded { .. }) => {
+            (Some(dsl::InputTerminalKind::Superseded), None)
+        }
+        Some(InputTerminalOutcome::Coalesced { .. }) => {
+            (Some(dsl::InputTerminalKind::Coalesced), None)
+        }
+        Some(InputTerminalOutcome::Abandoned { reason }) => (
+            Some(dsl::InputTerminalKind::Abandoned),
+            Some(match reason {
+                InputAbandonReason::Retired => dsl::InputAbandonReason::Retired,
+                InputAbandonReason::Reset => dsl::InputAbandonReason::Reset,
+                InputAbandonReason::Stopped => dsl::InputAbandonReason::Stopped,
+                InputAbandonReason::Destroyed => dsl::InputAbandonReason::Destroyed,
+                InputAbandonReason::Cancelled => dsl::InputAbandonReason::Cancelled,
+                InputAbandonReason::MaxAttemptsExhausted { .. } => {
+                    dsl::InputAbandonReason::MaxAttemptsExhausted
+                }
+            }),
+        ),
+    }
 }
 
 #[derive(Debug, Default)]
@@ -119,6 +796,14 @@ fn runtime_stores_share_authority(a: &Arc<dyn RuntimeStore>, b: &Arc<dyn Runtime
         (Some(a), Some(b)) => a == b,
         _ => Arc::ptr_eq(a, b),
     }
+}
+
+fn generated_runtime_auth_lease_handle(
+    handle: Arc<crate::handles::RuntimeAuthLeaseHandle>,
+) -> meerkat_core::handles::GeneratedAuthLeaseHandle {
+    #[allow(clippy::expect_used)]
+    crate::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(handle)
+        .expect("runtime AuthLeaseHandle must be certified by generated AuthMachine authority")
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -198,93 +883,6 @@ impl BlobStore for UnavailableBlobStore {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-struct UnavailableOAuthFlowAuthority;
-
-#[cfg(not(target_arch = "wasm32"))]
-impl UnavailableOAuthFlowAuthority {
-    fn rejected(operation: &'static str) -> meerkat_auth_core::oauth_flow::OAuthFlowError {
-        meerkat_auth_core::oauth_flow::OAuthFlowError::LifecycleRejected {
-            operation,
-            detail: "custom auth lease handle does not provide a runtime OAuth flow authority"
-                .to_string(),
-        }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl meerkat_auth_core::oauth_flow::OAuthFlowAuthority for UnavailableOAuthFlowAuthority {
-    fn start(
-        &self,
-        _target: meerkat_core::AuthBindingRef,
-        _provider: meerkat_auth_core::oauth_flow::OAuthProviderIdentity,
-        _redirect_uri: String,
-        _pkce_verifier: String,
-    ) -> Result<String, meerkat_auth_core::oauth_flow::OAuthFlowError> {
-        Err(Self::rejected("admit_oauth_browser_flow"))
-    }
-
-    fn verify(
-        &self,
-        _state: &str,
-        _target: &meerkat_core::AuthBindingRef,
-        _provider: meerkat_auth_core::oauth_flow::OAuthProviderIdentity,
-        _redirect_uri: &str,
-    ) -> Result<
-        meerkat_auth_core::oauth_flow::OAuthFlowRecord,
-        meerkat_auth_core::oauth_flow::OAuthFlowError,
-    > {
-        Err(Self::rejected("verify_oauth_browser_flow"))
-    }
-
-    fn consume(
-        &self,
-        _state: &str,
-        _target: &meerkat_core::AuthBindingRef,
-        _provider: meerkat_auth_core::oauth_flow::OAuthProviderIdentity,
-        _redirect_uri: &str,
-    ) -> Result<
-        meerkat_auth_core::oauth_flow::OAuthFlowRecord,
-        meerkat_auth_core::oauth_flow::OAuthFlowError,
-    > {
-        Err(Self::rejected("consume_oauth_browser_flow"))
-    }
-
-    fn admit_device_code(
-        &self,
-        _target: meerkat_core::AuthBindingRef,
-        _provider: meerkat_auth_core::oauth_flow::OAuthProviderIdentity,
-        _device_code: String,
-        _expires_in: std::time::Duration,
-    ) -> Result<(), meerkat_auth_core::oauth_flow::OAuthFlowError> {
-        Err(Self::rejected("admit_oauth_device_flow"))
-    }
-
-    fn verify_device_code(
-        &self,
-        _device_code: &str,
-        _target: &meerkat_core::AuthBindingRef,
-        _provider: meerkat_auth_core::oauth_flow::OAuthProviderIdentity,
-    ) -> Result<
-        meerkat_auth_core::oauth_flow::OAuthDeviceFlowRecord,
-        meerkat_auth_core::oauth_flow::OAuthFlowError,
-    > {
-        Err(Self::rejected("verify_oauth_device_flow"))
-    }
-
-    fn begin_device_code_poll(
-        &self,
-        _device_code: &str,
-        _target: &meerkat_core::AuthBindingRef,
-        _provider: meerkat_auth_core::oauth_flow::OAuthProviderIdentity,
-    ) -> Result<
-        meerkat_auth_core::oauth_flow::OAuthDevicePollLease,
-        meerkat_auth_core::oauth_flow::OAuthFlowError,
-    > {
-        Err(Self::rejected("begin_oauth_device_poll"))
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 type MeerkatMachineCommandFuture<'a> = Pin<
     Box<
         dyn Future<Output = Result<MeerkatMachineCommandResult, MeerkatMachineCommandError>>
@@ -303,12 +901,11 @@ pub(crate) use driver::{
     commit_runtime_loop_run, fail_machine_run, fail_runtime_loop_run,
     machine_apply_run_return_projection, machine_batch_primitive_projections,
     machine_batch_runtime_semantics, machine_begin_run, machine_commit_prepared_destroy,
-    machine_commit_service_turn_terminal_receipt, machine_executor_attach_projection,
-    machine_input_boundary, machine_prepare_bindings_projection, machine_prepare_destroy,
-    machine_recover_ephemeral_driver, machine_recover_persistent_driver,
+    machine_commit_service_turn_terminal_receipt, machine_prepare_bindings_projection,
+    machine_prepare_destroy, machine_recover_ephemeral_driver, machine_recover_persistent_driver,
     machine_recycle_preserving_work, machine_reset, machine_retire,
-    machine_select_runtime_loop_batch, machine_stop_runtime, machine_unregister_session_projection,
-    prepare_runtime_loop_batch_start, rollback_runtime_loop_run_after_boundary_commit_failure,
+    machine_select_runtime_loop_batch, machine_stop_runtime, prepare_runtime_loop_batch_start,
+    rollback_runtime_loop_run_after_boundary_commit_failure,
 };
 
 pub(crate) mod driver;
@@ -336,22 +933,25 @@ pub use comms_drain::{
     CommsDrainMode, CommsDrainPhase, DrainExitReason, PeerEndpointStageError, PeerIngressOwner,
     SupervisorBinding, SupervisorBindingStageError,
 };
-pub(crate) use comms_drain::{CommsDrainSlot, abort_slot};
+pub(crate) use comms_drain::{
+    CommsDrainSlot, SupervisorAuthorizeAdmission, SupervisorBindAdmission,
+    SupervisorBridgeCommandAdmission, abort_slot,
+};
 pub(crate) use dsl_effects::{DslTransitionEffects, apply_dsl_transition_on_authority};
 pub(crate) use visibility::MachineToolVisibilityOwner;
 
 struct StagedSessionDslInput {
-    previous_state: Box<dsl::MeerkatMachineState>,
+    previous_snapshot: dsl::MeerkatMachineAuthoritySnapshot,
+    committed_snapshot: dsl::MeerkatMachineAuthoritySnapshot,
     effects: DslTransitionEffects,
 }
 
 #[derive(Clone, Copy)]
 enum CommittedEffectDispatchFailure {
     PreserveCommittedDslState,
-    RestorePreviousDslState,
 }
 
-/// Per-session state: driver + registration phase.
+/// Per-session state: driver + generated authority binding + shell handles.
 struct RuntimeSessionEntry {
     /// Canonical runtime control-plane identity for this registered session.
     runtime_id: LogicalRuntimeId,
@@ -385,15 +985,11 @@ struct RuntimeSessionEntry {
     completions: SharedCompletionRegistry,
     /// Canonical durable visibility owner for this session.
     tool_visibility_owner: Arc<MachineToolVisibilityOwner>,
-    /// Machine-owned current durable/live LLM identity for the registered session.
-    current_llm_identity: Option<meerkat_core::SessionLlmIdentity>,
-    /// Machine-owned current capability surface for the registered session.
-    current_capability_surface: Option<SessionLlmCapabilitySurface>,
-    /// Whether the machine has a resolved capability surface for the current identity.
-    capability_surface_status: SessionLlmCapabilitySurfaceStatus,
-    /// Registration phase — explicit type-level distinction between
-    /// "registered but inert" and "executor attached."
-    phase: RegistrationPhase,
+    /// Runtime-loop channel publication slot.
+    ///
+    /// This is mechanical shell state only. The generated `MeerkatMachine`
+    /// `registration_phase` is the semantic executor registration authority.
+    attachment_slot: RuntimeLoopAttachmentSlot,
     /// Temporary live interrupt capability for prepared, session-owned turns
     /// that run before the runtime loop attachment is published.
     provisional_interrupt_handle:
@@ -432,22 +1028,10 @@ struct RuntimeLoopAttachment {
     _loop_handle: tokio::task::JoinHandle<()>,
 }
 
-/// Explicit registration phase — the type-level distinction between
-/// "registered but inert," "attachment in progress," and "executor attached."
-///
-/// Replaces the implicit `Option<RuntimeLoopAttachment>` discriminant
-/// (Dogma §8: Option must not hide ownership uncertainty).
-enum RegistrationPhase {
-    /// Registered via `prepare_bindings()`. No executor — inputs queue
-    /// but are not processed until an executor attaches.
-    Queuing,
-    /// `ensure_session_with_executor()` is in progress — another task is
-    /// wiring the runtime loop. Concurrent callers must treat this as
-    /// "attachment pending" and not race a second loop spawn.
-    Attaching,
-    /// Executor attached with live channels. Inputs are processed
-    /// by the RuntimeLoop.
-    Active(RuntimeLoopAttachment),
+/// Mechanical runtime-loop channel slot.
+enum RuntimeLoopAttachmentSlot {
+    Empty,
+    Attached(RuntimeLoopAttachment),
 }
 
 impl RuntimeSessionEntry {
@@ -462,25 +1046,65 @@ impl RuntimeSessionEntry {
     }
 
     fn attachment_is_live(&self) -> bool {
-        match &self.phase {
-            RegistrationPhase::Active(attachment) => {
+        match &self.attachment_slot {
+            RuntimeLoopAttachmentSlot::Attached(attachment) => {
                 !attachment.wake_tx.is_closed() && !attachment.effect_tx.is_closed()
             }
-            RegistrationPhase::Queuing | RegistrationPhase::Attaching => false,
+            RuntimeLoopAttachmentSlot::Empty => false,
         }
     }
 
-    /// Returns `true` if an executor is attached with live channels, OR if
-    /// attachment is in progress (another task is wiring the loop).
-    /// Used by external-facing queries (`session_has_executor`) to prevent
-    /// concurrent callers from racing a second loop spawn.
-    fn has_attachment_or_attaching(&self) -> bool {
-        matches!(self.phase, RegistrationPhase::Attaching) || self.attachment_is_live()
+    fn generated_executor_registration_active(&self) -> bool {
+        let authority = self
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        matches!(
+            authority.state().registration_phase,
+            dsl::RegistrationPhase::Active
+        )
+    }
+
+    fn generated_stop_deferred(&self) -> bool {
+        self.dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            .runtime_stop_deferred
+    }
+
+    fn stage_generated_executor_registration_claim(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<StagedSessionDslInput, String> {
+        let staged = MeerkatMachine::stage_dsl_transition_on_authority(
+            &self.dsl_authority,
+            dsl::MeerkatMachineInput::EnsureSessionWithExecutor {
+                session_id: dsl::SessionId::from_domain(session_id),
+            },
+            "EnsureSessionWithExecutor",
+        )?;
+        if self.generated_executor_registration_active() {
+            Ok(staged)
+        } else {
+            let mut authority = self
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            authority.restore_snapshot(staged.previous_snapshot);
+            Err("generated MeerkatMachine did not grant active executor registration".into())
+        }
+    }
+
+    fn stage_generated_executor_exit_observation(&self) -> Result<StagedSessionDslInput, String> {
+        MeerkatMachine::stage_runtime_internal_dsl_transition_on_authority(
+            &self.dsl_authority,
+            crate::meerkat_machine_types::MeerkatMachineFieldlessRuntimeInternalInput::RuntimeExecutorExited,
+        )
     }
 
     /// Returns `true` only if the executor is fully attached with live channels.
-    /// Used by internal publish logic within `ensure_session_with_executor`
-    /// where the caller itself may have set `Attaching`.
+    /// Used by internal publish logic within `ensure_session_with_executor`.
     fn has_live_attachment(&self) -> bool {
         self.attachment_is_live()
     }
@@ -494,7 +1118,7 @@ impl RuntimeSessionEntry {
         loop_handle: tokio::task::JoinHandle<()>,
     ) {
         self.provisional_interrupt_handle = None;
-        self.phase = RegistrationPhase::Active(RuntimeLoopAttachment {
+        self.attachment_slot = RuntimeLoopAttachmentSlot::Attached(RuntimeLoopAttachment {
             wake_tx,
             effect_tx,
             boundary_handle,
@@ -504,18 +1128,18 @@ impl RuntimeSessionEntry {
     }
 
     fn clear_dead_attachment(&mut self) -> bool {
-        if matches!(self.phase, RegistrationPhase::Active(_)) && !self.attachment_is_live() {
-            // Don't regress to Queuing if another task is mid-attach;
-            // Active with dead channels goes back to Queuing for retry.
-            self.phase = RegistrationPhase::Queuing;
+        if matches!(self.attachment_slot, RuntimeLoopAttachmentSlot::Attached(_))
+            && !self.attachment_is_live()
+        {
+            self.attachment_slot = RuntimeLoopAttachmentSlot::Empty;
             return true;
         }
         false
     }
 
     fn wake_sender(&self) -> Option<mpsc::Sender<()>> {
-        match &self.phase {
-            RegistrationPhase::Active(attachment)
+        match &self.attachment_slot {
+            RuntimeLoopAttachmentSlot::Attached(attachment)
                 if !attachment.wake_tx.is_closed() && !attachment.effect_tx.is_closed() =>
             {
                 Some(attachment.wake_tx.clone())
@@ -525,8 +1149,8 @@ impl RuntimeSessionEntry {
     }
 
     fn effect_sender(&self) -> Option<mpsc::Sender<crate::effect::RuntimeEffect>> {
-        match &self.phase {
-            RegistrationPhase::Active(attachment)
+        match &self.attachment_slot {
+            RuntimeLoopAttachmentSlot::Attached(attachment)
                 if !attachment.wake_tx.is_closed() && !attachment.effect_tx.is_closed() =>
             {
                 Some(attachment.effect_tx.clone())
@@ -538,8 +1162,8 @@ impl RuntimeSessionEntry {
     fn boundary_handle(
         &self,
     ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>> {
-        match &self.phase {
-            RegistrationPhase::Active(attachment)
+        match &self.attachment_slot {
+            RuntimeLoopAttachmentSlot::Attached(attachment)
                 if !attachment.wake_tx.is_closed() && !attachment.effect_tx.is_closed() =>
             {
                 attachment.boundary_handle.clone()
@@ -551,8 +1175,8 @@ impl RuntimeSessionEntry {
     fn interrupt_handle(
         &self,
     ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>> {
-        match &self.phase {
-            RegistrationPhase::Active(attachment)
+        match &self.attachment_slot {
+            RuntimeLoopAttachmentSlot::Attached(attachment)
                 if !attachment.wake_tx.is_closed() && !attachment.effect_tx.is_closed() =>
             {
                 attachment.interrupt_handle.clone()
@@ -584,6 +1208,97 @@ impl MeerkatMachine {
             .map(|entry| Arc::clone(&entry.mutation_gate))
     }
 
+    async fn lock_current_session_mutation_gate(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<crate::tokio::sync::OwnedMutexGuard<()>> {
+        loop {
+            let gate = self.session_mutation_gate(session_id).await?;
+            let gate_guard = Arc::clone(&gate).lock_owned().await;
+            let sessions = self.sessions.read().await;
+            let entry = sessions.get(session_id)?;
+            if Arc::ptr_eq(&entry.mutation_gate, &gate) {
+                return Some(gate_guard);
+            }
+        }
+    }
+
+    pub(crate) async fn lock_current_session_driver_gate(
+        &self,
+        session_id: &SessionId,
+        driver: &SharedDriver,
+    ) -> Result<crate::tokio::sync::OwnedMutexGuard<()>, RuntimeDriverError> {
+        let gate_guard = self
+            .lock_current_session_mutation_gate(session_id)
+            .await
+            .ok_or(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })?;
+        {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            if !Arc::ptr_eq(&entry.driver, driver) {
+                return Err(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                });
+            }
+        }
+        Ok(gate_guard)
+    }
+
+    pub(crate) async fn lock_current_runtime_loop_driver_authority(
+        &self,
+        session_id: &SessionId,
+        driver: &SharedDriver,
+    ) -> Result<crate::tokio::sync::OwnedMutexGuard<()>, RuntimeDriverError> {
+        let gate_guard = self
+            .lock_current_session_driver_gate(session_id, driver)
+            .await?;
+        {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            if !entry.generated_executor_registration_active() {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason:
+                        "generated MeerkatMachine has no active runtime-loop executor registration"
+                            .to_string(),
+                });
+            }
+        }
+        Ok(gate_guard)
+    }
+
+    async fn current_session_driver_with_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(SharedDriver, crate::tokio::sync::OwnedMutexGuard<()>), RuntimeDriverError> {
+        let gate_guard = self
+            .lock_current_session_mutation_gate(session_id)
+            .await
+            .ok_or(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })?;
+        let driver = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?
+                .driver
+                .clone()
+        };
+        Ok((driver, gate_guard))
+    }
+
     async fn session_dsl_authority(
         &self,
         session_id: &SessionId,
@@ -600,14 +1315,36 @@ impl MeerkatMachine {
             })
     }
 
+    /// Test-support: install the session's generated peer-comms handle (and its
+    /// owner token) onto a comms runtime, so the runtime accepts generated trust
+    /// mutations minted from THIS adapter's session dsl authority. Mirrors what
+    /// `prepare_session_runtime_bindings` does in production via
+    /// `SessionRuntimeBindings`, for tests/harnesses that construct external
+    /// member runtimes directly (e.g. the external-TCP production-drain smoke
+    /// lane). Gated behind `test-support` so it never reaches a production build.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn test_install_session_peer_comms_handle_on_runtime(
+        &self,
+        session_id: &SessionId,
+        runtime: &(dyn meerkat_core::handles::PeerCommsInstallTarget + '_),
+    ) -> Result<(), String> {
+        let dsl = self
+            .session_dsl_authority(session_id)
+            .await
+            .map_err(|error| format!("session dsl authority unavailable: {error}"))?;
+        let handle = std::sync::Arc::new(crate::handles::HandleDslAuthority::from_shared(dsl));
+        crate::handles::RuntimePeerCommsHandle::install_generated_on(handle, runtime)
+    }
+
     fn preview_dsl_input_on_state(
         state: &dsl::MeerkatMachineState,
         input: dsl::MeerkatMachineInput,
         context: &str,
     ) -> Result<Vec<dsl::MeerkatMachineEffect>, String> {
-        let mut preview = dsl::MeerkatMachineAuthority::from_state(state.clone());
+        let mut preview = dsl::MeerkatMachineAuthority::recover_from_state(state.clone())
+            .map_err(|err| dsl_authority::map_error(err, context))?;
         dsl::MeerkatMachineMutator::apply(&mut preview, input)
-            .map(|transition| transition.effects)
+            .map(|transition| transition.into_effects())
             .map_err(|err| dsl_authority::map_error(err, context))
     }
 
@@ -622,7 +1359,7 @@ impl MeerkatMachine {
             let authority = authority
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            authority.state.clone()
+            authority.state().clone()
         };
         Self::preview_dsl_input_on_state(&state, input, context)
     }
@@ -638,7 +1375,7 @@ impl MeerkatMachine {
         let authority = authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Ok(authority.state.clone())
+        Ok(authority.state().clone())
     }
 
     async fn commit_session_dsl_transition(
@@ -651,7 +1388,7 @@ impl MeerkatMachine {
             session_id,
             staged,
             context,
-            CommittedEffectDispatchFailure::RestorePreviousDslState,
+            CommittedEffectDispatchFailure::PreserveCommittedDslState,
         )
         .await
     }
@@ -673,7 +1410,7 @@ impl MeerkatMachine {
 
     async fn commit_session_dsl_transition_with_dispatch_failure(
         &self,
-        session_id: &SessionId,
+        _session_id: &SessionId,
         staged: StagedSessionDslInput,
         context: &str,
         dispatch_failure: CommittedEffectDispatchFailure,
@@ -682,13 +1419,7 @@ impl MeerkatMachine {
             .dispatch_routed_signals_from_effects(&staged.effects)
             .await
         {
-            match dispatch_failure {
-                CommittedEffectDispatchFailure::PreserveCommittedDslState => {}
-                CommittedEffectDispatchFailure::RestorePreviousDslState => {
-                    self.restore_session_dsl_state(session_id, staged.previous_state)
-                        .await;
-                }
-            }
+            let CommittedEffectDispatchFailure::PreserveCommittedDslState = dispatch_failure;
             return Err(format!(
                 "DSL authority ({context}): committed effect dispatch failed: {error}"
             ));
@@ -721,7 +1452,14 @@ impl MeerkatMachine {
     async fn clear_dead_runtime_attachment(&self, session_id: &SessionId) {
         let mut sessions = self.sessions.write().await;
         if let Some(entry) = sessions.get_mut(session_id) {
-            entry.clear_dead_attachment();
+            let cleared = entry.clear_dead_attachment();
+            if cleared && let Err(error) = entry.stage_generated_executor_exit_observation() {
+                tracing::warn!(
+                    %session_id,
+                    error = %error,
+                    "generated MeerkatMachine rejected executor-exit observation while clearing dead attachment"
+                );
+            }
         }
     }
 
@@ -767,21 +1505,50 @@ impl MeerkatMachine {
     async fn restore_session_dsl_state(
         &self,
         session_id: &SessionId,
-        state: Box<dsl::MeerkatMachineState>,
+        snapshot: dsl::MeerkatMachineAuthoritySnapshot,
     ) {
         if let Ok(authority) = self.session_dsl_authority(session_id).await {
-            Self::restore_dsl_authority_state(&authority, state);
+            Self::restore_dsl_authority_snapshot(&authority, snapshot);
         }
     }
 
-    fn restore_dsl_authority_state(
-        authority: &crate::driver::ephemeral::SharedIngressDslAuthority,
-        state: Box<dsl::MeerkatMachineState>,
+    async fn restore_session_dsl_state_if_current(
+        &self,
+        session_id: &SessionId,
+        expected_current: dsl::MeerkatMachineAuthoritySnapshot,
+        restore: dsl::MeerkatMachineAuthoritySnapshot,
+    ) -> bool {
+        let Ok(authority) = self.session_dsl_authority(session_id).await else {
+            return false;
+        };
+        Self::restore_dsl_authority_snapshot_if_current(&authority, expected_current, restore)
+    }
+
+    fn restore_dsl_authority_snapshot(
+        authority: &Arc<std::sync::Mutex<dsl::MeerkatMachineAuthority>>,
+        snapshot: dsl::MeerkatMachineAuthoritySnapshot,
     ) {
         let mut authority = authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *authority = dsl::MeerkatMachineAuthority::from_state(*state);
+        authority.restore_snapshot(snapshot);
+    }
+
+    fn restore_dsl_authority_snapshot_if_current(
+        authority: &Arc<std::sync::Mutex<dsl::MeerkatMachineAuthority>>,
+        expected_current: dsl::MeerkatMachineAuthoritySnapshot,
+        restore: dsl::MeerkatMachineAuthoritySnapshot,
+    ) -> bool {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = authority.snapshot();
+        if current.state() == expected_current.state() {
+            authority.restore_snapshot(restore);
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -790,6 +1557,502 @@ impl MeerkatMachine {
 #[derive(Debug, Clone, Copy)]
 pub struct MachineSessionControlAuthority {
     _private: (),
+}
+
+#[cfg(feature = "live")]
+struct LiveOpenAdmissionGeneratedAuthorityBridgeToken;
+
+#[cfg(feature = "live")]
+struct LiveCloseResultGeneratedAuthorityBridgeToken;
+
+#[cfg(feature = "live")]
+struct LiveChannelStatusResultGeneratedAuthorityBridgeToken;
+
+#[cfg(feature = "live")]
+static LIVE_OPEN_ADMISSION_GENERATED_AUTHORITY_BRIDGE_TOKEN:
+    LiveOpenAdmissionGeneratedAuthorityBridgeToken = LiveOpenAdmissionGeneratedAuthorityBridgeToken;
+
+#[cfg(feature = "live")]
+static LIVE_CLOSE_RESULT_GENERATED_AUTHORITY_BRIDGE_TOKEN:
+    LiveCloseResultGeneratedAuthorityBridgeToken = LiveCloseResultGeneratedAuthorityBridgeToken;
+
+#[cfg(feature = "live")]
+static LIVE_CHANNEL_STATUS_RESULT_GENERATED_AUTHORITY_BRIDGE_TOKEN:
+    LiveChannelStatusResultGeneratedAuthorityBridgeToken =
+    LiveChannelStatusResultGeneratedAuthorityBridgeToken;
+
+#[cfg(feature = "live")]
+fn live_open_admission_generated_authority_bridge_token()
+-> &'static (dyn std::any::Any + Send + Sync) {
+    &LIVE_OPEN_ADMISSION_GENERATED_AUTHORITY_BRIDGE_TOKEN
+}
+
+#[cfg(feature = "live")]
+fn live_close_result_generated_authority_bridge_token() -> &'static (dyn std::any::Any + Send + Sync)
+{
+    &LIVE_CLOSE_RESULT_GENERATED_AUTHORITY_BRIDGE_TOKEN
+}
+
+#[cfg(feature = "live")]
+fn live_channel_status_result_generated_authority_bridge_token()
+-> &'static (dyn std::any::Any + Send + Sync) {
+    &LIVE_CHANNEL_STATUS_RESULT_GENERATED_AUTHORITY_BRIDGE_TOKEN
+}
+
+#[cfg(feature = "live")]
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!(
+    "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_live_open_admission_",
+    env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub extern "Rust" fn live_open_admission_generated_authority_bridge_token_is_valid(
+    token: &(dyn std::any::Any + Send + Sync),
+) -> bool {
+    token.is::<LiveOpenAdmissionGeneratedAuthorityBridgeToken>()
+}
+
+#[cfg(feature = "live")]
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!(
+    "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_live_close_result_",
+    env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub extern "Rust" fn live_close_result_generated_authority_bridge_token_is_valid(
+    token: &(dyn std::any::Any + Send + Sync),
+) -> bool {
+    token.is::<LiveCloseResultGeneratedAuthorityBridgeToken>()
+}
+
+#[cfg(feature = "live")]
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!(
+    "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_live_channel_status_result_",
+    env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub extern "Rust" fn live_channel_status_result_generated_authority_bridge_token_is_valid(
+    token: &(dyn std::any::Any + Send + Sync),
+) -> bool {
+    token.is::<LiveChannelStatusResultGeneratedAuthorityBridgeToken>()
+}
+
+#[cfg(feature = "live")]
+fn build_live_channel_open_authority(
+    session_id: SessionId,
+    channel_id: meerkat_live::LiveChannelId,
+    sequence: u64,
+) -> Result<meerkat_live::LiveChannelOpenAuthority, String> {
+    #[allow(improper_ctypes_definitions, unsafe_code)]
+    unsafe extern "Rust" {
+        #[link_name = concat!(
+            "__meerkat_live_runtime_generated_live_channel_open_authority_build_v1_",
+            env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+        )]
+        fn live_generated_channel_open_authority_build(
+            token: &'static (dyn std::any::Any + Send + Sync),
+            session_id: SessionId,
+            channel_id: meerkat_live::LiveChannelId,
+            sequence: u64,
+        ) -> Result<meerkat_live::LiveChannelOpenAuthority, String>;
+    }
+    #[allow(unsafe_code)]
+    unsafe {
+        live_generated_channel_open_authority_build(
+            live_open_admission_generated_authority_bridge_token(),
+            session_id,
+            channel_id,
+            sequence,
+        )
+    }
+}
+
+#[cfg(feature = "live")]
+fn build_live_channel_close_commit_authority(
+    channel_id: String,
+    close_sequence: u64,
+) -> Result<meerkat_live::LiveChannelCloseCommitAuthority, String> {
+    #[allow(improper_ctypes_definitions, unsafe_code)]
+    unsafe extern "Rust" {
+        #[link_name = concat!(
+            "__meerkat_live_runtime_generated_live_channel_close_commit_authority_build_v1_",
+            env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+        )]
+        fn live_generated_channel_close_commit_authority_build(
+            token: &'static (dyn std::any::Any + Send + Sync),
+            channel_id: String,
+            close_sequence: u64,
+        ) -> Result<meerkat_live::LiveChannelCloseCommitAuthority, String>;
+    }
+    #[allow(unsafe_code)]
+    unsafe {
+        live_generated_channel_close_commit_authority_build(
+            live_close_result_generated_authority_bridge_token(),
+            channel_id,
+            close_sequence,
+        )
+    }
+}
+
+#[cfg(feature = "live")]
+fn build_live_channel_status_commit_authority(
+    channel_id: String,
+    status_observation_sequence: u64,
+) -> Result<meerkat_live::LiveChannelStatusCommitAuthority, String> {
+    #[allow(improper_ctypes_definitions, unsafe_code)]
+    unsafe extern "Rust" {
+        #[link_name = concat!(
+            "__meerkat_live_runtime_generated_live_channel_status_commit_authority_build_v1_",
+            env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+        )]
+        fn live_generated_channel_status_commit_authority_build(
+            token: &'static (dyn std::any::Any + Send + Sync),
+            channel_id: String,
+            status_observation_sequence: u64,
+        ) -> Result<meerkat_live::LiveChannelStatusCommitAuthority, String>;
+    }
+    #[allow(unsafe_code)]
+    unsafe {
+        live_generated_channel_status_commit_authority_build(
+            live_channel_status_result_generated_authority_bridge_token(),
+            channel_id,
+            status_observation_sequence,
+        )
+    }
+}
+
+/// Generated authority output for `live/open` admission.
+///
+/// Constructed only from `MeerkatMachineEffect::LiveOpenAdmissionResolved`.
+/// The live host accepts this as a typed handoff before materializing
+/// transport resources; it does not decide duplicate-session admission from
+/// its local maps.
+#[derive(Debug, Clone)]
+#[cfg(feature = "live")]
+pub struct LiveOpenAdmissionAuthority {
+    session_id: SessionId,
+    channel_id: meerkat_live::LiveChannelId,
+    admitted: bool,
+    rejection: Option<dsl::LiveOpenAdmissionRejection>,
+    bound_llm_identity: Option<meerkat_core::SessionLlmIdentity>,
+    sequence: u64,
+    channel_open_authority: Option<meerkat_live::LiveChannelOpenAuthority>,
+}
+
+#[cfg(feature = "live")]
+impl LiveOpenAdmissionAuthority {
+    pub(crate) fn from_generated_effect(
+        session_id: SessionId,
+        channel_id: meerkat_live::LiveChannelId,
+        admitted: bool,
+        rejection: Option<dsl::LiveOpenAdmissionRejection>,
+        bound_llm_identity: Option<dsl::SessionLlmIdentity>,
+        sequence: u64,
+    ) -> Result<Self, String> {
+        let bound_llm_identity = match (admitted, bound_llm_identity) {
+            (true, Some(identity)) => Some(identity.try_into()?),
+            (true, None) => {
+                return Err(
+                    "generated live-open admission was admitted without bound LLM identity"
+                        .to_string(),
+                );
+            }
+            (false, _) => None,
+        };
+        let channel_open_authority = if admitted {
+            Some(build_live_channel_open_authority(
+                session_id.clone(),
+                channel_id.clone(),
+                sequence,
+            )?)
+        } else {
+            None
+        };
+        Ok(Self {
+            session_id,
+            channel_id,
+            admitted,
+            rejection,
+            bound_llm_identity,
+            sequence,
+            channel_open_authority,
+        })
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn channel_id(&self) -> &meerkat_live::LiveChannelId {
+        &self.channel_id
+    }
+
+    #[must_use]
+    pub fn admitted(&self) -> bool {
+        self.admitted
+    }
+
+    #[must_use]
+    pub fn rejection(&self) -> Option<dsl::LiveOpenAdmissionRejection> {
+        self.rejection
+    }
+
+    #[must_use]
+    pub fn bound_llm_identity(&self) -> Option<&meerkat_core::SessionLlmIdentity> {
+        self.bound_llm_identity.as_ref()
+    }
+
+    #[must_use]
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    #[must_use]
+    pub fn channel_open_authority(&self) -> Option<&meerkat_live::LiveChannelOpenAuthority> {
+        self.channel_open_authority.as_ref()
+    }
+}
+
+/// Generated authority output for the public `live/refresh` success result.
+///
+/// Constructed only from a `MeerkatMachineEffect::LiveRefreshResultResolved`
+/// emitted after the live adapter command queue has accepted the refresh
+/// handoff. RPC/SDK surfaces project this value to their wire result instead
+/// of classifying the public status from host queue mechanics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "live")]
+pub struct LiveRefreshResultAuthority {
+    pub status: dsl::LiveRefreshPublicStatus,
+    pub refresh_enqueued: bool,
+    pub sequence: u64,
+    pub queue_acceptance_sequence: u64,
+}
+
+/// Generated authority output for the public `live/close` success result.
+///
+/// Constructed only from a `MeerkatMachineEffect::LiveCloseResultResolved`
+/// emitted after the live host supplies typed close-observation evidence.
+#[derive(Debug, Clone)]
+#[cfg(feature = "live")]
+pub struct LiveCloseResultAuthority {
+    pub status: dsl::LiveClosePublicStatus,
+    pub closed: bool,
+    pub sequence: u64,
+    pub close_observation_sequence: u64,
+    channel_close_commit_authority: Option<meerkat_live::LiveChannelCloseCommitAuthority>,
+}
+
+#[cfg(feature = "live")]
+impl LiveCloseResultAuthority {
+    pub(crate) fn from_generated_effect(
+        channel_id: String,
+        status: dsl::LiveClosePublicStatus,
+        closed: bool,
+        sequence: u64,
+        close_observation_sequence: u64,
+    ) -> Result<Self, String> {
+        let channel_close_commit_authority = if closed {
+            Some(build_live_channel_close_commit_authority(
+                channel_id,
+                close_observation_sequence,
+            )?)
+        } else {
+            None
+        };
+        Ok(Self {
+            status,
+            closed,
+            sequence,
+            close_observation_sequence,
+            channel_close_commit_authority,
+        })
+    }
+
+    #[must_use]
+    pub fn channel_close_commit_authority(
+        &self,
+    ) -> Option<&meerkat_live::LiveChannelCloseCommitAuthority> {
+        self.channel_close_commit_authority.as_ref()
+    }
+
+    #[must_use]
+    pub fn into_channel_close_commit_authority(
+        self,
+    ) -> Option<meerkat_live::LiveChannelCloseCommitAuthority> {
+        self.channel_close_commit_authority
+    }
+}
+
+/// Generated authority output for public live command success results.
+///
+/// Constructed only from a `MeerkatMachineEffect::LiveCommandResultResolved`
+/// emitted after the live host supplies typed command queue-acceptance
+/// evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "live")]
+pub struct LiveCommandResultAuthority {
+    pub command: dsl::LiveCommandPublicKind,
+    pub accepted: bool,
+    pub sequence: u64,
+    pub command_acceptance_sequence: u64,
+}
+
+/// Generated authority output for public live command rejection results.
+///
+/// Constructed only from a `MeerkatMachineEffect::LiveCommandRejectionResolved`
+/// emitted after the live host supplies typed rejection evidence. RPC/SDK
+/// surfaces project error classes from this value instead of matching host
+/// errors directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "live")]
+pub struct LiveCommandRejectionAuthority {
+    pub command: dsl::LiveCommandPublicKind,
+    pub rejection: dsl::LiveCommandRejectionReason,
+    pub public_error_class: dsl::LiveCommandRejectionPublicErrorClass,
+    pub sequence: u64,
+}
+
+/// Generated authority output for public live channel control request
+/// rejections.
+///
+/// Constructed only from a
+/// `MeerkatMachineEffect::LiveChannelRequestRejectionResolved` emitted after
+/// the live host supplies typed rejection evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "live")]
+pub struct LiveChannelRequestRejectionAuthority {
+    pub request: dsl::LiveChannelRequestPublicKind,
+    pub rejection: dsl::LiveChannelRequestRejectionReason,
+    pub public_error_class: dsl::LiveChannelRequestRejectionPublicErrorClass,
+    pub sequence: u64,
+}
+
+/// Generated authority output for a WebRTC answer token issued by
+/// MeerkatMachine.
+///
+/// Constructed only from `MeerkatMachineEffect::LiveWebrtcTokenIssued`.
+/// The transport supplies random bearer material, but it is not returned to a
+/// caller until the generated machine records the channel binding and expiry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "live")]
+pub struct LiveWebrtcTokenAuthority {
+    pub token: String,
+    pub expires_at_ms: u64,
+    pub sequence: u64,
+}
+
+/// Generated authority output for WebRTC answer token admission.
+///
+/// Constructed only from
+/// `MeerkatMachineEffect::LiveWebrtcAnswerAdmissionResolved`. RPC signaling
+/// proceeds to peer setup only when this effect admits the token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "live")]
+pub struct LiveWebrtcAnswerAdmissionAuthority {
+    pub admitted: bool,
+    pub rejection: Option<dsl::LiveWebrtcAnswerAdmissionRejection>,
+    pub public_error_class: Option<dsl::LiveChannelRequestRejectionPublicErrorClass>,
+    pub sequence: u64,
+}
+
+/// Generated authority output for the public `live/webrtc/answer` success
+/// class.
+///
+/// Constructed only from
+/// `MeerkatMachineEffect::LiveWebrtcAnswerResultResolved` emitted after the
+/// WebRTC transport supplies answer-observation evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "live")]
+pub struct LiveWebrtcAnswerResultAuthority {
+    pub status: dsl::LiveWebrtcAnswerPublicStatus,
+    pub answered: bool,
+    pub sequence: u64,
+    pub answer_observation_sequence: u64,
+}
+
+/// Generated authority output for a WebSocket transport token issued by
+/// MeerkatMachine.
+///
+/// Constructed only from `MeerkatMachineEffect::LiveWebsocketTokenIssued`.
+/// The WebSocket transport supplies random bearer material, but it is not
+/// returned until generated authority records channel binding and expiry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "live")]
+pub struct LiveWebsocketTokenAuthority {
+    pub token: String,
+    pub expires_at_ms: u64,
+    pub sequence: u64,
+}
+
+/// Generated authority output for WebSocket token admission.
+///
+/// Constructed only from
+/// `MeerkatMachineEffect::LiveWebsocketTokenAdmissionResolved`. The WebSocket
+/// transport upgrade proceeds only when this effect admits the token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "live")]
+pub struct LiveWebsocketTokenAdmissionAuthority {
+    pub admitted: bool,
+    pub rejection: Option<dsl::LiveWebsocketTokenAdmissionRejection>,
+    pub public_error_class: Option<dsl::LiveWebsocketTokenAdmissionPublicErrorClass>,
+    pub sequence: u64,
+}
+
+/// Generated authority output for the public `live/status` result.
+///
+/// Constructed only from a `MeerkatMachineEffect::LiveChannelStatusResolved`
+/// emitted after the live host supplies typed adapter-status observation
+/// evidence.
+#[derive(Debug, Clone)]
+#[cfg(feature = "live")]
+pub struct LiveChannelStatusAuthority {
+    pub status: dsl::LiveChannelPublicStatus,
+    pub sequence: u64,
+    pub status_observation_sequence: u64,
+    pub degradation_reason: Option<dsl::LiveChannelDegradationReason>,
+    pub degradation_detail: Option<String>,
+    pub channel_status_commit_authority: Option<meerkat_live::LiveChannelStatusCommitAuthority>,
+}
+
+#[cfg(feature = "live")]
+impl LiveChannelStatusAuthority {
+    pub(crate) fn from_generated_effect(
+        channel_id: String,
+        status: dsl::LiveChannelPublicStatus,
+        sequence: u64,
+        status_observation_sequence: u64,
+        degradation_reason: Option<dsl::LiveChannelDegradationReason>,
+        degradation_detail: Option<String>,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            status,
+            sequence,
+            status_observation_sequence,
+            degradation_reason,
+            degradation_detail,
+            channel_status_commit_authority: Some(build_live_channel_status_commit_authority(
+                channel_id,
+                status_observation_sequence,
+            )?),
+        })
+    }
+
+    #[must_use]
+    pub fn channel_status_commit_authority(
+        &self,
+    ) -> Option<&meerkat_live::LiveChannelStatusCommitAuthority> {
+        self.channel_status_commit_authority.as_ref()
+    }
+
+    #[must_use]
+    pub fn into_channel_status_commit_authority(
+        self,
+    ) -> Option<meerkat_live::LiveChannelStatusCommitAuthority> {
+        self.channel_status_commit_authority
+    }
 }
 
 /// Session-scoped execution kernel for the Meerkat runtime.
@@ -811,11 +2074,16 @@ pub struct MeerkatMachine {
     llm_reconfigure_host: StdRwLock<Option<Arc<dyn SessionLlmReconfigureHost>>>,
     /// AuthMachine lifecycle authority shared by runtime-backed auth
     /// resolution/refresh paths and public auth-status surfaces.
-    auth_lease: StdRwLock<Arc<dyn meerkat_core::handles::AuthLeaseHandle>>,
+    auth_lease: StdRwLock<meerkat_core::handles::GeneratedAuthLeaseHandle>,
     /// OAuth login-flow lifecycle authority shared by public auth surfaces
     /// that operate through this runtime adapter.
     #[cfg(not(target_arch = "wasm32"))]
     oauth_flows: StdRwLock<Arc<dyn meerkat_auth_core::oauth_flow::OAuthFlowAuthority>>,
+    /// Runtime-scoped generated authority for live control/command rejections
+    /// that cannot be attributed to a session because generated active-channel
+    /// ownership has no binding for the requested channel.
+    #[cfg(feature = "live")]
+    live_unbound_rejection_authority: crate::driver::ephemeral::SharedIngressDslAuthority,
     /// Canonical owner of "this session id is currently active" — replaces
     /// the deleted process-global `SESSION_IDENTITY_CLAIMS` static in the
     /// comms shell (dogma #2). Comms runtimes acquire a typed
@@ -883,7 +2151,7 @@ impl MeerkatMachine {
             std::time::Duration::from_secs(10 * 60),
             Arc::clone(&auth_lease),
         ));
-        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> = auth_lease;
+        let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
         Self {
             sessions: RwLock::new(HashMap::new()),
             mode: RuntimeMode::V9Compliant,
@@ -893,6 +2161,8 @@ impl MeerkatMachine {
             auth_lease: StdRwLock::new(auth_lease),
             #[cfg(not(target_arch = "wasm32"))]
             oauth_flows: StdRwLock::new(oauth_flows),
+            #[cfg(feature = "live")]
+            live_unbound_rejection_authority: live_unbound_rejection_authority(),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
             composition_signal_dispatcher: StdRwLock::new(None),
         }
@@ -910,7 +2180,7 @@ impl MeerkatMachine {
         };
         #[cfg(target_arch = "wasm32")]
         let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
-        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> = auth_lease;
+        let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
         Self {
             sessions: RwLock::new(HashMap::new()),
             mode: RuntimeMode::V9Compliant,
@@ -920,6 +2190,8 @@ impl MeerkatMachine {
             auth_lease: StdRwLock::new(auth_lease),
             #[cfg(not(target_arch = "wasm32"))]
             oauth_flows: StdRwLock::new(oauth_flows),
+            #[cfg(feature = "live")]
+            live_unbound_rejection_authority: live_unbound_rejection_authority(),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
             composition_signal_dispatcher: StdRwLock::new(None),
         }
@@ -941,7 +2213,7 @@ impl MeerkatMachine {
         };
         #[cfg(target_arch = "wasm32")]
         let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
-        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> = auth_lease;
+        let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
         Self {
             sessions: RwLock::new(HashMap::new()),
             mode: RuntimeMode::V9Compliant,
@@ -951,6 +2223,8 @@ impl MeerkatMachine {
             auth_lease: StdRwLock::new(auth_lease),
             #[cfg(not(target_arch = "wasm32"))]
             oauth_flows: StdRwLock::new(oauth_flows),
+            #[cfg(feature = "live")]
+            live_unbound_rejection_authority: live_unbound_rejection_authority(),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
             composition_signal_dispatcher: StdRwLock::new(None),
         }
@@ -959,12 +2233,16 @@ impl MeerkatMachine {
     /// Shared auth lifecycle handle used by all runtime-backed session
     /// bindings created by this adapter.
     pub fn auth_lease_handle(&self) -> Arc<dyn meerkat_core::handles::AuthLeaseHandle> {
-        Arc::clone(
-            &self
-                .auth_lease
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
+        self.generated_auth_lease_handle().clone_handle()
+    }
+
+    /// Generated-authority-certified auth lifecycle handle used at factory and
+    /// resolver seams that must reject arbitrary handwritten handles.
+    pub fn generated_auth_lease_handle(&self) -> meerkat_core::handles::GeneratedAuthLeaseHandle {
+        self.auth_lease
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Install the auth lifecycle authority that public surfaces also read.
@@ -972,45 +2250,26 @@ impl MeerkatMachine {
     /// Surfaces construct the adapter before all state fields are available, so
     /// this setter lets them align the adapter's runtime-backed traffic with
     /// the surface-visible status handle without creating a competing registry.
-    pub fn set_auth_lease_handle(&self, handle: Arc<dyn meerkat_core::handles::AuthLeaseHandle>) {
-        #[cfg(not(target_arch = "wasm32"))]
-        let handle = {
-            let erased: Arc<dyn std::any::Any + Send + Sync> = handle.clone();
-            if let Ok(runtime_handle) =
-                Arc::downcast::<crate::handles::RuntimeAuthLeaseHandle>(erased)
-            {
-                self.set_runtime_auth_lease_handle(runtime_handle);
-                return;
-            }
-            *self
-                .oauth_flows
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                Arc::new(UnavailableOAuthFlowAuthority);
-            handle
-        };
-        *self
-            .auth_lease
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = handle;
+    pub fn set_auth_lease_handle(&self, handle: Arc<crate::handles::RuntimeAuthLeaseHandle>) {
+        self.set_runtime_auth_lease_handle(handle);
     }
 
-    /// Install a custom credential lifecycle handle together with an explicit
-    /// OAuth login-flow authority.
+    /// Install the runtime credential lifecycle handle together with an
+    /// explicit OAuth login-flow authority.
     ///
-    /// This is the opt-in seam for tests/embedders that intentionally want a
-    /// non-runtime credential handle. The plain setter does not silently create
-    /// a second hidden AuthMachine authority for OAuth flow membership.
+    /// The credential side still has to be a generated AuthMachine authority;
+    /// the explicit OAuth authority only controls login-flow test seams.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_auth_lease_handle_with_oauth_flow_authority(
         &self,
-        handle: Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
+        handle: Arc<crate::handles::RuntimeAuthLeaseHandle>,
         oauth_flows: Arc<dyn meerkat_auth_core::oauth_flow::OAuthFlowAuthority>,
     ) {
         *self
             .oauth_flows
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = oauth_flows;
+        let handle = generated_runtime_auth_lease_handle(handle);
         *self
             .auth_lease
             .write()
@@ -1034,7 +2293,7 @@ impl MeerkatMachine {
                     Arc::clone(&handle),
                 ));
         }
-        let handle: Arc<dyn meerkat_core::handles::AuthLeaseHandle> = handle;
+        let handle = generated_runtime_auth_lease_handle(handle);
         *self
             .auth_lease
             .write()
@@ -1092,34 +2351,23 @@ impl MeerkatMachine {
         input: dsl::MeerkatMachineInput,
     ) -> Result<(), String> {
         Self::reject_raw_fieldless_runtime_internal_dsl_input(&input)?;
-        let sessions = self.sessions.read().await;
-        let entry = sessions.get(session_id).ok_or_else(|| {
-            format!(
-                "session `{session_id}` is not registered with this MeerkatMachine; \
-                 cannot deliver routed input"
-            )
-        })?;
-        let authority = Arc::clone(&entry.dsl_authority);
-        drop(sessions);
-
-        let (previous_state, effects) = {
-            let mut guard = authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let previous_state = Box::new(guard.state.clone());
-            let effects = dsl::MeerkatMachineMutator::apply(&mut *guard, input)
-                .map(|transition| transition.effects)
-                .map_err(|err| format!("{err}"))?;
-            (previous_state, effects)
-        };
-        if let Err(error) = self.dispatch_routed_signals_from_effects(&effects).await {
-            self.restore_session_dsl_state(session_id, previous_state)
-                .await;
-            return Err(format!(
-                "routed MeerkatMachine input committed effect dispatch failed: {error}"
-            ));
-        }
-        Ok(())
+        let _gate_guard = self
+            .lock_current_session_mutation_gate(session_id)
+            .await
+            .ok_or_else(|| {
+                format!(
+                    "session `{session_id}` is not registered with this MeerkatMachine; \
+                     cannot deliver routed input"
+                )
+            })?;
+        self.apply_session_dsl_input_with_dispatch_failure(
+            session_id,
+            input,
+            "RoutedMeerkatInput",
+            CommittedEffectDispatchFailure::PreserveCommittedDslState,
+        )
+        .await
+        .map(|_| ())
     }
 
     #[cfg(test)]
@@ -1179,23 +2427,42 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
         runtime_id: &LogicalRuntimeId,
-    ) -> (
-        Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
-        meerkat_core::RuntimeEpochId,
-        Arc<meerkat_core::EpochCursorState>,
-    ) {
+    ) -> Result<
+        (
+            Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
+            meerkat_core::RuntimeEpochId,
+            Arc<meerkat_core::EpochCursorState>,
+        ),
+        RuntimeDriverError,
+    > {
         if let Some(ref store) = self.store {
             match store.load_ops_lifecycle(runtime_id).await {
                 Ok(Some(snapshot)) => {
                     let recovered_epoch = snapshot.epoch_id.clone();
-                    let recovered_cursors = meerkat_core::EpochCursorState::from_recovered(
-                        snapshot.cursors.agent_applied_cursor,
-                        snapshot.cursors.runtime_observed_seq,
-                        snapshot.cursors.runtime_last_injected_seq,
-                    );
                     let recovered_ops_count = snapshot.completion_entries.len();
                     let registry =
-                        crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::from_recovered(snapshot);
+                        match crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::from_recovered(
+                            snapshot,
+                        ) {
+                            Ok(registry) => registry,
+                            Err(err) => {
+                                tracing::error!(
+                                    %session_id,
+                                    %runtime_id,
+                                    error = %err,
+                                    "failed to recover ops lifecycle through generated authority"
+                                );
+                                return Err(RuntimeDriverError::Internal(format!(
+                                    "failed to recover ops lifecycle through generated authority: {err}"
+                                )));
+                            }
+                        };
+                    let recovered_cursor_snapshot = registry.completion_cursor_snapshot();
+                    let recovered_cursors = meerkat_core::EpochCursorState::from_recovered(
+                        recovered_cursor_snapshot.agent_applied_cursor,
+                        recovered_cursor_snapshot.runtime_observed_seq,
+                        recovered_cursor_snapshot.runtime_last_injected_seq,
+                    );
                     tracing::info!(
                         %session_id,
                         %runtime_id,
@@ -1203,40 +2470,49 @@ impl MeerkatMachine {
                         recovered_ops = recovered_ops_count,
                         "ops lifecycle recovered from durable store (same epoch)"
                     );
-                    return (
+                    return Ok((
                         Arc::new(registry),
                         recovered_epoch,
                         Arc::new(recovered_cursors),
-                    );
+                    ));
                 }
                 Ok(None) => {}
                 Err(err) => {
-                    tracing::warn!(
+                    tracing::error!(
                         %session_id,
                         %runtime_id,
                         error = %err,
-                        "failed to load ops lifecycle; epoch rotated"
+                        "failed to load ops lifecycle from durable store"
                     );
-                    return (
-                        Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
-                        meerkat_core::RuntimeEpochId::new(),
-                        Arc::new(meerkat_core::EpochCursorState::new()),
-                    );
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "failed to load ops lifecycle from durable store: {err}"
+                    )));
                 }
             }
             tracing::debug!(%session_id, "no persisted ops lifecycle; fresh epoch");
-            (
+            Ok((
                 Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
                 meerkat_core::RuntimeEpochId::new(),
                 Arc::new(meerkat_core::EpochCursorState::new()),
-            )
+            ))
         } else {
-            (
+            Ok((
                 Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
                 meerkat_core::RuntimeEpochId::new(),
                 Arc::new(meerkat_core::EpochCursorState::new()),
-            )
+            ))
         }
+    }
+
+    fn fresh_ops_state() -> (
+        Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
+        meerkat_core::RuntimeEpochId,
+        Arc<meerkat_core::EpochCursorState>,
+    ) {
+        let registry = Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new());
+        let epoch = meerkat_core::RuntimeEpochId::new();
+        let cursors = Arc::new(meerkat_core::EpochCursorState::new());
+        (registry, epoch, cursors)
     }
 
     #[allow(clippy::large_futures)]
@@ -1311,7 +2587,9 @@ impl MeerkatMachine {
                 | MeerkatMachineCommand::RequestSwitchTurn { .. }
                 | MeerkatMachineCommand::AdmitModelRoutingAssistantTurn { .. }
                 | MeerkatMachineCommand::BeginImageOperation { .. }
+                | MeerkatMachineCommand::DenyImageOperationPlan { .. }
                 | MeerkatMachineCommand::ActivateImageOperationOverride { .. }
+                | MeerkatMachineCommand::ClassifyImageOperationTerminal { .. }
                 | MeerkatMachineCommand::CompleteImageOperation { .. }
                 | MeerkatMachineCommand::RestoreImageOperationOverride { .. }
                 | MeerkatMachineCommand::LoadBoundaryReceipt { .. } => self

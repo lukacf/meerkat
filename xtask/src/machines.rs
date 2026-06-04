@@ -49,6 +49,9 @@ pub struct VerifyArgs {
     /// Validate the canonical registry only and skip TLC execution.
     #[arg(long)]
     skip_tlc: bool,
+    /// Skip TLC for selected broad compositions after drift validation.
+    #[arg(long = "skip-tlc-composition")]
+    skip_tlc_compositions: Vec<String>,
     /// Skip Cargo-backed kernel/owner tests after drift and TLC checks.
     ///
     /// Bazel remote tests run from runfiles, not from a Git checkout, so the
@@ -125,6 +128,8 @@ pub fn machine_verify(args: VerifyArgs) -> Result<()> {
     let selection = registry.select(&args.selection)?;
     let root = repo_root()?;
     let workers = resolve_tlc_workers(args.workers)?;
+    let skip_tlc_compositions =
+        resolve_skip_tlc_compositions(&selection, &args.skip_tlc_compositions)?;
     println!(
         "machine-verify ({:?}): {} machine(s), {} composition(s), tlc={}",
         args.profile,
@@ -139,6 +144,7 @@ pub fn machine_verify(args: VerifyArgs) -> Result<()> {
         !args.skip_cargo_tests,
         args.profile,
         workers,
+        &skip_tlc_compositions,
     )
 }
 
@@ -398,6 +404,7 @@ fn machine_verify_at_root(
     run_cargo_tests: bool,
     profile: VerifyProfile,
     workers: usize,
+    skip_tlc_compositions: &BTreeSet<String>,
 ) -> Result<()> {
     ensure_no_drift(root, selection)?;
 
@@ -421,6 +428,13 @@ fn machine_verify_at_root(
     for composition in &selection.compositions {
         println!("composition: {}", composition.schema.name);
         if run_tlc {
+            if skip_tlc_compositions.contains(&composition.slug) {
+                println!(
+                    "skipping TLC for broad composition {} after drift validation",
+                    composition.schema.name
+                );
+                continue;
+            }
             let main_coverage = maybe_run_tlc_in_dir(
                 &composition_dir(root, &composition.slug),
                 &composition.slug,
@@ -2697,6 +2711,29 @@ fn select_compositions(
         .collect()
 }
 
+fn resolve_skip_tlc_compositions(
+    selection: &Selection,
+    requested: &[String],
+) -> Result<BTreeSet<String>> {
+    if requested.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+
+    requested
+        .iter()
+        .map(|wanted| {
+            selection
+                .compositions
+                .iter()
+                .find(|entry| {
+                    entry.schema.name.as_str() == wanted.as_str() || entry.slug == *wanted
+                })
+                .map(|entry| entry.slug.clone())
+                .ok_or_else(|| anyhow!("unknown selected composition for TLC skip `{wanted}`"))
+        })
+        .collect()
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct TlcCoverageSummary {
     counts_by_operator: BTreeMap<String, TlcCoverageCounts>,
@@ -2976,16 +3013,6 @@ struct OwnerTestSpec {
 
 fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
     const MEERKAT: &[OwnerTestSpec] = &[
-        OwnerTestSpec {
-            package: "meerkat-integration-tests",
-            target: "peer_directory_reachability_kernel",
-            filter: "peer_directory_reachability_kernel_initializes_with_typed_signal",
-        },
-        OwnerTestSpec {
-            package: "meerkat-integration-tests",
-            target: "peer_directory_reachability_kernel",
-            filter: "peer_directory_reachability_kernel_fields_removed_from_state",
-        },
         OwnerTestSpec {
             package: "meerkat-integration-tests",
             target: "session_turn_admission_kernel",

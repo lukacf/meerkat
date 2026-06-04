@@ -17,9 +17,145 @@ use meerkat_comms::identity::{Keypair, Signature};
 use meerkat_comms::runtime::comms_runtime::CommsRuntime;
 use meerkat_comms::types::{Envelope, InboxItem, MessageKind};
 use meerkat_comms::{AdmissionOutcome, DropReason};
-use meerkat_core::comms::{PeerAddress, PeerName, PeerTransport, TrustedPeerDescriptor};
+use meerkat_core::comms::{
+    CommsTrustMutation, CommsTrustMutationResult, PeerAddress, PeerName, PeerTransport,
+    TrustedPeerDescriptor,
+};
 use meerkat_core::{PeerIngressAuthDecision, PeerIngressAuthExemption, SUPERVISOR_BRIDGE_INTENT};
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
+
+type TestMachineAuthority =
+    Arc<Mutex<meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority>>;
+
+struct TestPeerCommsAuthority {
+    authority: TestMachineAuthority,
+    dsl: Arc<meerkat_runtime::HandleDslAuthority>,
+}
+
+impl TestPeerCommsAuthority {
+    fn install(runtime: &CommsRuntime, session_id: &str) -> Self {
+        let authority = Arc::new(Mutex::new(
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineAuthority::new(),
+        ));
+        let local_endpoint = local_endpoint_for(runtime);
+        {
+            let mut guard = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard
+                .apply_signal(
+                    meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize,
+                )
+                .expect("Initialize signal");
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *guard,
+                meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+                    session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(session_id),
+                },
+            )
+            .expect("RegisterSession input");
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *guard,
+                meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint {
+                    endpoint: local_endpoint,
+                },
+            )
+            .expect("PublishLocalEndpoint input");
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *guard,
+                meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::Prepare {
+                    session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(session_id),
+                    run_id: meerkat_runtime::meerkat_machine::dsl::RunId::from(format!(
+                        "{session_id}-ingress-run"
+                    )),
+                },
+            )
+            .expect("Prepare input");
+        }
+
+        let dsl = Arc::new(meerkat_runtime::HandleDslAuthority::from_shared(
+            Arc::clone(&authority),
+        ));
+        meerkat_runtime::RuntimePeerCommsHandle::install_generated_on(Arc::clone(&dsl), runtime)
+            .expect("install generated peer-comms handle");
+        Self { authority, dsl }
+    }
+
+    fn reinstall(&self, runtime: &CommsRuntime) {
+        meerkat_runtime::RuntimePeerCommsHandle::install_generated_on(
+            Arc::clone(&self.dsl),
+            runtime,
+        )
+        .expect("install generated peer-comms handle");
+    }
+
+    fn add_authority(
+        &self,
+        peer: &TrustedPeerDescriptor,
+    ) -> meerkat_core::comms::CommsTrustMutationAuthority {
+        let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(peer);
+        let transition = {
+            let mut guard = self
+                .authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *guard,
+                meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::AddDirectPeerEndpoint {
+                    endpoint: endpoint.clone(),
+                },
+            )
+            .expect("AddDirectPeerEndpoint input")
+        };
+        let mut obligations =
+            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+                &transition,
+                meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                    Arc::clone(&self.authority),
+                ),
+            );
+        let obligation = obligations.pop().expect("generated reconcile obligation");
+        meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(
+            &obligation,
+            &endpoint,
+        )
+        .expect("generated peer projection add authority")
+    }
+
+    fn remove_authority(
+        &self,
+        peer: &TrustedPeerDescriptor,
+    ) -> meerkat_core::comms::CommsTrustMutationAuthority {
+        let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(peer);
+        let transition = {
+            let mut guard = self
+                .authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *guard,
+                meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RemoveDirectPeerEndpoint {
+                    endpoint: endpoint.clone(),
+                },
+            )
+            .expect("RemoveDirectPeerEndpoint input")
+        };
+        let mut obligations =
+            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+                &transition,
+                meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+                    Arc::clone(&self.authority),
+                ),
+            );
+        let obligation = obligations.pop().expect("generated reconcile obligation");
+        meerkat_runtime::protocol_comms_trust_reconcile::removal_authority_for_peer_id(
+            &obligation,
+            &endpoint.peer_id.0,
+        )
+        .expect("generated peer projection remove authority")
+    }
+}
 
 fn descriptor_for(name: &str, pubkey: &meerkat_comms::identity::PubKey) -> TrustedPeerDescriptor {
     TrustedPeerDescriptor {
@@ -27,6 +163,55 @@ fn descriptor_for(name: &str, pubkey: &meerkat_comms::identity::PubKey) -> Trust
         name: PeerName::new(name.to_string()).expect("valid peer name"),
         address: PeerAddress::new(PeerTransport::Inproc, name),
         pubkey: *pubkey.as_bytes(),
+    }
+}
+
+fn local_endpoint_for(
+    runtime: &CommsRuntime,
+) -> meerkat_runtime::meerkat_machine::dsl::PeerEndpoint {
+    meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::new(
+        "local",
+        runtime.public_key().to_peer_id().to_string(),
+        "inproc://local",
+        *runtime.public_key().as_bytes(),
+    )
+}
+
+async fn apply_generated_trust(
+    runtime: &CommsRuntime,
+    peer_authority: &TestPeerCommsAuthority,
+    peer: TrustedPeerDescriptor,
+) {
+    peer_authority.reinstall(runtime);
+    let authority = peer_authority.add_authority(&peer);
+    meerkat_core::agent::CommsRuntime::apply_trust_mutation(
+        runtime,
+        CommsTrustMutation::AddTrustedPeer { authority, peer },
+    )
+    .await
+    .expect("seed trust");
+}
+
+async fn revoke_generated_trust(
+    runtime: &CommsRuntime,
+    peer_authority: &TestPeerCommsAuthority,
+    peer: TrustedPeerDescriptor,
+) -> bool {
+    let peer_id = peer.peer_id.to_string();
+    peer_authority.reinstall(runtime);
+    let authority = peer_authority.remove_authority(&peer);
+    match meerkat_core::agent::CommsRuntime::apply_trust_mutation(
+        runtime,
+        CommsTrustMutation::RemoveTrustedPeer {
+            authority,
+            peer_id: peer_id.clone(),
+        },
+    )
+    .await
+    .expect("revoke trust")
+    {
+        CommsTrustMutationResult::Removed { removed } => removed,
+        other => panic!("expected trust removal result, got {other:?}"),
     }
 }
 
@@ -56,23 +241,22 @@ fn make_signed_envelope(
 async fn trusted_sender_is_admitted_through_classified_path() {
     let receiver_name = format!("recv-{}", Uuid::new_v4().simple());
     let receiver = CommsRuntime::inproc_only(&receiver_name).expect("receiver runtime");
+    let peer_authority = TestPeerCommsAuthority::install(&receiver, &receiver_name);
     let sender = Keypair::generate();
 
     // Register the sender as trusted on the receiver.
-    meerkat_core::agent::CommsRuntime::add_trusted_peer(
+    apply_generated_trust(
         &receiver,
+        &peer_authority,
         descriptor_for("peer-sender", &sender.public_key()),
     )
-    .await
-    .expect("seed trust");
+    .await;
 
-    let trusted_peers = receiver.router().shared_trusted_peers();
     let envelope = make_signed_envelope(&sender, receiver.public_key());
-    let outcome =
-        receiver
-            .router()
-            .inbox_sender()
-            .send_connection_ingress(envelope, true, &trusted_peers);
+    let outcome = receiver
+        .router()
+        .inbox_sender()
+        .send_connection_ingress(envelope, true);
     assert_eq!(outcome, AdmissionOutcome::Admitted);
 }
 
@@ -94,31 +278,21 @@ async fn trusted_sender_is_admitted_through_classified_path() {
 async fn revoked_sender_is_rejected_at_admission() {
     let receiver_name = format!("recv-{}", Uuid::new_v4().simple());
     let receiver = CommsRuntime::inproc_only(&receiver_name).expect("receiver runtime");
+    let peer_authority = TestPeerCommsAuthority::install(&receiver, &receiver_name);
     let sender = Keypair::generate();
 
     // Seed trust, then revoke — this is the post-revoke state the
     // classify→admit seam must respect.
-    meerkat_core::agent::CommsRuntime::add_trusted_peer(
-        &receiver,
-        descriptor_for("peer-sender", &sender.public_key()),
-    )
-    .await
-    .expect("seed trust");
-    let removed = meerkat_core::agent::CommsRuntime::remove_trusted_peer(
-        &receiver,
-        &sender.public_key().to_peer_id().to_string(),
-    )
-    .await
-    .expect("revoke trust");
+    let sender_descriptor = descriptor_for("peer-sender", &sender.public_key());
+    apply_generated_trust(&receiver, &peer_authority, sender_descriptor.clone()).await;
+    let removed = revoke_generated_trust(&receiver, &peer_authority, sender_descriptor).await;
     assert!(removed, "trust revoke must succeed");
 
-    let trusted_peers = receiver.router().shared_trusted_peers();
     let envelope = make_signed_envelope(&sender, receiver.public_key());
-    let outcome =
-        receiver
-            .router()
-            .inbox_sender()
-            .send_connection_ingress(envelope, true, &trusted_peers);
+    let outcome = receiver
+        .router()
+        .inbox_sender()
+        .send_connection_ingress(envelope, true);
     assert_eq!(
         outcome,
         AdmissionOutcome::Dropped {
@@ -143,21 +317,24 @@ async fn concurrent_revokes_and_admissions_never_admit_untrusted() {
     let receiver_name = format!("recv-{}", Uuid::new_v4().simple());
     let receiver =
         std::sync::Arc::new(CommsRuntime::inproc_only(&receiver_name).expect("receiver runtime"));
+    let peer_authority = Arc::new(TestPeerCommsAuthority::install(
+        receiver.as_ref(),
+        &receiver_name,
+    ));
     let sender = std::sync::Arc::new(Keypair::generate());
 
-    meerkat_core::agent::CommsRuntime::add_trusted_peer(
+    apply_generated_trust(
         receiver.as_ref(),
+        peer_authority.as_ref(),
         descriptor_for("peer-sender", &sender.public_key()),
     )
-    .await
-    .expect("seed trust");
+    .await;
 
     let total: usize = 64;
 
     let admit_handle = {
         let receiver = receiver.clone();
         let sender = sender.clone();
-        let trusted_peers = receiver.router().shared_trusted_peers();
         let receiver_pk = receiver.public_key();
         tokio::spawn(async move {
             let mut admitted = 0usize;
@@ -165,11 +342,10 @@ async fn concurrent_revokes_and_admissions_never_admit_untrusted() {
             let mut dropped_other = 0usize;
             for _ in 0..total {
                 let envelope = make_signed_envelope(&sender, receiver_pk);
-                let outcome = receiver.router().inbox_sender().send_connection_ingress(
-                    envelope,
-                    true,
-                    &trusted_peers,
-                );
+                let outcome = receiver
+                    .router()
+                    .inbox_sender()
+                    .send_connection_ingress(envelope, true);
                 match outcome {
                     AdmissionOutcome::Admitted => admitted += 1,
                     AdmissionOutcome::Dropped {
@@ -187,17 +363,20 @@ async fn concurrent_revokes_and_admissions_never_admit_untrusted() {
     let revoke_handle = {
         let receiver_for_task = receiver.clone();
         let sender_for_task = sender.clone();
+        let peer_authority = Arc::clone(&peer_authority);
         tokio::spawn(async move {
             for i in 0..total {
                 if i % 2 == 0 {
-                    let _ = meerkat_core::agent::CommsRuntime::remove_trusted_peer(
+                    let _ = revoke_generated_trust(
                         receiver_for_task.as_ref(),
-                        &sender_for_task.public_key().to_peer_id().to_string(),
+                        peer_authority.as_ref(),
+                        descriptor_for("peer-sender", &sender_for_task.public_key()),
                     )
                     .await;
                 } else {
-                    let _ = meerkat_core::agent::CommsRuntime::add_trusted_peer(
+                    apply_generated_trust(
                         receiver_for_task.as_ref(),
+                        peer_authority.as_ref(),
                         descriptor_for("peer-sender", &sender_for_task.public_key()),
                     )
                     .await;
@@ -236,19 +415,14 @@ async fn concurrent_revokes_and_admissions_never_admit_untrusted() {
 async fn classify_at_t0_revoke_at_t1_admit_at_t2_sees_revoked_state() {
     let receiver_name = format!("recv-{}", Uuid::new_v4().simple());
     let receiver = CommsRuntime::inproc_only(&receiver_name).expect("receiver runtime");
+    let peer_authority = TestPeerCommsAuthority::install(&receiver, &receiver_name);
     let sender = Keypair::generate();
 
     // Seed trust — classification at T0 will see the sender as trusted.
-    meerkat_core::agent::CommsRuntime::add_trusted_peer(
-        &receiver,
-        descriptor_for("peer-sender", &sender.public_key()),
-    )
-    .await
-    .expect("seed trust");
+    let sender_descriptor = descriptor_for("peer-sender", &sender.public_key());
+    apply_generated_trust(&receiver, &peer_authority, sender_descriptor.clone()).await;
 
     let envelope = make_signed_envelope(&sender, receiver.public_key());
-    let shared_peers = receiver.router().shared_trusted_peers();
-    let revoke_pubkey = sender.public_key();
 
     // classify → (revoke trust) → admit. Post-fix, the admission step
     // re-reads the trust set and drops. Pre-fix, it would admit using
@@ -259,7 +433,12 @@ async fn classify_at_t0_revoke_at_t1_admit_at_t2_sees_revoked_state() {
         .classified_admit_with_pause_for_test(InboxItem::External { envelope }, || {
             // This runs between classify and admit. Revoke trust so the
             // admission stage observes a state the classifier did not.
-            shared_peers.write().remove(&revoke_pubkey);
+            let removed = futures::executor::block_on(revoke_generated_trust(
+                &receiver,
+                &peer_authority,
+                sender_descriptor.clone(),
+            ));
+            assert!(removed, "trust revoke must succeed during pause");
         });
 
     assert_eq!(
@@ -280,10 +459,10 @@ async fn classify_at_t0_revoke_at_t1_admit_at_t2_sees_revoked_state() {
 async fn auth_exempt_bridge_request_admits_without_trust_edge() {
     let receiver_name = format!("recv-{}", Uuid::new_v4().simple());
     let receiver = CommsRuntime::inproc_only(&receiver_name).expect("receiver runtime");
+    let _peer_authority = TestPeerCommsAuthority::install(&receiver, &receiver_name);
     let sender = Keypair::generate();
     // No trust edge seeded — sender is not trusted.
 
-    let trusted_peers = receiver.router().shared_trusted_peers();
     let mut envelope = Envelope {
         id: Uuid::new_v4(),
         from: sender.public_key(),
@@ -298,11 +477,10 @@ async fn auth_exempt_bridge_request_admits_without_trust_edge() {
     };
     envelope.sign(&sender);
 
-    let outcome =
-        receiver
-            .router()
-            .inbox_sender()
-            .send_connection_ingress(envelope, true, &trusted_peers);
+    let outcome = receiver
+        .router()
+        .inbox_sender()
+        .send_connection_ingress(envelope, true);
     assert_eq!(
         outcome,
         AdmissionOutcome::Admitted,

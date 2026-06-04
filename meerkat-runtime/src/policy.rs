@@ -1,8 +1,8 @@
-//! §12 PolicyDecision — the output of the policy table.
+//! §12 PolicyDecision — generated admission-policy output.
 //!
-//! The runtime's policy table resolves each Input to a PolicyDecision
-//! that determines how and when the input is applied, whether it wakes
-//! the runtime, how it's queued, and when it's consumed.
+//! `MeerkatMachine::ResolveAdmissionPlan` resolves each accepted input to a
+//! PolicyDecision that determines how and when the input is applied, whether it
+//! wakes the runtime, how it's queued, and when it's consumed.
 
 use serde::{Deserialize, Serialize};
 

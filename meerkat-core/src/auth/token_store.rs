@@ -237,10 +237,73 @@ pub trait TokenStore: Send + Sync {
 pub enum RefreshError {
     #[error("refresh function failed: {0}")]
     Refresh(String),
+    #[error("refresh function failed: {message}")]
+    Observed {
+        message: String,
+        observation: RefreshFailureObservation,
+    },
     #[error("refresh in progress was cancelled")]
     Cancelled,
     #[error("cross-process lock acquisition failed: {0}")]
     LockFailed(String),
+}
+
+/// Typed boundary evidence reported to AuthMachine after a refresh failure.
+///
+/// This is not a lifecycle classification.  It records facts the provider
+/// boundary actually observed; AuthMachine owns the semantic permanent vs.
+/// transient transition decision.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RefreshFailureObservation {
+    pub http_status: Option<u64>,
+    pub oauth_error_code: Option<String>,
+    pub local_credential_unusable: bool,
+}
+
+impl RefreshFailureObservation {
+    pub fn transient() -> Self {
+        Self::default()
+    }
+
+    pub fn http_status(status: u16) -> Self {
+        Self {
+            http_status: Some(u64::from(status)),
+            ..Self::default()
+        }
+    }
+
+    pub fn oauth_token_endpoint(status: u16, oauth_error_code: Option<String>) -> Self {
+        Self {
+            http_status: Some(u64::from(status)),
+            oauth_error_code,
+            ..Self::default()
+        }
+    }
+
+    pub fn oauth_error_code(code: impl Into<String>) -> Self {
+        Self {
+            oauth_error_code: Some(code.into()),
+            ..Self::default()
+        }
+    }
+
+    pub fn local_credential_unusable() -> Self {
+        Self {
+            local_credential_unusable: true,
+            ..Self::default()
+        }
+    }
+}
+
+impl RefreshError {
+    pub fn observation(&self) -> RefreshFailureObservation {
+        match self {
+            Self::Observed { observation, .. } => observation.clone(),
+            Self::Refresh(_) | Self::Cancelled | Self::LockFailed(_) => {
+                RefreshFailureObservation::transient()
+            }
+        }
+    }
 }
 
 /// Boxed refresh closure.

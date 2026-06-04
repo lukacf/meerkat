@@ -191,17 +191,6 @@ fn assert_history_contains_tool_uses(history: &serde_json::Value, tool_names: &[
     }
 }
 
-fn history_messages_text(history: &serde_json::Value) -> String {
-    history["result"]["messages"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|message| message.to_string())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// Read a response, collecting all notifications encountered before it.
 async fn read_response_with_notifications(
     reader: &mut BufReader<tokio::io::DuplexStream>,
@@ -838,221 +827,6 @@ async fn e2e_scenario_16_kitchen_sink() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 87: Same-session transcript rewrite revision graph (live API)
-// ---------------------------------------------------------------------------
-
-/// Scenario 87: Real provider session plus same-SessionId transcript rewrite.
-///
-/// Initialize -> session/create with live Anthropic -> session/rewrite_transcript
-/// to compact the assistant trace -> session/history returns current head under
-/// the same SessionId -> session/transcript_revision recovers the parent body
-/// -> session/restore_transcript_revision advances the head back to the parent.
-#[tokio::test]
-#[ignore = "lane:e2e-smoke"]
-async fn e2e_scenario_87_transcript_rewrite_revision_graph() {
-    let api_key = match live_smoke::anthropic_api_key() {
-        Some(key) => key,
-        None => {
-            eprintln!("Skipping scenario 87: no ANTHROPIC_API_KEY set");
-            return;
-        }
-    };
-
-    let client = Arc::new(meerkat_client::AnthropicClient::new(api_key).unwrap());
-    let (mut writer, mut reader, server_handle) = spawn_test_server(client);
-
-    let t = live_smoke::live_timeout();
-    let model = live_smoke::smoke_model();
-    let mut req_id = 0u64;
-    let mut next_id = || {
-        req_id += 1;
-        req_id
-    };
-
-    let id = next_id();
-    send_request(
-        &mut writer,
-        &serde_json::json!({"jsonrpc":"2.0","id":id,"method":"initialize","params":{}}),
-    )
-    .await;
-    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
-    assert!(resp["error"].is_null(), "initialize failed: {resp}");
-
-    let id = next_id();
-    send_request(
-        &mut writer,
-        &serde_json::json!({
-            "jsonrpc":"2.0",
-            "id": id,
-            "method": "session/create",
-            "params": {
-                "prompt": "Reply with exactly: rewrite smoke original trace",
-                "model": model
-            }
-        }),
-    )
-    .await;
-    let create = timeout(t, read_response(&mut reader)).await.unwrap();
-    assert!(create["error"].is_null(), "session/create failed: {create}");
-    let session_id = create["result"]["session_id"]
-        .as_str()
-        .expect("session/create should return session_id")
-        .to_string();
-
-    let id = next_id();
-    let before = session_history_response(&mut writer, &mut reader, id, t, &session_id, 100).await;
-    assert!(before["error"].is_null(), "history before failed: {before}");
-    let before_count = before["result"]["message_count"].as_u64().unwrap_or(0);
-    assert!(
-        before_count >= 2,
-        "live session should have user and assistant messages before rewrite: {before}"
-    );
-
-    let id = next_id();
-    send_request(
-        &mut writer,
-        &serde_json::json!({
-            "jsonrpc":"2.0",
-            "id": id,
-            "method": "session/rewrite_transcript",
-            "params": {
-                "session_id": session_id,
-                "selection": {
-                    "type": "message_range",
-                    "start": 1,
-                    "end": before_count
-                },
-                "replacement": [
-                    {
-                        "role": "block_assistant",
-                        "blocks": [
-                            {
-                                "block_type": "text",
-                                "data": {
-                                    "text": "rewrite smoke compacted trace"
-                                }
-                            }
-                        ],
-                        "stop_reason": "end_turn"
-                    }
-                ],
-                "reason": {
-                    "kind": "compaction",
-                    "note": "e2e smoke compact assistant trace"
-                },
-                "actor": "e2e-smoke",
-                "running_behavior": "reject"
-            }
-        }),
-    )
-    .await;
-    let rewrite = timeout(t, read_response(&mut reader)).await.unwrap();
-    assert!(
-        rewrite["error"].is_null(),
-        "session/rewrite_transcript failed: {rewrite}"
-    );
-    assert_eq!(rewrite["result"]["session_id"], session_id);
-    let parent_revision = rewrite["result"]["parent_revision"]
-        .as_str()
-        .expect("rewrite should return parent_revision")
-        .to_string();
-    let rewrite_revision = rewrite["result"]["revision"]
-        .as_str()
-        .expect("rewrite should return revision")
-        .to_string();
-    assert_ne!(rewrite_revision, parent_revision);
-
-    let id = next_id();
-    let after = session_history_response(&mut writer, &mut reader, id, t, &session_id, 100).await;
-    assert!(after["error"].is_null(), "history after failed: {after}");
-    assert_eq!(after["result"]["session_id"], session_id);
-    assert_eq!(after["result"]["message_count"].as_u64().unwrap_or(0), 2);
-    let after_text = history_messages_text(&after);
-    assert!(
-        after_text.contains("rewrite smoke compacted trace"),
-        "current head history should expose compacted trace: {after}"
-    );
-    let assistant_after_text = serde_json::to_string(&after["result"]["messages"][1])
-        .expect("assistant history message should serialize");
-    assert!(
-        !assistant_after_text.contains("rewrite smoke original trace"),
-        "current head history should not expose replaced assistant trace: {after}"
-    );
-
-    let id = next_id();
-    send_request(
-        &mut writer,
-        &serde_json::json!({
-            "jsonrpc":"2.0",
-            "id": id,
-            "method": "session/transcript_revision",
-            "params": {
-                "session_id": session_id,
-                "revision": parent_revision
-            }
-        }),
-    )
-    .await;
-    let parent = timeout(t, read_response(&mut reader)).await.unwrap();
-    assert!(
-        parent["error"].is_null(),
-        "session/transcript_revision failed: {parent}"
-    );
-    assert_eq!(parent["result"]["session_id"], session_id);
-    assert_eq!(parent["result"]["revision"], parent_revision);
-    assert_eq!(parent["result"]["head_revision"], rewrite_revision);
-    assert!(
-        history_messages_text(&parent).contains("rewrite smoke original trace"),
-        "parent revision should recover original assistant trace: {parent}"
-    );
-
-    let id = next_id();
-    send_request(
-        &mut writer,
-        &serde_json::json!({
-            "jsonrpc":"2.0",
-            "id": id,
-            "method": "session/restore_transcript_revision",
-            "params": {
-                "session_id": session_id,
-                "revision": parent_revision,
-                "reason": {
-                    "kind": "restore",
-                    "note": "e2e smoke restore parent"
-                },
-                "actor": "e2e-smoke",
-                "expected_parent_revision": rewrite_revision,
-                "running_behavior": "reject"
-            }
-        }),
-    )
-    .await;
-    let restored = timeout(t, read_response(&mut reader)).await.unwrap();
-    assert!(
-        restored["error"].is_null(),
-        "session/restore_transcript_revision failed: {restored}"
-    );
-    assert_eq!(restored["result"]["session_id"], session_id);
-    assert_eq!(restored["result"]["parent_revision"], rewrite_revision);
-    assert_eq!(restored["result"]["revision"], parent_revision);
-
-    let id = next_id();
-    let final_history =
-        session_history_response(&mut writer, &mut reader, id, t, &session_id, 100).await;
-    assert!(
-        final_history["error"].is_null(),
-        "final history failed: {final_history}"
-    );
-    assert!(
-        history_messages_text(&final_history).contains("rewrite smoke original trace"),
-        "restored current head should expose original trace: {final_history}"
-    );
-
-    drop(writer);
-    server_handle.await.unwrap().unwrap();
-}
-
-// ---------------------------------------------------------------------------
 // Scenario 17: RPC multi-turn with event streaming (live API)
 // ---------------------------------------------------------------------------
 
@@ -1561,6 +1335,291 @@ async fn e2e_scenario_22_transport_backpressure() {
 
     // Clean up
     drop(client_writer);
+    server_handle.await.unwrap().unwrap();
+}
+
+/// Scenario 87: RPC transcript rewrite revision graph.
+///
+/// Exercises public transcript rewrite authority by committing a same-session
+/// rewrite, reading both retained revision bodies, then restoring the original
+/// head through another append-only rewrite commit.
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_scenario_87_transcript_rewrite_revision_graph() {
+    let api_key = match live_smoke::anthropic_api_key() {
+        Some(key) => key,
+        None => {
+            eprintln!("Skipping scenario 87: no ANTHROPIC_API_KEY set");
+            return;
+        }
+    };
+
+    let client = Arc::new(meerkat_client::AnthropicClient::new(api_key).unwrap());
+    let (mut writer, mut reader, server_handle) = spawn_test_server(client);
+
+    let t = live_smoke::live_timeout();
+    let model = live_smoke::smoke_model();
+    let mut req_id = 0u64;
+    let mut next_id = || {
+        req_id += 1;
+        req_id
+    };
+
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({"jsonrpc":"2.0","id":id,"method":"initialize","params":{}}),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "initialize failed: {resp}");
+
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "session/create",
+            "params": {
+                "prompt": "Remember the exact marker TRANSCRIPT_REWRITE_ORIGINAL_87. Reply briefly.",
+                "model": model
+            }
+        }),
+    )
+    .await;
+    let create_resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(
+        create_resp["error"].is_null(),
+        "session/create failed: {create_resp}"
+    );
+    let session_id = create_resp["result"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "session/transcript_revision",
+            "params": {
+                "session_id": session_id,
+                "revision": "current",
+                "limit": 20
+            }
+        }),
+    )
+    .await;
+    let original_resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(
+        original_resp["error"].is_null(),
+        "current transcript read failed: {original_resp}"
+    );
+    let original_revision = original_resp["result"]["revision"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let original_messages = original_resp["result"]["messages"].as_array().unwrap();
+    assert!(
+        original_messages.len() >= 2,
+        "expected user + assistant messages in original revision: {original_resp}"
+    );
+    let user_index = original_messages
+        .iter()
+        .position(|message| message["role"] == "user")
+        .expect("original revision should contain a user message");
+    assert!(
+        original_messages[user_index]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("TRANSCRIPT_REWRITE_ORIGINAL_87"),
+        "original first user message should carry marker: {original_resp}"
+    );
+
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "session/rewrite_transcript",
+            "params": {
+                "session_id": session_id,
+                "selection": {
+                    "type": "message_range",
+                    "start": user_index,
+                    "end": user_index + 1
+                },
+                "replacement": [{
+                    "role": "user",
+                    "content": "Remember the exact marker TRANSCRIPT_REWRITE_EDITED_87. Reply briefly."
+                }],
+                "reason": {
+                    "kind": "smoke",
+                    "note": "scenario 87 rewrite graph probe"
+                },
+                "actor": "e2e-smoke-87",
+                "expected_parent_revision": original_revision
+            }
+        }),
+    )
+    .await;
+    let rewrite_resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(
+        rewrite_resp["error"].is_null(),
+        "session/rewrite_transcript failed: {rewrite_resp}"
+    );
+    assert_eq!(
+        rewrite_resp["result"]["parent_revision"].as_str().unwrap(),
+        original_revision
+    );
+    let edited_revision = rewrite_resp["result"]["revision"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(edited_revision, original_revision);
+    assert_eq!(
+        rewrite_resp["result"]["message_count"].as_u64().unwrap(),
+        original_messages.len() as u64
+    );
+
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "session/transcript_revision",
+            "params": {
+                "session_id": session_id,
+                "revision": "current",
+                "limit": 20
+            }
+        }),
+    )
+    .await;
+    let edited_current_resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(
+        edited_current_resp["error"].is_null(),
+        "edited current transcript read failed: {edited_current_resp}"
+    );
+    assert_eq!(
+        edited_current_resp["result"]["revision"].as_str().unwrap(),
+        edited_revision
+    );
+    assert!(
+        edited_current_resp["result"]["messages"][user_index]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("TRANSCRIPT_REWRITE_EDITED_87"),
+        "edited current revision should contain edited marker: {edited_current_resp}"
+    );
+
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "session/transcript_revision",
+            "params": {
+                "session_id": session_id,
+                "revision": original_revision,
+                "limit": 20
+            }
+        }),
+    )
+    .await;
+    let retained_original_resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(
+        retained_original_resp["error"].is_null(),
+        "retained original transcript read failed: {retained_original_resp}"
+    );
+    assert!(
+        retained_original_resp["result"]["messages"][user_index]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("TRANSCRIPT_REWRITE_ORIGINAL_87"),
+        "retained original revision should still contain original marker: {retained_original_resp}"
+    );
+
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "session/restore_transcript_revision",
+            "params": {
+                "session_id": session_id,
+                "revision": original_revision,
+                "reason": {
+                    "kind": "smoke_restore",
+                    "note": "scenario 87 restore graph probe"
+                },
+                "actor": "e2e-smoke-87",
+                "expected_parent_revision": edited_revision
+            }
+        }),
+    )
+    .await;
+    let restore_resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(
+        restore_resp["error"].is_null(),
+        "session/restore_transcript_revision failed: {restore_resp}"
+    );
+    assert_eq!(
+        restore_resp["result"]["parent_revision"].as_str().unwrap(),
+        edited_revision
+    );
+    let restored_revision = restore_resp["result"]["revision"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(restored_revision, edited_revision);
+
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "session/transcript_revision",
+            "params": {
+                "session_id": session_id,
+                "revision": "current",
+                "limit": 20
+            }
+        }),
+    )
+    .await;
+    let restored_current_resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(
+        restored_current_resp["error"].is_null(),
+        "restored current transcript read failed: {restored_current_resp}"
+    );
+    assert_eq!(
+        restored_current_resp["result"]["revision"]
+            .as_str()
+            .unwrap(),
+        restored_revision
+    );
+    assert!(
+        restored_current_resp["result"]["messages"][user_index]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("TRANSCRIPT_REWRITE_ORIGINAL_87"),
+        "restored current revision should contain original marker: {restored_current_resp}"
+    );
+
+    eprintln!(
+        "[scenario 87] rewrite graph advanced {original_revision} -> {edited_revision} -> {restored_revision}"
+    );
+
+    drop(writer);
     server_handle.await.unwrap().unwrap();
 }
 

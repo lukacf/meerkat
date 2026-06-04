@@ -13,8 +13,8 @@
 
 use meerkat_core::comms::PeerId;
 use meerkat_core::interaction::{
-    InboxInteraction, InteractionContent, InteractionId, PeerIngressConvention, PeerIngressFact,
-    PeerIngressIdentity, PeerInputCandidate, PeerInputClass, ResponseStatus,
+    InboxInteraction, InteractionContent, InteractionId, PeerIngressEnvelopeFacts,
+    PeerIngressEnvelopeKind, PeerIngressFact, PeerIngressIdentity, ResponseStatus,
 };
 use meerkat_core::lifecycle::RunId;
 use meerkat_runtime::comms_bridge::peer_input_candidate_to_runtime_input;
@@ -23,21 +23,9 @@ use meerkat_runtime::identifiers::LogicalRuntimeId;
 use meerkat_runtime::input::{Input, InputDurability, PeerConvention};
 use meerkat_runtime::input_state::InputLifecycleState;
 use meerkat_runtime::policy_table::DefaultPolicyTable;
-use meerkat_runtime::post_admission_signal_from_accept_outcome;
 use meerkat_runtime::runtime_state::RuntimeState;
 use meerkat_runtime::traits::RuntimeDriver;
 use uuid::Uuid;
-
-fn assert_machine_owned_admission_signal(
-    outcome: &meerkat_runtime::AcceptOutcome,
-    request_immediate_processing: bool,
-    expected: PostAdmissionSignal,
-) {
-    assert_eq!(
-        post_admission_signal_from_accept_outcome(outcome, request_immediate_processing),
-        expected
-    );
-}
 
 fn bind_running(driver: &mut EphemeralRuntimeDriver) -> RunId {
     let run_id = RunId::new();
@@ -129,70 +117,118 @@ fn rid() -> LogicalRuntimeId {
     LogicalRuntimeId::new("test-runtime")
 }
 
-fn test_peer_id() -> PeerId {
-    PeerId::parse("33333333-3333-4333-8333-333333333333").expect("canonical test peer id")
-}
-
-fn peer_kind_for_convention(convention: &PeerIngressConvention) -> meerkat_core::PeerIngressKind {
-    match convention {
-        PeerIngressConvention::Message => meerkat_core::PeerIngressKind::Message,
-        PeerIngressConvention::Request { .. } | PeerIngressConvention::Lifecycle { .. } => {
-            meerkat_core::PeerIngressKind::Request
-        }
-        PeerIngressConvention::Response { .. } => meerkat_core::PeerIngressKind::Response,
-        PeerIngressConvention::Ack { .. } => meerkat_core::PeerIngressKind::Ack,
-        PeerIngressConvention::PlainEvent { .. } => meerkat_core::PeerIngressKind::PlainEvent,
-    }
-}
-
 fn runtime_input_for_interaction(
     interaction: &InboxInteraction,
     runtime_id: &LogicalRuntimeId,
 ) -> Input {
-    let id = interaction.id;
-    let (class, convention, response_terminality) = match &interaction.content {
-        InteractionContent::Message { .. } => (
-            PeerInputClass::ActionableMessage,
-            PeerIngressConvention::Message,
-            None,
-        ),
-        InteractionContent::Request { intent, .. } => (
-            PeerInputClass::ActionableRequest,
-            PeerIngressConvention::Request {
-                request_id: id.to_string(),
-                intent: intent.clone(),
-            },
-            None,
-        ),
-        InteractionContent::Response {
-            in_reply_to,
-            status,
-            ..
-        } => {
-            let classification =
-                meerkat_core::PeerIngressMachinePolicy::default().classify_response(*status);
-            (
-                classification.class,
-                PeerIngressConvention::Response {
-                    in_reply_to: *in_reply_to,
-                    status: *status,
-                },
-                classification.response_terminality,
-            )
-        }
-    };
-    let kind = peer_kind_for_convention(&convention);
-    let ingress = PeerIngressFact::peer(
-        id,
-        class,
-        kind,
-        Some(meerkat_core::PeerIngressAuthDecision::Required),
-        PeerIngressIdentity::new(test_peer_id(), interaction.from.clone(), convention),
-    );
-    let mut candidate = PeerInputCandidate::new(interaction.clone(), ingress, None);
-    candidate.response_terminality = response_terminality;
+    let peer_id = interaction.from_route.unwrap_or_else(response_route_id);
+    let candidate = test_peer_input_candidate_from_interaction(interaction.clone(), peer_id);
     peer_input_candidate_to_runtime_input(&candidate, runtime_id)
         .expect("test interaction should project to runtime input")
+}
+
+fn test_peer_input_candidate_from_interaction(
+    interaction: InboxInteraction,
+    peer_id: PeerId,
+) -> meerkat_core::interaction::PeerInputCandidate {
+    let handle = test_peer_comms_handle();
+    let facts = PeerIngressEnvelopeFacts {
+        item_id: interaction.id.to_string(),
+        from_peer: interaction.from.clone(),
+        from_peer_id: peer_id,
+        kind: match &interaction.content {
+            InteractionContent::Message { body, .. } => {
+                PeerIngressEnvelopeKind::Message { body: body.clone() }
+            }
+            InteractionContent::Request { intent, params, .. } => {
+                PeerIngressEnvelopeKind::Request {
+                    intent: intent.clone(),
+                    params: params.clone(),
+                }
+            }
+            InteractionContent::Response {
+                in_reply_to,
+                status,
+                result,
+                ..
+            } => PeerIngressEnvelopeKind::Response {
+                in_reply_to: in_reply_to.to_string(),
+                status: *status,
+                result: result.clone(),
+            },
+        },
+    };
+    let admission =
+        meerkat_core::handles::PeerCommsHandle::classify_external_envelope(handle.as_ref(), facts)
+            .expect("generated peer-comms authority should classify test interaction");
+    let classification = admission.classification;
+    let convention = match &interaction.content {
+        InteractionContent::Message { .. } => meerkat_core::PeerIngressConvention::Message,
+        InteractionContent::Request { intent, .. } => {
+            if let Some(kind) = classification.lifecycle_kind {
+                let peer = admission
+                    .lifecycle_peer
+                    .clone()
+                    .expect("generated lifecycle classification should include a peer subject");
+                meerkat_core::PeerIngressConvention::Lifecycle { kind, peer }
+            } else {
+                let request_id = admission
+                    .request_id
+                    .clone()
+                    .expect("generated request classification should include request id");
+                meerkat_core::PeerIngressConvention::Request {
+                    request_id,
+                    intent: intent.clone(),
+                }
+            }
+        }
+        InteractionContent::Response { status, .. } => {
+            let in_reply_to = admission
+                .request_id
+                .as_deref()
+                .and_then(|id| uuid::Uuid::parse_str(id).ok())
+                .map(InteractionId)
+                .expect("generated response classification should include in-reply-to id");
+            meerkat_core::PeerIngressConvention::Response {
+                in_reply_to,
+                status: *status,
+            }
+        }
+    };
+    let ingress = PeerIngressFact::peer(
+        interaction.id,
+        classification.class,
+        classification.kind,
+        Some(classification.auth),
+        PeerIngressIdentity::new(peer_id, interaction.from.clone(), convention),
+    );
+    let mut candidate = meerkat_core::interaction::PeerInputCandidate::new(
+        interaction,
+        ingress,
+        admission.lifecycle_peer,
+    );
+    candidate.response_terminality = classification.response_terminality;
+    candidate
+}
+
+fn test_peer_comms_handle() -> std::sync::Arc<dyn meerkat_core::handles::PeerCommsHandle> {
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test peer-comms runtime should build");
+        runtime.block_on(async move {
+            let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+            let session_id = meerkat_core::SessionId::new();
+            let bindings = machine
+                .prepare_bindings(session_id)
+                .await
+                .expect("generated MeerkatMachine should prepare test peer-comms bindings");
+            std::sync::Arc::clone(bindings.peer_comms())
+        })
+    })
+    .join()
+    .expect("test peer-comms authority thread should finish")
 }
 
 // ---------------------------------------------------------------------------
@@ -224,10 +260,9 @@ async fn completed_response_idle_wakes() {
     // Verify driver behavior
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 }
 
@@ -246,11 +281,11 @@ async fn completed_response_admission_stamps_apply_intent_without_context_projec
         .admitted_runtime_semantics(&input_id)
         .expect("accepted input should have runtime semantics");
     assert_eq!(
-        semantics.execution_kind,
+        semantics.execution_kind(),
         meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn
     );
     assert_eq!(
-        semantics.peer_response_terminal_apply_intent,
+        semantics.peer_response_terminal_apply_intent(),
         Some(
             meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent::AppendContextAndRun
         )
@@ -273,7 +308,7 @@ async fn completed_response_admission_stamps_apply_intent_without_context_projec
 // §2: Accepted response injects context, no continuation (no wake)
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn accepted_response_no_wake() {
+async fn accepted_response_policy_no_wake_but_idle_admission_wakes() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
     let interaction = make_response("peer-1", ResponseStatus::Accepted);
     let input = runtime_input_for_interaction(&interaction, &rid());
@@ -302,13 +337,13 @@ async fn accepted_response_no_wake() {
         meerkat_runtime::ConsumePoint::OnRunComplete
     );
 
-    // Verify driver: accepted but no wake, queued (not immediately consumed)
+    // Verify driver: accepted and queued; the generated idle admission
+    // signal wakes the loop even though progress policy itself is no-wake.
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted(), "unexpected outcome: {outcome:?}");
-    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::None);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 
     // Input should be queued (StageRunBoundary queues for boundary application)
@@ -346,10 +381,9 @@ async fn failed_response_idle_wakes() {
     // Verify: terminal response + idle → wake
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 }
 
@@ -373,11 +407,11 @@ async fn response_with_passthrough_message_both_queued() {
 
     // Both should be queued
     assert_eq!(driver.queue().len(), 2);
-    assert_machine_owned_admission_signal(&outcome1, false, PostAdmissionSignal::WakeLoop);
-    assert_machine_owned_admission_signal(&outcome2, false, PostAdmissionSignal::WakeLoop);
+    assert!(outcome1.is_accepted());
+    assert!(outcome2.is_accepted());
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 }
 
@@ -399,10 +433,9 @@ async fn response_after_completed_turn_wakes() {
     let outcome = driver.accept_input(input).await.unwrap();
 
     assert!(outcome.is_accepted());
-    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 }
 
@@ -490,10 +523,9 @@ async fn non_silent_intent_triggers_wake() {
 
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 }
 
@@ -515,10 +547,9 @@ async fn message_triggers_wake() {
 
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
     assert_eq!(driver.queue().len(), 1);
 }
@@ -536,10 +567,9 @@ async fn request_triggers_wake() {
 
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 }
 
@@ -607,20 +637,16 @@ async fn message_while_running_with_explicit_queue_stays_queued() {
     let interaction = make_message("peer-1", "hello");
     let input = runtime_input_for_interaction(&interaction, &rid());
 
-    // peer_message + running + explicit Queue -> StageRunStart + idle wake, no interrupt
+    // peer_message + running + explicit Queue → StageRunStart + no interrupt
     let policy = DefaultPolicyTable::resolve(&input, false);
     assert_eq!(policy.apply_mode, meerkat_runtime::ApplyMode::StageRunStart);
-    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::WakeIfIdle);
+    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::None);
 
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
     assert_eq!(
-        post_admission_signal_from_accept_outcome(&outcome, false),
-        PostAdmissionSignal::WakeLoop
-    );
-    assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::WakeLoop
+        PostAdmissionSignal::None
     );
 }
 
@@ -653,17 +679,13 @@ async fn message_with_steer_while_running_requests_cooperative_interrupt() {
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
     assert_eq!(
-        post_admission_signal_from_accept_outcome(&outcome, true),
-        PostAdmissionSignal::RequestImmediateProcessing
-    );
-    assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::RequestImmediateProcessing
     );
 }
 
 #[tokio::test]
-async fn message_without_steer_while_running_requests_idle_wake() {
+async fn message_without_steer_while_running_interrupts_yielding_turn() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
 
     bind_running(&mut driver);
@@ -674,18 +696,28 @@ async fn message_without_steer_while_running_requests_idle_wake() {
         peer.handling_mode = None;
     }
 
-    // A default peer message is ordinary queued work. It should wake the
-    // runtime after the active turn, not cancel that turn at its next boundary.
+    // Generated admission authority treats default peer messages as queued
+    // work, but asks a running turn to yield so the queued peer work is not
+    // stranded behind a long active turn.
     let policy = DefaultPolicyTable::resolve(&input, false);
     assert_eq!(policy.apply_mode, meerkat_runtime::ApplyMode::StageRunStart);
-    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::WakeIfIdle);
+    assert_eq!(
+        policy.wake_mode,
+        meerkat_runtime::WakeMode::InterruptYielding
+    );
 
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
+    let meerkat_runtime::AcceptOutcome::Accepted { policy, .. } = &outcome else {
+        panic!("expected accepted outcome");
+    };
+    assert_eq!(
+        policy.wake_mode,
+        meerkat_runtime::WakeMode::InterruptYielding
+    );
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::WakeLoop
+        PostAdmissionSignal::InterruptYielding
     );
 }
 
@@ -712,10 +744,11 @@ async fn terminal_response_while_running_requests_idle_wake() {
 
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::WakeLoop
+        PostAdmissionSignal::WakeLoop,
+        "terminal peer response accepted while running is queued for the next idle boundary; \
+         the generated admission signal wakes the next idle re-check"
     );
 }
 
@@ -805,14 +838,9 @@ async fn terminal_response_with_steer_policy_while_running() {
     bind_running(&mut driver);
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert_machine_owned_admission_signal(
-        &outcome,
-        true,
-        PostAdmissionSignal::RequestImmediateProcessing,
-    );
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::RequestImmediateProcessing
     );
 }
 
@@ -854,13 +882,8 @@ async fn terminal_response_with_steer_policy_while_idle() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert_machine_owned_admission_signal(
-        &outcome,
-        true,
-        PostAdmissionSignal::RequestImmediateProcessing,
-    );
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::RequestImmediateProcessing
     );
 }

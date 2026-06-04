@@ -345,6 +345,9 @@ mod tests {
             field_pairs,
             vec![
                 ("agent_runtime_id", "runtime_id"),
+                ("fence_token", "fence_token"),
+                ("generation", "generation"),
+                ("session_id", "session_id"),
                 ("work_id", "work_id"),
                 ("origin", "origin"),
             ]

@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, RwLock};
 use tokio::sync::mpsc;
 
 pub use crate::session::{
@@ -321,8 +321,8 @@ pub struct SessionBuildOptions {
     ///
     /// Surfaces that enable mob tools pass an `Arc<dyn MobToolsFactory>` here.
     /// The factory calls [`MobToolsFactory::build_mob_tools`] during agent
-    /// construction with the session ID, ops lifecycle registry, and optional
-    /// comms runtime — then composes the result into the tool gateway.
+    /// construction only after generated mob authority is present, then
+    /// composes the result into the tool gateway.
     pub mob_tools: Option<Arc<dyn MobToolsFactory>>,
     /// Runtime build mode — determines how the factory resolves the ops lifecycle
     /// registry and completion feed.
@@ -428,6 +428,8 @@ impl MobToolCallerProvenance {
 /// `owner_session_id`, or profile flags.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MobToolAuthorityContext {
+    #[serde(skip)]
+    generated_authority_seal: MobToolAuthorityContextSeal,
     principal_token: OpaquePrincipalToken,
     can_create_mobs: bool,
     #[serde(default)]
@@ -442,186 +444,411 @@ pub struct MobToolAuthorityContext {
     audit_invocation_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct MobToolAuthorityContextSeal {
+    generated: bool,
+}
+
+impl MobToolAuthorityContextSeal {
+    const fn generated() -> Self {
+        Self { generated: true }
+    }
+}
+
+static EMPTY_MOB_AUTHORITY_MANAGED_SCOPE: LazyLock<BTreeSet<String>> = LazyLock::new(BTreeSet::new);
+static EMPTY_MOB_AUTHORITY_SPAWN_SCOPE: LazyLock<BTreeMap<String, BTreeSet<String>>> =
+    LazyLock::new(BTreeMap::new);
+static UNTRUSTED_MOB_AUTHORITY_PRINCIPAL: LazyLock<OpaquePrincipalToken> =
+    LazyLock::new(|| OpaquePrincipalToken::new("untrusted-mob-authority-context"));
+
 impl MobToolAuthorityContext {
-    pub fn new(principal_token: OpaquePrincipalToken, can_create_mobs: bool) -> Self {
-        Self {
+    #[cfg_attr(
+        not(any(test, meerkat_internal_generated_authority_bridge)),
+        allow(dead_code)
+    )]
+    fn from_generated_parts(
+        principal_token: OpaquePrincipalToken,
+        can_create_mobs: bool,
+        can_mutate_profiles: bool,
+        managed_mob_scope: BTreeSet<String>,
+        spawn_profile_scope: BTreeMap<String, BTreeSet<String>>,
+        caller_provenance: Option<MobToolCallerProvenance>,
+        audit_invocation_id: Option<String>,
+    ) -> Result<Self, String> {
+        if principal_token.as_str().trim().is_empty() {
+            return Err("generated mob tool authority requires a non-empty principal token".into());
+        }
+        Ok(Self {
+            generated_authority_seal: MobToolAuthorityContextSeal::generated(),
             principal_token,
             can_create_mobs,
-            can_mutate_profiles: can_create_mobs,
-            managed_mob_scope: BTreeSet::new(),
-            spawn_profile_scope: BTreeMap::new(),
-            caller_provenance: None,
-            audit_invocation_id: None,
-        }
+            can_mutate_profiles,
+            managed_mob_scope,
+            spawn_profile_scope,
+            caller_provenance,
+            audit_invocation_id,
+        })
     }
 
-    pub fn create_only_generated() -> Self {
-        Self::new(OpaquePrincipalToken::generated(), true)
+    #[cfg(test)]
+    #[allow(clippy::expect_used, clippy::too_many_arguments)]
+    pub(crate) fn generated_for_test(
+        principal_token: OpaquePrincipalToken,
+        can_create_mobs: bool,
+        can_mutate_profiles: bool,
+        managed_mob_scope: BTreeSet<String>,
+        spawn_profile_scope: BTreeMap<String, BTreeSet<String>>,
+        caller_provenance: Option<MobToolCallerProvenance>,
+        audit_invocation_id: Option<String>,
+    ) -> Self {
+        Self::from_generated_parts(
+            principal_token,
+            can_create_mobs,
+            can_mutate_profiles,
+            managed_mob_scope,
+            spawn_profile_scope,
+            caller_provenance,
+            audit_invocation_id,
+        )
+        .expect("test mob authority context must be generated-shape valid")
+    }
+
+    /// True only for contexts minted by the generated authority bridge.
+    ///
+    /// Serde intentionally cannot preserve this marker. Any stored or
+    /// deserialized context is a compatibility projection until a generated
+    /// authority seam restores it.
+    pub fn is_generated_authority_context(&self) -> bool {
+        self.generated_authority_seal.generated
     }
 
     pub fn principal_token(&self) -> &OpaquePrincipalToken {
-        &self.principal_token
+        if self.is_generated_authority_context() {
+            &self.principal_token
+        } else {
+            &UNTRUSTED_MOB_AUTHORITY_PRINCIPAL
+        }
     }
 
     pub fn can_create_mobs(&self) -> bool {
-        self.can_create_mobs
+        self.is_generated_authority_context() && self.can_create_mobs
     }
 
     pub fn can_mutate_profiles(&self) -> bool {
-        self.can_mutate_profiles
-    }
-
-    pub fn with_profile_mutation(mut self, allowed: bool) -> Self {
-        self.can_mutate_profiles = allowed;
-        self
+        self.is_generated_authority_context() && self.can_mutate_profiles
     }
 
     pub fn managed_mob_scope(&self) -> &BTreeSet<String> {
-        &self.managed_mob_scope
+        if self.is_generated_authority_context() {
+            &self.managed_mob_scope
+        } else {
+            &EMPTY_MOB_AUTHORITY_MANAGED_SCOPE
+        }
+    }
+
+    pub fn spawn_profile_scope(&self) -> &BTreeMap<String, BTreeSet<String>> {
+        if self.is_generated_authority_context() {
+            &self.spawn_profile_scope
+        } else {
+            &EMPTY_MOB_AUTHORITY_SPAWN_SCOPE
+        }
     }
 
     pub fn caller_provenance(&self) -> Option<&MobToolCallerProvenance> {
-        self.caller_provenance.as_ref()
+        self.is_generated_authority_context()
+            .then_some(self.caller_provenance.as_ref())
+            .flatten()
     }
 
     pub fn audit_invocation_id(&self) -> Option<&str> {
-        self.audit_invocation_id.as_deref()
+        self.is_generated_authority_context()
+            .then_some(self.audit_invocation_id.as_deref())
+            .flatten()
     }
 
     pub fn can_manage_mob(&self, mob_id: &str) -> bool {
-        self.managed_mob_scope.contains(mob_id)
+        self.managed_mob_scope().contains(mob_id)
     }
 
-    pub fn can_spawn_profile_in_mob(&self, mob_id: &str, profile: &str) -> bool {
-        self.can_manage_mob(mob_id)
-            || self
-                .spawn_profile_scope
-                .get(mob_id)
-                .is_some_and(|profiles| profiles.contains(profile))
+    /// Raw, atomic observation: whether the operator holds a non-empty
+    /// spawn-profile scope for `mob_id`. This is one of the two pure facts the
+    /// spawn-tool shell feeds to MobMachine's `ResolveSpawnToolAdmission`
+    /// (alongside [`Self::can_manage_mob`]); the machine — not the shell —
+    /// composes the disjunction into the Allow/Deny verdict. This is NOT a
+    /// pre-reduced admission conclusion.
+    pub fn spawn_profile_scope_present(&self, mob_id: &str) -> bool {
+        self.spawn_profile_scope()
+            .get(mob_id)
+            .is_some_and(|profiles| !profiles.is_empty())
     }
 
-    pub fn can_spawn_any_profile_in_mob(&self, mob_id: &str) -> bool {
-        self.can_manage_mob(mob_id)
-            || self
-                .spawn_profile_scope
-                .get(mob_id)
-                .is_some_and(|profiles| !profiles.is_empty())
-    }
-
-    pub fn grant_manage_mob(mut self, mob_id: impl Into<String>) -> Self {
-        self.managed_mob_scope.insert(mob_id.into());
-        self
-    }
-
-    pub fn grant_spawn_profile_in_mob(
-        mut self,
-        mob_id: impl Into<String>,
-        profile: impl Into<String>,
-    ) -> Self {
-        self.spawn_profile_scope
-            .entry(mob_id.into())
-            .or_default()
-            .insert(profile.into());
-        self
-    }
-
-    pub fn grant_spawn_profiles_in_mob<I, S>(
-        mut self,
-        mob_id: impl Into<String>,
-        profiles: I,
-    ) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        self.spawn_profile_scope
-            .entry(mob_id.into())
-            .or_default()
-            .extend(profiles.into_iter().map(Into::into));
-        self
-    }
-
-    /// Grant management scope for a mob in-place (mutable borrow).
-    ///
-    /// Used by the turn executor when applying `SessionEffect::GrantManageMob`
-    /// effects from tool dispatch.
-    pub fn grant_manage_mob_in_place(&mut self, mob_id: String) {
-        self.managed_mob_scope.insert(mob_id);
-    }
-
-    pub fn with_managed_mob_scope<I, S>(mut self, mob_ids: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        self.managed_mob_scope = mob_ids.into_iter().map(Into::into).collect();
-        self
-    }
-
-    pub fn with_caller_provenance(mut self, caller_provenance: MobToolCallerProvenance) -> Self {
-        self.caller_provenance = Some(caller_provenance);
-        self
-    }
-
-    pub fn with_audit_invocation_id(mut self, audit_invocation_id: impl Into<String>) -> Self {
-        self.audit_invocation_id = Some(audit_invocation_id.into());
-        self
+    /// Raw, atomic observation: whether the operator's spawn-profile scope SET
+    /// for `mob_id` CONTAINS `profile`. This is a pure per-profile
+    /// set-membership fact — it does NOT OR in [`Self::can_manage_mob`]. The
+    /// spawn-member shell feeds this raw fact (alongside the separate
+    /// `manage_scope_present` observation) to MobMachine's
+    /// `ResolveSpawnMemberAdmission`; the machine — not the shell — composes the
+    /// `manage_scope_present || profile_scope_contains` disjunction into the
+    /// Allow/Deny verdict. This is a RAW per-profile set-membership fact, NOT a
+    /// pre-reduced admission conclusion (it does not OR in manage scope).
+    pub fn spawn_profile_scope_contains(&self, mob_id: &str, profile: &str) -> bool {
+        self.spawn_profile_scope()
+            .get(mob_id)
+            .is_some_and(|profiles| profiles.contains(profile))
     }
 }
 
-/// Shared host/runtime policy for explicit mob-operator enablement.
-///
-/// When a host/runtime build seam explicitly enables mob operator tools for a
-/// session, the default authority shape is create-only. Existing-mob scope
-/// must still be injected separately and explicitly.
-pub fn generated_create_only_mob_operator_authority(
-    enable_mob: ToolCategoryOverride,
-) -> Option<MobToolAuthorityContext> {
-    matches!(enable_mob, ToolCategoryOverride::Enable)
-        .then(MobToolAuthorityContext::create_only_generated)
+#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+unsafe extern "Rust" {
+    #[link_name = concat!(
+        "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_mob_operator_authority_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn runtime_mob_operator_authority_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
 }
 
-/// Shared build-seam rule for mob operator access rehydration.
+#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[allow(clippy::too_many_arguments)]
+#[unsafe(export_name = concat!(
+    "__meerkat_core_runtime_generated_mob_tool_authority_context_build_v1_",
+    env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub(crate) extern "Rust" fn runtime_generated_mob_tool_authority_context_build(
+    token: &'static (dyn std::any::Any + Send + Sync),
+    principal_token: OpaquePrincipalToken,
+    can_create_mobs: bool,
+    can_mutate_profiles: bool,
+    managed_mob_scope: BTreeSet<String>,
+    spawn_profile_scope: BTreeMap<String, BTreeSet<String>>,
+    caller_provenance: Option<MobToolCallerProvenance>,
+    audit_invocation_id: Option<String>,
+) -> Result<MobToolAuthorityContext, String> {
+    #[allow(unsafe_code)]
+    let valid =
+        unsafe { runtime_mob_operator_authority_generated_authority_bridge_token_is_valid(token) };
+    if !valid {
+        return Err(
+            "mob tool authority context requires the generated runtime bridge token".into(),
+        );
+    }
+    MobToolAuthorityContext::from_generated_parts(
+        principal_token,
+        can_create_mobs,
+        can_mutate_profiles,
+        managed_mob_scope,
+        spawn_profile_scope,
+        caller_provenance,
+        audit_invocation_id,
+    )
+}
+
+/// Opaque parent/composition authority for snapshots of currently visible tools.
 ///
-/// Explicit disable clears authority. Otherwise, persisted typed authority
-/// wins; if none exists, explicit mob enablement falls back to generated
-/// create-only authority.
-pub fn resolve_mob_operator_access(
-    enable_mob: ToolCategoryOverride,
-    persisted_authority_context: Option<MobToolAuthorityContext>,
-) -> (ToolCategoryOverride, Option<MobToolAuthorityContext>) {
-    if matches!(enable_mob, ToolCategoryOverride::Disable) {
-        return (ToolCategoryOverride::Disable, None);
+/// This type is intentionally constructed only by the AgentFactory bridge. Mob
+/// tools may read the parent snapshot and request inherited visibility handoffs
+/// from this object, but downstream crates cannot implement a fake provider to
+/// mint `InheritedToolVisibilityAuthority`.
+#[derive(Clone)]
+pub struct ParentToolCompositionAuthority {
+    inner: Arc<ParentToolCompositionAuthorityInner>,
+}
+
+struct ParentToolCompositionAuthorityInner {
+    tool_scope: RwLock<Option<crate::ToolScope>>,
+}
+
+impl ParentToolCompositionAuthority {
+    #[cfg_attr(not(meerkat_internal_agent_factory_build), allow(dead_code))]
+    fn new_from_agent_factory_composition() -> Self {
+        Self {
+            inner: Arc::new(ParentToolCompositionAuthorityInner {
+                tool_scope: RwLock::new(None),
+            }),
+        }
     }
 
-    let authority_context = persisted_authority_context
-        .or_else(|| generated_create_only_mob_operator_authority(enable_mob));
-    let override_mob = if authority_context.is_some() {
-        ToolCategoryOverride::Enable
-    } else {
-        enable_mob
-    };
+    #[cfg_attr(not(meerkat_internal_agent_factory_build), allow(dead_code))]
+    fn set_tool_scope_from_agent_factory_composition(&self, tool_scope: &crate::ToolScope) {
+        let mut guard = self
+            .inner
+            .tool_scope
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = Some(tool_scope.clone());
+    }
 
-    (override_mob, authority_context)
-}
+    fn current_tool_scope(&self) -> Option<crate::ToolScope> {
+        self.inner
+            .tool_scope
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 
-/// Provider of a snapshot of currently visible tools.
-///
-/// Implemented by the agent's `ToolScope` holder to capture tool visibility
-/// at spawn time for inheritance by mob children.
-pub trait VisibleToolSnapshotProvider: Send + Sync {
+    fn map_visible_tools_error(
+        err: crate::tool_scope::ToolScopeApplyError,
+    ) -> crate::tool_scope::ToolScopeStageError {
+        match err {
+            crate::tool_scope::ToolScopeApplyError::LockPoisoned => {
+                crate::tool_scope::ToolScopeStageError::LockPoisoned
+            }
+            crate::tool_scope::ToolScopeApplyError::Owner { message } => {
+                crate::tool_scope::ToolScopeStageError::Owner { message }
+            }
+            crate::tool_scope::ToolScopeApplyError::InjectedFailure => {
+                crate::tool_scope::ToolScopeStageError::Owner {
+                    message: err.to_string(),
+                }
+            }
+        }
+    }
+
+    fn visible_tool_snapshot_result(
+        &self,
+    ) -> Result<Vec<Arc<ToolDef>>, crate::tool_scope::ToolScopeStageError> {
+        let tool_scope = self.current_tool_scope().ok_or_else(|| {
+            crate::tool_scope::ToolScopeStageError::Owner {
+                message: "parent tool scope is unavailable".to_string(),
+            }
+        })?;
+        tool_scope
+            .visible_tools_result()
+            .map(|tools| tools.iter().cloned().collect())
+            .map_err(Self::map_visible_tools_error)
+    }
+
     /// Returns the tool definitions currently visible to the parent agent.
-    fn snapshot_visible_tools(&self) -> Vec<Arc<ToolDef>>;
+    pub fn snapshot_visible_tools(&self) -> Vec<Arc<ToolDef>> {
+        self.visible_tool_snapshot_result().unwrap_or_default()
+    }
+
+    /// Authorize an inherited child visibility filter from this parent-owned
+    /// composition snapshot.
+    pub fn authorize_inherited_tool_visibility(
+        &self,
+        filter: crate::tool_scope::ToolFilter,
+    ) -> Result<crate::InheritedToolVisibilityAuthority, crate::tool_scope::ToolScopeStageError>
+    {
+        let tools = self.visible_tool_snapshot_result()?;
+        let tool_defs = tools
+            .iter()
+            .map(|tool| tool.as_ref().clone())
+            .collect::<Vec<_>>();
+        let witnesses = crate::tool_scope::filter_witnesses_for_tool_defs(&tool_defs, &filter);
+        crate::tool_scope::validate_witnessed_filter_authority(&filter, &witnesses)?;
+        Ok(
+            crate::InheritedToolVisibilityAuthority::from_generated_composition_authority(
+                filter, witnesses,
+            ),
+        )
+    }
+
+    /// Authorize a child allow-filter derived from the current visible parent
+    /// tool set plus optional allow/deny overlays.
+    pub fn authorize_inherited_tool_visibility_with_overlays(
+        &self,
+        allow_overlay: Option<&std::collections::HashSet<String>>,
+        deny_overlay: Option<&std::collections::HashSet<String>>,
+    ) -> Result<crate::InheritedToolVisibilityAuthority, crate::tool_scope::ToolScopeStageError>
+    {
+        let tools = self.visible_tool_snapshot_result()?;
+        let mut names = tools
+            .iter()
+            .map(|tool| tool.name.as_str().to_string())
+            .collect::<std::collections::HashSet<_>>();
+        if let Some(allow) = allow_overlay {
+            names = names.intersection(allow).cloned().collect();
+        }
+        if let Some(deny) = deny_overlay {
+            for name in deny {
+                names.remove(name);
+            }
+        }
+        let filter = crate::tool_scope::ToolFilter::Allow(names.into_iter().collect());
+        let tool_defs = tools
+            .iter()
+            .map(|tool| tool.as_ref().clone())
+            .collect::<Vec<_>>();
+        let witnesses = crate::tool_scope::filter_witnesses_for_tool_defs(&tool_defs, &filter);
+        crate::tool_scope::validate_witnessed_filter_authority(&filter, &witnesses)?;
+        Ok(
+            crate::InheritedToolVisibilityAuthority::from_generated_composition_authority(
+                filter, witnesses,
+            ),
+        )
+    }
+}
+
+#[cfg(all(meerkat_internal_agent_factory_build, not(test)))]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+unsafe extern "Rust" {
+    #[link_name = concat!(
+        "__meerkat_agent_factory_policy_bridge_token_is_valid_v1_",
+        env!("MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn agent_factory_parent_tool_composition_bridge_token_is_valid(
+        factory_bridge_token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+}
+
+#[cfg(all(meerkat_internal_agent_factory_build, not(test)))]
+fn validate_agent_factory_parent_tool_composition_bridge_token(
+    token: &(dyn std::any::Any + Send + Sync),
+) -> Result<(), String> {
+    #[allow(unsafe_code)]
+    let is_valid = unsafe { agent_factory_parent_tool_composition_bridge_token_is_valid(token) };
+    if is_valid {
+        Ok(())
+    } else {
+        Err("parent tool composition authority requires the AgentFactory bridge token".into())
+    }
+}
+
+#[cfg(all(meerkat_internal_agent_factory_build, not(test)))]
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!(
+    "__meerkat_agent_factory_parent_tool_composition_authority_new_v1_",
+    env!("MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub(crate) extern "Rust" fn agent_factory_parent_tool_composition_authority_new(
+    token: &'static (dyn std::any::Any + Send + Sync),
+) -> Result<ParentToolCompositionAuthority, String> {
+    validate_agent_factory_parent_tool_composition_bridge_token(token)?;
+    Ok(ParentToolCompositionAuthority::new_from_agent_factory_composition())
+}
+
+#[cfg(all(meerkat_internal_agent_factory_build, not(test)))]
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!(
+    "__meerkat_agent_factory_parent_tool_composition_authority_set_tool_scope_v1_",
+    env!("MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub(crate) extern "Rust" fn agent_factory_parent_tool_composition_authority_set_tool_scope(
+    token: &'static (dyn std::any::Any + Send + Sync),
+    authority: &ParentToolCompositionAuthority,
+    tool_scope: &crate::ToolScope,
+) -> Result<(), String> {
+    validate_agent_factory_parent_tool_composition_bridge_token(token)?;
+    authority.set_tool_scope_from_agent_factory_composition(tool_scope);
+    Ok(())
 }
 
 /// Context for capturing a parent agent's tool scope snapshot.
 ///
-/// `ParentOwned` carries a provider that can snapshot the parent's visible
+/// `ParentOwned` carries an authority that can snapshot the parent's visible
 /// tools at child spawn time. `Standalone` means no parent scope is available
 /// (e.g. top-level agents, tests).
+#[derive(Clone)]
 pub enum MobToolSnapshotContext {
     /// Parent agent owns a tool scope; snapshot available on demand.
-    ParentOwned(Arc<dyn VisibleToolSnapshotProvider>),
+    ParentOwned(ParentToolCompositionAuthority),
     /// No parent scope available.
     Standalone,
 }
@@ -634,16 +861,17 @@ pub struct MobToolsBuildArgs {
     pub model: String,
     /// Runtime-injected mob operator authority context.
     ///
-    /// Tool visibility may depend on this context being present, but operator
-    /// dispatch must still re-check the typed create/scope fields on every
-    /// call.
+    /// The session factory only calls [`MobToolsFactory::build_mob_tools`]
+    /// after generated authority has supplied this context. Operator dispatch
+    /// must still re-check the typed create/scope fields on every call.
     pub authority_context: Option<MobToolAuthorityContext>,
     /// Shared effective mob authority handle owned by the agent.
     ///
     /// Mob tools read from this handle for authorization checks. The agent
     /// (turn owner) is the sole writer — it updates this handle via
     /// `apply_session_effects` after merging tool-produced `SessionEffect`s.
-    /// If `None`, mob tools fall back to `authority_context` as a static snapshot.
+    /// Mob tools fall back to `authority_context` as a static snapshot if this
+    /// shared read handle is absent.
     pub effective_authority: Option<Arc<std::sync::RwLock<MobToolAuthorityContext>>>,
     /// Comms name of the owning agent (for building `TrustedPeerDescriptor`).
     pub comms_name: Option<String>,
@@ -696,31 +924,44 @@ pub struct ResumeOverrideMask {
 impl SessionBuildOptions {
     /// Apply the shared rehydration rule for mob operator access.
     ///
-    /// This preserves exact persisted authority when available and otherwise
-    /// falls back to generated create-only authority for explicit mob
-    /// enablement.
+    /// Serialized authority contexts are compatibility projections. They do
+    /// not carry behavior authority and are dropped at build seams unless a
+    /// generated authority seal is still present in memory. Recovered
+    /// metadata-only `Enable` is display intent, not behavior authority; it
+    /// must not force the runtime seam to mint fresh operator access.
     pub fn apply_persisted_mob_operator_access(
         &mut self,
         enable_mob: ToolCategoryOverride,
         persisted_authority_context: Option<MobToolAuthorityContext>,
     ) {
-        let (override_mob, authority_context) =
-            resolve_mob_operator_access(enable_mob, persisted_authority_context);
-        self.override_mob = override_mob;
-        self.mob_tool_authority_context = authority_context;
+        if matches!(enable_mob, ToolCategoryOverride::Disable) {
+            self.override_mob = ToolCategoryOverride::Disable;
+            self.mob_tool_authority_context = None;
+            return;
+        }
+
+        let generated_authority_context = persisted_authority_context
+            .filter(MobToolAuthorityContext::is_generated_authority_context);
+        let has_generated_authority = generated_authority_context.is_some();
+        self.override_mob = if has_generated_authority {
+            ToolCategoryOverride::Enable
+        } else {
+            ToolCategoryOverride::Inherit
+        };
+        self.mob_tool_authority_context = generated_authority_context;
     }
 
-    /// Apply the shared host/runtime default for explicit mob operator
-    /// enablement.
+    /// Apply the compatibility mirror for explicit mob operator enablement.
     ///
-    /// This keeps `override_mob` and the generated create-only authority
-    /// context aligned at the composition seam. Existing-mob scope must be
-    /// injected explicitly elsewhere; this helper never infers it.
+    /// Core does not synthesize behavior authority. Runtime/facade build seams
+    /// must rehydrate or mint `MobToolAuthorityContext` through generated
+    /// MeerkatMachine authority before mob operator tools can mount.
     pub fn apply_generated_create_only_mob_operator_access(
         &mut self,
         enable_mob: ToolCategoryOverride,
     ) {
-        self.apply_persisted_mob_operator_access(enable_mob, None);
+        self.override_mob = enable_mob;
+        self.mob_tool_authority_context = None;
     }
 }
 
@@ -949,6 +1190,17 @@ pub struct AppendSystemContextRequest {
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    /// Typed provenance: whether this append is a transient runtime steer.
+    ///
+    /// The producer of a runtime-steer append sets
+    /// [`crate::session::SystemContextSource::RuntimeSteer`]; the default
+    /// (`Normal`) covers every durable append. This typed marker is the
+    /// canonical replacement for the retired `runtime:steer:` string prefix.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::session::SystemContextSource::is_normal"
+    )]
+    pub source_kind: crate::session::SystemContextSource,
 }
 
 /// Result of appending runtime system context to a session.
@@ -1358,21 +1610,6 @@ pub trait SessionService: Send + Sync {
         ))
     }
 
-    /// Update the `keep_alive` flag on a live session's durable metadata.
-    ///
-    /// Called by the runtime when an explicit override changes the session's
-    /// keep-alive intent so that subsequent inheriting calls observe the
-    /// updated value. Returns `Unsupported` by default.
-    async fn update_session_keep_alive(
-        &self,
-        _id: &SessionId,
-        _keep_alive: bool,
-    ) -> Result<(), SessionError> {
-        Err(SessionError::Unsupported(
-            "update_session_keep_alive".to_string(),
-        ))
-    }
-
     /// Update the session's canonical mob operator authority context.
     ///
     /// This is the only supported seam for widening or narrowing exact mob
@@ -1651,49 +1888,82 @@ mod tests {
     }
 
     #[test]
-    fn grant_manage_mob_in_place_adds_mob_id() {
-        let mut ctx = MobToolAuthorityContext::create_only_generated();
-        ctx.grant_manage_mob_in_place("mob-1".into());
-        assert!(ctx.managed_mob_scope.contains("mob-1"));
-    }
-
-    #[test]
-    fn grant_manage_mob_in_place_is_idempotent() {
-        let mut ctx = MobToolAuthorityContext::create_only_generated();
-        ctx.grant_manage_mob_in_place("mob-1".into());
-        ctx.grant_manage_mob_in_place("mob-1".into());
-        assert_eq!(ctx.managed_mob_scope.len(), 1);
-    }
-
-    #[test]
-    fn grant_manage_mob_in_place_accumulates() {
-        let mut ctx = MobToolAuthorityContext::create_only_generated();
-        ctx.grant_manage_mob_in_place("mob-1".into());
-        ctx.grant_manage_mob_in_place("mob-2".into());
-        assert!(ctx.managed_mob_scope.contains("mob-1"));
-        assert!(ctx.managed_mob_scope.contains("mob-2"));
-        assert_eq!(ctx.managed_mob_scope.len(), 2);
-    }
-
-    #[test]
     fn spawn_profile_scope_allows_only_granted_profile_without_manage_scope() {
-        let ctx = MobToolAuthorityContext::create_only_generated()
-            .grant_spawn_profile_in_mob("mob-1", "investigator");
+        let ctx = MobToolAuthorityContext::generated_for_test(
+            OpaquePrincipalToken::new("generated-test"),
+            false,
+            false,
+            BTreeSet::new(),
+            BTreeMap::from([(
+                "mob-1".to_string(),
+                BTreeSet::from(["investigator".to_string()]),
+            )]),
+            None,
+            None,
+        );
 
-        assert!(ctx.can_spawn_any_profile_in_mob("mob-1"));
-        assert!(ctx.can_spawn_profile_in_mob("mob-1", "investigator"));
-        assert!(!ctx.can_spawn_profile_in_mob("mob-1", "writer"));
+        assert!(ctx.spawn_profile_scope_present("mob-1"));
+        assert!(ctx.spawn_profile_scope_contains("mob-1", "investigator"));
+        assert!(!ctx.spawn_profile_scope_contains("mob-1", "writer"));
         assert!(!ctx.can_manage_mob("mob-1"));
     }
 
-    struct MockSnapshotProvider {
-        tools: Vec<Arc<ToolDef>>,
+    #[test]
+    fn deserialized_mob_tool_authority_context_is_projection_only() {
+        let ctx = MobToolAuthorityContext::generated_for_test(
+            OpaquePrincipalToken::new("generated-test"),
+            true,
+            true,
+            BTreeSet::from(["mob-1".to_string()]),
+            BTreeMap::from([(
+                "mob-1".to_string(),
+                BTreeSet::from(["investigator".to_string()]),
+            )]),
+            Some(MobToolCallerProvenance::default().with_mob_id("mob-1")),
+            Some("audit-1".to_string()),
+        );
+
+        let restored: MobToolAuthorityContext =
+            serde_json::from_value(serde_json::to_value(ctx).unwrap()).unwrap();
+
+        assert!(!restored.is_generated_authority_context());
+        assert!(!restored.can_create_mobs());
+        assert!(!restored.can_mutate_profiles());
+        assert!(!restored.can_manage_mob("mob-1"));
+        assert!(!restored.spawn_profile_scope_present("mob-1"));
+        assert!(restored.caller_provenance().is_none());
+        assert!(restored.audit_invocation_id().is_none());
     }
 
-    impl VisibleToolSnapshotProvider for MockSnapshotProvider {
-        fn snapshot_visible_tools(&self) -> Vec<Arc<ToolDef>> {
-            self.tools.clone()
-        }
+    #[test]
+    fn persisted_mob_enable_without_generated_seal_does_not_become_override() {
+        let ctx = MobToolAuthorityContext::generated_for_test(
+            OpaquePrincipalToken::new("generated-test"),
+            true,
+            true,
+            BTreeSet::from(["mob-1".to_string()]),
+            BTreeMap::new(),
+            None,
+            None,
+        );
+        let projected: MobToolAuthorityContext =
+            serde_json::from_value(serde_json::to_value(ctx).unwrap()).unwrap();
+
+        let mut build = SessionBuildOptions::default();
+        build.apply_persisted_mob_operator_access(ToolCategoryOverride::Enable, Some(projected));
+
+        assert_eq!(build.override_mob, ToolCategoryOverride::Inherit);
+        assert!(build.mob_tool_authority_context.is_none());
+    }
+
+    #[test]
+    fn explicit_mob_enable_records_create_only_runtime_handoff_intent() {
+        let mut build = SessionBuildOptions::default();
+
+        build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::Enable);
+
+        assert_eq!(build.override_mob, ToolCategoryOverride::Enable);
+        assert!(build.mob_tool_authority_context.is_none());
     }
 
     #[test]
@@ -1704,14 +1974,16 @@ mod tests {
 
     #[test]
     fn mob_tool_snapshot_context_parent_owned_returns_tools() {
-        let tools = vec![Arc::new(ToolDef {
+        let tools = Arc::<[Arc<ToolDef>]>::from(vec![Arc::new(ToolDef {
             name: "test_tool".into(),
             description: "a test".to_string(),
             input_schema: serde_json::json!({"type": "object"}),
             provenance: None,
-        })];
-        let provider = Arc::new(MockSnapshotProvider { tools });
-        let ctx = MobToolSnapshotContext::ParentOwned(provider);
+        })]);
+        let tool_scope = crate::ToolScope::new(tools);
+        let authority = ParentToolCompositionAuthority::new_from_agent_factory_composition();
+        authority.set_tool_scope_from_agent_factory_composition(&tool_scope);
+        let ctx = MobToolSnapshotContext::ParentOwned(authority);
         match ctx {
             MobToolSnapshotContext::ParentOwned(p) => {
                 let snapshot = p.snapshot_visible_tools();

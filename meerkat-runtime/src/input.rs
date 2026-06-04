@@ -1,7 +1,7 @@
 //! §8 Input types — the 6 input variants accepted by the runtime layer.
 //!
-//! Core never sees these. The runtime's policy table resolves each Input
-//! to a PolicyDecision, then the runtime translates accepted Inputs into
+//! Core never sees these. Generated admission authority resolves each accepted
+//! Input to a PolicyDecision, then the runtime translates accepted Inputs into
 //! RunPrimitive for core consumption.
 
 use chrono::{DateTime, Utc};
@@ -183,6 +183,18 @@ impl Input {
             Input::Continuation(continuation) => Some(continuation.handling_mode),
             Input::Peer(peer) => peer.handling_mode,
             Input::Operation(_) => None,
+        }
+    }
+
+    /// Typed continuation discriminant threaded into admission. Only
+    /// continuations carry a non-ordinary kind; every other input family is
+    /// [`ContinuationKind::Ordinary`]. This is a typed pass-through of the
+    /// producer-declared fact — admission never re-classifies continuation
+    /// routing from reason strings or overlay dispatch-context keys.
+    pub fn continuation_kind(&self) -> ContinuationKind {
+        match self {
+            Input::Continuation(continuation) => continuation.continuation_kind,
+            _ => ContinuationKind::Ordinary,
         }
     }
 }
@@ -493,6 +505,25 @@ pub struct ExternalEventInput {
     pub render_metadata: Option<RenderMetadata>,
 }
 
+/// Typed continuation discriminant carried on a [`ContinuationInput`].
+///
+/// The producer of a continuation declares how the runtime must re-enter the
+/// session: an ordinary continuation resumes the pending run, while a WorkGraph
+/// attention continuation re-enters as a fresh queued content turn. This is a
+/// typed fact owned by the producer; admission threads it into
+/// `MeerkatMachine::ResolveAdmissionPlan`, which owns the lane and run-apply
+/// semantics derived from it. No downstream consumer re-classifies continuation
+/// routing from continuation reason strings or overlay dispatch-context keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationKind {
+    /// Ordinary continuation: resume the pending run at the run boundary.
+    #[default]
+    Ordinary,
+    /// WorkGraph attention continuation: re-enter as a fresh queued content turn.
+    WorkgraphAttention,
+}
+
 /// Explicit continuation request that asks the runtime to keep draining
 /// ordinary work after a boundary-local event (for example, terminal peer
 /// responses injected into session state).
@@ -501,6 +532,11 @@ pub struct ContinuationInput {
     pub header: InputHeader,
     /// Stable reason for the continuation request.
     pub reason: String,
+    /// Typed continuation discriminant owned by the producer. Admission threads
+    /// it into `MeerkatMachine::ResolveAdmissionPlan` so the machine owns the
+    /// lane and run-apply semantics for WorkGraph attention re-entry.
+    #[serde(default)]
+    pub continuation_kind: ContinuationKind,
     /// Ordinary-work handling mode for the continuation.
     #[serde(default)]
     pub handling_mode: HandlingMode,
@@ -540,6 +576,7 @@ impl ContinuationInput {
                 correlation_id: None,
             },
             reason: "detached_background_op_completed".to_string(),
+            continuation_kind: ContinuationKind::Ordinary,
             handling_mode: HandlingMode::Steer,
             request_id: None,
             flow_tool_overlay: None,
@@ -946,14 +983,7 @@ fn peer_response_terminal_context_append(
                 }),
                 request_id: Some(fact.correlation_id.to_string()),
                 intent: None,
-                status: Some(
-                    match fact.status {
-                        PeerResponseTerminalProjectionStatus::Completed => "completed",
-                        PeerResponseTerminalProjectionStatus::Failed => "failed",
-                        PeerResponseTerminalProjectionStatus::Cancelled => "cancelled",
-                    }
-                    .to_string(),
-                ),
+                status: Some(fact.status.label().to_string()),
                 summary: Some("Peer terminal response".to_string()),
                 payload: fact.render_payload.as_ref().cloned(),
                 content: Vec::new(),
@@ -995,6 +1025,8 @@ pub(crate) fn context_append_to_pending_system_context_append(
         text,
         source: Some(append.key.clone()),
         idempotency_key: Some(append.key.clone()),
+        // Durable keyed context append (peer responses, etc.) — not a steer.
+        source_kind: meerkat_core::session::SystemContextSource::Normal,
         accepted_at: meerkat_core::time_compat::SystemTime::now(),
     }
 }
@@ -1013,11 +1045,17 @@ pub(crate) fn projection_to_pending_system_context_appends(
         .append
         .as_ref()
         .map(|append| {
+            // The PRODUCER of a runtime-steer append sets the typed marker
+            // here, at construction. This is the single source of truth for
+            // the runtime-steer fact — no downstream code reclassifies the
+            // `source` string. The `runtime:steer:` source/idempotency key is
+            // retained only as a stable per-input idempotency identifier.
             let key = format!("runtime:steer:{input_id}");
             meerkat_core::PendingSystemContextAppend {
                 text: render_core_context_for_pending_system_context(&append.content),
                 source: Some(key.clone()),
                 idempotency_key: Some(key),
+                source_kind: meerkat_core::session::SystemContextSource::RuntimeSteer,
                 accepted_at: meerkat_core::time_compat::SystemTime::now(),
             }
         })
@@ -1301,6 +1339,7 @@ mod tests {
         let input = Input::Continuation(ContinuationInput {
             header: make_header(),
             reason: "workgraph_attention".into(),
+            continuation_kind: ContinuationKind::WorkgraphAttention,
             handling_mode: HandlingMode::Steer,
             request_id: Some("binding-1".into()),
             flow_tool_overlay: Some(TurnToolOverlay {
@@ -1698,6 +1737,7 @@ mod tests {
         let continuation = Input::Continuation(ContinuationInput {
             header: make_header(),
             reason: "continue".into(),
+            continuation_kind: ContinuationKind::Ordinary,
             handling_mode: HandlingMode::Steer,
             request_id: None,
             flow_tool_overlay: None,
@@ -1802,8 +1842,8 @@ mod tests {
             peer_id,
             Some(display_name),
             request_id,
-            meerkat_contracts::PeerResponseTerminalStatusWire::Cancelled,
-            serde_json::json!({"ok": false}),
+            meerkat_contracts::PeerResponseTerminalStatusWire::Completed,
+            serde_json::json!({"ok": true}),
         );
 
         match input {
@@ -1835,11 +1875,32 @@ mod tests {
                         uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000162").unwrap()
                     ))
                 );
-                assert_eq!(status, ResponseTerminalStatus::Cancelled);
-                assert_eq!(payload["ok"], false);
+                assert_eq!(status, ResponseTerminalStatus::Completed);
+                assert_eq!(payload["ok"], true);
             }
             other => panic!("expected terminal peer input, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn peer_response_terminal_validation_is_structural_only() {
+        let peer_id = meerkat_core::comms::PeerId::from_uuid(
+            uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000161").unwrap(),
+        );
+        let display_name = meerkat_core::comms::PeerName::new("analyst").unwrap();
+        let request_id = meerkat_core::PeerCorrelationId::from_uuid(
+            uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000162").unwrap(),
+        );
+        let input = peer_response_terminal_input(
+            peer_id,
+            Some(display_name),
+            request_id,
+            meerkat_contracts::PeerResponseTerminalStatusWire::Cancelled,
+            serde_json::json!({"ok": false}),
+        );
+
+        validate_peer_response_terminal_fact(&input)
+            .expect("status support is generated admission authority, structural fact validation should pass");
     }
 
     #[test]

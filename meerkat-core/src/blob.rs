@@ -27,6 +27,23 @@ impl fmt::Display for BlobId {
     }
 }
 
+/// Canonical content-addressed blob identifier for an image payload.
+///
+/// This is the single owner of the blob-identity hash: blob stores compute
+/// stored ids through it, and transcript-identity digests canonicalize inline
+/// image payloads through it so that the inline and blob-backed representations
+/// of the same image share one identity. Because an inline image hydrates from
+/// its blob's own bytes, `content_blob_id(media_type, hydrated_data)` equals the
+/// id the blob store minted for that image.
+pub fn content_blob_id(media_type: &str, data: &str) -> BlobId {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(media_type.as_bytes());
+    hasher.update([0]);
+    hasher.update(data.as_bytes());
+    BlobId::new(format!("sha256:{:x}", hasher.finalize()))
+}
+
 impl From<String> for BlobId {
     fn from(value: String) -> Self {
         Self(value)

@@ -9,9 +9,6 @@ use meerkat_core::lifecycle::InputId;
 
 use crate::identifiers::{InputKind, LogicalRuntimeId, SupersessionKey};
 use crate::input::{Input, PeerConvention};
-use crate::input_state::{
-    InputLifecycleState, InputState, InputStateHistoryEntry, InputTerminalOutcome,
-};
 
 /// Whether an input is eligible for coalescing.
 pub fn is_coalescing_eligible(input: &Input) -> bool {
@@ -75,49 +72,6 @@ pub fn check_supersession(
         }
         _ => CoalescingResult::Standalone,
     }
-}
-
-/// Write the shell-side metadata for a supersession. Callers invoke the DSL
-/// `SupersedeInput` transition first (which flips `input_phases` and records
-/// the structured terminal metadata in the typed terminal maps); this helper
-/// keeps the shell's history log and typed outcome cache in step.
-///
-/// `from_phase` is the DSL-tracked lifecycle the input held at the moment the
-/// DSL transition fired, captured by the caller so the history entry is
-/// accurate.
-pub fn apply_supersession(
-    superseded_state: &mut InputState,
-    from_phase: InputLifecycleState,
-    superseded_by: InputId,
-) {
-    let now = Utc::now();
-    superseded_state.history.push(InputStateHistoryEntry {
-        timestamp: now,
-        from: from_phase,
-        to: InputLifecycleState::Superseded,
-        reason: Some("Supersede".into()),
-    });
-    superseded_state.terminal_outcome = Some(InputTerminalOutcome::Superseded { superseded_by });
-    superseded_state.updated_at = now;
-}
-
-/// Write the shell-side metadata for a coalesce. Callers invoke the DSL
-/// `CoalesceInput` transition first; this helper keeps the shell's history
-/// log and typed outcome cache in step.
-pub fn apply_coalescing(
-    source_state: &mut InputState,
-    from_phase: InputLifecycleState,
-    aggregate_id: InputId,
-) {
-    let now = Utc::now();
-    source_state.history.push(InputStateHistoryEntry {
-        timestamp: now,
-        from: from_phase,
-        to: InputLifecycleState::Coalesced,
-        reason: Some("Coalesce".into()),
-    });
-    source_state.terminal_outcome = Some(InputTerminalOutcome::Coalesced { aggregate_id });
-    source_state.updated_at = now;
 }
 
 /// Create an aggregate input from multiple coalesced inputs.
@@ -317,38 +271,6 @@ mod tests {
         let result = check_supersession(&input2, &input1, &runtime);
         // Different kinds → different scope → no supersession
         assert!(matches!(result, CoalescingResult::Standalone));
-    }
-
-    #[test]
-    fn apply_supersession_records_history_and_outcome() {
-        let mut state = InputState::new_accepted(InputId::new());
-        let superseder = InputId::new();
-        apply_supersession(&mut state, InputLifecycleState::Queued, superseder);
-        assert!(matches!(
-            state.terminal_outcome.clone(),
-            Some(InputTerminalOutcome::Superseded { .. })
-        ));
-        assert!(!state.history.is_empty());
-        assert_eq!(
-            state.history.last().map(|e| e.to),
-            Some(InputLifecycleState::Superseded)
-        );
-    }
-
-    #[test]
-    fn apply_coalescing_records_history_and_outcome() {
-        let mut state = InputState::new_accepted(InputId::new());
-        let aggregate = InputId::new();
-        apply_coalescing(&mut state, InputLifecycleState::Queued, aggregate);
-        assert!(matches!(
-            state.terminal_outcome.clone(),
-            Some(InputTerminalOutcome::Coalesced { .. })
-        ));
-        assert!(!state.history.is_empty());
-        assert_eq!(
-            state.history.last().map(|e| e.to),
-            Some(InputLifecycleState::Coalesced)
-        );
     }
 
     #[test]

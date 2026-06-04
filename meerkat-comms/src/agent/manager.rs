@@ -1,6 +1,6 @@
 //! CommsManager - Central manager for agent communication.
 //!
-//! The CommsManager holds the keypair, trusted peers, inbox, and router,
+//! The CommsManager holds the keypair, compatibility peer directory, inbox, and router,
 //! providing a unified interface for comms operations.
 
 use std::sync::Arc;
@@ -16,7 +16,8 @@ use super::types::CommsMessage;
 pub struct CommsManagerConfig {
     /// Our keypair for signing messages.
     pub keypair: Keypair,
-    /// List of trusted peers.
+    /// Compatibility peer-directory mirror. These rows are not live
+    /// send/admission trust.
     pub trusted_peers: TrustedPeers,
     /// Comms configuration (timeouts, limits).
     pub comms_config: CommsConfig,
@@ -41,7 +42,11 @@ impl CommsManagerConfig {
         }
     }
 
-    /// Set the trusted peers.
+    /// Set the compatibility peer-directory mirror.
+    ///
+    /// Compatibility mirror only. `CommsManager` no longer promotes these
+    /// rows into live send/admission trust; generated machine/composition
+    /// trust authority must install runtime trust through the mutation seam.
     pub fn trusted_peers(mut self, trusted_peers: TrustedPeers) -> Self {
         self.trusted_peers = trusted_peers;
         self
@@ -70,7 +75,7 @@ impl Default for CommsManagerConfig {
 pub struct CommsManager {
     /// Our keypair for signing messages.
     keypair: Arc<Keypair>,
-    /// List of trusted peers.
+    /// Compatibility peer-directory mirror.
     trusted_peers: Arc<TrustedPeers>,
     /// The inbox for receiving messages.
     inbox: Inbox,
@@ -84,7 +89,7 @@ impl CommsManager {
     /// Create a new CommsManager with the given configuration.
     pub fn new(config: CommsManagerConfig) -> std::io::Result<Self> {
         let (inbox, inbox_sender) = Inbox::new();
-        let trusted_peers = Arc::new(config.trusted_peers.clone());
+        let trusted_peers = Arc::new(TrustedPeers::new());
 
         let router = Router::new(
             config.keypair,
@@ -118,7 +123,7 @@ impl CommsManager {
         self.keypair.public_key()
     }
 
-    /// Get the trusted peers.
+    /// Get the compatibility peer-directory mirror.
     pub fn trusted_peers(&self) -> &Arc<TrustedPeers> {
         &self.trusted_peers
     }
@@ -168,6 +173,7 @@ impl CommsManager {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::inbox::{AdmissionOutcome, DropReason};
     use crate::{Envelope, InboxItem, MessageKind, Signature, TrustedPeer};
     use uuid::Uuid;
 
@@ -176,14 +182,12 @@ mod tests {
     }
 
     fn make_trusted_peers(name: &str, pubkey: &crate::PubKey) -> TrustedPeers {
-        TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: name.to_string(),
-                pubkey: *pubkey,
-                addr: "tcp://127.0.0.1:4200".to_string(),
-                meta: crate::PeerMeta::default(),
-            }],
-        }
+        TrustedPeers::from_peers(vec![TrustedPeer {
+            name: name.to_string(),
+            pubkey: *pubkey,
+            addr: "tcp://127.0.0.1:4200".to_string(),
+            meta: crate::PeerMeta::default(),
+        }])
     }
 
     #[test]
@@ -208,8 +212,10 @@ mod tests {
 
         let manager = CommsManager::new(config).unwrap();
 
-        assert_eq!(manager.trusted_peers().peers.len(), 1);
-        assert_eq!(manager.trusted_peers().peers[0].name, "test-peer");
+        assert!(
+            manager.trusted_peers().peers().is_empty(),
+            "constructor trusted_peers are compatibility data only; live trust requires generated authority",
+        );
     }
 
     #[test]
@@ -247,19 +253,23 @@ mod tests {
         };
         envelope.sign(&sender);
 
-        manager
+        let outcome = manager
             .inbox_sender()
-            .send(InboxItem::External { envelope })
-            .into_result()
-            .unwrap();
+            .send(InboxItem::External { envelope });
+        assert_eq!(
+            outcome,
+            AdmissionOutcome::Dropped {
+                reason: DropReason::ClassificationRejected
+            }
+        );
 
         // Give tokio a moment to process
         tokio::task::yield_now().await;
 
-        // Drain messages
+        // Raw CommsManager inboxes are transport-only; without a machine
+        // authority handle they fail closed instead of deriving peer facts.
         let messages = manager.drain_messages();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].from_peer, "sender-agent");
+        assert!(messages.is_empty());
     }
 
     #[test]

@@ -89,10 +89,10 @@ run_logged machine-authority \
   bash -lc './scripts/repo-cargo xtask machine-codegen --all && git diff --exit-code && ./scripts/repo-cargo xtask machine-check-drift --all && ./scripts/repo-cargo xtask machine-verify --all && ./scripts/repo-cargo xtask protocol-codegen && git diff --exit-code && ./scripts/repo-cargo xtask audit-generated-headers'
 
 run_logged rmat-audit \
-  bash -lc './scripts/audit-effect-authority.sh && ./scripts/repo-cargo run -p xtask -- ownership-ledger --check-drift && ./scripts/repo-cargo run -p xtask -- rmat-audit --strict'
+  bash -lc './scripts/audit-effect-authority.sh && ./scripts/repo-cargo run -p xtask -- ownership-ledger --check-drift && { ulimit -s unlimited 2>/dev/null || ulimit -s 65520; } && ./scripts/repo-cargo run -p xtask -- rmat-audit --strict'
 
 run_logged seam-inventory \
-  ./scripts/repo-cargo run -p xtask -- seam-inventory --strict
+  bash -lc '{ ulimit -s unlimited 2>/dev/null || ulimit -s 65520; } && ./scripts/repo-cargo run -p xtask -- seam-inventory --strict'
 
 run_logged wasm-contract \
   bash -lc 'RUSTFLAGS='\''--cfg getrandom_backend="wasm_js"'\'' ./scripts/repo-cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --test browser_contract --no-run && RUSTFLAGS='\''--cfg getrandom_backend="wasm_js"'\'' ./scripts/repo-cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --test release_targets --no-run && RUSTFLAGS='\''--cfg getrandom_backend="wasm_js"'\'' wasm-pack test --headless --chrome meerkat-web-runtime --test browser_contract && RUSTFLAGS='\''--cfg getrandom_backend="wasm_js"'\'' wasm-pack test --headless --chrome meerkat-web-runtime --test release_targets'

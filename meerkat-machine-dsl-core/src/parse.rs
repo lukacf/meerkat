@@ -662,10 +662,18 @@ fn parse_unary_expr(input: ParseStream) -> Result<ExprDef> {
 fn parse_postfix_expr(input: ParseStream) -> Result<ExprDef> {
     let mut expr = parse_primary_expr(input)?;
 
-    // Handle method calls: .is_some(), .is_none(), .contains(x), .len(), .keys(), .get(k)
+    // Handle field projections and method calls:
+    // `.field`, `.is_some()`, `.contains(x)`, `.get(k)`, etc.
     while input.peek(Token![.]) {
         let _: Token![.] = input.parse()?;
         let method: Ident = input.parse()?;
+        if !input.peek(syn::token::Paren) {
+            expr = ExprDef::FieldAccess {
+                base: Box::new(expr),
+                field: method,
+            };
+            continue;
+        }
         match method.to_string().as_str() {
             "is_some" => {
                 let paren;
@@ -701,6 +709,15 @@ fn parse_postfix_expr(input: ParseStream) -> Result<ExprDef> {
                 syn::parenthesized!(paren in input);
                 let _ = &paren;
                 expr = ExprDef::Len(Box::new(expr));
+            }
+            "count" => {
+                let paren;
+                syn::parenthesized!(paren in input);
+                let value = parse_expr(&paren)?;
+                expr = ExprDef::Count {
+                    collection: Box::new(expr),
+                    value: Box::new(value),
+                };
             }
             "keys" => {
                 let paren;
@@ -740,6 +757,41 @@ fn parse_postfix_expr(input: ParseStream) -> Result<ExprDef> {
                     key: Box::new(key),
                 };
             }
+            "is_unit_variant" => {
+                let paren;
+                syn::parenthesized!(paren in input);
+                let (enum_name, variant) = parse_enum_variant_ref(&paren)?;
+                expr = ExprDef::EnumVariantIs {
+                    value: Box::new(expr),
+                    enum_name,
+                    variant,
+                    tuple_variant: false,
+                };
+            }
+            "is_tuple_variant" => {
+                let paren;
+                syn::parenthesized!(paren in input);
+                let (enum_name, variant) = parse_enum_variant_ref(&paren)?;
+                expr = ExprDef::EnumVariantIs {
+                    value: Box::new(expr),
+                    enum_name,
+                    variant,
+                    tuple_variant: true,
+                };
+            }
+            "string_set_payload" => {
+                let paren;
+                syn::parenthesized!(paren in input);
+                let (enum_name, variant) = parse_enum_variant_ref(&paren)?;
+                let _: Token![,] = paren.parse()?;
+                let field: LitStr = paren.parse()?;
+                expr = ExprDef::EnumStringSetPayload {
+                    value: Box::new(expr),
+                    enum_name,
+                    variant,
+                    field: field.value(),
+                };
+            }
             _ => {
                 return Err(syn::Error::new(
                     method.span(),
@@ -750,6 +802,13 @@ fn parse_postfix_expr(input: ParseStream) -> Result<ExprDef> {
     }
 
     Ok(expr)
+}
+
+fn parse_enum_variant_ref(input: ParseStream) -> Result<(Ident, Ident)> {
+    let enum_name: Ident = input.parse()?;
+    let _: Token![::] = input.parse()?;
+    let variant: Ident = input.parse()?;
+    Ok((enum_name, variant))
 }
 
 fn parse_primary_expr(input: ParseStream) -> Result<ExprDef> {
@@ -812,6 +871,18 @@ fn parse_primary_expr(input: ParseStream) -> Result<ExprDef> {
     let ident: Ident = input.parse()?;
     match ident.to_string().as_str() {
         "None" => Ok(ExprDef::None),
+        "u64" if input.peek(Token![::]) => {
+            let _: Token![::] = input.parse()?;
+            let variant: Ident = input.parse()?;
+            if variant == "MAX" {
+                Ok(ExprDef::U64Max)
+            } else {
+                Err(syn::Error::new(
+                    variant.span(),
+                    "unsupported u64 associated constant in machine DSL",
+                ))
+            }
+        }
         "Some" => {
             let paren;
             syn::parenthesized!(paren in input);

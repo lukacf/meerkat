@@ -36,6 +36,22 @@ const BUILD_PROFILE = (() => {
     `invalid MEERKAT_WEB_WASM_PROFILE=${value}; expected release, dev, or profiling`,
   );
 })();
+const WASM_RUSTFLAGS = [
+  process.env.CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS,
+  '--cfg getrandom_backend="wasm_js"',
+  "-C link-arg=-zstack-size=8388608",
+]
+  .filter(Boolean)
+  .join(" ");
+const RELEASE_CARGO_PROFILE_ENV =
+  BUILD_PROFILE === "release"
+    ? {
+        CARGO_PROFILE_RELEASE_CODEGEN_UNITS:
+          process.env.CARGO_PROFILE_RELEASE_CODEGEN_UNITS ?? "256",
+        CARGO_PROFILE_RELEASE_OPT_LEVEL:
+          process.env.CARGO_PROFILE_RELEASE_OPT_LEVEL ?? "0",
+      }
+    : {};
 // Lock timeout must exceed (wasm_build_seconds * max_parallel_tests). A cold
 // wasm-pack build takes ~60s on M-series; the e2e-smoke lane can run ~5 browser
 // tests that all compete for this lock. 15 minutes gives comfortable headroom
@@ -272,8 +288,11 @@ async function localCargoGraphInputs() {
 async function computeSourceHash() {
   const hash = createHash("sha256");
   hash.update("meerkat-web-runtime-wasm-v1\n");
-  hash.update(`rustflags=--cfg getrandom_backend="wasm_js"\n`);
+  hash.update(`rustflags=${WASM_RUSTFLAGS}\n`);
   hash.update(`profile=${BUILD_PROFILE}\n`);
+  for (const [key, value] of Object.entries(RELEASE_CARGO_PROFILE_ENV).sort()) {
+    hash.update(`${key}=${value}\n`);
+  }
   hash.update(`wasm-pack=${(await runCapture(WASM_PACK_BIN, ["--version"])).trim()}\n`);
   const inputs = await localCargoGraphInputs();
   for (const filePath of inputs) {
@@ -334,7 +353,8 @@ async function run() {
           stdio: "inherit",
           env: {
             ...process.env,
-            RUSTFLAGS: '--cfg getrandom_backend="wasm_js"',
+            ...RELEASE_CARGO_PROFILE_ENV,
+            CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS: WASM_RUSTFLAGS,
           },
         },
       );

@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 
 use meerkat_core::{
     AuthError, Provider, RealmConnectionSet, ResolvedAuthEnvelope, connection::AuthBindingRef,
-    handles::AuthLeaseHandle,
+    handles::GeneratedAuthLeaseHandle,
 };
 
 use crate::provider_runtime::binding::{ResolvedConnection, ValidatedBinding};
@@ -53,7 +53,7 @@ pub struct ResolverEnvironment {
     pub external_resolvers: BTreeMap<String, Arc<dyn ExternalAuthResolverHandle>>,
     pub now: NowFn,
     pub force_refresh: bool,
-    pub auth_lease_handle: Option<Arc<dyn AuthLeaseHandle>>,
+    pub auth_lease_handle: Option<GeneratedAuthLeaseHandle>,
     #[cfg(not(target_arch = "wasm32"))]
     pub token_store: Option<Arc<dyn meerkat_core::auth::TokenStore>>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -124,7 +124,7 @@ impl ResolverEnvironment {
     /// Attach the session-owned auth lease handle so dynamic cloud
     /// authorizers can publish observed token freshness into AuthMachine
     /// truth after a lazy token exchange.
-    pub fn with_auth_lease_handle(mut self, handle: Arc<dyn AuthLeaseHandle>) -> Self {
+    pub fn with_auth_lease_handle(mut self, handle: GeneratedAuthLeaseHandle) -> Self {
         self.auth_lease_handle = Some(handle);
         self
     }

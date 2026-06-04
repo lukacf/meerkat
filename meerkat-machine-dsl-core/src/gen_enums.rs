@@ -42,7 +42,10 @@ fn gen_enum(enum_def: &EnumDef) -> TokenStream {
                         quote! { #fname: #fty }
                     })
                     .collect();
-                quote! { #vname { #(#fields),* } }
+                quote! {
+                    #[allow(clippy::too_many_arguments)]
+                    #vname { #(#fields),* }
+                }
             }
         })
         .collect();
@@ -60,6 +63,7 @@ fn gen_enum(enum_def: &EnumDef) -> TokenStream {
         .collect();
 
     quote! {
+        #[allow(clippy::too_many_arguments)]
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub enum #name {
             #(#variants),*
@@ -77,6 +81,12 @@ fn gen_enum(enum_def: &EnumDef) -> TokenStream {
                 match *self {
                     #(Self::#variant_idents => stringify!(#variant_idents)),*
                 }
+            }
+        }
+
+        impl std::fmt::Display for #variant_name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
             }
         }
 

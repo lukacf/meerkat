@@ -15,8 +15,6 @@ use meerkat_core::types::HandlingMode;
 use serde::{Deserialize, Serialize};
 
 use crate::identifiers::{InputKind, KindId};
-use crate::input::Input;
-use crate::policy::{ApplyMode, PolicyDecision};
 
 /// Content shape classification for admitted inputs.
 ///
@@ -77,10 +75,10 @@ pub struct RequestId(pub String);
 /// carrier from that decision point to `RunPrimitive` construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeInputSemantics {
-    pub boundary: RunApplyBoundary,
-    pub execution_kind: RuntimeExecutionKind,
-    pub execution_handling_mode: Option<HandlingMode>,
-    pub peer_response_terminal_apply_intent: Option<PeerResponseTerminalApplyIntent>,
+    pub(crate) boundary: RunApplyBoundary,
+    pub(crate) execution_kind: RuntimeExecutionKind,
+    pub(crate) execution_handling_mode: Option<HandlingMode>,
+    pub(crate) peer_response_terminal_apply_intent: Option<PeerResponseTerminalApplyIntent>,
 }
 
 /// Admitted conversation projection for one input.
@@ -97,106 +95,41 @@ pub struct RuntimeInputProjection {
 }
 
 impl RuntimeInputSemantics {
-    fn boundary_from_policy(policy: &PolicyDecision) -> RunApplyBoundary {
-        match policy.apply_mode {
-            ApplyMode::StageRunBoundary => RunApplyBoundary::RunCheckpoint,
-            ApplyMode::InjectNow => RunApplyBoundary::Immediate,
-            ApplyMode::StageRunStart | ApplyMode::Ignore => RunApplyBoundary::RunStart,
-        }
+    pub fn try_from_generated_admission(
+        input: &crate::input::Input,
+        runtime_idle: bool,
+    ) -> Result<Self, String> {
+        crate::policy_table::generated_admission_projection_for_input(input, runtime_idle)
+            .map(|projection| projection.runtime_semantics)
     }
 
-    pub fn from_policy_and_execution_kind(
-        policy: &PolicyDecision,
-        execution_kind: RuntimeExecutionKind,
-        peer_response_terminal_apply_intent: Option<PeerResponseTerminalApplyIntent>,
-    ) -> Self {
-        let boundary = Self::boundary_from_policy(policy);
-        let execution_handling_mode = match (boundary, policy.routing_disposition) {
-            (
-                RunApplyBoundary::RunStart,
-                crate::policy::RoutingDisposition::Steer
-                | crate::policy::RoutingDisposition::Immediate,
-            ) => Some(HandlingMode::Queue),
-            _ => None,
-        };
-        Self {
-            boundary,
-            execution_kind,
-            execution_handling_mode,
-            peer_response_terminal_apply_intent,
-        }
+    pub fn boundary(&self) -> RunApplyBoundary {
+        self.boundary
     }
 
-    pub fn from_policy_and_kind(policy: &PolicyDecision, kind: InputKind) -> Self {
-        let execution_kind = match kind {
-            InputKind::Continuation => RuntimeExecutionKind::ResumePending,
-            InputKind::Prompt
-            | InputKind::PeerMessage
-            | InputKind::PeerRequest
-            | InputKind::PeerResponseProgress
-            | InputKind::PeerResponseTerminal
-            | InputKind::FlowStep
-            | InputKind::ExternalEvent
-            | InputKind::Operation => RuntimeExecutionKind::ContentTurn,
-        };
-        let peer_response_terminal_apply_intent = match kind {
-            InputKind::PeerResponseTerminal => {
-                Some(PeerResponseTerminalApplyIntent::AppendContextAndRun)
-            }
-            InputKind::Prompt
-            | InputKind::PeerMessage
-            | InputKind::PeerRequest
-            | InputKind::PeerResponseProgress
-            | InputKind::FlowStep
-            | InputKind::ExternalEvent
-            | InputKind::Continuation
-            | InputKind::Operation => None,
-        };
-        Self::from_policy_and_execution_kind(
-            policy,
-            execution_kind,
-            peer_response_terminal_apply_intent,
-        )
+    pub fn execution_kind(&self) -> RuntimeExecutionKind {
+        self.execution_kind
     }
 
-    pub fn from_policy_and_input(policy: &PolicyDecision, input: &Input) -> Self {
-        let mut semantics = Self::from_policy_and_kind(policy, input.kind());
-        if let Input::Continuation(continuation) = input
-            && continuation.turn_append.is_some()
-        {
-            semantics.execution_kind = RuntimeExecutionKind::ContentTurn;
-        }
-        semantics
+    pub fn peer_response_terminal_apply_intent(&self) -> Option<PeerResponseTerminalApplyIntent> {
+        self.peer_response_terminal_apply_intent
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::{ConsumePoint, DrainPolicy, QueueMode, RoutingDisposition, WakeMode};
-
-    fn policy(apply_mode: ApplyMode) -> PolicyDecision {
-        PolicyDecision {
-            apply_mode,
-            wake_mode: WakeMode::WakeIfIdle,
-            queue_mode: QueueMode::Fifo,
-            consume_point: ConsumePoint::OnRunComplete,
-            drain_policy: DrainPolicy::QueueNextTurn,
-            routing_disposition: RoutingDisposition::Queue,
-            record_transcript: true,
-            emit_operator_content: true,
-            policy_version: crate::policy_table::DEFAULT_POLICY_VERSION,
-        }
-    }
 
     #[test]
     fn terminal_peer_response_keeps_content_turn_execution_kind() {
-        let semantics = RuntimeInputSemantics::from_policy_and_kind(
-            &policy(ApplyMode::StageRunBoundary),
-            InputKind::PeerResponseTerminal,
-        );
+        let semantics = crate::policy_table::generated_admission_projection_for_kind(
+            KindId::new(InputKind::PeerResponseTerminal),
+            false,
+        )
+        .expect("generated admission projection")
+        .runtime_semantics;
 
-        assert_eq!(semantics.boundary, RunApplyBoundary::RunCheckpoint);
+        assert_eq!(semantics.boundary, RunApplyBoundary::RunStart);
         assert_eq!(semantics.execution_kind, RuntimeExecutionKind::ContentTurn);
         assert_eq!(semantics.execution_handling_mode, None);
         assert_eq!(
@@ -206,27 +139,13 @@ mod tests {
     }
 
     #[test]
-    fn idle_steer_run_start_normalizes_execution_handling_mode() {
-        let mut policy = policy(ApplyMode::StageRunStart);
-        policy.routing_disposition = crate::policy::RoutingDisposition::Steer;
-
-        let semantics =
-            RuntimeInputSemantics::from_policy_and_kind(&policy, InputKind::PeerRequest);
-
-        assert_eq!(semantics.boundary, RunApplyBoundary::RunStart);
-        assert_eq!(
-            semantics.execution_handling_mode,
-            Some(HandlingMode::Queue),
-            "steer remains the admission lane, but a fresh run starts through the queue-compatible session-service path"
-        );
-    }
-
-    #[test]
     fn continuation_is_the_only_resume_pending_execution_kind() {
-        let semantics = RuntimeInputSemantics::from_policy_and_kind(
-            &policy(ApplyMode::StageRunBoundary),
-            InputKind::Continuation,
-        );
+        let semantics = crate::policy_table::generated_admission_projection_for_kind(
+            KindId::new(InputKind::Continuation),
+            false,
+        )
+        .expect("generated admission projection")
+        .runtime_semantics;
 
         assert_eq!(semantics.boundary, RunApplyBoundary::RunCheckpoint);
         assert_eq!(

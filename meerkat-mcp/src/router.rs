@@ -1,15 +1,14 @@
 //! MCP router for multi-server routing
 //!
 //! The router is a shell that manages connections, async tasks, and tool
-//! caching. Runtime/session construction injects a runtime-owned
-//! [`ExternalToolSurfaceHandle`] as the surface owner. Standalone construction
-//! uses a local compatibility handle backed by [`ExternalToolSurfaceAuthority`]
-//! until a runtime-owned handle is bound.
+//! caching. Runtime/session construction injects a generated machine-owned
+//! [`ExternalToolSurfaceHandle`] as the surface owner. Construction without a
+//! bound handle fails closed for lifecycle mutations until that owner is
+//! supplied.
 
 use crate::external_tool_surface_authority::{
-    ExternalToolSurfaceAuthority, ExternalToolSurfaceEffect, ExternalToolSurfaceError,
-    ExternalToolSurfaceInput, ExternalToolSurfaceMutator, ExternalToolSurfacePhase,
-    ExternalToolSurfaceTransition, PendingSurfaceOp, RemovalTimingInfo, StagedSurfaceOp,
+    ExternalToolSurfaceEffect, ExternalToolSurfaceError, ExternalToolSurfaceInput,
+    ExternalToolSurfacePhase, ExternalToolSurfaceTransition, RemovalTimingInfo, StagedSurfaceOp,
     SurfaceBaseState, SurfaceDeltaOperation, SurfaceDeltaPhase, SurfaceId, TurnNumber,
 };
 use crate::generated::{
@@ -48,7 +47,6 @@ use std::sync::{Arc, Mutex, RwLock as StdRwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
-const DEFAULT_REMOVAL_TIMEOUT: Duration = Duration::from_secs(30);
 const PENDING_CHANNEL_CAPACITY: usize = 32;
 
 /// MCP server lifecycle state used by staged router apply.
@@ -120,379 +118,184 @@ struct CompletedLifecycleUpdate {
     action: McpLifecycleAction,
 }
 
-/// Local compatibility implementation of the core surface-handle contract.
-///
-/// Runtime/session wiring should replace this with the runtime-owned
-/// MeerkatMachine handle. Keeping this adapter in the MCP crate lets standalone
-/// callers and tests use the core trait boundary without depending on
-/// the runtime crate.
-#[allow(dead_code)]
-pub(crate) struct CompatExternalToolSurfaceHandle {
-    authority: Mutex<ExternalToolSurfaceAuthority>,
-}
+/// Fail-closed surface handle used until generated machine authority is bound.
+struct UnboundExternalToolSurfaceHandle;
 
-#[allow(dead_code)]
-impl CompatExternalToolSurfaceHandle {
-    pub(crate) fn new(removal_timeout: Duration) -> Self {
-        Self {
-            authority: Mutex::new(ExternalToolSurfaceAuthority::with_removal_timeout(
-                removal_timeout,
-            )),
-        }
+impl UnboundExternalToolSurfaceHandle {
+    fn new() -> Self {
+        Self
     }
 
-    fn apply_local(
-        &self,
-        context: &'static str,
-        input: ExternalToolSurfaceInput,
-    ) -> Result<CoreSurfaceTransition, DslTransitionError> {
-        let mut authority = self
-            .authority
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let transition = authority
-            .apply(input)
-            .map_err(|error| compat_surface_error(context, error))?;
-        Ok(CoreSurfaceTransition {
-            phase: core_phase_from_local(transition.phase),
-            effects: core_surface_effects(&transition.effects),
-        })
+    fn reject(context: &'static str) -> DslTransitionError {
+        DslTransitionError::guard_rejected(
+            context,
+            "external tool surface lifecycle requires generated machine authority",
+        )
     }
 
-    fn with_authority<R>(&self, f: impl FnOnce(&ExternalToolSurfaceAuthority) -> R) -> R {
-        let authority = self
-            .authority
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        f(&authority)
-    }
-
-    fn local_pending_operation(
-        authority: &ExternalToolSurfaceAuthority,
-        surface_id: &SurfaceId,
-    ) -> SurfaceDeltaOperation {
-        match authority.pending_op(surface_id) {
-            PendingSurfaceOp::Add => SurfaceDeltaOperation::Add,
-            PendingSurfaceOp::Reload => SurfaceDeltaOperation::Reload,
-            PendingSurfaceOp::None => SurfaceDeltaOperation::None,
+    fn empty_snapshot() -> SurfaceDiagnosticSnapshot {
+        SurfaceDiagnosticSnapshot {
+            surface_phase: ExternalToolSurfaceGlobalPhase::Operating,
+            known_surfaces: BTreeSet::new(),
+            visible_surfaces: BTreeSet::new(),
+            snapshot_epoch: 0,
+            snapshot_aligned_epoch: 0,
+            has_pending_or_staged: false,
+            entries: Vec::new(),
         }
     }
 }
 
-impl ExternalToolSurfaceHandle for CompatExternalToolSurfaceHandle {
+impl ExternalToolSurfaceHandle for UnboundExternalToolSurfaceHandle {
     fn apply_surface_input(
         &self,
-        input: CoreSurfaceInput,
+        _input: CoreSurfaceInput,
     ) -> Result<CoreSurfaceTransition, DslTransitionError> {
-        match input {
-            CoreSurfaceInput::StageAdd { surface_id, .. } => self.apply_local(
-                "CompatExternalToolSurfaceHandle::stage_add",
-                ExternalToolSurfaceInput::StageAdd {
-                    surface_id: SurfaceId(surface_id),
-                },
-            ),
-            CoreSurfaceInput::StageRemove { surface_id, .. } => self.apply_local(
-                "CompatExternalToolSurfaceHandle::stage_remove",
-                ExternalToolSurfaceInput::StageRemove {
-                    surface_id: SurfaceId(surface_id),
-                },
-            ),
-            CoreSurfaceInput::StageReload { surface_id, .. } => self.apply_local(
-                "CompatExternalToolSurfaceHandle::stage_reload",
-                ExternalToolSurfaceInput::StageReload {
-                    surface_id: SurfaceId(surface_id),
-                },
-            ),
-            CoreSurfaceInput::ApplyBoundary {
-                surface_id,
-                staged_intent_sequence,
-                applied_at_turn,
-                ..
-            } => self.apply_local(
-                "CompatExternalToolSurfaceHandle::apply_boundary",
-                ExternalToolSurfaceInput::ApplyBoundary {
-                    surface_id: SurfaceId(surface_id),
-                    staged_intent_sequence,
-                    applied_at_turn: TurnNumber(applied_at_turn),
-                },
-            ),
-            CoreSurfaceInput::MarkPendingSucceeded {
-                surface_id,
-                pending_task_sequence,
-                staged_intent_sequence,
-            } => {
-                let mut authority = self
-                    .authority
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let surface_id = SurfaceId(surface_id);
-                let operation = Self::local_pending_operation(&authority, &surface_id);
-                let transition = authority
-                    .apply(ExternalToolSurfaceInput::PendingSucceeded {
-                        surface_id,
-                        operation,
-                        pending_task_sequence,
-                        staged_intent_sequence,
-                        applied_at_turn: TurnNumber(staged_intent_sequence),
-                    })
-                    .map_err(|error| {
-                        compat_surface_error(
-                            "CompatExternalToolSurfaceHandle::mark_pending_succeeded",
-                            error,
-                        )
-                    })?;
-                Ok(CoreSurfaceTransition {
-                    phase: core_phase_from_local(transition.phase),
-                    effects: core_surface_effects(&transition.effects),
-                })
-            }
-            CoreSurfaceInput::MarkPendingFailed {
-                surface_id,
-                pending_task_sequence,
-                staged_intent_sequence,
-                cause,
-            } => {
-                let mut authority = self
-                    .authority
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let surface_id = SurfaceId(surface_id);
-                let operation = Self::local_pending_operation(&authority, &surface_id);
-                let transition = authority
-                    .apply(ExternalToolSurfaceInput::PendingFailed {
-                        surface_id,
-                        operation,
-                        pending_task_sequence,
-                        staged_intent_sequence,
-                        applied_at_turn: TurnNumber(staged_intent_sequence),
-                        cause,
-                    })
-                    .map_err(|error| {
-                        compat_surface_error(
-                            "CompatExternalToolSurfaceHandle::mark_pending_failed",
-                            error,
-                        )
-                    })?;
-                Ok(CoreSurfaceTransition {
-                    phase: core_phase_from_local(transition.phase),
-                    effects: core_surface_effects(&transition.effects),
-                })
-            }
-            CoreSurfaceInput::CallStarted { surface_id } => self.apply_local(
-                "CompatExternalToolSurfaceHandle::call_started",
-                ExternalToolSurfaceInput::CallStarted {
-                    surface_id: SurfaceId(surface_id),
-                },
-            ),
-            CoreSurfaceInput::CallFinished { surface_id } => self.apply_local(
-                "CompatExternalToolSurfaceHandle::call_finished",
-                ExternalToolSurfaceInput::CallFinished {
-                    surface_id: SurfaceId(surface_id),
-                },
-            ),
-            CoreSurfaceInput::FinalizeRemovalClean { surface_id } => self.apply_local(
-                "CompatExternalToolSurfaceHandle::finalize_removal_clean",
-                ExternalToolSurfaceInput::FinalizeRemovalClean {
-                    surface_id: SurfaceId(surface_id),
-                    applied_at_turn: TurnNumber(0),
-                },
-            ),
-            CoreSurfaceInput::FinalizeRemovalForced { surface_id } => self.apply_local(
-                "CompatExternalToolSurfaceHandle::finalize_removal_forced",
-                ExternalToolSurfaceInput::FinalizeRemovalForced {
-                    surface_id: SurfaceId(surface_id),
-                    applied_at_turn: TurnNumber(0),
-                },
-            ),
-            CoreSurfaceInput::SnapshotAligned { epoch } => self.apply_local(
-                "CompatExternalToolSurfaceHandle::snapshot_aligned",
-                ExternalToolSurfaceInput::SnapshotAligned {
-                    snapshot_epoch: epoch,
-                },
-            ),
-            CoreSurfaceInput::Shutdown => self.apply_local(
-                "CompatExternalToolSurfaceHandle::shutdown_surface",
-                ExternalToolSurfaceInput::Shutdown,
-            ),
-        }
+        Err(Self::reject(
+            "UnboundExternalToolSurfaceHandle::apply_surface_input",
+        ))
     }
 
     fn register(&self, _surface_id: String) -> Result<(), DslTransitionError> {
-        Ok(())
+        Err(Self::reject("UnboundExternalToolSurfaceHandle::register"))
     }
 
-    fn stage_add(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError> {
-        self.apply_surface_input(CoreSurfaceInput::StageAdd { surface_id, now_ms })
-            .map(|_| ())
+    fn stage_add(&self, _surface_id: String, _now_ms: u64) -> Result<(), DslTransitionError> {
+        Err(Self::reject("UnboundExternalToolSurfaceHandle::stage_add"))
     }
 
-    fn stage_remove(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError> {
-        self.apply_surface_input(CoreSurfaceInput::StageRemove { surface_id, now_ms })
-            .map(|_| ())
+    fn stage_remove(&self, _surface_id: String, _now_ms: u64) -> Result<(), DslTransitionError> {
+        Err(Self::reject(
+            "UnboundExternalToolSurfaceHandle::stage_remove",
+        ))
     }
 
-    fn stage_reload(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError> {
-        self.apply_surface_input(CoreSurfaceInput::StageReload { surface_id, now_ms })
-            .map(|_| ())
+    fn stage_reload(&self, _surface_id: String, _now_ms: u64) -> Result<(), DslTransitionError> {
+        Err(Self::reject(
+            "UnboundExternalToolSurfaceHandle::stage_reload",
+        ))
     }
 
     fn apply_boundary(
         &self,
-        surface_id: String,
-        now_ms: u64,
-        staged_intent_sequence: u64,
-        applied_at_turn: u64,
+        _surface_id: String,
+        _now_ms: u64,
+        _staged_intent_sequence: u64,
+        _applied_at_turn: u64,
     ) -> Result<(), DslTransitionError> {
-        self.apply_surface_input(CoreSurfaceInput::ApplyBoundary {
-            surface_id,
-            now_ms,
-            staged_intent_sequence,
-            applied_at_turn,
-        })
-        .map(|_| ())
+        Err(Self::reject(
+            "UnboundExternalToolSurfaceHandle::apply_boundary",
+        ))
     }
 
     fn mark_pending_succeeded(
         &self,
-        surface_id: String,
-        pending_task_sequence: u64,
-        staged_intent_sequence: u64,
+        _surface_id: String,
+        _pending_task_sequence: u64,
+        _staged_intent_sequence: u64,
     ) -> Result<(), DslTransitionError> {
-        self.apply_surface_input(CoreSurfaceInput::MarkPendingSucceeded {
-            surface_id,
-            pending_task_sequence,
-            staged_intent_sequence,
-        })
-        .map(|_| ())
+        Err(Self::reject(
+            "UnboundExternalToolSurfaceHandle::mark_pending_succeeded",
+        ))
     }
 
     fn mark_pending_failed(
         &self,
-        surface_id: String,
-        pending_task_sequence: u64,
-        staged_intent_sequence: u64,
-        cause: ExternalToolSurfaceFailureCause,
+        _surface_id: String,
+        _pending_task_sequence: u64,
+        _staged_intent_sequence: u64,
+        _cause: ExternalToolSurfaceFailureCause,
     ) -> Result<(), DslTransitionError> {
-        self.apply_surface_input(CoreSurfaceInput::MarkPendingFailed {
-            surface_id,
-            pending_task_sequence,
-            staged_intent_sequence,
-            cause,
-        })
-        .map(|_| ())
+        Err(Self::reject(
+            "UnboundExternalToolSurfaceHandle::mark_pending_failed",
+        ))
     }
 
-    fn call_started(&self, surface_id: String) -> Result<(), DslTransitionError> {
-        self.apply_surface_input(CoreSurfaceInput::CallStarted { surface_id })
-            .map(|_| ())
+    fn call_started(&self, _surface_id: String) -> Result<(), DslTransitionError> {
+        Err(Self::reject(
+            "UnboundExternalToolSurfaceHandle::call_started",
+        ))
     }
 
-    fn call_finished(&self, surface_id: String) -> Result<(), DslTransitionError> {
-        self.apply_surface_input(CoreSurfaceInput::CallFinished { surface_id })
-            .map(|_| ())
+    fn call_finished(&self, _surface_id: String) -> Result<(), DslTransitionError> {
+        Err(Self::reject(
+            "UnboundExternalToolSurfaceHandle::call_finished",
+        ))
     }
 
-    fn finalize_removal_clean(&self, surface_id: String) -> Result<(), DslTransitionError> {
-        self.apply_surface_input(CoreSurfaceInput::FinalizeRemovalClean { surface_id })
-            .map(|_| ())
+    fn finalize_removal_clean(&self, _surface_id: String) -> Result<(), DslTransitionError> {
+        Err(Self::reject(
+            "UnboundExternalToolSurfaceHandle::finalize_removal_clean",
+        ))
     }
 
-    fn finalize_removal_forced(&self, surface_id: String) -> Result<(), DslTransitionError> {
-        self.apply_surface_input(CoreSurfaceInput::FinalizeRemovalForced { surface_id })
-            .map(|_| ())
+    fn finalize_removal_forced(&self, _surface_id: String) -> Result<(), DslTransitionError> {
+        Err(Self::reject(
+            "UnboundExternalToolSurfaceHandle::finalize_removal_forced",
+        ))
     }
 
-    fn snapshot_aligned(&self, epoch: u64) -> Result<(), DslTransitionError> {
-        self.apply_surface_input(CoreSurfaceInput::SnapshotAligned { epoch })
-            .map(|_| ())
+    fn snapshot_aligned(&self, _epoch: u64) -> Result<(), DslTransitionError> {
+        Err(Self::reject(
+            "UnboundExternalToolSurfaceHandle::snapshot_aligned",
+        ))
     }
 
     fn shutdown_surface(&self) -> Result<(), DslTransitionError> {
-        self.apply_surface_input(CoreSurfaceInput::Shutdown)
-            .map(|_| ())
+        Err(Self::reject(
+            "UnboundExternalToolSurfaceHandle::shutdown_surface",
+        ))
     }
 
-    fn surface_snapshot(&self, surface_id: &str) -> Option<SurfaceSnapshot> {
-        self.with_authority(|authority| {
-            let snapshot = authority.diagnostic_snapshot();
-            snapshot
-                .entries
-                .into_iter()
-                .find(|entry| entry.surface_id == surface_id)
-                .map(|entry| handle_snapshot_from_local_entry(entry, authority))
-        })
+    fn surface_snapshot(&self, _surface_id: &str) -> Option<SurfaceSnapshot> {
+        None
     }
 
     fn diagnostic_snapshot(&self) -> SurfaceDiagnosticSnapshot {
-        self.with_authority(handle_snapshot_from_local_authority)
+        Self::empty_snapshot()
     }
 
     fn visible_surfaces(&self) -> BTreeSet<String> {
-        self.with_authority(|authority| {
-            authority
-                .visible_surfaces()
-                .map(|surface_id| surface_id.0.clone())
-                .collect()
-        })
+        BTreeSet::new()
     }
 
     fn removing_surfaces(&self) -> BTreeSet<String> {
-        self.with_authority(|authority| {
-            authority
-                .removing_surfaces()
-                .map(|surface_id| surface_id.0.clone())
-                .collect()
-        })
+        BTreeSet::new()
     }
 
     fn pending_surfaces(&self) -> BTreeSet<String> {
-        self.with_authority(|authority| {
-            authority
-                .pending_surfaces()
-                .map(|surface_id| surface_id.0.clone())
-                .collect()
-        })
+        BTreeSet::new()
     }
 
     fn has_pending_or_staged(&self) -> bool {
-        self.with_authority(ExternalToolSurfaceAuthority::has_pending_or_staged)
+        false
     }
 
     fn snapshot_epoch(&self) -> u64 {
-        self.with_authority(ExternalToolSurfaceAuthority::snapshot_epoch)
+        0
     }
 
     fn snapshot_aligned_epoch(&self) -> u64 {
-        self.with_authority(ExternalToolSurfaceAuthority::snapshot_aligned_epoch)
+        0
     }
 }
 
 enum SurfaceOwner {
-    #[allow(dead_code)]
-    CompatStandalone(Box<Mutex<ExternalToolSurfaceAuthority>>),
     Runtime {
         handle_slot: Arc<StdRwLock<Arc<dyn ExternalToolSurfaceHandle>>>,
-        removal_timeout_hint: Duration,
     },
 }
 
 impl SurfaceOwner {
-    #[allow(dead_code)]
-    fn compat_standalone(authority: ExternalToolSurfaceAuthority) -> Self {
-        Self::CompatStandalone(Box::new(Mutex::new(authority)))
-    }
-
-    fn runtime(handle: Arc<dyn ExternalToolSurfaceHandle>, removal_timeout_hint: Duration) -> Self {
+    fn runtime(handle: Arc<dyn ExternalToolSurfaceHandle>) -> Self {
         Self::Runtime {
             handle_slot: Arc::new(StdRwLock::new(handle)),
-            removal_timeout_hint,
         }
     }
 
     fn runtime_handle_slot(&self) -> Option<Arc<StdRwLock<Arc<dyn ExternalToolSurfaceHandle>>>> {
         match self {
             Self::Runtime { handle_slot, .. } => Some(Arc::clone(handle_slot)),
-            Self::CompatStandalone(_) => None,
         }
     }
 
@@ -504,16 +307,11 @@ impl SurfaceOwner {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone(),
             ),
-            Self::CompatStandalone(_) => None,
         }
     }
 
     fn diagnostic_snapshot(&self) -> ExternalToolSurfaceSnapshot {
         match self {
-            Self::CompatStandalone(authority) => authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .diagnostic_snapshot(),
             Self::Runtime { handle_slot, .. } => {
                 let handle = handle_slot
                     .read()
@@ -526,7 +324,6 @@ impl SurfaceOwner {
 
     fn surface_snapshot(&self, surface_id: &str) -> Option<SurfaceSnapshot> {
         match self {
-            Self::CompatStandalone(_) => None,
             Self::Runtime { .. } => self
                 .runtime_handle()
                 .and_then(|handle| handle.surface_snapshot(surface_id)),
@@ -538,27 +335,17 @@ impl SurfaceOwner {
         removal_timeout: Duration,
     ) -> Result<(), ExternalToolSurfaceError> {
         match self {
-            Self::CompatStandalone(authority) => authority
-                .get_mut()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .set_removal_timeout(removal_timeout),
-            Self::Runtime {
-                removal_timeout_hint,
-                ..
-            } => {
-                *removal_timeout_hint = removal_timeout;
-                Ok(())
+            Self::Runtime { handle_slot } => {
+                let timeout_ms = removal_timeout.as_millis().min(u128::from(u64::MAX)) as u64;
+                let handle = handle_slot
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                handle
+                    .apply_surface_input(CoreSurfaceInput::SetRemovalTimeout { timeout_ms })
+                    .map(|_| ())
+                    .map_err(|error| runtime_surface_error("SetRemovalTimeout", error))
             }
-        }
-    }
-
-    fn configured_removal_timeout(&self) -> Duration {
-        match self {
-            Self::CompatStandalone(_) => DEFAULT_REMOVAL_TIMEOUT,
-            Self::Runtime {
-                removal_timeout_hint,
-                ..
-            } => *removal_timeout_hint,
         }
     }
 
@@ -567,11 +354,7 @@ impl SurfaceOwner {
         input: ExternalToolSurfaceInput,
     ) -> Result<ExternalToolSurfaceTransition, ExternalToolSurfaceError> {
         match self {
-            Self::CompatStandalone(authority) => authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .apply(input),
-            Self::Runtime { handle_slot, .. } => {
+            Self::Runtime { handle_slot } => {
                 let handle = handle_slot
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -707,10 +490,6 @@ impl SurfaceOwner {
 
     fn staged_intents_in_order(&self) -> Vec<(SurfaceId, StagedSurfaceOp, u64)> {
         match self {
-            Self::CompatStandalone(authority) => authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .staged_intents_in_order(),
             Self::Runtime { .. } => {
                 let mut staged = self
                     .diagnostic_snapshot()
@@ -793,21 +572,10 @@ impl SurfaceOwner {
 
     fn removal_timing(&self, id: &SurfaceId) -> Option<RemovalTimingInfo> {
         match self {
-            Self::CompatStandalone(authority) => authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .removal_timing(id),
-            Self::Runtime {
-                removal_timeout_hint,
-                ..
-            } => {
+            Self::Runtime { .. } => {
                 let entry = self.surface_snapshot(&id.0)?;
                 let draining_since_ms = entry.removal_draining_since_ms?;
-                let timeout_at_ms = draining_since_ms.saturating_add(
-                    (*removal_timeout_hint)
-                        .as_millis()
-                        .min(u128::from(u64::MAX)) as u64,
-                );
+                let timeout_at_ms = entry.removal_timeout_at_ms?;
                 Some(RemovalTimingInfo {
                     draining_since: instant_from_epoch_ms(draining_since_ms),
                     timeout_at: instant_from_epoch_ms(timeout_at_ms),
@@ -894,22 +662,6 @@ fn runtime_surface_error(input_name: &str, error: DslTransitionError) -> Externa
     }
 }
 
-#[allow(dead_code)]
-fn compat_surface_error(
-    context: &'static str,
-    error: ExternalToolSurfaceError,
-) -> DslTransitionError {
-    DslTransitionError::guard_rejected(context, error.to_string())
-}
-
-#[allow(dead_code)]
-fn core_phase_from_local(phase: ExternalToolSurfacePhase) -> ExternalToolSurfaceGlobalPhase {
-    match phase {
-        ExternalToolSurfacePhase::Operating => ExternalToolSurfaceGlobalPhase::Operating,
-        ExternalToolSurfacePhase::Shutdown => ExternalToolSurfaceGlobalPhase::Shutdown,
-    }
-}
-
 fn phase_from_snapshot(phase: ExternalToolSurfaceGlobalPhase) -> ExternalToolSurfacePhase {
     match phase {
         ExternalToolSurfaceGlobalPhase::Operating => ExternalToolSurfacePhase::Operating,
@@ -966,83 +718,6 @@ fn instant_from_epoch_ms(epoch_ms: u64) -> Instant {
     } else {
         now.checked_sub(Duration::from_millis(now_ms - epoch_ms))
             .unwrap_or(now)
-    }
-}
-
-#[allow(dead_code)]
-fn epoch_ms_from_instant(instant: Instant) -> u64 {
-    let now_ms = McpRouter::now_ms();
-    let now = Instant::now();
-    if instant >= now {
-        let delta = instant.duration_since(now);
-        now_ms.saturating_add(delta.as_millis().min(u128::from(u64::MAX)) as u64)
-    } else {
-        let delta = now.duration_since(instant);
-        now_ms.saturating_sub(delta.as_millis().min(u128::from(u64::MAX)) as u64)
-    }
-}
-
-#[allow(dead_code)]
-fn handle_snapshot_from_local_authority(
-    authority: &ExternalToolSurfaceAuthority,
-) -> SurfaceDiagnosticSnapshot {
-    let snapshot = authority.diagnostic_snapshot();
-    let ExternalToolSurfaceSnapshot {
-        phase,
-        snapshot_epoch,
-        snapshot_aligned_epoch,
-        entries,
-    } = snapshot;
-    let known_surfaces = entries
-        .iter()
-        .map(|entry| entry.surface_id.clone())
-        .collect::<BTreeSet<_>>();
-    let visible_surfaces = entries
-        .iter()
-        .filter(|entry| entry.visible)
-        .map(|entry| entry.surface_id.clone())
-        .collect::<BTreeSet<_>>();
-    let has_pending_or_staged = entries.iter().any(|entry| {
-        entry.pending_op != ExternalToolSurfacePendingOp::None
-            || entry.staged_op != ExternalToolSurfaceStagedOp::None
-    });
-    let entries = entries
-        .into_iter()
-        .map(|entry| handle_snapshot_from_local_entry(entry, authority))
-        .collect();
-
-    SurfaceDiagnosticSnapshot {
-        surface_phase: phase,
-        known_surfaces,
-        visible_surfaces,
-        snapshot_epoch,
-        snapshot_aligned_epoch,
-        has_pending_or_staged,
-        entries,
-    }
-}
-
-#[allow(dead_code)]
-fn handle_snapshot_from_local_entry(
-    entry: ExternalToolSurfaceEntrySnapshot,
-    authority: &ExternalToolSurfaceAuthority,
-) -> SurfaceSnapshot {
-    let timing = authority.removal_timing(&SurfaceId::from(entry.surface_id.as_str()));
-    SurfaceSnapshot {
-        surface_id: entry.surface_id,
-        base_state: Some(entry.base_state),
-        pending_op: entry.pending_op,
-        staged_op: entry.staged_op,
-        staged_intent_sequence: Some(entry.staged_intent_sequence),
-        pending_task_sequence: Some(entry.pending_task_sequence),
-        pending_lineage_sequence: Some(entry.pending_lineage_sequence),
-        inflight_calls: entry.inflight_call_count,
-        last_delta_operation: Some(entry.last_delta_operation),
-        last_delta_phase: Some(entry.last_delta_phase),
-        removal_draining_since_ms: timing
-            .map(|timing| epoch_ms_from_instant(timing.draining_since)),
-        removal_timeout_at_ms: timing.map(|timing| epoch_ms_from_instant(timing.timeout_at)),
-        removal_applied_at_turn: timing.map(|timing| timing.applied_at_turn.0),
     }
 }
 
@@ -1382,29 +1057,20 @@ impl McpRouter {
         self.with_lifecycle_handle(|handle| handle.apply_reload(server_name));
     }
 
-    /// Create a new empty standalone router with a local surface authority.
+    /// Create a new empty router without a generated surface authority.
     ///
-    /// Production/session construction must bind a runtime-owned
-    /// [`ExternalToolSurfaceHandle`] through [`Self::new_with_surface_handle`] or
-    /// late adapter binding when lifecycle state must be session-owned.
-    /// Standalone callers keep a local compatibility handle so lifecycle
-    /// operations work outside a `MeerkatMachine`.
+    /// Lifecycle mutations fail closed until runtime/session construction binds
+    /// a generated [`ExternalToolSurfaceHandle`] through
+    /// [`Self::new_with_surface_handle`] or late adapter binding.
     pub fn new() -> Self {
-        let surface_handle: Arc<dyn ExternalToolSurfaceHandle> = Arc::new(
-            CompatExternalToolSurfaceHandle::new(DEFAULT_REMOVAL_TIMEOUT),
-        );
-        Self::with_surface_owner(SurfaceOwner::runtime(
-            surface_handle,
-            DEFAULT_REMOVAL_TIMEOUT,
-        ))
+        let surface_handle: Arc<dyn ExternalToolSurfaceHandle> =
+            Arc::new(UnboundExternalToolSurfaceHandle::new());
+        Self::with_surface_owner(SurfaceOwner::runtime(surface_handle))
     }
 
     /// Create a new empty router with a runtime-backed surface handle.
     pub fn new_with_surface_handle(surface_handle: Arc<dyn ExternalToolSurfaceHandle>) -> Self {
-        Self::with_surface_owner(SurfaceOwner::runtime(
-            surface_handle,
-            DEFAULT_REMOVAL_TIMEOUT,
-        ))
+        Self::with_surface_owner(SurfaceOwner::runtime(surface_handle))
     }
 
     pub fn with_mcp_auth(
@@ -1419,19 +1085,15 @@ impl McpRouter {
 
     /// Create a new router with a custom remove-drain timeout.
     pub fn new_with_removal_timeout(removal_timeout: Duration) -> Self {
-        let surface_handle: Arc<dyn ExternalToolSurfaceHandle> =
-            Arc::new(CompatExternalToolSurfaceHandle::new(removal_timeout));
-        Self::with_surface_owner(SurfaceOwner::runtime(surface_handle, removal_timeout))
-    }
-
-    /// Test-only compatibility constructor for the retired standalone
-    /// handwritten surface authority.
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn new_with_compat_standalone_authority_for_testing() -> Self {
-        Self::with_surface_owner(SurfaceOwner::compat_standalone(
-            ExternalToolSurfaceAuthority::new(),
-        ))
+        let mut router = Self::new();
+        if let Err(error) = router.set_removal_timeout(removal_timeout) {
+            tracing::warn!(
+                timeout_ms = removal_timeout.as_millis(),
+                error = %error,
+                "Surface owner rejected set_removal_timeout during router construction"
+            );
+        }
+        router
     }
 
     /// Create a new router with a custom remove-drain timeout and runtime-backed surface handle.
@@ -1439,7 +1101,15 @@ impl McpRouter {
         surface_handle: Arc<dyn ExternalToolSurfaceHandle>,
         removal_timeout: Duration,
     ) -> Self {
-        Self::with_surface_owner(SurfaceOwner::runtime(surface_handle, removal_timeout))
+        let mut router = Self::new_with_surface_handle(surface_handle);
+        if let Err(error) = router.set_removal_timeout(removal_timeout) {
+            tracing::warn!(
+                timeout_ms = removal_timeout.as_millis(),
+                error = %error,
+                "Surface owner rejected set_removal_timeout during router construction"
+            );
+        }
+        router
     }
 
     fn now_ms() -> u64 {
@@ -1472,14 +1142,11 @@ impl McpRouter {
     }
 
     /// Override remove-drain timeout.
-    pub fn set_removal_timeout(&mut self, removal_timeout: Duration) {
-        if let Err(error) = self.surface_owner.set_removal_timeout(removal_timeout) {
-            tracing::warn!(
-                timeout_ms = removal_timeout.as_millis(),
-                error = %error,
-                "Surface owner rejected set_removal_timeout"
-            );
-        }
+    pub fn set_removal_timeout(
+        &mut self,
+        removal_timeout: Duration,
+    ) -> Result<(), ExternalToolSurfaceError> {
+        self.surface_owner.set_removal_timeout(removal_timeout)
     }
 
     /// Snapshot the live external tool-surface state.
@@ -1987,7 +1654,6 @@ impl McpRouter {
                 .map(|update| update.action)
                 .collect(),
             pending,
-            background_completions: Vec::new(),
         }
     }
 
@@ -2008,16 +1674,8 @@ impl McpRouter {
     /// Backward-compatible immediate install path. Bypasses staged/boundary
     /// flow and directly drives the surface owner through Stage -> Apply -> Success.
     async fn install_active_server(&mut self, config: McpServerConfig) -> Result<(), McpError> {
-        let (conn, tools) = McpConnection::connect_and_enumerate_with_mcp_auth(
-            &config,
-            self.mcp_auth_mode,
-            self.mcp_auth_resolver.clone(),
-        )
-        .await?;
-
         let server_name = config.name.clone();
         let sid = SurfaceId::from(server_name.as_str());
-        let mut snapshot_alignment = None;
 
         if let Err(e) = self
             .surface_owner
@@ -2030,13 +1688,6 @@ impl McpRouter {
                 error = %e,
                 "Surface owner rejected StageAdd in install path"
             );
-            if let Err(close_error) = conn.close().await {
-                tracing::debug!(
-                    server = %server_name,
-                    error = %close_error,
-                    "Error closing MCP connection after rejected StageAdd"
-                );
-            }
             return Err(McpError::ProtocolError {
                 message: format!("surface owner rejected StageAdd: {e}"),
             });
@@ -2064,13 +1715,6 @@ impl McpRouter {
                         error = %e,
                         "Surface owner rejected ApplyBoundary in install path"
                     );
-                    if let Err(close_error) = conn.close().await {
-                        tracing::debug!(
-                            server = %server_name,
-                            error = %close_error,
-                            "Error closing MCP connection after rejected ApplyBoundary"
-                        );
-                    }
                     return Err(McpError::ProtocolError {
                         message: format!("surface owner rejected ApplyBoundary: {e}"),
                     });
@@ -2083,79 +1727,21 @@ impl McpRouter {
         let obligation = match obligations.pop() {
             Some(obligation) => obligation,
             None => {
-                if let Err(close_error) = conn.close().await {
-                    tracing::debug!(
-                        server = %server_name,
-                        error = %close_error,
-                        "Error closing MCP connection after missing surface completion obligation"
-                    );
-                }
                 return Err(McpError::ProtocolError {
                     message: "surface owner ApplyBoundary emitted no surface completion obligation"
                         .into(),
                 });
             }
         };
-        let mut applied_operation = ToolConfigChangeOperation::Add;
-        match self
-            .surface_owner
-            .apply(ExternalToolSurfaceInput::PendingSucceeded {
-                surface_id: SurfaceId(obligation.surface_id.clone()),
-                operation: local_surface_operation(obligation.operation),
-                pending_task_sequence: obligation.pending_task_sequence,
-                staged_intent_sequence: obligation.staged_intent_sequence,
-                applied_at_turn: TurnNumber(obligation.applied_at_turn),
-            }) {
-            Ok(transition) => {
-                if let Some(operation) = lifecycle_operation_from_effects(
-                    &transition.effects,
-                    SurfaceDeltaPhase::Applied,
-                ) {
-                    applied_operation = operation;
-                }
-                if let Some(obligation) = latest_snapshot_alignment(&transition.effects) {
-                    merge_snapshot_alignment(&mut snapshot_alignment, obligation);
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    server = %server_name,
-                    error = %e,
-                    "Surface owner rejected PendingSucceeded in install path"
-                );
-                if let Err(close_error) = conn.close().await {
-                    tracing::debug!(
-                        server = %server_name,
-                        error = %close_error,
-                        "Error closing MCP connection after rejected PendingSucceeded"
-                    );
-                }
-                return Err(McpError::ProtocolError {
-                    message: format!("surface owner rejected PendingSucceeded: {e}"),
-                });
-            }
-        }
 
-        let new_entry = ServerEntry {
-            config,
-            connection: Some(conn),
-            tools,
-            active_calls: AtomicUsize::new(0),
-        };
-        let tool_count = new_entry.tools.len();
-
-        if let Some(old_entry) = self.servers.insert(server_name.clone(), new_entry) {
-            Self::close_entry_connection(old_entry.config.name.clone(), old_entry.connection).await;
-        }
-
-        self.completed_updates.push_back(CompletedLifecycleUpdate {
-            action: McpLifecycleAction::new(
-                server_name.clone(),
-                applied_operation,
-                McpLifecyclePhase::Applied,
-            )
-            .with_tool_count(Some(tool_count)),
-        });
+        let result = McpConnection::connect_and_enumerate_with_mcp_auth(
+            &config,
+            self.mcp_auth_mode,
+            self.mcp_auth_resolver.clone(),
+        )
+        .await;
+        let connect_error = result.as_ref().err().map(ToString::to_string);
+        let snapshot_alignment = self.process_pending_result(PendingResult { obligation, result });
 
         self.record_snapshot_alignment(snapshot_alignment);
         let published = self.publish_projection_snapshot();
@@ -2164,7 +1750,18 @@ impl McpRouter {
             self.align_snapshot_if_requested(obligation);
         }
 
-        Ok(())
+        if let Some(message) = connect_error {
+            return Err(McpError::ProtocolError { message });
+        }
+
+        if self.servers.contains_key(&server_name) {
+            Ok(())
+        } else {
+            Err(McpError::ProtocolError {
+                message: "surface owner did not activate MCP server after successful connect"
+                    .into(),
+            })
+        }
     }
 
     /// Process removal finalization based on owner-owned timeout tracking.
@@ -2365,13 +1962,11 @@ impl McpRouter {
                         timeout_at: t.timeout_at,
                     }),
                     None => {
-                        // Defensive fallback: the owner should always have timing
-                        // for Removing surfaces, but synthesize if missing.
-                        let now = Instant::now();
-                        Some(McpServerLifecycleState::Removing {
-                            draining_since: now,
-                            timeout_at: now + self.surface_owner.configured_removal_timeout(),
-                        })
+                        tracing::warn!(
+                            server = %server_name,
+                            "surface owner reported Removing without generated removal timing"
+                        );
+                        None
                     }
                 }
             }
@@ -2647,10 +2242,19 @@ mod tests {
         )
     }
 
-    fn compat_handle_owner_router() -> McpRouter {
-        McpRouter::new_with_surface_handle(Arc::new(CompatExternalToolSurfaceHandle::new(
-            DEFAULT_REMOVAL_TIMEOUT,
-        )))
+    fn generated_surface_handle() -> Arc<dyn ExternalToolSurfaceHandle> {
+        Arc::new(meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral())
+    }
+
+    fn generated_handle_owner_router() -> McpRouter {
+        McpRouter::new_with_surface_handle(generated_surface_handle())
+    }
+
+    fn generated_handle_owner_router_with_timeout(removal_timeout: Duration) -> McpRouter {
+        McpRouter::new_with_surface_handle_and_removal_timeout(
+            generated_surface_handle(),
+            removal_timeout,
+        )
     }
 
     #[derive(Default)]
@@ -2834,7 +2438,7 @@ mod tests {
     #[test]
     fn runtime_owner_pending_failed_preserves_typed_failure_cause() {
         let handle = Arc::new(RecordingSurfaceHandle::default());
-        let owner = SurfaceOwner::runtime(handle.clone(), DEFAULT_REMOVAL_TIMEOUT);
+        let owner = SurfaceOwner::runtime(handle.clone());
 
         let transition = owner
             .apply(ExternalToolSurfaceInput::PendingFailed {
@@ -2898,7 +2502,7 @@ mod tests {
 
     #[test]
     fn core_handle_owner_add_apply_success_makes_surface_active_visible() {
-        let mut router = compat_handle_owner_router();
+        let mut router = generated_handle_owner_router();
 
         complete_add(&mut router, "runtime-add");
 
@@ -2915,7 +2519,7 @@ mod tests {
 
     #[test]
     fn core_handle_owner_reload_rejects_before_active_and_accepts_after_active() {
-        let mut router = compat_handle_owner_router();
+        let mut router = generated_handle_owner_router();
         let sid = SurfaceId::from("runtime-reload");
 
         assert!(
@@ -2955,7 +2559,7 @@ mod tests {
 
     #[test]
     fn core_handle_owner_remove_finalize_and_call_guards_are_owner_owned() {
-        let mut router = compat_handle_owner_router();
+        let mut router = generated_handle_owner_router();
         complete_add(&mut router, "runtime-remove");
         let sid = SurfaceId::from("runtime-remove");
 
@@ -3034,7 +2638,7 @@ mod tests {
 
     #[test]
     fn core_handle_owner_uses_owner_pending_operation_over_completion_hint() {
-        let router = compat_handle_owner_router();
+        let router = generated_handle_owner_router();
         let sid = SurfaceId::from("runtime-wrong-op");
 
         router
@@ -3083,7 +2687,7 @@ mod tests {
             return;
         };
 
-        let mut router = McpRouter::new();
+        let mut router = generated_handle_owner_router();
 
         router
             .add_server(test_server_config("test-server", &server_path))
@@ -3122,7 +2726,7 @@ mod tests {
             return;
         };
 
-        let mut router = McpRouter::new();
+        let mut router = generated_handle_owner_router();
         router
             .add_server(test_server_config("test-server", &server_path))
             .await
@@ -3144,7 +2748,7 @@ mod tests {
             return;
         };
 
-        let mut router = McpRouter::new_with_removal_timeout(Duration::from_secs(60));
+        let mut router = generated_handle_owner_router_with_timeout(Duration::from_secs(60));
         router
             .add_server(test_server_config("test-server", &server_path))
             .await
@@ -3188,7 +2792,7 @@ mod tests {
             return;
         };
 
-        let mut router = McpRouter::new_with_removal_timeout(Duration::from_millis(10));
+        let mut router = generated_handle_owner_router_with_timeout(Duration::from_millis(10));
         router
             .add_server(test_server_config("test-server", &server_path))
             .await
@@ -3217,7 +2821,7 @@ mod tests {
             return;
         };
 
-        let mut router = McpRouter::new();
+        let mut router = generated_handle_owner_router();
         router
             .stage_add(test_server_config("test-server", &server_path))
             .expect("stage add");
@@ -3282,7 +2886,7 @@ mod tests {
             return;
         };
 
-        let mut router = McpRouter::new();
+        let mut router = generated_handle_owner_router();
 
         router
             .stage_add(test_server_config("test-server", &server_path))

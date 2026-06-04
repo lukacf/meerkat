@@ -13,16 +13,23 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
         session_id: &SessionId,
         input: Input,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
-        let runtime_id = MeerkatMachine::logical_runtime_id(session_id);
         match self
             .execute_meerkat_machine_command(
                 None,
-                MeerkatMachineCommand::Ingest { runtime_id, input },
+                MeerkatMachineCommand::AcceptWithCompletion {
+                    session_id: session_id.clone(),
+                    input,
+                    register_completion: false,
+                },
             )
             .await
             .map_err(MeerkatMachine::driver_error_from_command_error)?
         {
-            MeerkatMachineCommandResult::AcceptOutcome(outcome) => Ok(outcome),
+            MeerkatMachineCommandResult::AcceptWithCompletion {
+                outcome,
+                handle: _,
+                admission_signal: _,
+            } => Ok(outcome),
             other => Err(RuntimeDriverError::Internal(format!(
                 "unexpected MeerkatMachineCommandResult for SessionServiceRuntimeExt::accept_input: {other:?}"
             ))),
@@ -35,10 +42,13 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
         input: Input,
     ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
     {
-        Box::pin(MeerkatMachine::accept_input_with_completion(
-            self, session_id, input,
-        ))
-        .await
+        tracing::debug!(
+            session_id = %session_id,
+            input_id = %input.id(),
+            "SessionServiceRuntimeExt::accept_input_with_completion entered"
+        );
+        self.accept_input_with_completion_boxed(session_id, input)
+            .await
     }
 
     async fn runtime_state(
@@ -295,6 +305,31 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
         }
     }
 
+    async fn deny_image_operation_plan(
+        &self,
+        session_id: &SessionId,
+        operation_id: meerkat_core::image_generation::ImageOperationId,
+        reason: meerkat_core::image_generation::ImageOperationDenialReason,
+    ) -> Result<meerkat_core::image_generation::ImageOperationPhase, RuntimeDriverError> {
+        match self
+            .execute_meerkat_machine_command(
+                None,
+                MeerkatMachineCommand::DenyImageOperationPlan {
+                    session_id: session_id.clone(),
+                    operation_id,
+                    reason,
+                },
+            )
+            .await
+            .map_err(MeerkatMachine::driver_error_from_command_error)?
+        {
+            MeerkatMachineCommandResult::ImageOperationPhase(phase) => Ok(phase),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineCommandResult for SessionServiceRuntimeExt::deny_image_operation_plan: {other:?}"
+            ))),
+        }
+    }
+
     async fn activate_image_operation_override(
         &self,
         session_id: &SessionId,
@@ -339,6 +374,34 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
             MeerkatMachineCommandResult::ImageOperationPhase(phase) => Ok(phase),
             other => Err(RuntimeDriverError::Internal(format!(
                 "unexpected MeerkatMachineCommandResult for SessionServiceRuntimeExt::complete_image_operation: {other:?}"
+            ))),
+        }
+    }
+
+    async fn classify_image_operation_terminal(
+        &self,
+        session_id: &SessionId,
+        operation_id: meerkat_core::image_generation::ImageOperationId,
+        observation: meerkat_core::image_generation::ImageProviderTerminalObservation,
+        provider_text: meerkat_core::image_generation::ProviderTextDisposition,
+    ) -> Result<meerkat_core::image_generation::ImageOperationTerminalClass, RuntimeDriverError>
+    {
+        match self
+            .execute_meerkat_machine_command(
+                None,
+                MeerkatMachineCommand::ClassifyImageOperationTerminal {
+                    session_id: session_id.clone(),
+                    operation_id,
+                    observation,
+                    provider_text,
+                },
+            )
+            .await
+            .map_err(MeerkatMachine::driver_error_from_command_error)?
+        {
+            MeerkatMachineCommandResult::ImageOperationTerminalClass(terminal) => Ok(terminal),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineCommandResult for SessionServiceRuntimeExt::classify_image_operation_terminal: {other:?}"
             ))),
         }
     }
@@ -468,16 +531,24 @@ impl MeerkatMachine {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dsl_phase = dsl_authority::runtime_phase_from_authority(&authority);
         let dsl_pre_run_phase = dsl_authority::pre_run_phase_from_authority(&authority);
-        if self.has_runtime_persistence()
-            && dsl_authority::should_publish_control_over_dsl(
-                control.phase,
-                dsl_phase,
-                dsl_pre_run_phase,
-            )
-        {
-            Some(control.phase)
-        } else {
-            Some(dsl_phase)
+        // The visible-phase arbitration verdict is machine-owned: mirror the
+        // generated `selected_raw_phase` (the chosen phase without the
+        // visibility rewrite). The classifier is total over the pure
+        // observations, so a failure is structurally unreachable; if it ever
+        // arises we fail closed to the most-terminal phase rather than re-derive
+        // a disposition in the shell.
+        match crate::meerkat_machine::resolve_visible_runtime_phase(
+            dsl_phase,
+            dsl_pre_run_phase,
+            control.phase,
+            control.pre_run_phase,
+            self.has_runtime_persistence(),
+        ) {
+            Ok(plan) => Some(plan.selected_raw_phase),
+            Err(reason) => {
+                tracing::error!(%session_id, %reason, "MeerkatMachine visible runtime phase resolution failed; failing closed to Destroyed");
+                Some(RuntimeState::Destroyed)
+            }
         }
     }
 
@@ -494,22 +565,23 @@ impl MeerkatMachine {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dsl_phase = dsl_authority::runtime_phase_from_authority(&authority);
         let dsl_pre_run_phase = dsl_authority::pre_run_phase_from_authority(&authority);
-        if self.has_runtime_persistence()
-            && dsl_authority::should_publish_control_over_dsl(
-                control.phase,
-                dsl_phase,
-                dsl_pre_run_phase,
-            )
-        {
-            Some(dsl_authority::visible_runtime_phase(
-                control.phase,
-                control.pre_run_phase,
-            ))
-        } else {
-            Some(dsl_authority::visible_runtime_phase(
-                dsl_phase,
-                dsl_pre_run_phase,
-            ))
+        // Mirror the machine-owned `visible_phase` verdict (the externally-
+        // visible phase after the Running+pre_run(Retired)->Retired rewrite).
+        // The classifier is total; a failure is structurally unreachable and
+        // fails closed to the most-terminal phase rather than re-deriving in the
+        // shell.
+        match crate::meerkat_machine::resolve_visible_runtime_phase(
+            dsl_phase,
+            dsl_pre_run_phase,
+            control.phase,
+            control.pre_run_phase,
+            self.has_runtime_persistence(),
+        ) {
+            Ok(plan) => Some(plan.visible_phase),
+            Err(reason) => {
+                tracing::error!(%session_id, %reason, "MeerkatMachine visible runtime phase resolution failed; failing closed to Destroyed");
+                Some(RuntimeState::Destroyed)
+            }
         }
     }
 
@@ -538,6 +610,91 @@ impl MeerkatMachine {
             entry.completions.clone(),
             entry.wake_sender(),
         ))
+    }
+
+    pub async fn retire_runtime_control_plane(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<RetireReport, RuntimeControlPlaneError> {
+        tracing::info!(
+            runtime_id = %runtime_id,
+            "MeerkatMachine::retire_runtime_control_plane start"
+        );
+        let (session_id, driver, completions, wake_tx) = self.lookup_entry(runtime_id).await?;
+        let gate = self.session_mutation_gate(&session_id).await;
+        let _gate_guard = match gate {
+            Some(ref gate) => Some(gate.lock().await),
+            None => None,
+        };
+
+        let staged_dsl = self
+            .stage_session_dsl_transition(
+                &session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::Retire {
+                    session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
+                },
+                "Retire",
+            )
+            .await
+            .map_err(RuntimeControlPlaneError::Internal)?;
+
+        let mut drv = driver.lock().await;
+        let mut report = match Box::pin(machine_retire(&mut drv)).await {
+            Ok(report) => report,
+            Err(err) => {
+                drv.sync_control_projection_from_dsl_authority();
+                return Err(RuntimeControlPlaneError::Internal(err.to_string()));
+            }
+        };
+        drop(drv);
+
+        let mut commit_error = None;
+        if let Err(reason) = self
+            .commit_session_dsl_transition_preserving_committed_state(
+                &session_id,
+                staged_dsl,
+                "Retire",
+            )
+            .await
+        {
+            driver
+                .lock()
+                .await
+                .sync_control_projection_from_dsl_authority();
+            commit_error = Some(reason);
+        }
+
+        if report.inputs_pending_drain > 0 {
+            if let Some(ref tx) = wake_tx
+                && tx.send(()).await.is_ok()
+            {
+                if let Some(reason) = commit_error {
+                    return Err(RuntimeControlPlaneError::Internal(reason));
+                }
+                return Ok(report);
+            }
+
+            let mut drv = driver.lock().await;
+            let abandoned = drv
+                .abandon_pending_inputs(crate::input_state::InputAbandonReason::Retired)
+                .await
+                .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?;
+            drop(drv);
+            let result_class =
+                crate::meerkat_machine::driver::machine_resolve_runtime_terminated_completion_result(
+                    &driver,
+                )
+                .await
+                .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?;
+            let mut comp = completions.lock().await;
+            comp.resolve_all_runtime_terminated("retired without runtime loop", result_class);
+            report.inputs_abandoned += abandoned;
+            report.inputs_pending_drain = 0;
+        }
+        if let Some(reason) = commit_error {
+            return Err(RuntimeControlPlaneError::Internal(reason));
+        }
+        Ok(report)
     }
 }
 
@@ -587,21 +744,7 @@ impl crate::traits::RuntimeControlPlane for MeerkatMachine {
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<RetireReport, RuntimeControlPlaneError> {
-        match self
-            .execute_meerkat_machine_command(
-                None,
-                MeerkatMachineCommand::Retire {
-                    runtime_id: runtime_id.clone(),
-                },
-            )
-            .await
-            .map_err(MeerkatMachine::control_plane_error_from_command_error)?
-        {
-            MeerkatMachineCommandResult::RetireReport(report) => Ok(report),
-            other => Err(RuntimeControlPlaneError::Internal(format!(
-                "unexpected MeerkatMachineCommandResult for retire: {other:?}"
-            ))),
-        }
+        self.retire_runtime_control_plane(runtime_id).await
     }
 
     async fn recycle(

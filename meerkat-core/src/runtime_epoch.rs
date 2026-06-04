@@ -15,12 +15,14 @@ use uuid::Uuid;
 
 use crate::completion_feed::CompletionSeq;
 use crate::handles::{
-    AuthLeaseHandle, CommsDrainHandle, ExternalToolSurfaceHandle, InteractionStreamHandle,
-    McpServerLifecycleHandle, ModelRoutingHandle, PeerCommsHandle, PeerInteractionHandle,
+    CommsDrainHandle, ExternalToolSurfaceHandle, GeneratedAuthLeaseHandle,
+    GeneratedPeerCommsInstallFactory, InteractionStreamHandle, McpServerLifecycleHandle,
+    ModelRoutingHandle, PeerCommsHandle, PeerCommsInstallTarget, PeerInteractionHandle,
     SessionAdmissionHandle, SessionClaimHandle, SessionContextHandle, TurnStateHandle,
 };
+use crate::ops_lifecycle::CompletionCursorConsumer;
 use crate::ops_lifecycle::OpsLifecycleRegistry;
-use crate::tool_scope::ToolVisibilityOwner;
+use crate::tool_scope::GeneratedToolVisibilityOwner;
 use crate::types::SessionId;
 
 /// Unique identifier for a runtime epoch (UUID v7 for time-ordering).
@@ -56,21 +58,18 @@ impl std::fmt::Display for RuntimeEpochId {
     }
 }
 
-/// Shared consumer cursor state for the epoch.
+/// Projection of generated completion-consumer cursor state for the epoch.
 ///
-/// Written by the agent boundary and runtime loop; read by the persistence
-/// channel for snapshotting. Atomics provide lock-free monotonic updates.
-///
-/// Cursor values may be stale relative to the agent's true position when
-/// read for persistence — this is safe (stale cursors produce duplicate
-/// notices on recovery, never lost notices).
+/// The generated ops-lifecycle authority owns cursor truth. This struct is a
+/// lock-free cache updated only after that authority emits cursor-advanced
+/// feedback, then read by consumers that need a local starting watermark.
 pub struct EpochCursorState {
-    /// Agent's `applied_cursor` — advanced at the CallingLlm boundary.
-    pub agent_applied_cursor: AtomicU64,
-    /// Runtime loop's `observed_seq` — advanced after feed reads.
-    pub runtime_observed_seq: AtomicU64,
-    /// Runtime loop's `last_injected_seq` — advanced after continuation injection.
-    pub runtime_last_injected_seq: AtomicU64,
+    /// Agent's `applied_cursor` — projected after generated authority accepts it.
+    agent_applied_cursor: AtomicU64,
+    /// Runtime loop's `observed_seq` — projected after generated authority accepts it.
+    runtime_observed_seq: AtomicU64,
+    /// Runtime loop's `last_injected_seq` — projected after generated authority accepts it.
+    runtime_last_injected_seq: AtomicU64,
 }
 
 impl EpochCursorState {
@@ -83,7 +82,7 @@ impl EpochCursorState {
         }
     }
 
-    /// Create from recovered persisted values.
+    /// Create a projection from generated-recovered cursor values.
     pub fn from_recovered(
         agent_applied_cursor: CompletionSeq,
         runtime_observed_seq: CompletionSeq,
@@ -96,12 +95,24 @@ impl EpochCursorState {
         }
     }
 
-    /// Snapshot current cursor values for persistence.
-    pub fn snapshot(&self) -> EpochCursorSnapshot {
-        EpochCursorSnapshot {
-            agent_applied_cursor: self.agent_applied_cursor.load(Ordering::Acquire),
-            runtime_observed_seq: self.runtime_observed_seq.load(Ordering::Acquire),
-            runtime_last_injected_seq: self.runtime_last_injected_seq.load(Ordering::Acquire),
+    /// Project a cursor value accepted by generated machine authority.
+    #[doc(hidden)]
+    pub fn project_authorized_completion_cursor(
+        &self,
+        consumer: CompletionCursorConsumer,
+        cursor: CompletionSeq,
+    ) {
+        match consumer {
+            CompletionCursorConsumer::AgentApplied => {
+                self.agent_applied_cursor.store(cursor, Ordering::Release);
+            }
+            CompletionCursorConsumer::RuntimeObserved => {
+                self.runtime_observed_seq.store(cursor, Ordering::Release);
+            }
+            CompletionCursorConsumer::RuntimeInjected => {
+                self.runtime_last_injected_seq
+                    .store(cursor, Ordering::Release);
+            }
         }
     }
 }
@@ -159,15 +170,17 @@ pub struct SessionRuntimeBindings {
     /// Shared consumer cursor state for this epoch.
     cursor_state: Arc<EpochCursorState>,
     /// Canonical durable tool-visibility owner for this session/runtime binding.
-    tool_visibility_owner: Arc<dyn ToolVisibilityOwner>,
+    tool_visibility_owner: GeneratedToolVisibilityOwner,
     /// Turn-execution DSL handle (Phase 5F/0 addition).
     turn_state: Arc<dyn TurnStateHandle>,
     /// Comms drain lifecycle DSL handle (Phase 5F/0 addition).
     comms_drain: Arc<dyn CommsDrainHandle>,
     /// External tool surface DSL handle (Phase 5F/0 addition).
     external_tool_surface: Arc<dyn ExternalToolSurfaceHandle>,
-    /// Peer comms classification DSL handle (Phase 5F/0 addition).
-    peer_comms: Arc<dyn PeerCommsHandle>,
+    /// Peer comms classification handle plus generated owner token for
+    /// peer-projection trust mutations authorized by the same MeerkatMachine
+    /// authority.
+    peer_comms_install: GeneratedPeerCommsInstallFactory,
     /// Session turn-admission DSL handle (Phase 5F/0 addition).
     session_admission: Arc<dyn SessionAdmissionHandle>,
     /// Session model-routing baseline DSL handle.
@@ -176,7 +189,7 @@ pub struct SessionRuntimeBindings {
     /// runtime-backed tool resolution observes a machine-owned baseline.
     model_routing: Arc<dyn ModelRoutingHandle>,
     /// Auth lease lifecycle DSL handle (Phase 1.5-rev addition).
-    auth_lease: Arc<dyn AuthLeaseHandle>,
+    auth_lease: GeneratedAuthLeaseHandle,
     /// MCP server lifecycle DSL handle (Phase 5G / T5g addition).
     ///
     /// Routes per-server MCP handshake events into the session's MeerkatMachine
@@ -227,14 +240,14 @@ impl SessionRuntimeBindings {
         epoch_id: RuntimeEpochId,
         ops_lifecycle: Arc<dyn OpsLifecycleRegistry>,
         cursor_state: Arc<EpochCursorState>,
-        tool_visibility_owner: Arc<dyn ToolVisibilityOwner>,
+        tool_visibility_owner: GeneratedToolVisibilityOwner,
         turn_state: Arc<dyn TurnStateHandle>,
         comms_drain: Arc<dyn CommsDrainHandle>,
         external_tool_surface: Arc<dyn ExternalToolSurfaceHandle>,
-        peer_comms: Arc<dyn PeerCommsHandle>,
+        peer_comms_install: GeneratedPeerCommsInstallFactory,
         session_admission: Arc<dyn SessionAdmissionHandle>,
         model_routing: Arc<dyn ModelRoutingHandle>,
-        auth_lease: Arc<dyn AuthLeaseHandle>,
+        auth_lease: GeneratedAuthLeaseHandle,
         mcp_server_lifecycle: Arc<dyn McpServerLifecycleHandle>,
         peer_interaction: Arc<dyn PeerInteractionHandle>,
         session_context: Arc<dyn SessionContextHandle>,
@@ -251,7 +264,7 @@ impl SessionRuntimeBindings {
             turn_state,
             comms_drain,
             external_tool_surface,
-            peer_comms,
+            peer_comms_install,
             session_admission,
             model_routing,
             auth_lease,
@@ -280,7 +293,7 @@ impl SessionRuntimeBindings {
         &self.cursor_state
     }
 
-    pub fn tool_visibility_owner(&self) -> &Arc<dyn ToolVisibilityOwner> {
+    pub fn tool_visibility_owner(&self) -> &GeneratedToolVisibilityOwner {
         &self.tool_visibility_owner
     }
 
@@ -297,7 +310,14 @@ impl SessionRuntimeBindings {
     }
 
     pub fn peer_comms(&self) -> &Arc<dyn PeerCommsHandle> {
-        &self.peer_comms
+        self.peer_comms_install.peer_comms_handle()
+    }
+
+    pub fn install_peer_comms_on(
+        &self,
+        target: &(dyn PeerCommsInstallTarget + '_),
+    ) -> Result<(), String> {
+        self.peer_comms_install.install_on_target(target)
     }
 
     pub fn session_admission(&self) -> &Arc<dyn SessionAdmissionHandle> {
@@ -308,7 +328,7 @@ impl SessionRuntimeBindings {
         &self.model_routing
     }
 
-    pub fn auth_lease(&self) -> &Arc<dyn AuthLeaseHandle> {
+    pub fn auth_lease(&self) -> &GeneratedAuthLeaseHandle {
         &self.auth_lease
     }
 
@@ -345,14 +365,14 @@ impl Clone for SessionRuntimeBindings {
             epoch_id: self.epoch_id.clone(),
             ops_lifecycle: Arc::clone(&self.ops_lifecycle),
             cursor_state: Arc::clone(&self.cursor_state),
-            tool_visibility_owner: Arc::clone(&self.tool_visibility_owner),
+            tool_visibility_owner: self.tool_visibility_owner.clone(),
             turn_state: Arc::clone(&self.turn_state),
             comms_drain: Arc::clone(&self.comms_drain),
             external_tool_surface: Arc::clone(&self.external_tool_surface),
-            peer_comms: Arc::clone(&self.peer_comms),
+            peer_comms_install: self.peer_comms_install.clone(),
             session_admission: Arc::clone(&self.session_admission),
             model_routing: Arc::clone(&self.model_routing),
-            auth_lease: Arc::clone(&self.auth_lease),
+            auth_lease: self.auth_lease.clone(),
             mcp_server_lifecycle: Arc::clone(&self.mcp_server_lifecycle),
             peer_interaction: Arc::clone(&self.peer_interaction),
             session_context: Arc::clone(&self.session_context),

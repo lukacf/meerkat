@@ -1968,7 +1968,7 @@ fn state_cells() -> Vec<StateCellEntry> {
         ),
         state_entry!(
             "meerkat-runtime/src/meerkat_machine/mod.rs",
-            "RuntimeSessionEntry.phase",
+            "RuntimeSessionEntry.attachment_slot",
             Subsystem::Runtime,
             StateClass::CapabilityHandle,
             "MeerkatMachine attachment publication contract",
@@ -2224,7 +2224,7 @@ fn state_cells() -> Vec<StateCellEntry> {
         ),
         state_entry!(
             "meerkat-mob/src/runtime/ops_adapter.rs",
-            "MobOpsAdapter.fallback_registry",
+            "MobOpsAdapter.member_bindings",
             Subsystem::Mob,
             StateClass::CapabilityHandle,
             "RuntimeOpsLifecycleRegistry",
@@ -3372,7 +3372,10 @@ fn coupling_invariants() -> Vec<CouplingInvariantEntry> {
         invariant(
             "runtime_attachment_alignment",
             Subsystem::Runtime,
-            &["RuntimeSessionEntry.phase", "RuntimeSessionEntry.driver"],
+            &[
+                "RuntimeSessionEntry.attachment_slot",
+                "RuntimeSessionEntry.driver",
+            ],
             "live attachment publication is aligned with driver attachment/control transitions on stop/ensure paths",
             "MeerkatMachine attachment publication contract + RuntimeControl transitions",
             "driver attachment semantics + ownership-ledger",
@@ -3457,7 +3460,7 @@ fn coupling_invariants() -> Vec<CouplingInvariantEntry> {
             &[
                 "SessionBackend.runtime_sessions",
                 "RuntimeSessionState.queued_turns",
-                "MobOpsAdapter.fallback_registry",
+                "MobOpsAdapter.member_bindings",
             ],
             "runtime-backed bridge tables must agree on member/session/runtime association",
             "SessionBackend runtime session sidecar contract + MeerkatMachine registration truth + RuntimeOpsLifecycleRegistry",

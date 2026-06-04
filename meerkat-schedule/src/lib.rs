@@ -24,14 +24,18 @@ pub use driver::{
 };
 pub use error::{ScheduleDomainError, ScheduleStoreError};
 pub use lifecycle::{
-    OccurrenceLifecycleEffect, OccurrenceLifecycleError, OccurrenceLifecycleInput,
-    OccurrenceLifecycleMutator, ScheduleLifecycleEffect, ScheduleLifecycleError,
-    ScheduleLifecycleInput, ScheduleLifecycleMutator,
+    AuthorizedOccurrenceWrite, AuthorizedScheduleWrite, ClaimedDispatchDisposition,
+    ClaimedDispatchVerdict, CompletionSupersessionDisposition, CompletionSupersessionVerdict,
+    OccurrenceDueAction, OccurrenceLifecycleEffect, OccurrenceLifecycleError,
+    OccurrenceLifecycleInput, OccurrenceLifecycleMutator, OccurrenceSupersessionAck,
+    OccurrenceWritePrecondition, ScheduleLifecycleEffect, ScheduleLifecycleError,
+    ScheduleLifecycleInput, ScheduleLifecycleMutator, ScheduleWritePrecondition,
 };
 pub use service::ScheduleService;
 pub use store::{
     ClaimDueRequest, ClaimDueResult, DisabledScheduleStore, MemoryScheduleStore, OccurrenceFilter,
     PendingSupersession, ScheduleFilter, ScheduleStore, ScheduleStoreKind,
+    apply_supersession_feedback,
 };
 pub use surface::wire_schedule_tools;
 pub use tool_surface::ScheduleToolSurface;
@@ -43,10 +47,11 @@ pub use tools::{
 };
 pub use trigger::{CronAuthoringSpec, next_due_after, occurrences_for_horizon};
 pub use types::{
-    CalendarFieldSpec, CalendarTriggerSpec, CreateScheduleRequest, DeliveryReceipt,
-    DeliveryReceiptStage, ForkContextSpec, HelperOptionsSpec, IntervalTriggerSpec, MisfirePolicy,
-    MissingTargetPolicy, MobTargetBinding, Occurrence, OccurrenceFailureClass, OccurrenceId,
-    OccurrenceOrdinal, OccurrencePhase, OverlapPolicy, ResolvedSpawnSnapshot,
+    CalendarFieldSpec, CalendarTriggerSpec, CreateScheduleRequest, DeliveryCompletionFailureReason,
+    DeliveryFailureReason, DeliveryReceipt, DeliveryReceiptStage, ForkContextSpec,
+    HelperOptionsSpec, IntervalTriggerSpec, MisfirePolicy, MissingTargetPolicy, MobTargetBinding,
+    Occurrence, OccurrenceFailureClass, OccurrenceId, OccurrenceOrdinal, OccurrencePhase,
+    OccurrenceTargetProbeOutcome, OverlapPolicy, ResolvedSpawnSnapshot, RuntimeCompletionOutcome,
     RuntimeDeliveryOutcome, Schedule, ScheduleConfig, ScheduleId, SchedulePhase, ScheduleRevision,
     ScheduleSpawnTooling, ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode,
     ScheduledSessionAction, SessionMaterializationSpec, SessionTargetBinding, TargetBinding,

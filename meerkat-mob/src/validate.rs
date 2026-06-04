@@ -394,31 +394,20 @@ mod tests {
             },
         );
 
-        MobDefinition {
-            id: MobId::from("test-mob"),
-            orchestrator: Some(OrchestratorConfig {
-                profile: ProfileName::from("lead"),
-            }),
-            profiles,
-            wiring: WiringRules {
-                auto_wire_orchestrator: true,
-                role_wiring: vec![RoleWiringRule {
-                    a: ProfileName::from("lead"),
-                    b: ProfileName::from("worker"),
-                }],
-            },
-            skills,
-            backend: BackendConfig::default(),
-            flows: BTreeMap::new(),
-            topology: None,
-            supervisor: None,
-            limits: None,
-            spawn_policy: None,
-            event_router: None,
-            owner_bridge_session_id: None,
-            session_cleanup_policy: crate::definition::SessionCleanupPolicy::Manual,
-            is_implicit: false,
-        }
+        let mut definition = MobDefinition::explicit("test-mob");
+        definition.orchestrator = Some(OrchestratorConfig {
+            profile: ProfileName::from("lead"),
+        });
+        definition.profiles = profiles;
+        definition.wiring = WiringRules {
+            auto_wire_orchestrator: true,
+            role_wiring: vec![RoleWiringRule {
+                a: ProfileName::from("lead"),
+                b: ProfileName::from("worker"),
+            }],
+        };
+        definition.skills = skills;
+        definition
     }
 
     #[test]
@@ -725,23 +714,7 @@ model = "claude-sonnet-4-5"
 
     #[test]
     fn test_minimal_valid_definition() {
-        let def = MobDefinition {
-            id: MobId::from("minimal"),
-            orchestrator: None,
-            profiles: BTreeMap::new(),
-            wiring: WiringRules::default(),
-            skills: BTreeMap::new(),
-            backend: BackendConfig::default(),
-            flows: BTreeMap::new(),
-            topology: None,
-            supervisor: None,
-            limits: None,
-            spawn_policy: None,
-            event_router: None,
-            owner_bridge_session_id: None,
-            session_cleanup_policy: crate::definition::SessionCleanupPolicy::Manual,
-            is_implicit: false,
-        };
+        let def = MobDefinition::explicit("minimal");
         let diagnostics = validate_definition(&def);
         assert!(
             diagnostics

@@ -13,8 +13,9 @@ use meerkat_core::RuntimeEpochId;
 use meerkat_core::agent::CommsRuntime;
 use meerkat_core::image_generation::{
     ImageOperationApprovalReason, ImageOperationDenialReason, ImageOperationId,
-    ImageOperationPhase, ImageOperationTerminalClass, SessionModelRoutingStatus,
-    SwitchTurnApprovalReason, SwitchTurnControlResult, SwitchTurnIntent, SwitchTurnRequestId,
+    ImageOperationPhase, ImageOperationTerminalClass, ImageProviderTerminalObservation,
+    ProviderTextDisposition, SessionModelRoutingStatus, SwitchTurnApprovalReason,
+    SwitchTurnControlResult, SwitchTurnIntent, SwitchTurnRequestId,
 };
 use meerkat_core::lifecycle::WaitRequestId;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
@@ -255,6 +256,9 @@ pub(crate) enum MeerkatMachineCommand {
     RegisterSession {
         session_id: SessionId,
     },
+    // Retained for generated manifest/parity coverage; production call sites
+    // prefer typed unregister helpers.
+    #[cfg_attr(not(test), allow(dead_code))]
     UnregisterSession {
         session_id: SessionId,
     },
@@ -276,6 +280,7 @@ pub(crate) enum MeerkatMachineCommand {
     CommitServiceTurnTerminalReceipt {
         session_id: SessionId,
     },
+    #[cfg_attr(not(test), allow(dead_code))]
     ContainsSession {
         session_id: SessionId,
     },
@@ -288,9 +293,15 @@ pub(crate) enum MeerkatMachineCommand {
     OpsLifecycleRegistry {
         session_id: SessionId,
     },
+    // Retained for generated composition contracts; production binding requests
+    // normally enter through typed composition helpers.
+    #[cfg_attr(not(test), allow(dead_code))]
     PrepareBindings {
         session_id: SessionId,
     },
+    // Local bootstrap is a shell mechanic, kept in the command catalog so the
+    // generated classifier can spell that boundary explicitly.
+    #[cfg_attr(not(test), allow(dead_code))]
     PrepareLocalSessionBindings {
         session_id: SessionId,
     },
@@ -307,6 +318,11 @@ pub(crate) enum MeerkatMachineCommand {
         previous_visibility_state: Box<meerkat_core::SessionToolVisibilityState>,
         previous_capability_surface: Option<SessionLlmCapabilitySurface>,
         previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus,
+        view_image_tool_available: bool,
+        previous_view_image_visible: bool,
+        next_view_image_visible: bool,
+        previous_active_visibility_revision: u64,
+        previous_staged_visibility_revision: u64,
         target_identity: Box<meerkat_core::SessionLlmIdentity>,
         target_capability_surface: Box<SessionLlmCapabilitySurface>,
         next_visibility_state: Box<meerkat_core::SessionToolVisibilityState>,
@@ -399,9 +415,20 @@ pub(crate) enum MeerkatMachineCommand {
         session_id: SessionId,
         request: Box<ImageOperationRoutingRequest>,
     },
+    DenyImageOperationPlan {
+        session_id: SessionId,
+        operation_id: ImageOperationId,
+        reason: ImageOperationDenialReason,
+    },
     ActivateImageOperationOverride {
         session_id: SessionId,
         operation_id: ImageOperationId,
+    },
+    ClassifyImageOperationTerminal {
+        session_id: SessionId,
+        operation_id: ImageOperationId,
+        observation: ImageProviderTerminalObservation,
+        provider_text: ProviderTextDisposition,
     },
     CompleteImageOperation {
         session_id: SessionId,
@@ -420,6 +447,7 @@ pub(crate) enum MeerkatMachineCommand {
     AcceptWithCompletion {
         session_id: SessionId,
         input: Input,
+        register_completion: bool,
     },
     AcceptWithoutWake {
         session_id: SessionId,
@@ -444,31 +472,24 @@ pub(crate) enum MeerkatMachineCommand {
 
 #[derive(Debug, Clone)]
 pub(crate) struct MeerkatMachineRunFailure {
-    pub terminal_outcome: meerkat_core::TurnTerminalOutcome,
-    pub terminal_cause_kind: meerkat_core::TurnTerminalCauseKind,
+    pub source: Option<dsl::RunFailureSourceKind>,
+    pub machine_terminal_failure_observed: bool,
     pub error: String,
 }
 
 impl MeerkatMachineRunFailure {
-    pub(crate) fn new(
-        terminal_cause_kind: meerkat_core::TurnTerminalCauseKind,
-        error: impl Into<String>,
-    ) -> Self {
-        Self::terminal(
-            meerkat_core::TurnTerminalOutcome::Failed,
-            terminal_cause_kind,
-            error,
-        )
+    pub(crate) fn new(error: impl Into<String>) -> Self {
+        Self {
+            source: None,
+            machine_terminal_failure_observed: false,
+            error: error.into(),
+        }
     }
 
-    pub(crate) fn terminal(
-        terminal_outcome: meerkat_core::TurnTerminalOutcome,
-        terminal_cause_kind: meerkat_core::TurnTerminalCauseKind,
-        error: impl Into<String>,
-    ) -> Self {
+    pub(crate) fn from_machine_terminal_failure(error: impl Into<String>) -> Self {
         Self {
-            terminal_outcome,
-            terminal_cause_kind,
+            source: None,
+            machine_terminal_failure_observed: true,
             error: error.into(),
         }
     }
@@ -512,6 +533,7 @@ pub(crate) enum MeerkatMachineCommandResult {
     SwitchTurnControlResult(SwitchTurnControlResult),
     ImageOperationRoutingResult(ImageOperationRoutingResult),
     ImageOperationPhase(ImageOperationPhase),
+    ImageOperationTerminalClass(ImageOperationTerminalClass),
     BoundaryReceipt(Option<RunBoundaryReceipt>),
     Prepared(MeerkatMachineRunPrepared),
 }
@@ -613,10 +635,13 @@ pub enum MeerkatMachineRuntimeInternalReason {
     CancellationLifecycle,
     LiveTopologyReconfiguration,
     InteractionStreamLifecycle,
+    EventStreamLifecycle,
     CommsIngressLifecycle,
     SupervisorTrustLifecycle,
+    MobOperatorAuthorityLifecycle,
     PeerRequestLifecycle,
     VisibilityAuthorityLifecycle,
+    DeferredSessionLifecycle,
     ExtractionLifecycle,
     McpServerLifecycle,
     ModelRoutingLifecycle,
@@ -642,8 +667,19 @@ meerkat_machine_runtime_internal_inputs!(
         ConsumeOnAccept,
         MarkApplied,
         MarkAppliedPendingConsumption,
+        DeferInputBehindBacklog,
+        PrioritizeInput,
         QueueAccepted,
+        RecoverAdmittedInput,
         RecoverInputLifecycle,
+        ResolveAdmissionIdempotency,
+        ResolveAdmissionPlan,
+        ResolveAdmissionValidation,
+        ResolveInputPublicLifecycle,
+        ResolveInputPublicTerminalOutcome,
+        ResolveTranscriptEditAdmission,
+        RegisterAcceptedIdempotency,
+        ResolveStagedRollback,
         RetryRequested,
         RollbackStaged,
         StageForRun,
@@ -652,19 +688,40 @@ meerkat_machine_runtime_internal_inputs!(
         StartImmediateContext,
         SteerAccepted,
         SupersedeInput,
+        AuthorizeStoredInputStateSeed,
+        ClassifyInputTerminality,
+        ClassifyRecoveredInputDurability,
+        ClassifyRuntimeLoopQueueAdmission,
+        NormalizeRecoveredInputLifecycle,
     ],
     OperationLifecycle => [
         AbortOp,
         CancelOp,
         CancelWaitAll,
+        ClassifyOperationCompletionFeed,
+        ClassifyOperationCompletionWake,
+        ClassifyOperationDurability,
+        ClassifyOperationPublicResult,
+        ClassifyOperationTerminality,
+        ClassifyOperationTransitionIdempotence,
+        ClassifyRecoveredOperationRecord,
+        CollectCompletedOp,
         CompleteOp,
+        EvictCompletedOp,
         FailOp,
         IncrementAttemptCount,
         OpsBarrierSatisfied,
         PeerReadyOp,
         ProgressReportedOp,
+        RecoverCompletionFeedEntry,
         RegisterOp,
         RegisterPendingOps,
+        RecoverCompletionConsumerCursors,
+        RecoverOpRecord,
+        RecoverOpsCompletionCursor,
+        ResolveOpLifecycleTransitionRejection,
+        ResolveRuntimeOpsLifecycleDurability,
+        ResolveWaitAllAdmission,
         RequestWaitAll,
         RetireCompletedOp,
         RetireRequestedOp,
@@ -674,12 +731,24 @@ meerkat_machine_runtime_internal_inputs!(
     ],
     RunExecutionLifecycle => [
         AcknowledgeTerminal,
+        AdvanceAgentCompletionCursor,
+        AdvanceRuntimeInjectedCompletionCursor,
+        AdvanceRuntimeObservedCompletionCursor,
         BoundaryComplete,
         BoundaryContinue,
+        ClassifyTurnTerminalCauseClass,
+        ClassifyTurnTerminality,
+        ClearSessionLlmState,
+        HydrateSessionLlmState,
         LlmReturnedTerminal,
         LlmReturnedToolCalls,
         PrimitiveApplied,
         RecordBoundarySeq,
+        ResolveLiveBoundaryContextReceipt,
+        ResolveRuntimeCompletionCleanup,
+        ResolveRuntimeCompletionResult,
+        ResolveRuntimeCompletionWaitFailure,
+        ResolveTurnSurfaceResult,
         RollbackRun,
         RunCompleted,
         RunFailed,
@@ -697,7 +766,15 @@ meerkat_machine_runtime_internal_inputs!(
         RunCancelled,
     ],
     LiveTopologyReconfiguration => [
+        AbandonLiveOpenAdmission,
         CompleteUntilChangedSwitchTurnReconfigure,
+        RecordLiveChannelRequestRejected,
+        RecordLiveChannelStatus,
+        RecordLiveCloseClosed,
+        RecordLiveCommandAccepted,
+        RecordLiveCommandRejected,
+        RecordLiveRefreshQueued,
+        ResolveLiveOpenAdmission,
     ],
     InteractionStreamLifecycle => [
         InteractionStreamAttached,
@@ -706,28 +783,51 @@ meerkat_machine_runtime_internal_inputs!(
         InteractionStreamExpired,
         InteractionStreamReserved,
     ],
+    EventStreamLifecycle => [
+        RecordMobEventStreamOpened,
+        RecordMobEventStreamTerminated,
+        RecordSessionEventStreamOpened,
+        RecordSessionEventStreamTerminated,
+        ResolveMobEventStreamClose,
+        ResolveSessionEventStreamClose,
+    ],
     CommsIngressLifecycle => [
         AddDirectPeerEndpoint,
         ApplyMobPeerOverlay,
         AttachMobIngress,
         AttachSessionIngress,
+        AuthorizeSupervisorMobPeerOverlay,
         BindSupervisor,
         ClearLocalEndpoint,
         DetachIngress,
-        DrainExitedClean,
-        DrainExitedRespawnable,
+        PeerResponseRejected,
         PublishLocalEndpoint,
         RemoveDirectPeerEndpoint,
+        ResolvePeerIngressDequeue,
+        ResolvePeerIngressReceive,
+        ResolveSupervisorAuthorizeAdmission,
+        ResolveSupervisorBindAdmission,
+        ResolveSupervisorBindMaterialAdmission,
+        ResolveSupervisorBridgeCommandAdmission,
         SpawnDrain,
         StopDrain,
     ],
     SupervisorTrustLifecycle => [
         AuthorizeSupervisor,
+        RequestSupervisorTrustPublish,
         RevokeSupervisor,
         SupervisorTrustEdgePublishFailed,
         SupervisorTrustEdgePublished,
         SupervisorTrustEdgeRevokeFailed,
         SupervisorTrustEdgeRevoked,
+    ],
+    MobOperatorAuthorityLifecycle => [
+        GrantMobOperatorManageMob,
+        ResolveMobOperatorCreateAuthority,
+        RestoreMobOperatorAuthority,
+        SetMobOperatorCreateAuthority,
+        SetMobOperatorProfileMutation,
+        SetMobOperatorSpawnProfilesInMob,
     ],
     PeerRequestLifecycle => [
         PeerRequestReceived,
@@ -740,9 +840,28 @@ meerkat_machine_runtime_internal_inputs!(
     VisibilityAuthorityLifecycle => [
         CommitDeferredNames,
         CommitVisibilityFilter,
+        ClearTurnToolOverlay,
+        ReplaceDeferredToolAuthorityCatalog,
+        ReplaceFilterToolAuthorityCatalog,
+        SetTurnToolOverlay,
         StageDeferredNames,
         StageVisibilityFilter,
+        SurfaceSetRemovalTimeout,
         SyncVisibilityRevisions,
+    ],
+    DeferredSessionLifecycle => [
+        AbandonDeferredSessionPromotion,
+        AuthorizeDeferredSessionMachineArchivedResume,
+        AuthorizeDeferredSessionSystemContextAppend,
+        BeginDeferredSessionArchive,
+        BeginDeferredSessionPromotion,
+        DropDeferredSession,
+        FinishDeferredSessionArchive,
+        FinishDeferredSessionPromotion,
+        RestoreDeferredSessionArchive,
+        StageDeferredSession,
+        UpdateDeferredSessionKeepAlive,
+        UpdateDeferredSessionLlmIdentity,
     ],
     ExtractionLifecycle => [
         EnterExtraction,
@@ -765,6 +884,17 @@ meerkat_machine_runtime_internal_inputs!(
         SetModelRoutingBaseline,
     ],
     ExternalSurfaceLifecycle => [
+        AdmitSurfaceRequest,
+        CancelSurfaceRequest,
+        ClassifySurfaceRequestTerminal,
+        FinishSurfaceRequestUnpublished,
+        PublishOrCancelSurfaceRequest,
+        PublishSurfaceRequest,
+        RecordLiveWebrtcAnswerAccepted,
+        RecordLiveWebrtcTokenIssued,
+        RecordLiveWebsocketTokenIssued,
+        ResolveLiveWebrtcAnswerAdmission,
+        ResolveLiveWebsocketTokenAdmission,
         SurfaceApplyBoundary,
         SurfaceCallFinished,
         SurfaceCallStarted,
@@ -780,11 +910,17 @@ meerkat_machine_runtime_internal_inputs!(
         SurfaceStageRemove,
     ],
     FailureRecoveryLifecycle => [
+        ClassifyLlmFailureRecovery,
+        ClassifyRuntimeLifecycleDurability,
+        ClassifyRuntimeLifecycleState,
         FatalFailure,
         RecoverableFailure,
+        RecoverRuntimeAuthority,
+        ResolveVisibleRuntimePhase,
     ],
     UserInterruptDispatch => [
         InterruptCurrentRun,
+        ResolveUserInterruptPublicResult,
     ],
 );
 
@@ -870,24 +1006,9 @@ macro_rules! meerkat_machine_fieldless_runtime_internal_inputs {
 meerkat_machine_fieldless_runtime_internal_inputs!(
     RuntimeOwner => [
         RuntimeExecutorExited,
-        PrimitiveApplied,
-        LlmReturnedTerminal,
-        ToolCallsResolved,
-        BoundaryContinue,
-        BoundaryComplete,
-        ExtractionStart,
-        ExtractionValidationPassed,
-        CancelNow,
-        RequestCancelAfterBoundary,
-        CancellationObserved,
-        TurnLimitReached,
-        BudgetExhausted,
-        TimeBudgetExceeded,
         ForceCancelNoRun,
         CancelWaitAll,
         StopDrain,
-        DrainExitedClean,
-        DrainExitedRespawnable,
         SurfaceShutdown,
         DetachIngress,
         ClearLocalEndpoint,
@@ -975,7 +1096,9 @@ pub enum MeerkatMachineCatalogInput {
     RequestUntilChangedSwitchTurn,
     AdmitModelRoutingAssistantTurn,
     BeginImageOperation,
+    DenyImageOperationPlan,
     ActivateImageOperationOverride,
+    ClassifyImageOperationTerminal,
     CompleteImageOperation,
     RestoreImageOperationOverride,
     LoadBoundaryReceipt,
@@ -1025,7 +1148,9 @@ impl MeerkatMachineCatalogInput {
         Self::RequestUntilChangedSwitchTurn,
         Self::AdmitModelRoutingAssistantTurn,
         Self::BeginImageOperation,
+        Self::DenyImageOperationPlan,
         Self::ActivateImageOperationOverride,
+        Self::ClassifyImageOperationTerminal,
         Self::CompleteImageOperation,
         Self::RestoreImageOperationOverride,
         Self::LoadBoundaryReceipt,
@@ -1086,8 +1211,12 @@ impl MeerkatMachineCatalogInput {
                 MeerkatMachineInputVariant::AdmitModelRoutingAssistantTurn
             }
             Self::BeginImageOperation => MeerkatMachineInputVariant::BeginImageOperation,
+            Self::DenyImageOperationPlan => MeerkatMachineInputVariant::DenyImageOperationPlan,
             Self::ActivateImageOperationOverride => {
                 MeerkatMachineInputVariant::ActivateImageOperationOverride
+            }
+            Self::ClassifyImageOperationTerminal => {
+                MeerkatMachineInputVariant::ClassifyImageOperationTerminal
             }
             Self::CompleteImageOperation => MeerkatMachineInputVariant::CompleteImageOperation,
             Self::RestoreImageOperationOverride => {
@@ -1142,7 +1271,9 @@ impl MeerkatMachineCatalogInput {
             Self::RequestUntilChangedSwitchTurn => "RequestUntilChangedSwitchTurn",
             Self::AdmitModelRoutingAssistantTurn => "AdmitModelRoutingAssistantTurn",
             Self::BeginImageOperation => "BeginImageOperation",
+            Self::DenyImageOperationPlan => "DenyImageOperationPlan",
             Self::ActivateImageOperationOverride => "ActivateImageOperationOverride",
+            Self::ClassifyImageOperationTerminal => "ClassifyImageOperationTerminal",
             Self::CompleteImageOperation => "CompleteImageOperation",
             Self::RestoreImageOperationOverride => "RestoreImageOperationOverride",
             Self::LoadBoundaryReceipt => "LoadBoundaryReceipt",
@@ -1207,8 +1338,14 @@ impl MeerkatMachineCommandVariant {
                 Some(MeerkatMachineCatalogInput::AdmitModelRoutingAssistantTurn)
             }
             Self::BeginImageOperation => Some(MeerkatMachineCatalogInput::BeginImageOperation),
+            Self::DenyImageOperationPlan => {
+                Some(MeerkatMachineCatalogInput::DenyImageOperationPlan)
+            }
             Self::ActivateImageOperationOverride => {
                 Some(MeerkatMachineCatalogInput::ActivateImageOperationOverride)
+            }
+            Self::ClassifyImageOperationTerminal => {
+                Some(MeerkatMachineCatalogInput::ClassifyImageOperationTerminal)
             }
             Self::CompleteImageOperation => {
                 Some(MeerkatMachineCatalogInput::CompleteImageOperation)
@@ -1432,9 +1569,19 @@ const fn meerkat_machine_command_classification(
                 MeerkatMachineCatalogInput::BeginImageOperation,
             )
         }
+        MeerkatMachineCommandVariant::DenyImageOperationPlan => {
+            MeerkatMachineCommandClassification::CatalogInput(
+                MeerkatMachineCatalogInput::DenyImageOperationPlan,
+            )
+        }
         MeerkatMachineCommandVariant::ActivateImageOperationOverride => {
             MeerkatMachineCommandClassification::CatalogInput(
                 MeerkatMachineCatalogInput::ActivateImageOperationOverride,
+            )
+        }
+        MeerkatMachineCommandVariant::ClassifyImageOperationTerminal => {
+            MeerkatMachineCommandClassification::CatalogInput(
+                MeerkatMachineCatalogInput::ClassifyImageOperationTerminal,
             )
         }
         MeerkatMachineCommandVariant::CompleteImageOperation => {
@@ -1558,6 +1705,19 @@ pub struct MeerkatInputsSnapshot {
     pub silent_intent_overrides: Vec<String>,
 }
 
+/// Lightweight lifecycle snapshot used by archive/retire cleanup.
+///
+/// This intentionally avoids the heavier diagnostic regions that are not
+/// needed for archive decisions. Control and input fields still come from the
+/// generated runtime authority/driver projections.
+#[derive(Debug, Clone)]
+pub struct MeerkatArchiveSnapshot {
+    pub control: MeerkatControlSnapshot,
+    pub queue: Vec<InputId>,
+    pub steer_queue: Vec<InputId>,
+    pub completion_waiters: MeerkatCompletionWaitersSnapshot,
+}
+
 /// Snapshot of the canonical input-ledger carrier for one session.
 ///
 /// These counts sit below the top-level Meerkat phase machine, but they drive
@@ -1590,7 +1750,10 @@ pub struct MeerkatOpsSnapshot {
     pub operations: Vec<OperationLifecycleSnapshot>,
 }
 
-/// Snapshot of comms-drain lifecycle truth for one session.
+/// Diagnostic comms-drain projection for one session.
+///
+/// `phase` and `mode` are read from generated MeerkatMachine authority; the
+/// handle flag is shell task mechanics only.
 #[derive(Debug, Clone)]
 pub struct MeerkatDrainSnapshot {
     pub slot_present: bool,

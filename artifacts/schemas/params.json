@@ -108,12 +108,12 @@
         "properties": {
           "current_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 2,
+            "default": 3,
             "description": "Protocol version implemented by the responding member runtime."
           },
           "default_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 2,
+            "default": 3,
             "description": "Protocol version new supervisors should use for fresh authority records."
           },
           "deliver_member_input": {
@@ -142,7 +142,8 @@
           },
           "supported_protocol_versions": {
             "default": [
-              2
+              2,
+              3
             ],
             "description": "Protocol versions accepted by the responding member runtime.",
             "items": {
@@ -447,7 +448,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "Peer wiring command payload.",
+            "description": "Peer wiring command payload.\n\n`mob_peer_overlay` is present from protocol V3 onward. It is\n`#[serde(default, skip_serializing_if)]` so that (a) a V2 wiring payload\nemitted by a pre-overlay peer still deserializes here as `None` instead of\nerroring on a missing field, and (b) a V3 payload remains byte-identical on\nthe wire to the pre-Option shape (the field is always `Some` when emitted by\nV3 senders). A `None` overlay on a wiring command is rejected by the\nreceiver with a typed `UnsupportedProtocolVersion` cause.",
             "properties": {
               "command": {
                 "const": "wire_member",
@@ -457,6 +458,16 @@
                 "format": "uint64",
                 "minimum": 0,
                 "type": "integer"
+              },
+              "mob_peer_overlay": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "peer_spec": {
                 "$ref": "#/$defs/BridgePeerSpec"
@@ -479,7 +490,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "Peer wiring command payload.",
+            "description": "Peer wiring command payload.\n\n`mob_peer_overlay` is present from protocol V3 onward. It is\n`#[serde(default, skip_serializing_if)]` so that (a) a V2 wiring payload\nemitted by a pre-overlay peer still deserializes here as `None` instead of\nerroring on a missing field, and (b) a V3 payload remains byte-identical on\nthe wire to the pre-Option shape (the field is always `Some` when emitted by\nV3 senders). A `None` overlay on a wiring command is rejected by the\nreceiver with a typed `UnsupportedProtocolVersion` cause.",
             "properties": {
               "command": {
                 "const": "unwire_member",
@@ -489,6 +500,16 @@
                 "format": "uint64",
                 "minimum": 0,
                 "type": "integer"
+              },
+              "mob_peer_overlay": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "peer_spec": {
                 "$ref": "#/$defs/BridgePeerSpec"
@@ -684,6 +705,32 @@
           "destroyed"
         ],
         "type": "string"
+      },
+      "BridgeMobPeerOverlayHandoff": {
+        "additionalProperties": false,
+        "description": "Generated MobMachine peer overlay handoff carried with peer wiring commands.",
+        "properties": {
+          "peer_specs": {
+            "items": {
+              "$ref": "#/$defs/BridgePeerSpec"
+            },
+            "type": "array"
+          },
+          "recipient_peer_id": {
+            "type": "string"
+          },
+          "topology_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "recipient_peer_id",
+          "topology_epoch",
+          "peer_specs"
+        ],
+        "type": "object"
       },
       "BridgePeerConnectivity": {
         "description": "Connectivity class observed for the bridged member runtime.",
@@ -10233,22 +10280,6 @@
               "phase"
             ],
             "type": "object"
-          },
-          {
-            "properties": {
-              "kind": {
-                "const": "legacy_status",
-                "type": "string"
-              },
-              "status": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "status"
-            ],
-            "type": "object"
           }
         ]
       },
@@ -10293,14 +10324,7 @@
             "type": "string"
           },
           "status_info": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/ToolConfigChangeStatus"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/$defs/ToolConfigChangeStatus"
           },
           "target": {
             "type": "string"
@@ -10310,6 +10334,7 @@
           "operation",
           "target",
           "status",
+          "status_info",
           "persisted"
         ],
         "type": "object"

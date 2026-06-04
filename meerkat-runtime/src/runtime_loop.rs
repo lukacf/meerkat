@@ -18,7 +18,6 @@ use crate::input::Input;
 use crate::input::input_prompt_text;
 #[cfg(test)]
 use crate::input::runtime_input_projection_for_machine_batch;
-use crate::runtime_state::RuntimeState;
 use crate::tokio;
 
 /// Extract a prompt string from an `Input`.
@@ -99,54 +98,281 @@ pub(crate) fn merge_batch_turn_metadata(
     Ok(acc.filter(|m| !m.is_empty()))
 }
 
-fn resolve_completion_waiters(
-    registry: &mut crate::completion::CompletionRegistry,
-    input_ids: &[InputId],
-    terminal: Option<CoreApplyTerminal>,
-) {
+fn completion_terminal_observation(
+    terminal: Option<&CoreApplyTerminal>,
+) -> crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation {
     match terminal {
-        Some(CoreApplyTerminal::CallbackPending { tool_name, args }) => {
-            for input_id in input_ids {
-                registry.resolve_callback_pending(input_id, tool_name.clone(), args.clone());
-            }
+        Some(CoreApplyTerminal::RunResult(_)) => {
+            crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::RunResult
         }
-        Some(CoreApplyTerminal::RunResult(result)) => {
-            for input_id in input_ids {
-                registry.resolve_completed(input_id, result.as_ref().clone());
-            }
+        Some(CoreApplyTerminal::CallbackPending { .. }) => {
+            crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::CallbackPending
         }
         Some(CoreApplyTerminal::NoPendingBoundary) | None => {
-            for input_id in input_ids {
-                registry.resolve_without_result(input_id);
-            }
+            crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::NoResult
         }
     }
 }
 
-fn resolve_completion_waiters_with_finalization_failure(
+async fn runtime_completion_result_class(
+    driver: &crate::meerkat_machine::SharedDriver,
+    run_id: Option<&RunId>,
+    terminal: crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation,
+    finalization: crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation,
+) -> Result<
+    crate::meerkat_machine::driver::RuntimeCompletionResultAuthority,
+    crate::RuntimeDriverError,
+> {
+    let driver = driver.lock().await;
+    crate::meerkat_machine::driver::machine_resolve_runtime_completion_result(
+        &driver,
+        run_id,
+        terminal,
+        finalization,
+    )
+}
+
+async fn resolve_runtime_completion_waiters(
+    driver: &crate::meerkat_machine::SharedDriver,
+    completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
+    input_ids: &[InputId],
+    run_id: &RunId,
+    terminal: Option<&CoreApplyTerminal>,
+    finalization: crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation,
+    finalization_error: Option<meerkat_core::TurnErrorMetadata>,
+) {
+    let Some(completions) = completions else {
+        return;
+    };
+    let result_class = runtime_completion_result_class(
+        driver,
+        Some(run_id),
+        completion_terminal_observation(terminal),
+        finalization,
+    )
+    .await;
+    let mut registry = completions.lock().await;
+    match result_class {
+        Ok(result_class) => resolve_completion_waiters_from_authority(
+            &mut registry,
+            input_ids,
+            terminal,
+            result_class,
+            finalization_error,
+        ),
+        Err(err) => fail_closed_completion_waiters(
+            &mut registry,
+            input_ids,
+            format!("runtime completion result authority missing: {err}"),
+        ),
+    }
+}
+
+async fn resolve_machine_terminal_completion_waiters(
+    driver: &crate::meerkat_machine::SharedDriver,
+    completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
+    input_ids: &[InputId],
+    run_id: &RunId,
+    reason: String,
+) {
+    let Some(completions) = completions else {
+        return;
+    };
+    let result_class = runtime_completion_result_class(
+        driver,
+        Some(run_id),
+        crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::MachineTerminal,
+        crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
+    )
+    .await;
+    let error_metadata = machine_terminal_completion_error(driver, reason.clone()).await;
+    let mut registry = completions.lock().await;
+    match (result_class, error_metadata) {
+        (Ok(result_class), Ok(error_metadata)) => resolve_completion_waiters_from_authority(
+            &mut registry,
+            input_ids,
+            None,
+            result_class,
+            error_metadata,
+        ),
+        (Err(err), _) | (_, Err(err)) => fail_closed_completion_waiters(
+            &mut registry,
+            input_ids,
+            format!("runtime terminal completion authority missing: {err}"),
+        ),
+    }
+}
+
+async fn runtime_terminated_completion_class(
+    driver: &crate::meerkat_machine::SharedDriver,
+) -> Result<
+    crate::meerkat_machine::driver::RuntimeCompletionResultAuthority,
+    crate::RuntimeDriverError,
+> {
+    runtime_completion_result_class(
+        driver,
+        None,
+        crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::RuntimeTerminated,
+        crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
+    )
+    .await
+}
+
+fn resolve_completion_waiters_from_authority(
     registry: &mut crate::completion::CompletionRegistry,
     input_ids: &[InputId],
-    terminal: Option<CoreApplyTerminal>,
-    error: meerkat_core::TurnErrorMetadata,
+    terminal: Option<&CoreApplyTerminal>,
+    authority: crate::meerkat_machine::driver::RuntimeCompletionResultAuthority,
+    finalization_error: Option<meerkat_core::TurnErrorMetadata>,
 ) {
-    match terminal {
-        Some(CoreApplyTerminal::RunResult(result)) => {
+    use crate::meerkat_machine::dsl::RuntimeCompletionResultClass;
+
+    match authority.class() {
+        RuntimeCompletionResultClass::Completed => {
+            let Some(CoreApplyTerminal::RunResult(result)) = terminal else {
+                fail_closed_completion_waiters(
+                    registry,
+                    input_ids,
+                    "runtime completion authority resolved Completed without result payload",
+                );
+                return;
+            };
             for input_id in input_ids {
-                registry.resolve_completed_with_finalization_failure(
+                registry.resolve_completed_authorized(
                     input_id,
                     result.as_ref().clone(),
-                    error.clone(),
+                    authority.clone(),
                 );
             }
         }
-        _ => {
+        RuntimeCompletionResultClass::CompletedWithoutResult => {
+            if !matches!(terminal, Some(CoreApplyTerminal::NoPendingBoundary) | None) {
+                fail_closed_completion_waiters(
+                    registry,
+                    input_ids,
+                    "runtime completion authority resolved CompletedWithoutResult with terminal payload",
+                );
+                return;
+            }
+            for input_id in input_ids {
+                registry.resolve_without_result_authorized(input_id, authority.clone());
+            }
+        }
+        RuntimeCompletionResultClass::CallbackPending => {
+            let Some(CoreApplyTerminal::CallbackPending { tool_name, args }) = terminal else {
+                fail_closed_completion_waiters(
+                    registry,
+                    input_ids,
+                    "runtime completion authority resolved CallbackPending without callback payload",
+                );
+                return;
+            };
+            for input_id in input_ids {
+                registry.resolve_callback_pending_authorized(
+                    input_id,
+                    tool_name.clone(),
+                    args.clone(),
+                    authority.clone(),
+                );
+            }
+        }
+        RuntimeCompletionResultClass::Cancelled => {
+            if terminal.is_some() || finalization_error.is_some() {
+                fail_closed_completion_waiters(
+                    registry,
+                    input_ids,
+                    "runtime completion authority resolved Cancelled with payload",
+                );
+                return;
+            }
+            for input_id in input_ids {
+                registry.resolve_cancelled_authorized(input_id, authority.clone());
+            }
+        }
+        RuntimeCompletionResultClass::AbandonedWithError => {
+            if matches!(terminal, Some(CoreApplyTerminal::RunResult(_))) {
+                fail_closed_completion_waiters(
+                    registry,
+                    input_ids,
+                    "runtime completion authority resolved AbandonedWithError with result payload",
+                );
+                return;
+            }
+            let Some(error) = finalization_error else {
+                fail_closed_completion_waiters(
+                    registry,
+                    input_ids,
+                    "runtime completion authority resolved AbandonedWithError without typed error",
+                );
+                return;
+            };
             let reason = error
                 .detail
                 .clone()
                 .unwrap_or_else(|| "runtime finalization failed".to_string());
-            abandon_completion_waiters_with_error(registry, input_ids, reason, error);
+            for input_id in input_ids {
+                registry.resolve_abandoned_with_error_authorized(
+                    input_id,
+                    reason.clone(),
+                    error.clone(),
+                    authority.clone(),
+                );
+            }
+        }
+        RuntimeCompletionResultClass::CompletedWithFinalizationFailure => {
+            let Some(CoreApplyTerminal::RunResult(result)) = terminal else {
+                fail_closed_completion_waiters(
+                    registry,
+                    input_ids,
+                    "runtime completion authority resolved CompletedWithFinalizationFailure without result payload",
+                );
+                return;
+            };
+            let Some(error) = finalization_error else {
+                fail_closed_completion_waiters(
+                    registry,
+                    input_ids,
+                    "runtime completion authority resolved finalization failure without typed error",
+                );
+                return;
+            };
+            for input_id in input_ids {
+                registry.resolve_completed_with_finalization_failure_authorized(
+                    input_id,
+                    result.as_ref().clone(),
+                    error.clone(),
+                    authority.clone(),
+                );
+            }
+        }
+        RuntimeCompletionResultClass::RuntimeTerminated => {
+            if terminal.is_some() || finalization_error.is_some() {
+                fail_closed_completion_waiters(
+                    registry,
+                    input_ids,
+                    "runtime completion authority resolved RuntimeTerminated with payload",
+                );
+                return;
+            }
+            registry.resolve_inputs_runtime_terminated(
+                input_ids.iter().cloned(),
+                "runtime terminated",
+                authority,
+            );
         }
     }
+}
+
+fn fail_closed_completion_waiters(
+    registry: &mut crate::completion::CompletionRegistry,
+    input_ids: &[InputId],
+    reason: impl Into<String>,
+) {
+    let reason = reason.into();
+    registry.fail_inputs(
+        input_ids.iter().cloned(),
+        crate::completion::CompletionWaitError::AuthorityUnavailable(reason),
+    );
 }
 
 async fn stop_runtime_loop_executor_from_dsl_effect(
@@ -206,26 +432,69 @@ async fn stop_runtime_loop_executor_from_dsl_effect(
     }
 }
 
-fn abandon_completion_waiters(
+fn fail_completion_waiters(
     registry: &mut crate::completion::CompletionRegistry,
     input_ids: &[InputId],
     reason: impl Into<String>,
 ) {
-    let reason = reason.into();
-    for input_id in input_ids {
-        registry.resolve_abandoned(input_id, reason.clone());
-    }
+    fail_closed_completion_waiters(registry, input_ids, reason);
 }
 
-fn abandon_completion_waiters_with_error(
-    registry: &mut crate::completion::CompletionRegistry,
-    input_ids: &[InputId],
-    reason: impl Into<String>,
-    error: meerkat_core::TurnErrorMetadata,
-) {
-    let reason = reason.into();
-    for input_id in input_ids {
-        registry.resolve_abandoned_with_error(input_id, reason.clone(), error.clone());
+async fn machine_terminal_completion_error(
+    driver: &crate::meerkat_machine::SharedDriver,
+    detail: String,
+) -> Result<Option<meerkat_core::TurnErrorMetadata>, crate::RuntimeDriverError> {
+    let authority = {
+        let driver = driver.lock().await;
+        driver.shared_dsl_authority()
+    };
+    let auth = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let outcome = auth.state().terminal_outcome.ok_or_else(|| {
+        crate::RuntimeDriverError::Internal(
+            "missing generated terminal_outcome for runtime completion".to_string(),
+        )
+    })?;
+    match outcome {
+        crate::meerkat_machine::dsl::TurnTerminalOutcome::Cancelled => {
+            match auth.state().terminal_cause_kind {
+                None | Some(crate::meerkat_machine::dsl::TurnTerminalCauseKind::Unknown) => {
+                    Ok(None)
+                }
+                Some(cause_kind) => Err(crate::RuntimeDriverError::Internal(format!(
+                    "generated cancelled terminal carried failure cause {cause_kind:?}"
+                ))),
+            }
+        }
+        crate::meerkat_machine::dsl::TurnTerminalOutcome::Failed
+        | crate::meerkat_machine::dsl::TurnTerminalOutcome::BudgetExhausted
+        | crate::meerkat_machine::dsl::TurnTerminalOutcome::TimeBudgetExceeded
+        | crate::meerkat_machine::dsl::TurnTerminalOutcome::StructuredOutputValidationFailed => {
+            let cause_kind = auth.state().terminal_cause_kind.ok_or_else(|| {
+                crate::RuntimeDriverError::Internal(
+                    "missing generated terminal_cause_kind for failed runtime completion"
+                        .to_string(),
+                )
+            })?;
+            if cause_kind == crate::meerkat_machine::dsl::TurnTerminalCauseKind::Unknown {
+                return Err(crate::RuntimeDriverError::Internal(
+                    "unknown generated terminal_cause_kind for failed runtime completion"
+                        .to_string(),
+                ));
+            }
+            Ok(Some(meerkat_core::TurnErrorMetadata::terminal(
+                meerkat_core::TurnTerminalCauseKind::from(cause_kind),
+                meerkat_core::TurnTerminalOutcome::from(outcome),
+                detail,
+            )))
+        }
+        crate::meerkat_machine::dsl::TurnTerminalOutcome::None
+        | crate::meerkat_machine::dsl::TurnTerminalOutcome::Completed => {
+            Err(crate::RuntimeDriverError::Internal(format!(
+                "generated terminal outcome {outcome:?} cannot resolve failed runtime completion"
+            )))
+        }
     }
 }
 
@@ -339,7 +608,7 @@ async fn prepare_turn_state_for_primitive(
     // guard on Initializing/Attached — no Retired variant. Skip the
     // signal during drain; shell-side `set_control_projection` has
     // already advanced control so `executor.apply` proceeds next.
-    if auth.state.lifecycle_phase == crate::meerkat_machine::dsl::MeerkatPhase::Retired {
+    if auth.state().lifecycle_phase == crate::meerkat_machine::dsl::MeerkatPhase::Retired {
         return Ok(());
     }
     crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut *auth, input)
@@ -423,8 +692,8 @@ pub(crate) fn inputs_to_primitive(
 
 #[cfg(test)]
 fn fallback_unadmitted_semantics(input: &Input) -> crate::ingress_types::RuntimeInputSemantics {
-    let policy = crate::policy_table::DefaultPolicyTable::resolve(input, true);
-    crate::ingress_types::RuntimeInputSemantics::from_policy_and_input(&policy, input)
+    crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(input, true)
+        .expect("generated admission semantics")
 }
 
 #[cfg(test)]
@@ -460,6 +729,75 @@ pub(crate) fn admitted_input_to_primitive(
     )
 }
 
+#[derive(Clone)]
+struct RuntimeLoopAuthorityBinding {
+    machine: std::sync::Weak<crate::meerkat_machine::MeerkatMachine>,
+    session_id: meerkat_core::types::SessionId,
+    #[cfg(test)]
+    detached_test_gate: Option<std::sync::Arc<crate::tokio::sync::Mutex<()>>>,
+}
+
+impl RuntimeLoopAuthorityBinding {
+    fn new(
+        machine: std::sync::Weak<crate::meerkat_machine::MeerkatMachine>,
+        session_id: meerkat_core::types::SessionId,
+    ) -> Self {
+        Self {
+            machine,
+            session_id,
+            #[cfg(test)]
+            detached_test_gate: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn detached_for_test() -> Self {
+        Self {
+            machine: std::sync::Weak::<crate::meerkat_machine::MeerkatMachine>::new(),
+            session_id: meerkat_core::types::SessionId::new(),
+            detached_test_gate: Some(std::sync::Arc::new(crate::tokio::sync::Mutex::new(()))),
+        }
+    }
+
+    async fn lock_current_driver_authority(
+        &self,
+        driver: &crate::meerkat_machine::SharedDriver,
+        context: &'static str,
+    ) -> Result<crate::tokio::sync::OwnedMutexGuard<()>, crate::traits::RuntimeDriverError> {
+        #[cfg(test)]
+        if let Some(gate) = &self.detached_test_gate {
+            let _ = (driver, context);
+            return Ok(std::sync::Arc::clone(gate).lock_owned().await);
+        }
+
+        let machine =
+            self.machine
+                .upgrade()
+                .ok_or(crate::traits::RuntimeDriverError::NotReady {
+                    state: crate::runtime_state::RuntimeState::Destroyed,
+                })?;
+        machine
+            .lock_current_runtime_loop_driver_authority(&self.session_id, driver)
+            .await
+            .map_err(|err| {
+                tracing::warn!(
+                    session_id = %self.session_id,
+                    error = %err,
+                    context,
+                    "runtime loop refused stale session driver authority"
+                );
+                err
+            })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeedWakeOutcome {
+    Noop,
+    Injected,
+    StaleAuthority,
+}
+
 /// Spawn the per-session runtime loop with optional completion registry.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_runtime_loop_with_completions(
@@ -469,47 +807,55 @@ pub(crate) fn spawn_runtime_loop_with_completions(
     mut effect_rx: tokio::sync::mpsc::Receiver<crate::effect::RuntimeEffect>,
     completions: Option<crate::meerkat_machine::SharedCompletionRegistry>,
     completion_feed: Option<std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>>,
+    ops_lifecycle: Option<std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
     epoch_cursor_state: Option<std::sync::Arc<meerkat_core::EpochCursorState>>,
-    _machine_weak: std::sync::Weak<crate::meerkat_machine::MeerkatMachine>,
-    _session_id: meerkat_core::types::SessionId,
+    machine_weak: std::sync::Weak<crate::meerkat_machine::MeerkatMachine>,
+    session_id: meerkat_core::types::SessionId,
 ) -> tokio::task::JoinHandle<()> {
+    #[cfg(test)]
+    let authority_binding = if machine_weak.strong_count() == 0 {
+        RuntimeLoopAuthorityBinding::detached_for_test()
+    } else {
+        RuntimeLoopAuthorityBinding::new(machine_weak, session_id)
+    };
+    #[cfg(not(test))]
+    let authority_binding = RuntimeLoopAuthorityBinding::new(machine_weak, session_id);
     tokio::spawn(async move {
         // Feed-based idle wake state (local to this loop).
-        // Seed from epoch cursor state when available (runtime-backed surfaces).
-        // Even an all-zero cursor must win over the feed watermark so a fresh
-        // runtime loop cannot silently skip background completions that land
-        // before the task reaches its first select iteration. Only callers that
-        // do not provide cursor state fall back to the feed watermark to avoid
-        // replaying historical completions.
-        let initial_watermark = epoch_cursor_state
+        // Seed from generated cursor authority when available. Even an
+        // all-zero runtime-owned cursor must win over the feed watermark so a
+        // fresh runtime loop cannot silently skip background completions that
+        // land before the task reaches its first select iteration.
+        let initial_watermark = ops_lifecycle
             .as_ref()
-            .map(|cs| {
-                let obs = cs
-                    .runtime_observed_seq
-                    .load(std::sync::atomic::Ordering::Acquire);
-                let inj = cs
-                    .runtime_last_injected_seq
-                    .load(std::sync::atomic::Ordering::Acquire);
-                obs.max(inj)
+            .and_then(|registry| {
+                let obs = registry.completion_cursor(
+                    meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeObserved,
+                )?;
+                let inj = registry.completion_cursor(
+                    meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeInjected,
+                )?;
+                Some(obs.max(inj))
             })
-            .unwrap_or_else(|| completion_feed.as_ref().map(|f| f.watermark()).unwrap_or(0));
+            .unwrap_or(0);
         let mut observed_seq: meerkat_core::completion_feed::CompletionSeq = initial_watermark;
-        let mut last_injected_seq: meerkat_core::completion_feed::CompletionSeq =
-            epoch_cursor_state
-                .as_ref()
-                .map(|cs| {
-                    cs.runtime_last_injected_seq
-                        .load(std::sync::atomic::Ordering::Acquire)
-                })
-                .filter(|&v| v > 0)
-                .unwrap_or(initial_watermark);
+        let mut last_injected_seq: meerkat_core::completion_feed::CompletionSeq = ops_lifecycle
+            .as_ref()
+            .and_then(|registry| {
+                registry.completion_cursor(
+                    meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeInjected,
+                )
+            })
+            .filter(|&v| v > 0)
+            .unwrap_or(initial_watermark);
 
         loop {
             // Build a future for the idle wake. Backed by the completion feed
-            // when present; otherwise pends forever (no background ops can
-            // complete without a feed-producing ops registry).
+            // only when generated ops cursor authority is present; otherwise
+            // pends forever because the feed watermark is not delivery
+            // authority.
             let idle_wake = async {
-                if let Some(ref feed) = completion_feed {
+                if let (Some(feed), Some(_)) = (completion_feed.as_ref(), ops_lifecycle.as_ref()) {
                     feed.wait_for_advance(observed_seq).await;
                 } else {
                     std::future::pending::<()>().await;
@@ -521,6 +867,16 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                 maybe_effect = effect_rx.recv() => {
                     match maybe_effect {
                         Some(effect) => {
+                            let _authority_guard = match authority_binding
+                                .lock_current_driver_authority(
+                                    &driver,
+                                    "runtime loop direct executor effect",
+                                )
+                                .await
+                            {
+                                Ok(guard) => guard,
+                                Err(_) => break,
+                            };
                             match crate::control_plane::apply_executor_effect(
                                 &driver,
                                 completions.as_ref(),
@@ -551,6 +907,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 &mut *executor,
                                 &mut effect_rx,
                                 completions.as_ref(),
+                                &authority_binding,
                             )
                             .await
                             {
@@ -559,88 +916,67 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                             // Secondary wake path: re-check after queue drain.
                             // If a completion arrived during process_queue, inject
                             // and immediately process the continuation.
-                            if maybe_inject_feed_wake(
+                            match maybe_inject_feed_wake(
                                 &driver,
                                 completion_feed.as_deref(),
                                 &mut observed_seq,
                                 &mut last_injected_seq,
                                 epoch_cursor_state.as_deref(),
+                                ops_lifecycle.as_deref(),
+                                &authority_binding,
                             )
                             .await
-                                && process_queue(
-                                    &driver,
-                                    &mut *executor,
-                                    &mut effect_rx,
-                                    completions.as_ref(),
-                                )
-                                .await
                             {
-                                break;
+                                FeedWakeOutcome::Injected => {
+                                    if process_queue(
+                                        &driver,
+                                        &mut *executor,
+                                        &mut effect_rx,
+                                        completions.as_ref(),
+                                        &authority_binding,
+                                    )
+                                    .await
+                                    {
+                                        break;
+                                    }
+                                }
+                                FeedWakeOutcome::StaleAuthority => break,
+                                FeedWakeOutcome::Noop => {}
                             }
                         }
                         None => break,
                     }
                 }
                 () = idle_wake => {
-                    // A completion arrived while idle. Check if it's a
-                    // BackgroundToolOp that hasn't been injected yet.
-                    // Only BackgroundToolOp triggers idle wake — MobMemberChild
-                    // completions already wake through comms terminal response.
-                    if let Some(ref feed) = completion_feed {
-                        let batch = feed.list_since(observed_seq);
-
-                        let has_new_bg_completion = batch.entries.iter().any(|e| {
-                            e.kind
-                                == meerkat_core::ops_lifecycle::OperationKind::BackgroundToolOp
-                                && e.seq > last_injected_seq
-                        });
-
-                        if has_new_bg_completion {
-                            // Verify quiescence before injecting.
-                            let d = driver.lock().await;
-                            let quiescent = d.is_quiescent_for_detached_wake();
-                            drop(d);
-
-                            if quiescent {
-                                let input = crate::input::Input::Continuation(
-                                    crate::input::ContinuationInput::detached_background_op_completed(),
-                                );
-                                let mut d = driver.lock().await;
-                                if d.as_driver_mut().accept_input(input).await.is_ok() {
-                                    last_injected_seq = batch.watermark;
-                                    if let Some(ref cs) = epoch_cursor_state {
-                                        cs.runtime_last_injected_seq.store(batch.watermark, std::sync::atomic::Ordering::Release);
-                                    }
-                                }
-                                // Advance cursor only after successful injection
-                                // or when quiescent (no pending BG work to retry).
-                                observed_seq = batch.watermark;
-                                if let Some(ref cs) = epoch_cursor_state {
-                                    cs.runtime_observed_seq.store(batch.watermark, std::sync::atomic::Ordering::Release);
-                                }
-                                drop(d);
-                                if process_queue(
-                                    &driver,
-                                    &mut *executor,
-                                    &mut effect_rx,
-                                    completions.as_ref(),
-                                )
-                                .await
-                                {
-                                    break;
-                                }
-                            }
-                            // Non-quiescent: do NOT advance observed_seq.
-                            // The completion stays visible for the next wake
-                            // so it's not permanently lost.
-                        } else {
-                            // No new BG completions — advance to prevent hot-spin
-                            // on non-BG entries (MobMemberChild, etc.).
-                            observed_seq = batch.watermark;
-                            if let Some(ref cs) = epoch_cursor_state {
-                                cs.runtime_observed_seq.store(batch.watermark, std::sync::atomic::Ordering::Release);
+                    // A completion arrived while idle. Generated ops authority
+                    // classifies whether it should wake this runtime; other
+                    // completions already wake through their owning channels.
+                    match maybe_inject_feed_wake(
+                        &driver,
+                        completion_feed.as_deref(),
+                        &mut observed_seq,
+                        &mut last_injected_seq,
+                        epoch_cursor_state.as_deref(),
+                        ops_lifecycle.as_deref(),
+                        &authority_binding,
+                    )
+                    .await
+                    {
+                        FeedWakeOutcome::Injected => {
+                            if process_queue(
+                                &driver,
+                                &mut *executor,
+                                &mut effect_rx,
+                                completions.as_ref(),
+                                &authority_binding,
+                            )
+                            .await
+                            {
+                                break;
                             }
                         }
+                        FeedWakeOutcome::StaleAuthority => break,
+                        FeedWakeOutcome::Noop => {}
                     }
                 }
             }
@@ -648,8 +984,19 @@ pub(crate) fn spawn_runtime_loop_with_completions(
 
         // Loop exiting — resolve any pending completion waiters as terminated.
         if let Some(ref completions) = completions {
+            let result_class = runtime_terminated_completion_class(&driver).await;
             let mut reg = completions.lock().await;
-            reg.resolve_all_terminated("runtime loop exited");
+            match result_class {
+                Ok(result_class) => {
+                    reg.resolve_all_runtime_terminated("runtime loop exited", result_class);
+                }
+                Err(err) => {
+                    let reason = format!("runtime loop exited without completion authority: {err}");
+                    reg.fail_all_waiters(
+                        crate::completion::CompletionWaitError::AuthorityUnavailable(reason),
+                    );
+                }
+            }
         }
     })
 }
@@ -657,33 +1004,112 @@ pub(crate) fn spawn_runtime_loop_with_completions(
 /// Check for new background op completions and inject a continuation if needed.
 ///
 /// Called after queue processing completes (session has returned to idle).
-/// Returns `true` if a continuation was injected (caller should process_queue).
+/// Distinguishes ordinary no-op from stale-authority shutdown so cursor
+/// projection cannot advance after the runtime loop loses current ownership.
+fn advance_runtime_completion_cursor(
+    ops_lifecycle: Option<&dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
+    consumer: meerkat_core::ops_lifecycle::CompletionCursorConsumer,
+    cursor: meerkat_core::completion_feed::CompletionSeq,
+    epoch_cursor_state: Option<&meerkat_core::EpochCursorState>,
+) -> Result<meerkat_core::completion_feed::CompletionSeq, FeedWakeOutcome> {
+    let Some(registry) = ops_lifecycle else {
+        tracing::warn!(
+            ?consumer,
+            cursor,
+            has_epoch_projection = epoch_cursor_state.is_some(),
+            "runtime loop refused completion cursor advance without generated ops authority"
+        );
+        return Err(FeedWakeOutcome::StaleAuthority);
+    };
+    registry
+        .advance_completion_cursor(consumer, cursor, epoch_cursor_state)
+        .map_err(|err| {
+            tracing::warn!(
+                ?consumer,
+                cursor,
+                error = %err,
+                "generated ops authority rejected runtime completion cursor advance"
+            );
+            FeedWakeOutcome::StaleAuthority
+        })
+}
+
+fn batch_has_generated_wake_completion(
+    batch: &meerkat_core::completion_feed::CompletionBatch,
+    last_injected_seq: meerkat_core::completion_feed::CompletionSeq,
+    registry: &dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry,
+) -> Result<bool, FeedWakeOutcome> {
+    for entry in batch
+        .entries
+        .iter()
+        .filter(|entry| entry.seq > last_injected_seq)
+    {
+        match registry.classify_operation_completion_wake(&entry.operation_id, entry.kind) {
+            Ok(meerkat_core::ops_lifecycle::OperationCompletionWakeClass::Wake) => {
+                return Ok(true);
+            }
+            Ok(meerkat_core::ops_lifecycle::OperationCompletionWakeClass::Ignore) => {}
+            Err(err) => {
+                tracing::warn!(
+                    operation_id = %entry.operation_id,
+                    kind = ?entry.kind,
+                    error = %err,
+                    "generated completion-wake authority rejected runtime feed entry"
+                );
+                return Err(FeedWakeOutcome::StaleAuthority);
+            }
+        }
+    }
+    Ok(false)
+}
+
 async fn maybe_inject_feed_wake(
     driver: &crate::meerkat_machine::SharedDriver,
     feed: Option<&dyn meerkat_core::completion_feed::CompletionFeed>,
     observed_seq: &mut meerkat_core::completion_feed::CompletionSeq,
     last_injected_seq: &mut meerkat_core::completion_feed::CompletionSeq,
     epoch_cursor_state: Option<&meerkat_core::EpochCursorState>,
-) -> bool {
+    ops_lifecycle: Option<&dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
+    authority_binding: &RuntimeLoopAuthorityBinding,
+) -> FeedWakeOutcome {
     let Some(feed) = feed else {
-        return false;
+        return FeedWakeOutcome::Noop;
+    };
+    let Some(registry) = ops_lifecycle else {
+        tracing::warn!(
+            "runtime loop refused completion feed wake without generated ops cursor authority"
+        );
+        return FeedWakeOutcome::StaleAuthority;
     };
     let batch = feed.list_since(*observed_seq);
 
-    let has_new_bg_completion = batch.entries.iter().any(|e| {
-        e.kind == meerkat_core::ops_lifecycle::OperationKind::BackgroundToolOp
-            && e.seq > *last_injected_seq
-    });
+    let has_new_wake_completion =
+        match batch_has_generated_wake_completion(&batch, *last_injected_seq, registry) {
+            Ok(has_wake_completion) => has_wake_completion,
+            Err(outcome) => return outcome,
+        };
 
-    if !has_new_bg_completion {
-        // No new BG completions — advance to prevent hot-spin
-        // on non-BG entries (MobMemberChild, etc.).
-        *observed_seq = batch.watermark;
-        if let Some(cs) = epoch_cursor_state {
-            cs.runtime_observed_seq
-                .store(batch.watermark, std::sync::atomic::Ordering::Release);
-        }
-        return false;
+    let Ok(_authority_guard) = authority_binding
+        .lock_current_driver_authority(driver, "runtime loop feed wake")
+        .await
+    else {
+        return FeedWakeOutcome::StaleAuthority;
+    };
+
+    if !has_new_wake_completion {
+        // No generated wake-worthy completions: advance to prevent hot-spin
+        // on observe-only entries.
+        let advanced = match advance_runtime_completion_cursor(
+            Some(registry),
+            meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeObserved,
+            batch.watermark,
+            epoch_cursor_state,
+        ) {
+            Ok(cursor) => cursor,
+            Err(outcome) => return outcome,
+        };
+        *observed_seq = advanced;
+        return FeedWakeOutcome::Noop;
     }
 
     // Verify quiescence before injecting.
@@ -691,7 +1117,7 @@ async fn maybe_inject_feed_wake(
     if !d.is_quiescent_for_detached_wake() {
         // Non-quiescent: do NOT advance observed_seq. The completion
         // stays visible for the next wake so it's not permanently lost.
-        return false;
+        return FeedWakeOutcome::Noop;
     }
     drop(d);
 
@@ -700,19 +1126,29 @@ async fn maybe_inject_feed_wake(
     );
     let mut d = driver.lock().await;
     if d.as_driver_mut().accept_input(input).await.is_ok() {
-        *last_injected_seq = batch.watermark;
-        if let Some(cs) = epoch_cursor_state {
-            cs.runtime_last_injected_seq
-                .store(batch.watermark, std::sync::atomic::Ordering::Release);
-        }
+        let advanced = match advance_runtime_completion_cursor(
+            Some(registry),
+            meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeInjected,
+            batch.watermark,
+            epoch_cursor_state,
+        ) {
+            Ok(cursor) => cursor,
+            Err(outcome) => return outcome,
+        };
+        *last_injected_seq = advanced;
     }
     // Advance cursor after injection attempt (quiescent path).
-    *observed_seq = batch.watermark;
-    if let Some(cs) = epoch_cursor_state {
-        cs.runtime_observed_seq
-            .store(batch.watermark, std::sync::atomic::Ordering::Release);
-    }
-    true
+    let advanced = match advance_runtime_completion_cursor(
+        Some(registry),
+        meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeObserved,
+        batch.watermark,
+        epoch_cursor_state,
+    ) {
+        Ok(cursor) => cursor,
+        Err(outcome) => return outcome,
+    };
+    *observed_seq = advanced;
+    FeedWakeOutcome::Injected
 }
 
 /// Process all queued inputs until the queue is empty.
@@ -722,8 +1158,16 @@ async fn process_queue(
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
     effect_rx: &mut tokio::sync::mpsc::Receiver<crate::effect::RuntimeEffect>,
     completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
+    authority_binding: &RuntimeLoopAuthorityBinding,
 ) -> bool {
     loop {
+        let effect_authority_guard = match authority_binding
+            .lock_current_driver_authority(driver, "runtime loop executor effects")
+            .await
+        {
+            Ok(guard) => guard,
+            Err(_) => return true,
+        };
         match crate::control_plane::drain_ready_executor_effects(
             driver,
             completions,
@@ -742,22 +1186,42 @@ async fn process_queue(
                 return true;
             }
         }
+        drop(effect_authority_guard);
+
+        let queue_authority_guard = match authority_binding
+            .lock_current_driver_authority(driver, "runtime loop queue processing")
+            .await
+        {
+            Ok(guard) => guard,
+            Err(_) => return true,
+        };
 
         // Dequeue and prepare under the driver lock
         let dequeued = {
             let mut d = driver.lock().await;
 
-            // Immediate attached steer pre-binds the DSL run before waking the
-            // loop. Honor that Running/current_run_id pair as a queued batch
-            // that is already prepared by the checked-in machine.
-            let prebound_run_id = if d.runtime_state() == RuntimeState::Running {
-                d.current_run_id()
+            // Immediate attached steer can pre-bind the DSL run before waking
+            // the loop. The generated classifier owns whether that binding
+            // admits queue processing and whether the loop must reuse it.
+            let current_run_id = d.current_run_id();
+            let queue_plan = match d.runtime_loop_queue_admission(current_run_id.is_some()) {
+                Ok(queue_plan) => queue_plan,
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        "failed closed while classifying runtime queue admission"
+                    );
+                    return false;
+                }
+            };
+            if !queue_plan.can_process_queue() {
+                return false;
+            }
+            let prebound_run_id = if queue_plan.uses_prebound_run() {
+                current_run_id
             } else {
                 None
             };
-            if !d.can_process_queue() && prebound_run_id.is_none() {
-                return false;
-            }
 
             // Ask the ingress authority for the next batch of input IDs.
             // The authority implements steer-first priority and same-boundary
@@ -786,12 +1250,6 @@ async fn process_queue(
             // staging failure.
             let staged_ids: Vec<_> = staged_inputs.iter().map(|(id, _)| id.clone()).collect();
 
-            // The checked-in Meerkat machine now owns runtime-loop batch
-            // boundary classification over the stored ingress metadata.
-            let boundary = staged_inputs
-                .first()
-                .map(|(id, _)| crate::meerkat_machine::machine_input_boundary(&d, id))
-                .unwrap_or(RunApplyBoundary::RunStart);
             let contributing_input_ids = staged_inputs
                 .iter()
                 .map(|(staged_input_id, _)| staged_input_id.clone())
@@ -800,17 +1258,37 @@ async fn process_queue(
                 crate::meerkat_machine::machine_batch_runtime_semantics(&d, &staged_ids);
             let projections =
                 crate::meerkat_machine::machine_batch_primitive_projections(&d, &staged_inputs);
-            let primitive = match semantics {
-                Some(semantics) => try_projected_inputs_to_primitive_with_boundary(
-                    &staged_inputs,
-                    &projections,
-                    boundary,
-                    &semantics,
-                ),
-                None => Err(
+            let primitive = match (semantics, projections) {
+                (Some(semantics), Some(projections)) => {
+                    let boundary = semantics.first().map(|semantics| semantics.boundary).ok_or(
+                        meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict {
+                            field: "runtime_boundary",
+                            reason: "runtime-stamped boundary missing for staged inputs",
+                        },
+                    );
+                    match boundary {
+                        Ok(boundary) => try_projected_inputs_to_primitive_with_boundary(
+                            &staged_inputs,
+                            &projections,
+                            boundary,
+                            &semantics,
+                        ),
+                        Err(error) => Err(error),
+                    }
+                }
+                (None, _) => Err(
                     meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict {
                         field: "execution_kind",
                         reason: "runtime-stamped execution kind missing for one or more inputs",
+                    },
+                ),
+                // Fail closed alongside semantics: a missing primitive projection
+                // (co-recorded with runtime semantics) must reject the batch, not
+                // construct a run primitive from a defaulted projection.
+                (Some(_), None) => Err(
+                    meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict {
+                        field: "primitive_projection",
+                        reason: "runtime-stamped primitive projection missing for one or more inputs",
                     },
                 ),
             };
@@ -829,7 +1307,7 @@ async fn process_queue(
                     tracing::error!(%run_id, error = %err, "failed to prepare runtime loop batch");
                     if let Some(completions) = completions.as_ref() {
                         let mut completions = completions.lock().await;
-                        abandon_completion_waiters(
+                        fail_completion_waiters(
                             &mut completions,
                             &input_ids,
                             format!("runtime batch preparation failed: {err}"),
@@ -848,7 +1326,7 @@ async fn process_queue(
                         );
                         if let Err(err) = crate::meerkat_machine::fail_runtime_loop_run(
                             driver,
-                            run_id,
+                            run_id.clone(),
                             CoreApplyFailureCause::primitive_rejected(conflict.to_string()),
                         )
                         .await
@@ -863,7 +1341,7 @@ async fn process_queue(
                             .await;
                             if let Some(completions) = completions.as_ref() {
                                 let mut completions = completions.lock().await;
-                                abandon_completion_waiters(
+                                fail_completion_waiters(
                                     &mut completions,
                                     &input_ids,
                                     format!("runtime primitive rejection snapshot failed: {err}"),
@@ -871,14 +1349,14 @@ async fn process_queue(
                             }
                             return should_stop;
                         }
-                        if let Some(completions) = completions.as_ref() {
-                            let mut completions = completions.lock().await;
-                            abandon_completion_waiters(
-                                &mut completions,
-                                &input_ids,
-                                format!("runtime primitive rejected: {conflict}"),
-                            );
-                        }
+                        resolve_machine_terminal_completion_waiters(
+                            driver,
+                            completions,
+                            &input_ids,
+                            &run_id,
+                            format!("runtime primitive rejected: {conflict}"),
+                        )
+                        .await;
                         return false;
                     }
                 };
@@ -888,7 +1366,7 @@ async fn process_queue(
                     tracing::error!(%run_id, error = %error, "failed to start runtime turn state");
                     if let Err(err) = crate::meerkat_machine::fail_runtime_loop_run(
                         driver,
-                        run_id,
+                        run_id.clone(),
                         CoreApplyFailureCause::executor_internal(error.to_string()),
                     )
                     .await
@@ -903,7 +1381,7 @@ async fn process_queue(
                         .await;
                         if let Some(completions) = completions.as_ref() {
                             let mut completions = completions.lock().await;
-                            abandon_completion_waiters(
+                            fail_completion_waiters(
                                 &mut completions,
                                 &input_ids,
                                 format!("runtime turn-state preparation snapshot failed: {err}"),
@@ -911,16 +1389,17 @@ async fn process_queue(
                         }
                         return should_stop;
                     }
-                    if let Some(completions) = completions.as_ref() {
-                        let mut completions = completions.lock().await;
-                        abandon_completion_waiters(
-                            &mut completions,
-                            &input_ids,
-                            format!("runtime turn-state preparation failed: {error}"),
-                        );
-                    }
+                    resolve_machine_terminal_completion_waiters(
+                        driver,
+                        completions,
+                        &input_ids,
+                        &run_id,
+                        format!("runtime turn-state preparation failed: {error}"),
+                    )
+                    .await;
                     return false;
                 }
+                drop(queue_authority_guard);
 
                 // Execute outside the driver lock (this calls start_turn, which is slow)
                 let result = executor.apply(run_id.clone(), primitive).await;
@@ -929,12 +1408,29 @@ async fn process_queue(
                 let d = driver.lock().await;
                 match result {
                     Ok(output) => {
+                        drop(d);
+                        let terminal_authority_guard = match authority_binding
+                            .lock_current_driver_authority(driver, "runtime loop terminal commit")
+                            .await
+                        {
+                            Ok(guard) => guard,
+                            Err(_) => {
+                                if let Some(completions) = completions.as_ref() {
+                                    let mut completions = completions.lock().await;
+                                    fail_completion_waiters(
+                                        &mut completions,
+                                        &input_ids,
+                                        "runtime session unregistered before terminal commit",
+                                    );
+                                }
+                                return true;
+                            }
+                        };
                         let meerkat_core::lifecycle::core_executor::CoreApplyOutput {
                             receipt,
                             session_snapshot,
                             terminal,
                         } = output;
-                        drop(d);
                         let committed_session_snapshot = session_snapshot.clone();
                         if let Err(err) = crate::meerkat_machine::commit_runtime_loop_run(
                             driver,
@@ -950,15 +1446,16 @@ async fn process_queue(
                                 meerkat_core::TurnErrorMetadata::runtime_apply_failure(format!(
                                     "runtime loop commit failed: {err}"
                                 ));
-                            if let Some(completions) = completions.as_ref() {
-                                let mut completions = completions.lock().await;
-                                resolve_completion_waiters_with_finalization_failure(
-                                    &mut completions,
-                                    &input_ids,
-                                    terminal,
-                                    completion_error,
-                                );
-                            }
+                            resolve_runtime_completion_waiters(
+                                driver,
+                                completions,
+                                &input_ids,
+                                &run_id,
+                                terminal.as_ref(),
+                                crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Failed,
+                                Some(completion_error),
+                            )
+                            .await;
                             let should_stop = stop_runtime_loop_executor_from_dsl_effect(
                                 driver,
                                 completions,
@@ -983,15 +1480,16 @@ async fn process_queue(
                                 meerkat_core::TurnErrorMetadata::runtime_apply_failure(format!(
                                     "runtime session checkpoint failed after commit: {err}"
                                 ));
-                            if let Some(completions) = completions.as_ref() {
-                                let mut completions = completions.lock().await;
-                                resolve_completion_waiters_with_finalization_failure(
-                                    &mut completions,
-                                    &input_ids,
-                                    terminal,
-                                    completion_error,
-                                );
-                            }
+                            resolve_runtime_completion_waiters(
+                                driver,
+                                completions,
+                                &input_ids,
+                                &run_id,
+                                terminal.as_ref(),
+                                crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Failed,
+                                Some(completion_error),
+                            )
+                            .await;
                             let should_stop = stop_runtime_loop_executor_from_dsl_effect(
                                 driver,
                                 completions,
@@ -1005,50 +1503,64 @@ async fn process_queue(
                         }
 
                         // Resolve completion waiters unconditionally
-                        if let Some(completions) = completions.as_ref() {
-                            let mut reg = completions.lock().await;
-                            resolve_completion_waiters(&mut reg, &input_ids, terminal);
-                        }
+                        resolve_runtime_completion_waiters(
+                            driver,
+                            completions,
+                            &input_ids,
+                            &run_id,
+                            terminal.as_ref(),
+                            crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
+                            None,
+                        )
+                        .await;
+                        drop(terminal_authority_guard);
                     }
                     Err(e) => {
+                        drop(d);
+                        let terminal_authority_guard = match authority_binding
+                            .lock_current_driver_authority(driver, "runtime loop terminal failure")
+                            .await
+                        {
+                            Ok(guard) => guard,
+                            Err(_) => {
+                                if let Some(completions) = completions.as_ref() {
+                                    let mut completions = completions.lock().await;
+                                    fail_completion_waiters(
+                                        &mut completions,
+                                        &input_ids,
+                                        "runtime session unregistered before terminal failure",
+                                    );
+                                }
+                                return true;
+                            }
+                        };
                         let cancelled = e.is_cancelled();
                         let error_msg = e.to_string();
                         let terminal_failure = match &e {
                             CoreExecutorError::TerminalFailure {
-                                outcome,
-                                cause_kind,
                                 message,
                                 ..
                             } => Some(
-                                crate::meerkat_machine_types::MeerkatMachineRunFailure::terminal(
-                                    *outcome,
-                                    *cause_kind,
+                                crate::meerkat_machine_types::MeerkatMachineRunFailure::from_machine_terminal_failure(
                                     message.clone(),
                                 ),
                             ),
                             _ => None,
                         };
-                        let completion_error = match &e {
-                            CoreExecutorError::TerminalFailure {
-                                outcome,
-                                cause_kind,
-                                ..
-                            } => Some(meerkat_core::TurnErrorMetadata::terminal(
-                                *cause_kind,
-                                *outcome,
-                                format!("apply failed: {error_msg}"),
-                            )),
-                            _ => None,
-                        };
-                        drop(d);
                         let fail_result = if cancelled {
-                            crate::meerkat_machine::cancel_runtime_loop_run(driver, run_id).await
+                            crate::meerkat_machine::cancel_runtime_loop_run(driver, run_id.clone())
+                                .await
                         } else if let Some(failure) = terminal_failure {
-                            crate::meerkat_machine::fail_machine_run(driver, run_id, failure).await
+                            crate::meerkat_machine::fail_machine_run(
+                                driver,
+                                run_id.clone(),
+                                failure,
+                            )
+                            .await
                         } else {
                             crate::meerkat_machine::fail_runtime_loop_run(
                                 driver,
-                                run_id,
+                                run_id.clone(),
                                 e.apply_failure_cause(),
                             )
                             .await
@@ -1065,7 +1577,7 @@ async fn process_queue(
                             // Resolve waiter before breaking so callers don't hang.
                             if let Some(completions) = completions.as_ref() {
                                 let mut completions = completions.lock().await;
-                                abandon_completion_waiters(
+                                fail_completion_waiters(
                                     &mut completions,
                                     &input_ids,
                                     format!("runtime failure snapshot failed: {err}"),
@@ -1074,34 +1586,25 @@ async fn process_queue(
                             return should_stop;
                         }
                         // Resolve completion waiter so callers don't hang.
-                        if let Some(completions) = completions.as_ref() {
-                            let mut completions = completions.lock().await;
-                            if cancelled {
-                                for input_id in &input_ids {
-                                    completions.resolve_cancelled(input_id);
-                                }
-                            } else {
-                                let reason = format!("apply failed: {error_msg}");
-                                if let Some(error) = completion_error {
-                                    abandon_completion_waiters_with_error(
-                                        &mut completions,
-                                        &input_ids,
-                                        reason,
-                                        error,
-                                    );
-                                } else {
-                                    abandon_completion_waiters(
-                                        &mut completions,
-                                        &input_ids,
-                                        reason,
-                                    );
-                                }
-                            }
-                        }
+                        let reason = format!("apply failed: {error_msg}");
+                        resolve_machine_terminal_completion_waiters(
+                            driver,
+                            completions,
+                            &input_ids,
+                            &run_id,
+                            reason,
+                        )
+                        .await;
                         let mut d = driver.lock().await;
                         let should_continue = d.has_queued_input_outside(&input_ids);
                         if should_continue {
-                            d.defer_queued_inputs_behind_backlog(&input_ids);
+                            if let Err(err) = d.defer_queued_inputs_behind_backlog(&input_ids) {
+                                tracing::error!(
+                                    error = %err,
+                                    "failed to defer failed input batch behind backlog"
+                                );
+                                return false;
+                            }
                             d.take_wake_requested();
                         }
                         drop(d);
@@ -1110,6 +1613,7 @@ async fn process_queue(
                         }
                         // Leave the failing input queued for a future wake instead of
                         // hot-looping on the same payload indefinitely.
+                        drop(terminal_authority_guard);
                         return false;
                     }
                 }
@@ -1135,7 +1639,7 @@ mod tests {
     use std::time::Duration;
 
     use meerkat_core::ops_lifecycle::{
-        OperationKind, OperationResult, OperationSpec, OpsLifecycleRegistry,
+        OperationKind, OperationResult, OperationSource, OperationSpec, OpsLifecycleRegistry,
     };
     use meerkat_core::types::SessionId;
 
@@ -1150,8 +1654,23 @@ mod tests {
             owner_session_id: SessionId::new(),
             display_name: name.into(),
             source_label: "runtime-loop-test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
+        }
+    }
+
+    fn mob_child_spec(name: &str) -> OperationSpec {
+        let child_session_id = SessionId::new();
+        OperationSpec {
+            id: meerkat_core::ops_lifecycle::OperationId::new(),
+            kind: OperationKind::MobMemberChild,
+            owner_session_id: SessionId::new(),
+            display_name: name.into(),
+            source_label: "runtime-loop-test".into(),
+            operation_source: Some(OperationSource::session_child(child_session_id.clone())),
+            child_session_id: Some(child_session_id),
+            expect_peer_channel: true,
         }
     }
 
@@ -1227,7 +1746,15 @@ mod tests {
             .await
             .expect("test effect should enqueue");
 
-        let should_stop = process_queue(&driver, &mut executor, &mut effect_rx, None).await;
+        let authority_binding = RuntimeLoopAuthorityBinding::detached_for_test();
+        let should_stop = process_queue(
+            &driver,
+            &mut executor,
+            &mut effect_rx,
+            None,
+            &authority_binding,
+        )
+        .await;
 
         assert!(
             should_stop,
@@ -1257,6 +1784,7 @@ mod tests {
             Box::new(executor),
             wake_rx,
             effect_rx,
+            None,
             None,
             None,
             None,
@@ -1828,10 +2356,9 @@ mod tests {
         assert_eq!(policy.wake_mode, crate::WakeMode::WakeIfIdle);
         assert_eq!(policy.queue_mode, crate::QueueMode::Fifo);
 
-        let semantics = crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
-            &policy,
-            input.kind(),
-        );
+        let semantics =
+            crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(&input, true)
+                .expect("generated admission semantics");
         assert_eq!(semantics.boundary, RunApplyBoundary::RunStart);
         assert_eq!(
             semantics.execution_kind,
@@ -2512,17 +3039,23 @@ mod tests {
         let mut registry = crate::completion::CompletionRegistry::new();
         let input_id = InputId::new();
         let handle = registry.register(input_id.clone());
+        let terminal = Some(CoreApplyTerminal::CallbackPending {
+            tool_name: "external_mock".to_string(),
+            args: serde_json::json!({ "value": "browser" }),
+        });
 
-        resolve_completion_waiters(
+        resolve_completion_waiters_from_authority(
             &mut registry,
             std::slice::from_ref(&input_id),
-            Some(CoreApplyTerminal::CallbackPending {
-                tool_name: "external_mock".to_string(),
-                args: serde_json::json!({ "value": "browser" }),
-            }),
+            terminal.as_ref(),
+            crate::meerkat_machine::driver::test_runtime_completion_authority(
+                crate::meerkat_machine::dsl::RuntimeCompletionResultClass::CallbackPending,
+                crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::CallbackPending,
+            ),
+            None,
         );
 
-        match handle.wait().await {
+        match handle.wait_authorized().await {
             crate::completion::CompletionOutcome::CallbackPending { tool_name, args } => {
                 assert_eq!(tool_name, "external_mock");
                 assert_eq!(args, serde_json::json!({ "value": "browser" }));
@@ -2548,14 +3081,20 @@ mod tests {
             schema_warnings: None,
             skill_diagnostics: None,
         };
+        let terminal = Some(CoreApplyTerminal::RunResult(Box::new(run_result)));
 
-        resolve_completion_waiters(
+        resolve_completion_waiters_from_authority(
             &mut registry,
             std::slice::from_ref(&input_id),
-            Some(CoreApplyTerminal::RunResult(Box::new(run_result))),
+            terminal.as_ref(),
+            crate::meerkat_machine::driver::test_runtime_completion_authority(
+                crate::meerkat_machine::dsl::RuntimeCompletionResultClass::Completed,
+                crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::Completed,
+            ),
+            None,
         );
 
-        match handle.wait().await {
+        match handle.wait_authorized().await {
             crate::completion::CompletionOutcome::Completed(result) => {
                 assert_eq!(result.text, "terminal authority");
             }
@@ -2564,22 +3103,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abandon_completion_waiters_surfaces_abandoned() {
+    async fn fail_completion_waiters_surfaces_wait_error() {
         let mut registry = crate::completion::CompletionRegistry::new();
         let input_id = InputId::new();
         let handle = registry.register(input_id.clone());
 
-        abandon_completion_waiters(
+        fail_completion_waiters(
             &mut registry,
             std::slice::from_ref(&input_id),
             "runtime loop failed before executor apply",
         );
 
-        match handle.wait().await {
-            crate::completion::CompletionOutcome::Abandoned(reason) => {
+        match handle.try_wait().await {
+            Err(crate::completion::CompletionWaitError::AuthorityUnavailable(reason)) => {
                 assert_eq!(reason, "runtime loop failed before executor apply");
             }
-            other => panic!("Expected Abandoned, got {other:?}"),
+            other => panic!("Expected completion wait error, got {other:?}"),
         }
     }
 
@@ -2606,11 +3145,14 @@ mod tests {
             &mut observed_seq,
             &mut last_injected_seq,
             None,
+            Some(&registry),
+            &RuntimeLoopAuthorityBinding::detached_for_test(),
         )
         .await;
 
-        assert!(
+        assert_eq!(
             injected,
+            FeedWakeOutcome::Injected,
             "feed-backed path should inject inline when quiescent"
         );
         assert_eq!(observed_seq, feed.watermark());
@@ -2645,10 +3187,16 @@ mod tests {
             &mut observed_seq,
             &mut last_injected_seq,
             None,
+            None,
+            &RuntimeLoopAuthorityBinding::detached_for_test(),
         )
         .await;
 
-        assert!(!injected, "no feed means no injection");
+        assert_eq!(
+            injected,
+            FeedWakeOutcome::Noop,
+            "no feed means no injection"
+        );
         assert_eq!(observed_seq, 0);
         assert_eq!(last_injected_seq, 0);
 
@@ -2660,7 +3208,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn maybe_inject_feed_wake_no_bg_completions_advances_observed_seq() {
+    async fn maybe_inject_feed_wake_with_feed_without_ops_authority_fails_closed() {
+        let driver = make_shared_ephemeral_driver("feed-without-ops-authority");
+        let registry = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new();
+
+        let spec = background_spec("feed-without-ops-authority");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&op_id).unwrap();
+        registry
+            .complete_operation(&op_id, op_result(&op_id, "done"))
+            .unwrap();
+
+        let feed = registry.completion_feed_handle();
+        let mut observed_seq = 0;
+        let mut last_injected_seq = 0;
+
+        let injected = maybe_inject_feed_wake(
+            &driver,
+            Some(feed.as_ref()),
+            &mut observed_seq,
+            &mut last_injected_seq,
+            None,
+            None,
+            &RuntimeLoopAuthorityBinding::detached_for_test(),
+        )
+        .await;
+
+        assert_eq!(
+            injected,
+            FeedWakeOutcome::StaleAuthority,
+            "feed-backed wake must fail closed without generated cursor authority"
+        );
+        assert_eq!(observed_seq, 0);
+        assert_eq!(last_injected_seq, 0);
+
+        let guard = driver.lock().await;
+        assert!(
+            guard.as_driver().active_input_ids().is_empty(),
+            "missing cursor authority must not enqueue a detached continuation"
+        );
+    }
+
+    #[tokio::test]
+    async fn maybe_inject_feed_wake_empty_feed_advances_observed_seq() {
         let driver = make_shared_ephemeral_driver("advance-only");
         let registry = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new();
         let feed = registry.completion_feed_handle();
@@ -2673,15 +3264,97 @@ mod tests {
             &mut observed_seq,
             &mut last_injected_seq,
             None,
+            Some(&registry),
+            &RuntimeLoopAuthorityBinding::detached_for_test(),
         )
         .await;
 
-        assert!(!injected, "empty feed should not inject");
+        assert_eq!(
+            injected,
+            FeedWakeOutcome::Noop,
+            "empty feed should not inject"
+        );
         assert_eq!(observed_seq, feed.watermark());
         assert_eq!(last_injected_seq, 0);
 
         let guard = driver.lock().await;
         assert!(guard.as_driver().active_input_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn maybe_inject_feed_wake_generated_ignore_completion_advances_observed_seq() {
+        let driver = make_shared_ephemeral_driver("advance-generated-ignore");
+        let registry = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new();
+        let spec = mob_child_spec("advance-generated-ignore");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&op_id).unwrap();
+        registry
+            .complete_operation(&op_id, op_result(&op_id, "done"))
+            .unwrap();
+        let feed = registry.completion_feed_handle();
+        let mut observed_seq = 0;
+        let mut last_injected_seq = 0;
+
+        let injected = maybe_inject_feed_wake(
+            &driver,
+            Some(feed.as_ref()),
+            &mut observed_seq,
+            &mut last_injected_seq,
+            None,
+            Some(&registry),
+            &RuntimeLoopAuthorityBinding::detached_for_test(),
+        )
+        .await;
+
+        assert_eq!(
+            injected,
+            FeedWakeOutcome::Noop,
+            "generated observe-only completion should not inject"
+        );
+        assert_eq!(observed_seq, feed.watermark());
+        assert_eq!(last_injected_seq, 0);
+
+        let guard = driver.lock().await;
+        assert!(guard.as_driver().active_input_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn maybe_inject_feed_wake_stale_observe_only_completion_does_not_advance_cursor() {
+        let driver = make_shared_ephemeral_driver("advance-only-stale");
+        let registry = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new();
+        let spec = mob_child_spec("advance-only-stale");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&op_id).unwrap();
+        registry
+            .complete_operation(&op_id, op_result(&op_id, "done"))
+            .unwrap();
+        let feed = registry.completion_feed_handle();
+        let mut observed_seq = 0;
+        let mut last_injected_seq = 0;
+        let stale_binding = RuntimeLoopAuthorityBinding::new(
+            std::sync::Weak::<crate::meerkat_machine::MeerkatMachine>::new(),
+            SessionId::new(),
+        );
+
+        let injected = maybe_inject_feed_wake(
+            &driver,
+            Some(feed.as_ref()),
+            &mut observed_seq,
+            &mut last_injected_seq,
+            None,
+            Some(&registry),
+            &stale_binding,
+        )
+        .await;
+
+        assert_eq!(injected, FeedWakeOutcome::StaleAuthority);
+        assert_eq!(
+            observed_seq, 0,
+            "stale runtime loop must not advance observed cursor truth"
+        );
+        assert_eq!(last_injected_seq, 0);
     }
 
     // --- execution_kind stamping tests ---

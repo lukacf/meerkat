@@ -34,8 +34,15 @@ rubato = { version = "2.0.0", optional = true }
 [features]
 default = []
 webrtc = ["dep:bytes", "dep:webrtc", "dep:webrtc-media", "dep:opus", "dep:rubato"]
+__meerkat-generated-authority-bridge = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 tokio-tungstenite = "0.29"
 futures = { workspace = true }
+meerkat-machine-schema = { workspace = true }
+# webrtc DTLS uses rustls 0.23, which requires an explicit process-global
+# CryptoProvider when more than one provider feature is active in the build
+# graph (e.g. a full --workspace --all-features union). The webrtc tests install
+# the ring provider via ensure_test_crypto_provider(); only needed under tests.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }

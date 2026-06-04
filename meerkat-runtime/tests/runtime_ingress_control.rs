@@ -136,7 +136,8 @@ async fn runtime_ingress_control_red_ok_accepts_prompt_and_resolves_completion_h
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(ResultExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_prompt("phase 1 runtime ingress");
     let input_id = input.id().clone();
@@ -147,7 +148,10 @@ async fn runtime_ingress_control_red_ok_accepts_prompt_and_resolves_completion_h
     assert!(outcome.is_accepted(), "prompt should be admitted");
 
     let completion = handle.expect("accepted input should expose a wait handle");
-    let result = completion.wait().await;
+    let result = completion
+        .wait()
+        .await
+        .expect("completion waiter should resolve");
     assert!(
         matches!(result, CompletionOutcome::Completed(ref run) if run.text == "runtime ingress ok"),
         "runtime-backed ingress should resolve through the completion handle"
@@ -193,7 +197,8 @@ async fn runtime_ingress_control_red_ok_reset_preempts_queued_input_once() {
     let result = handle
         .expect("queued input should expose a handle")
         .wait()
-        .await;
+        .await
+        .expect("completion waiter should resolve");
     assert!(
         matches!(result, CompletionOutcome::RuntimeTerminated(_)),
         "queued ingress should resolve as terminated when control-plane reset wins"
@@ -232,6 +237,9 @@ async fn runtime_ingress_control_closed_taxonomy_uses_explicit_continuation_and_
     let mut attention_continuation =
         Input::Continuation(ContinuationInput::detached_background_op_completed());
     if let Input::Continuation(continuation) = &mut attention_continuation {
+        // The producer declares the typed continuation kind; admission routes
+        // the lane and runtime semantics from it, not from overlay strings.
+        continuation.continuation_kind = meerkat_runtime::ContinuationKind::WorkgraphAttention;
         continuation.turn_append = Some(ConversationAppend {
             role: ConversationAppendRole::SystemNotice,
             content: CoreRenderable::Text {
@@ -253,13 +261,14 @@ async fn runtime_ingress_control_closed_taxonomy_uses_explicit_continuation_and_
     assert_eq!(attention_policy.apply_mode, ApplyMode::StageRunStart);
     assert_eq!(attention_policy.drain_policy, DrainPolicy::QueueNextTurn);
     let attention_semantics =
-        meerkat_runtime::ingress_types::RuntimeInputSemantics::from_policy_and_input(
-            &attention_policy,
+        meerkat_runtime::ingress_types::RuntimeInputSemantics::try_from_generated_admission(
             &attention_continuation,
-        );
-    assert_eq!(attention_semantics.boundary, RunApplyBoundary::RunStart);
+            true,
+        )
+        .expect("generated admission should project attention continuation semantics");
+    assert_eq!(attention_semantics.boundary(), RunApplyBoundary::RunStart);
     assert_eq!(
-        attention_semantics.execution_kind,
+        attention_semantics.execution_kind(),
         RuntimeExecutionKind::ContentTurn
     );
 
@@ -297,7 +306,7 @@ async fn runtime_ingress_control_closed_taxonomy_uses_explicit_continuation_and_
             routing_disposition: RoutingDisposition::Drop,
             record_transcript: false,
             emit_operator_content: false,
-            policy_version: meerkat_runtime::DEFAULT_POLICY_VERSION,
+            policy_version: meerkat_runtime::generated_default_policy_version(),
         }
     );
 }
@@ -316,7 +325,8 @@ async fn runtime_ingress_control_batches_same_boundary_contributors_in_runtime_o
                 seen_contributors: Arc::clone(&seen),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let first = make_prompt("batched one");
     let first_id = first.id().clone();
@@ -332,8 +342,16 @@ async fn runtime_ingress_control_batches_same_boundary_contributors_in_runtime_o
         .await
         .expect("accept second input");
 
-    let first_result = first_handle.expect("first handle").wait().await;
-    let second_result = second_handle.expect("second handle").wait().await;
+    let first_result = first_handle
+        .expect("first handle")
+        .wait()
+        .await
+        .expect("first completion waiter should resolve");
+    let second_result = second_handle
+        .expect("second handle")
+        .wait()
+        .await
+        .expect("second completion waiter should resolve");
     assert!(matches!(first_result, CompletionOutcome::Completed(_)));
     assert!(matches!(second_result, CompletionOutcome::Completed(_)));
 

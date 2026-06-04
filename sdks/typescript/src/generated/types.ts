@@ -876,10 +876,17 @@ export interface GoalStatusResult {
 
 export interface ProjectedAttentionAuthority {
   can_add_evidence: boolean;
+  can_block: boolean;
   can_close_if_policy_allows: boolean;
   can_close_own_review_item?: boolean;
-  can_close_parent: boolean;
-  can_request_closure: boolean;
+  can_create: boolean;
+  can_get: boolean;
+  can_link: boolean;
+  can_link_derived_from: boolean;
+  can_link_parent: boolean;
+  can_link_related: boolean;
+  can_release: boolean;
+  can_update: boolean;
 }
 
 export interface WorkAttentionBinding {
@@ -926,6 +933,8 @@ export interface WorkItemRef {
 }
 
 export interface WorkEvidenceRef {
+  confirmation_kind?: unknown;
+  confirming_owner_key?: WorkOwnerKey;
   id: string;
   kind: string;
   label?: string;
@@ -1022,6 +1031,7 @@ export interface BridgePeerSpec {
 
 export interface BridgePeerWiringPayload {
   epoch: number;
+  mob_peer_overlay?: Record<string, unknown>;
   peer_spec: BridgePeerSpec;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
@@ -1072,11 +1082,9 @@ export interface PeerCapabilitySet {
 export interface PeerDirectoryEntry {
   address: PeerAddress;
   capabilities: PeerCapabilitySet;
-  last_unreachable_reason?: PeerReachabilityReason;
   meta: Record<string, unknown>;
   name: PeerName;
   peer_id: PeerId;
-  reachability: PeerReachability;
   sendable_kinds: PeerSendability[];
   source: PeerDirectorySource;
 }
@@ -1609,6 +1617,7 @@ export interface BridgeCommandDestroyMember {
 export interface BridgeCommandWireMember {
   command: "wire_member";
   epoch: number;
+  mob_peer_overlay?: unknown;
   peer_spec: BridgePeerSpec;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
@@ -1617,6 +1626,7 @@ export interface BridgeCommandWireMember {
 export interface BridgeCommandUnwireMember {
   command: "unwire_member";
   epoch: number;
+  mob_peer_overlay?: unknown;
   peer_spec: BridgePeerSpec;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
@@ -1845,10 +1855,6 @@ export type PeerDirectorySource = "trusted" | "inproc" | "trusted_and_inproc" | 
 
 export type PeerSendability = "peer_message" | "peer_request" | "peer_response";
 
-export type PeerReachability = "unknown" | "reachable" | "unreachable";
-
-export type PeerReachabilityReason = "offline_or_no_ack" | "transport_error" | "admission_dropped";
-
 export interface WireRenderMetadata {
   class: "user_prompt" | "peer_message" | "peer_request" | "peer_response" | "external_event" | "flow_step" | "continuation" | "system_notice" | "tool_scope_notice" | "ops_progress";
   salience?: "background" | "normal" | "important" | "urgent";
@@ -2030,6 +2036,13 @@ export type LiveRefreshStatus = "queued";
 export interface LiveRefreshResult {
   refresh_enqueued: boolean;
   status: "queued";
+}
+
+export type LiveCloseStatus = "closed";
+
+export interface LiveCloseResult {
+  closed: boolean;
+  status: "closed";
 }
 
 export interface LiveInputChunkWireAudio {

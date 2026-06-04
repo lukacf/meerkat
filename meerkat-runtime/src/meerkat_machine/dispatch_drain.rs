@@ -155,21 +155,29 @@ impl MeerkatMachine {
     ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
         match command {
             MeerkatMachineCommand::AbortAll => {
-                // Stage StopDrain for each session whose drain is Running.
-                let session_ids: Vec<meerkat_core::types::SessionId> = {
+                // Stage StopDrain for each session whose generated drain
+                // authority says Running. The shell slot is only task
+                // mechanics and does not decide lifecycle.
+                let session_states: Vec<(meerkat_core::types::SessionId, bool)> = {
                     let sessions = self.sessions.read().await;
                     sessions
                         .iter()
-                        .filter(|(_, entry)| {
-                            entry.drain_slot.phase
-                                == crate::meerkat_machine::CommsDrainPhase::Running
+                        .map(|(sid, entry)| {
+                            let authority = entry
+                                .dsl_authority
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            (
+                                sid.clone(),
+                                authority.state().drain_phase
+                                    == crate::meerkat_machine::dsl::DrainPhase::Running,
+                            )
                         })
-                        .map(|(sid, _)| sid.clone())
                         .collect()
                 };
                 let mut accepted_session_ids = Vec::new();
-                for sid in &session_ids {
-                    if self.stage_drain_stop_dsl(sid).await {
+                for (sid, running) in &session_states {
+                    if !running || self.stage_drain_stop_dsl(sid).await {
                         accepted_session_ids.push(sid.clone());
                     }
                 }
@@ -188,17 +196,13 @@ impl MeerkatMachine {
                         state: RuntimeState::Destroyed,
                     });
                 }
-                // Stage StopDrain if drain is Running.
-                let drain_is_running = {
-                    let sessions = self.sessions.read().await;
-                    sessions
-                        .get(&session_id)
-                        .map(|entry| {
-                            entry.drain_slot.phase
-                                == crate::meerkat_machine::CommsDrainPhase::Running
-                        })
-                        .unwrap_or(false)
-                };
+                // Stage StopDrain if generated drain authority says Running.
+                let drain_is_running =
+                    self.drain_authority_state(&session_id)
+                        .await
+                        .is_some_and(|state| {
+                            state.phase == crate::meerkat_machine::dsl::DrainPhase::Running
+                        });
                 if drain_is_running && !self.stage_drain_stop_dsl(&session_id).await {
                     return Ok(MeerkatMachineCommandResult::Unit);
                 }
@@ -219,76 +223,47 @@ impl MeerkatMachine {
                     let mut sessions = self.sessions.write().await;
                     sessions
                         .get_mut(&session_id)
-                        .and_then(|entry| entry.drain_slot.handle.take())
+                        .and_then(|entry| entry.drain_slot.take_handle())
                 };
                 if let Some(handle) = handle {
                     let _ = handle.await;
                 }
                 // Re-read post-await to safety-net a panicked task that
-                // never notified the authority. Record the stage-if-running
-                // decision under the same lock acquisition so authority
-                // and slot updates stay ordered: DSL input first, then
-                // mark the slot exited. Dropping and re-acquiring the
-                // write guard between DSL and slot mutation preserves the
-                // pre-collapse pattern where the sibling map was touched
-                // after the `sessions` lock was released.
-                let is_respawnable = {
-                    let sessions = self.sessions.read().await;
-                    sessions.get(&session_id).and_then(|entry| {
-                        (entry.drain_slot.phase == crate::meerkat_machine::CommsDrainPhase::Running)
-                            .then_some(
-                                entry.drain_slot.mode
-                                    == Some(crate::meerkat_machine::CommsDrainMode::PersistentHost),
-                            )
-                    })
-                };
-                if let Some(is_respawnable) = is_respawnable {
-                    let dsl_input = if is_respawnable {
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::DrainExitedRespawnable
-                    } else {
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::DrainExitedClean
-                    };
-                    let context = if is_respawnable {
-                        "DrainExitedRespawnable(safety)"
-                    } else {
-                        "DrainExitedClean(safety)"
-                    };
-                    let dsl_accepted = {
-                        let mut sessions = self.sessions.write().await;
-                        if let Some(entry) = sessions.get_mut(&session_id) {
-                            let mut authority = entry
-                                .dsl_authority
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            if let Err(err) =
-                                crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-                                    &mut *authority,
-                                    dsl_input,
-                                )
-                            {
-                                tracing::warn!(
-                                    error = %crate::meerkat_machine::dsl_authority::map_error(err, context),
-                                    "DSL rejected drain exit safety net"
-                                );
-                                false
-                            } else {
-                                true
-                            }
-                        } else {
-                            false
-                        }
-                    };
+                // never notified the authority. The generated
+                // `NotifyDrainExited { Failed }` transition owns the
+                // resulting clean-vs-respawnable state; the shell then only
+                // clears task-handle mechanics after acceptance.
+                let drain_is_running =
+                    self.drain_authority_state(&session_id)
+                        .await
+                        .is_some_and(|state| {
+                            state.phase == crate::meerkat_machine::dsl::DrainPhase::Running
+                        });
+                if drain_is_running {
+                    let dsl_accepted = self
+                        .stage_session_dsl_input(
+                            &session_id,
+                            crate::meerkat_machine::dsl::MeerkatMachineInput::NotifyDrainExited {
+                                reason: crate::meerkat_machine::dsl::DrainExitReason::Failed,
+                            },
+                            "NotifyDrainExited(safety)",
+                        )
+                        .await
+                        .map_err(|err| {
+                            tracing::warn!(
+                                error = %err,
+                                "DSL rejected drain exit safety net"
+                            );
+                            err
+                        })
+                        .is_ok();
                     tracing::warn!(
                         "comms_drain: task exited without notifying authority (likely panicked), \
                          submitting Failed safety net"
                     );
                     if dsl_accepted {
-                        let mut sessions = self.sessions.write().await;
-                        if let Some(entry) = sessions.get_mut(&session_id) {
-                            entry.drain_slot.mark_task_exit_if_running_for_safety(
-                                crate::meerkat_machine::DrainExitReason::Failed,
-                            );
-                        }
+                        self.project_comms_drain_failed_safety_net(&session_id)
+                            .await;
                     }
                 }
                 Ok(MeerkatMachineCommandResult::Unit)
@@ -302,21 +277,17 @@ impl MeerkatMachine {
     /// the transition; callers use that gate before applying shell-side abort
     /// projection.
     async fn stage_drain_stop_dsl(&self, session_id: &meerkat_core::types::SessionId) -> bool {
-        let mut sessions = self.sessions.write().await;
-        let Some(entry) = sessions.get_mut(session_id) else {
-            return false;
-        };
-        let mut authority = entry
-            .dsl_authority
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Err(err) = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-            &mut *authority,
-            crate::meerkat_machine::dsl::MeerkatMachineInput::StopDrain,
-        ) {
+        if let Err(err) = self
+            .stage_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::StopDrain,
+                "StopDrain",
+            )
+            .await
+        {
             tracing::warn!(
                 %session_id,
-                error = %crate::meerkat_machine::dsl_authority::map_error(err, "StopDrain"),
+                error = %err,
                 "DSL rejected StopDrain; skipping drain abort"
             );
             false

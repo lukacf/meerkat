@@ -6,7 +6,9 @@
 use super::realm_profile::{RealmProfileStore, StoredRealmProfile};
 use super::{
     ExternalBindingOverlayRecord, MobEventStore, MobRunStore, MobRuntimeMetadataStore,
-    MobSpecStore, MobStoreError, SupervisorAuthorityRecord, terminal_event_identity,
+    MobSpecStore, MobStoreError, SupervisorAuthorityDeletionAuthority,
+    SupervisorAuthorityPersistenceAuthority, SupervisorAuthorityRecord, private,
+    terminal_event_identity, validate_mob_event_write_authority,
 };
 use crate::definition::MobDefinition;
 use crate::error::MobError;
@@ -19,7 +21,7 @@ use crate::profile::Profile;
 use crate::run::flow_run;
 use crate::run::{
     FailureLedgerEntry, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun,
-    MobRunStatus, StepLedgerEntry,
+    MobRunProvenanceAuthority, MobRunStatus, StepLedgerEntry, mob_machine_run_status_is_terminal,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -542,7 +544,9 @@ impl MobRuntimeMetadataStore for SqliteMobRuntimeMetadataStore {
         &self,
         mob_id: &MobId,
         record: &SupervisorAuthorityRecord,
+        authority: &SupervisorAuthorityPersistenceAuthority,
     ) -> Result<(), MobStoreError> {
+        authority.verify_record(record)?;
         let path = self.path.clone();
         let mob_id = mob_id.clone();
         let record = record.clone();
@@ -566,7 +570,9 @@ impl MobRuntimeMetadataStore for SqliteMobRuntimeMetadataStore {
         mob_id: &MobId,
         expected: &SupervisorAuthorityRecord,
         record: &SupervisorAuthorityRecord,
+        authority: &SupervisorAuthorityPersistenceAuthority,
     ) -> Result<bool, MobStoreError> {
+        authority.verify_record(record)?;
         let path = self.path.clone();
         let mob_id = mob_id.clone();
         let expected = expected.clone();
@@ -596,7 +602,9 @@ impl MobRuntimeMetadataStore for SqliteMobRuntimeMetadataStore {
         &self,
         mob_id: &MobId,
         record: &SupervisorAuthorityRecord,
+        authority: &SupervisorAuthorityPersistenceAuthority,
     ) -> Result<bool, MobStoreError> {
+        authority.verify_record(record)?;
         let path = self.path.clone();
         let mob_id = mob_id.clone();
         let record = record.clone();
@@ -615,19 +623,27 @@ impl MobRuntimeMetadataStore for SqliteMobRuntimeMetadataStore {
         .await
     }
 
-    async fn delete_supervisor_authority(&self, mob_id: &MobId) -> Result<(), MobStoreError> {
+    async fn delete_supervisor_authority(
+        &self,
+        mob_id: &MobId,
+        expected: &SupervisorAuthorityRecord,
+        authority: &SupervisorAuthorityDeletionAuthority,
+    ) -> Result<bool, MobStoreError> {
+        authority.verify_record(expected)?;
         let path = self.path.clone();
         let mob_id = mob_id.clone();
+        let expected = expected.clone();
         run_sqlite_task(move || {
             let mut conn = open_connection(&path)?;
             let tx = begin_immediate(&mut conn)?;
-            tx.execute(
-                "DELETE FROM mob_runtime_supervisors WHERE mob_id = ?1",
-                params![mob_id.as_str()],
-            )
-            .map_err(se)?;
+            let changed = tx
+                .execute(
+                    "DELETE FROM mob_runtime_supervisors WHERE mob_id = ?1 AND record_json = ?2",
+                    params![mob_id.as_str(), encode_json(&expected)?],
+                )
+                .map_err(se)?;
             tx.commit().map_err(se)?;
-            Ok(())
+            Ok(changed > 0)
         })
         .await
     }
@@ -803,9 +819,13 @@ impl std::fmt::Debug for SqliteMobEventStore {
 
 const EVENT_CURSOR_KEY: &str = "next_cursor";
 
+impl private::MobEventStoreSealed for SqliteMobEventStore {}
+
 #[async_trait]
 impl MobEventStore for SqliteMobEventStore {
     async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobStoreError> {
+        validate_mob_event_write_authority(&event.kind)?;
+
         let path = self.path.clone();
         let stored = run_sqlite_task(move || {
             let mut conn = open_connection(&path)?;
@@ -898,6 +918,10 @@ impl MobEventStore for SqliteMobEventStore {
     }
 
     async fn append_batch(&self, batch: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobStoreError> {
+        for event in &batch {
+            validate_mob_event_write_authority(&event.kind)?;
+        }
+
         let path = self.path.clone();
         let stored = run_sqlite_task(move || {
             let mut conn = open_connection(&path)?;
@@ -1102,6 +1126,8 @@ impl SqliteMobRunStore {
             }
             run.append_flow_authority_inputs(authority_inputs)
                 .map_err(|error| MobStoreError::Internal(error.to_string()))?;
+            run.validate_flow_authority_projection()
+                .map_err(|error| MobStoreError::Internal(error.to_string()))?;
             write_run_json(&tx, &key, &run)?;
             tx.commit().map_err(se)?;
             Ok(true)
@@ -1134,6 +1160,8 @@ impl MobRunStore for SqliteMobRunStore {
                     run.run_id
                 )));
             }
+            run.validate_flow_authority_projection()
+                .map_err(|error| MobStoreError::Internal(error.to_string()))?;
 
             let encoded = encode_json(&run)?;
             tx.execute(
@@ -1195,90 +1223,6 @@ impl MobRunStore for SqliteMobRunStore {
         .await
     }
 
-    async fn cas_run_status(
-        &self,
-        run_id: &RunId,
-        expected: MobRunStatus,
-        next: MobRunStatus,
-    ) -> Result<bool, MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes: Option<Vec<u8>> = tx
-                .query_row(
-                    "SELECT run_json FROM mob_runs WHERE run_id = ?1",
-                    params![key],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(se)?;
-            let Some(bytes) = bytes else {
-                return Ok(false);
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            if run.status != expected || run.status.is_terminal() {
-                return Ok(false);
-            }
-            let terminal = next.is_terminal();
-            run.status = next;
-            if terminal && run.completed_at.is_none() {
-                run.completed_at = Some(Utc::now());
-            }
-            let encoded = encode_json(&run)?;
-            tx.execute(
-                "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
-                params![encoded, key],
-            )
-            .map_err(se)?;
-            tx.commit().map_err(se)?;
-            Ok(true)
-        })
-        .await
-    }
-
-    async fn cas_flow_state(
-        &self,
-        run_id: &RunId,
-        expected: &flow_run::State,
-        next: &flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let expected = expected.clone();
-        let next = next.clone();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes: Option<Vec<u8>> = tx
-                .query_row(
-                    "SELECT run_json FROM mob_runs WHERE run_id = ?1",
-                    params![key],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(se)?;
-            let Some(bytes) = bytes else {
-                return Ok(false);
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            if run.flow_state != expected {
-                return Ok(false);
-            }
-            run.flow_state = next;
-            let encoded = encode_json(&run)?;
-            tx.execute(
-                "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
-                params![encoded, key],
-            )
-            .map_err(se)?;
-            tx.commit().map_err(se)?;
-            Ok(true)
-        })
-        .await
-    }
-
     async fn cas_flow_state_with_authority(
         &self,
         run_id: &RunId,
@@ -1303,57 +1247,6 @@ impl MobRunStore for SqliteMobRunStore {
         .await
     }
 
-    async fn cas_run_snapshot(
-        &self,
-        run_id: &RunId,
-        expected_status: MobRunStatus,
-        expected_flow_state: &flow_run::State,
-        next_status: MobRunStatus,
-        next_flow_state: &flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let expected_flow_state = expected_flow_state.clone();
-        let next_flow_state = next_flow_state.clone();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes: Option<Vec<u8>> = tx
-                .query_row(
-                    "SELECT run_json FROM mob_runs WHERE run_id = ?1",
-                    params![key],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(se)?;
-            let Some(bytes) = bytes else {
-                return Ok(false);
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            if run.status != expected_status
-                || run.status.is_terminal()
-                || run.flow_state != expected_flow_state
-            {
-                return Ok(false);
-            }
-            let terminal = next_status.is_terminal();
-            run.status = next_status;
-            run.flow_state = next_flow_state;
-            if terminal && run.completed_at.is_none() {
-                run.completed_at = Some(Utc::now());
-            }
-            let encoded = encode_json(&run)?;
-            tx.execute(
-                "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
-                params![encoded, key],
-            )
-            .map_err(se)?;
-            tx.commit().map_err(se)?;
-            Ok(true)
-        })
-        .await
-    }
-
     async fn cas_run_snapshot_with_authority(
         &self,
         run_id: &RunId,
@@ -1365,18 +1258,24 @@ impl MobRunStore for SqliteMobRunStore {
     ) -> Result<bool, MobStoreError> {
         let expected_flow_state = expected_flow_state.clone();
         let next_flow_state = next_flow_state.clone();
+        let terminality_run_id = run_id.clone();
         self.update_run_with_authority_if(
             run_id,
             MissingRunCasBehavior::ReturnFalse,
             authority_inputs,
             move |run| {
+                let current_terminal =
+                    mob_machine_run_status_is_terminal(&terminality_run_id, &run.status)
+                        .map_err(|error| MobStoreError::Internal(error.to_string()))?;
                 if run.status != expected_status
-                    || run.status.is_terminal()
+                    || current_terminal
                     || run.flow_state != expected_flow_state
                 {
                     return Ok(false);
                 }
-                let terminal = next_status.is_terminal();
+                let terminal =
+                    mob_machine_run_status_is_terminal(&terminality_run_id, &next_status)
+                        .map_err(|error| MobStoreError::Internal(error.to_string()))?;
                 run.status = next_status;
                 run.flow_state = next_flow_state;
                 if terminal && run.completed_at.is_none() {
@@ -1388,10 +1287,11 @@ impl MobRunStore for SqliteMobRunStore {
         .await
     }
 
-    async fn append_step_entry(
+    async fn append_step_entry_with_authority(
         &self,
         run_id: &RunId,
         entry: StepLedgerEntry,
+        authority: MobRunProvenanceAuthority,
     ) -> Result<(), MobStoreError> {
         let path = self.path.clone();
         let key = run_id.to_string();
@@ -1411,7 +1311,12 @@ impl MobRunStore for SqliteMobRunStore {
                 return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
             let mut run: MobRun = decode_json(&bytes)?;
+            authority
+                .validate_step_entry(&run, &entry)
+                .map_err(|error| MobStoreError::Internal(error.to_string()))?;
             run.step_ledger.push(entry);
+            run.validate_flow_authority_projection()
+                .map_err(|error| MobStoreError::Internal(error.to_string()))?;
             let encoded = encode_json(&run)?;
             tx.execute(
                 "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
@@ -1424,10 +1329,11 @@ impl MobRunStore for SqliteMobRunStore {
         .await
     }
 
-    async fn append_step_entry_if_absent(
+    async fn append_step_entry_if_absent_with_authority(
         &self,
         run_id: &RunId,
         entry: StepLedgerEntry,
+        authority: MobRunProvenanceAuthority,
     ) -> Result<bool, MobStoreError> {
         let path = self.path.clone();
         let key = run_id.to_string();
@@ -1447,6 +1353,9 @@ impl MobRunStore for SqliteMobRunStore {
                 return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
             let mut run: MobRun = decode_json(&bytes)?;
+            authority
+                .validate_step_entry(&run, &entry)
+                .map_err(|error| MobStoreError::Internal(error.to_string()))?;
             let is_duplicate = run.step_ledger.iter().any(|existing| {
                 existing.step_id == entry.step_id
                     && existing.agent_identity == entry.agent_identity
@@ -1456,6 +1365,8 @@ impl MobRunStore for SqliteMobRunStore {
                 return Ok(false);
             }
             run.step_ledger.push(entry);
+            run.validate_flow_authority_projection()
+                .map_err(|error| MobStoreError::Internal(error.to_string()))?;
             let encoded = encode_json(&run)?;
             tx.execute(
                 "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
@@ -1468,59 +1379,11 @@ impl MobRunStore for SqliteMobRunStore {
         .await
     }
 
-    async fn put_step_output(
-        &self,
-        run_id: &RunId,
-        step_id: &StepId,
-        output: serde_json::Value,
-    ) -> Result<(), MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let run_id = run_id.clone();
-        let step_id = step_id.clone();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes: Option<Vec<u8>> = tx
-                .query_row(
-                    "SELECT run_json FROM mob_runs WHERE run_id = ?1",
-                    params![key],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(se)?;
-            let Some(bytes) = bytes else {
-                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            if let Some(entry) = run
-                .step_ledger
-                .iter_mut()
-                .rev()
-                .find(|entry| entry.step_id == step_id)
-            {
-                entry.output = Some(output);
-            } else {
-                return Err(MobStoreError::Internal(format!(
-                    "cannot set output for unknown step '{step_id}' in run '{run_id}'"
-                )));
-            }
-            let encoded = encode_json(&run)?;
-            tx.execute(
-                "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
-                params![encoded, key],
-            )
-            .map_err(se)?;
-            tx.commit().map_err(se)?;
-            Ok(())
-        })
-        .await
-    }
-
-    async fn append_failure_entry(
+    async fn append_failure_entry_with_authority(
         &self,
         run_id: &RunId,
         entry: FailureLedgerEntry,
+        authority: MobRunProvenanceAuthority,
     ) -> Result<(), MobStoreError> {
         let path = self.path.clone();
         let key = run_id.to_string();
@@ -1540,7 +1403,12 @@ impl MobRunStore for SqliteMobRunStore {
                 return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
             let mut run: MobRun = decode_json(&bytes)?;
+            authority
+                .validate_failure_entry(&run, &entry)
+                .map_err(|error| MobStoreError::Internal(error.to_string()))?;
             run.failure_ledger.push(entry);
+            run.validate_flow_authority_projection()
+                .map_err(|error| MobStoreError::Internal(error.to_string()))?;
             let encoded = encode_json(&run)?;
             tx.execute(
                 "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
@@ -1549,73 +1417,6 @@ impl MobRunStore for SqliteMobRunStore {
             .map_err(se)?;
             tx.commit().map_err(se)?;
             Ok(())
-        })
-        .await
-    }
-
-    async fn upsert_loop_snapshot(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &LoopInstanceId,
-        snapshot: LoopSnapshot,
-        ledger_entry: Option<LoopIterationLedgerEntry>,
-    ) -> Result<(), MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let run_id = run_id.clone();
-        let loop_instance_id = loop_instance_id.clone();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes = load_run_bytes(&tx, &key)?;
-            let Some(bytes) = bytes else {
-                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            run.loops.insert(loop_instance_id, snapshot);
-            if let Some(entry) = ledger_entry {
-                append_loop_iteration_ledger_if_absent(&mut run, entry);
-            }
-            write_run_json(&tx, &key, &run)?;
-            tx.commit().map_err(se)?;
-            Ok(())
-        })
-        .await
-    }
-
-    async fn cas_frame_state(
-        &self,
-        run_id: &RunId,
-        frame_id: &FrameId,
-        expected: Option<&FrameSnapshot>,
-        next: FrameSnapshot,
-    ) -> Result<bool, MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let run_id = run_id.clone();
-        let frame_id = frame_id.clone();
-        let expected = expected.cloned();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes = load_run_bytes(&tx, &key)?;
-            let Some(bytes) = bytes else {
-                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            let current = run.frames.get(&frame_id);
-            let matches = match (expected.as_ref(), current) {
-                (None, None) => true,
-                (Some(exp), Some(cur)) => exp == cur,
-                _ => false,
-            };
-            if !matches {
-                return Ok(false);
-            }
-            run.frames.insert(frame_id, next);
-            write_run_json(&tx, &key, &run)?;
-            tx.commit().map_err(se)?;
-            Ok(true)
         })
         .await
     }
@@ -1651,44 +1452,6 @@ impl MobRunStore for SqliteMobRunStore {
         .await
     }
 
-    async fn cas_grant_node_slot(
-        &self,
-        run_id: &RunId,
-        expected_run_state: &flow_run::State,
-        next_run_state: flow_run::State,
-        frame_id: &FrameId,
-        expected_frame: &FrameSnapshot,
-        next_frame: FrameSnapshot,
-    ) -> Result<bool, MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let run_id = run_id.clone();
-        let expected_run_state = expected_run_state.clone();
-        let frame_id = frame_id.clone();
-        let expected_frame = expected_frame.clone();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes = load_run_bytes(&tx, &key)?;
-            let Some(bytes) = bytes else {
-                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            if run.flow_state != expected_run_state {
-                return Ok(false);
-            }
-            if run.frames.get(&frame_id) != Some(&expected_frame) {
-                return Ok(false);
-            }
-            run.flow_state = next_run_state;
-            run.frames.insert(frame_id, next_frame);
-            write_run_json(&tx, &key, &run)?;
-            tx.commit().map_err(se)?;
-            Ok(true)
-        })
-        .await
-    }
-
     #[allow(clippy::too_many_arguments)]
     async fn cas_grant_node_slot_with_authority(
         &self,
@@ -1719,61 +1482,6 @@ impl MobRunStore for SqliteMobRunStore {
                 Ok(true)
             },
         )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn cas_complete_step_and_record_output(
-        &self,
-        run_id: &RunId,
-        frame_id: &FrameId,
-        expected_frame: &FrameSnapshot,
-        next_frame: FrameSnapshot,
-        step_output_key: String,
-        step_output: serde_json::Value,
-        loop_context: Option<(&LoopId, u64)>,
-    ) -> Result<bool, MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let run_id = run_id.clone();
-        let frame_id = frame_id.clone();
-        let expected_frame = expected_frame.clone();
-        let loop_context = loop_context.map(|(loop_id, iteration)| (loop_id.clone(), iteration));
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes = load_run_bytes(&tx, &key)?;
-            let Some(bytes) = bytes else {
-                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            if run.frames.get(&frame_id) != Some(&expected_frame) {
-                return Ok(false);
-            }
-            run.frames.insert(frame_id, next_frame);
-            match loop_context {
-                None => {
-                    run.root_step_outputs
-                        .insert(StepId::from(step_output_key.as_str()), step_output);
-                }
-                Some((loop_id, iteration)) => {
-                    let iteration_index = usize::try_from(iteration).map_err(|_| {
-                        MobStoreError::Internal(format!(
-                            "loop iteration index {iteration} exceeds usize::MAX on this target"
-                        ))
-                    })?;
-                    let outputs = run.loop_iteration_outputs.entry(loop_id).or_default();
-                    while outputs.len() <= iteration_index {
-                        outputs.push(indexmap::IndexMap::new());
-                    }
-                    outputs[iteration_index]
-                        .insert(StepId::from(step_output_key.as_str()), step_output);
-                }
-            }
-            write_run_json(&tx, &key, &run)?;
-            tx.commit().map_err(se)?;
-            Ok(true)
-        })
         .await
     }
 
@@ -1827,52 +1535,6 @@ impl MobRunStore for SqliteMobRunStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn cas_start_loop(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &LoopInstanceId,
-        expected_run_state: &flow_run::State,
-        next_run_state: flow_run::State,
-        frame_id: &FrameId,
-        expected_frame: &FrameSnapshot,
-        next_frame: FrameSnapshot,
-        initial_loop: LoopSnapshot,
-    ) -> Result<bool, MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let run_id = run_id.clone();
-        let loop_instance_id = loop_instance_id.clone();
-        let expected_run_state = expected_run_state.clone();
-        let frame_id = frame_id.clone();
-        let expected_frame = expected_frame.clone();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes = load_run_bytes(&tx, &key)?;
-            let Some(bytes) = bytes else {
-                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            if run.flow_state != expected_run_state {
-                return Ok(false);
-            }
-            if run.frames.get(&frame_id) != Some(&expected_frame) {
-                return Ok(false);
-            }
-            if run.loops.contains_key(&loop_instance_id) {
-                return Ok(false);
-            }
-            run.flow_state = next_run_state;
-            run.frames.insert(frame_id, next_frame);
-            run.loops.insert(loop_instance_id, initial_loop);
-            write_run_json(&tx, &key, &run)?;
-            tx.commit().map_err(se)?;
-            Ok(true)
-        })
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
     async fn cas_start_loop_with_authority(
         &self,
         run_id: &RunId,
@@ -1912,44 +1574,6 @@ impl MobRunStore for SqliteMobRunStore {
         .await
     }
 
-    async fn cas_loop_request_body_frame(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &LoopInstanceId,
-        expected_loop: &LoopSnapshot,
-        next_loop: LoopSnapshot,
-        expected_run_state: &flow_run::State,
-        next_run_state: flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let run_id = run_id.clone();
-        let loop_instance_id = loop_instance_id.clone();
-        let expected_loop = expected_loop.clone();
-        let expected_run_state = expected_run_state.clone();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes = load_run_bytes(&tx, &key)?;
-            let Some(bytes) = bytes else {
-                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            if run.flow_state != expected_run_state {
-                return Ok(false);
-            }
-            if run.loops.get(&loop_instance_id) != Some(&expected_loop) {
-                return Ok(false);
-            }
-            run.flow_state = next_run_state;
-            run.loops.insert(loop_instance_id, next_loop);
-            write_run_json(&tx, &key, &run)?;
-            tx.commit().map_err(se)?;
-            Ok(true)
-        })
-        .await
-    }
-
     #[allow(clippy::too_many_arguments)]
     async fn cas_loop_request_body_frame_with_authority(
         &self,
@@ -1980,54 +1604,6 @@ impl MobRunStore for SqliteMobRunStore {
                 Ok(true)
             },
         )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn cas_grant_body_frame_start(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &LoopInstanceId,
-        expected_loop: &LoopSnapshot,
-        next_loop: LoopSnapshot,
-        frame_id: &FrameId,
-        initial_frame: FrameSnapshot,
-        ledger_entry: LoopIterationLedgerEntry,
-        expected_run_state: &flow_run::State,
-        next_run_state: flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let run_id = run_id.clone();
-        let loop_instance_id = loop_instance_id.clone();
-        let expected_loop = expected_loop.clone();
-        let frame_id = frame_id.clone();
-        let expected_run_state = expected_run_state.clone();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes = load_run_bytes(&tx, &key)?;
-            let Some(bytes) = bytes else {
-                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            if run.flow_state != expected_run_state {
-                return Ok(false);
-            }
-            if run.loops.get(&loop_instance_id) != Some(&expected_loop) {
-                return Ok(false);
-            }
-            if run.frames.contains_key(&frame_id) {
-                return Ok(false);
-            }
-            run.flow_state = next_run_state;
-            run.loops.insert(loop_instance_id, next_loop);
-            run.frames.insert(frame_id, initial_frame);
-            append_loop_iteration_ledger_if_absent(&mut run, ledger_entry);
-            write_run_json(&tx, &key, &run)?;
-            tx.commit().map_err(se)?;
-            Ok(true)
-        })
         .await
     }
 
@@ -2074,54 +1650,6 @@ impl MobRunStore for SqliteMobRunStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn cas_complete_body_frame(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &LoopInstanceId,
-        expected_loop: &LoopSnapshot,
-        next_loop: LoopSnapshot,
-        frame_id: &FrameId,
-        expected_frame: &FrameSnapshot,
-        next_frame: FrameSnapshot,
-        expected_run_state: &flow_run::State,
-        next_run_state: flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let run_id = run_id.clone();
-        let loop_instance_id = loop_instance_id.clone();
-        let expected_loop = expected_loop.clone();
-        let frame_id = frame_id.clone();
-        let expected_frame = expected_frame.clone();
-        let expected_run_state = expected_run_state.clone();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes = load_run_bytes(&tx, &key)?;
-            let Some(bytes) = bytes else {
-                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            if run.flow_state != expected_run_state {
-                return Ok(false);
-            }
-            if run.loops.get(&loop_instance_id) != Some(&expected_loop) {
-                return Ok(false);
-            }
-            if run.frames.get(&frame_id) != Some(&expected_frame) {
-                return Ok(false);
-            }
-            run.flow_state = next_run_state;
-            run.loops.insert(loop_instance_id, next_loop);
-            run.frames.insert(frame_id, next_frame);
-            write_run_json(&tx, &key, &run)?;
-            tx.commit().map_err(se)?;
-            Ok(true)
-        })
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
     async fn cas_complete_body_frame_with_authority(
         &self,
         run_id: &RunId,
@@ -2160,54 +1688,6 @@ impl MobRunStore for SqliteMobRunStore {
                 Ok(true)
             },
         )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn cas_complete_loop(
-        &self,
-        run_id: &RunId,
-        loop_instance_id: &LoopInstanceId,
-        expected_loop: &LoopSnapshot,
-        next_loop: LoopSnapshot,
-        frame_id: &FrameId,
-        expected_frame: &FrameSnapshot,
-        next_frame: FrameSnapshot,
-        expected_run_state: &flow_run::State,
-        next_run_state: flow_run::State,
-    ) -> Result<bool, MobStoreError> {
-        let path = self.path.clone();
-        let key = run_id.to_string();
-        let run_id = run_id.clone();
-        let loop_instance_id = loop_instance_id.clone();
-        let expected_loop = expected_loop.clone();
-        let frame_id = frame_id.clone();
-        let expected_frame = expected_frame.clone();
-        let expected_run_state = expected_run_state.clone();
-        run_sqlite_task(move || {
-            let mut conn = open_connection(&path)?;
-            let tx = begin_immediate(&mut conn)?;
-            let bytes = load_run_bytes(&tx, &key)?;
-            let Some(bytes) = bytes else {
-                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
-            };
-            let mut run: MobRun = decode_json(&bytes)?;
-            if run.flow_state != expected_run_state {
-                return Ok(false);
-            }
-            if run.loops.get(&loop_instance_id) != Some(&expected_loop) {
-                return Ok(false);
-            }
-            if run.frames.get(&frame_id) != Some(&expected_frame) {
-                return Ok(false);
-            }
-            run.flow_state = next_run_state;
-            run.loops.insert(loop_instance_id, next_loop);
-            run.frames.insert(frame_id, next_frame);
-            write_run_json(&tx, &key, &run)?;
-            tx.commit().map_err(se)?;
-            Ok(true)
-        })
         .await
     }
 
@@ -2756,56 +2236,33 @@ mod tests {
                 provider_params: None,
             }),
         );
-        MobDefinition {
-            id: MobId::from("mob"),
-            orchestrator: None,
-            profiles,
-            wiring: WiringRules::default(),
-            skills: std::collections::BTreeMap::new(),
-            backend: BackendConfig::default(),
-            flows: {
-                let mut flows = std::collections::BTreeMap::new();
-                flows.insert(
-                    FlowId::from("flow-a"),
-                    FlowSpec {
-                        description: None,
-                        steps: IndexMap::new(),
-                        root: None,
-                    },
-                );
-                flows
-            },
-            topology: None,
-            supervisor: None,
-            limits: None,
-            spawn_policy: None,
-            event_router: None,
-            owner_bridge_session_id: None,
-            session_cleanup_policy: crate::definition::SessionCleanupPolicy::Manual,
-            is_implicit: false,
-        }
+        let mut definition = MobDefinition::explicit("mob");
+        definition.profiles = profiles;
+        definition.flows = {
+            let mut flows = std::collections::BTreeMap::new();
+            flows.insert(
+                FlowId::from("flow-a"),
+                FlowSpec {
+                    description: None,
+                    steps: IndexMap::new(),
+                    root: None,
+                },
+            );
+            flows
+        };
+        definition
     }
 
     fn sample_run(status: MobRunStatus) -> MobRun {
-        MobRun {
-            run_id: RunId::new(),
-            mob_id: MobId::from("mob"),
-            flow_id: FlowId::from("flow-a"),
+        MobRun::authority_backed_for_steps(
+            RunId::new(),
+            MobId::from("mob"),
+            FlowId::from("flow-a"),
+            [crate::ids::StepId::from("step-1")],
             status,
-            flow_state: MobRun::flow_state_for_steps([crate::ids::StepId::from("step-1")]).unwrap(),
-            activation_params: serde_json::json!({"a":1}),
-            created_at: Utc::now(),
-            completed_at: None,
-            step_ledger: Vec::new(),
-            failure_ledger: Vec::new(),
-            frames: std::collections::BTreeMap::new(),
-            loops: std::collections::BTreeMap::new(),
-            loop_iteration_ledger: Vec::new(),
-            schema_version: 4,
-            root_step_outputs: IndexMap::new(),
-            loop_iteration_outputs: std::collections::BTreeMap::new(),
-            flow_authority_inputs: Vec::new(),
-        }
+            serde_json::json!({"a":1}),
+        )
+        .expect("authority-backed sample run")
     }
 
     #[tokio::test]
@@ -2992,23 +2449,58 @@ mod tests {
         let store = SqliteMobStores::open(&path).unwrap().run_store();
         let run = sample_run(MobRunStatus::Running);
         let run_id = run.run_id.clone();
+        let expected_flow_state = run.flow_state.clone();
+        let (completed_flow_state, completed_authority_input) = run
+            .flow_run_command_projection_for_test(
+                crate::run::MobMachineFlowRunCommand::TerminalizeCompleted(
+                    crate::run::flow_run::inputs::TerminalizeCompleted {},
+                ),
+            )
+            .expect("project completed run state");
+        let (failed_flow_state, failed_authority_input) = run
+            .flow_run_command_projection_for_test(
+                crate::run::MobMachineFlowRunCommand::TerminalizeFailed(
+                    crate::run::flow_run::inputs::TerminalizeFailed {},
+                ),
+            )
+            .expect("project failed run state");
 
         store.create_run(run).await.unwrap();
 
         let s1 = store.clone();
         let rid1 = run_id.clone();
+        let state1 = expected_flow_state.clone();
+        let completed_state = completed_flow_state.clone();
+        let completed_input = completed_authority_input.clone();
         let s2 = store.clone();
         let rid2 = run_id.clone();
+        let state2 = expected_flow_state.clone();
+        let failed_state = failed_flow_state.clone();
+        let failed_input = failed_authority_input.clone();
         let outcomes = join_all(vec![
             tokio::spawn(async move {
-                s1.cas_run_status(&rid1, MobRunStatus::Running, MobRunStatus::Completed)
-                    .await
-                    .unwrap()
+                s1.cas_run_snapshot_with_authority(
+                    &rid1,
+                    MobRunStatus::Running,
+                    &state1,
+                    MobRunStatus::Completed,
+                    &completed_state,
+                    vec![completed_input],
+                )
+                .await
+                .unwrap()
             }),
             tokio::spawn(async move {
-                s2.cas_run_status(&rid2, MobRunStatus::Running, MobRunStatus::Failed)
-                    .await
-                    .unwrap()
+                s2.cas_run_snapshot_with_authority(
+                    &rid2,
+                    MobRunStatus::Running,
+                    &state2,
+                    MobRunStatus::Failed,
+                    &failed_state,
+                    vec![failed_input],
+                )
+                .await
+                .unwrap()
             }),
         ])
         .await;
@@ -3020,26 +2512,153 @@ mod tests {
             .count();
         assert_eq!(winners, 1);
 
+        let ledger_run = sample_run(MobRunStatus::Running);
+        let ledger_run_id = ledger_run.run_id.clone();
+        let step_id = StepId::from("step-1");
+        let ledger_expected_flow_state = ledger_run.flow_state.clone();
+        let (dispatched_flow_state, dispatched_authority_input) = ledger_run
+            .flow_run_command_projection_for_test(
+                crate::run::MobMachineFlowRunCommand::DispatchStep(
+                    crate::run::flow_run::inputs::DispatchStep {
+                        step_id: step_id.clone(),
+                    },
+                ),
+            )
+            .expect("project dispatched step state");
+        store.create_run(ledger_run).await.unwrap();
+        assert!(
+            store
+                .cas_flow_state_with_authority(
+                    &ledger_run_id,
+                    &ledger_expected_flow_state,
+                    &dispatched_flow_state,
+                    vec![dispatched_authority_input.clone()],
+                )
+                .await
+                .unwrap()
+        );
+        let dispatched_authority =
+            MobRunProvenanceAuthority::from_flow_authority_input(dispatched_authority_input)
+                .expect("dispatch input is provenance authority");
+
         let entry = StepLedgerEntry {
-            step_id: StepId::from("step-a"),
-            agent_identity: AgentIdentity::from("worker-1"),
-            status: StepRunStatus::Completed,
+            step_id,
+            agent_identity: AgentIdentity::from(crate::run::FLOW_RUN_PROVENANCE_AGENT_ID),
+            status: StepRunStatus::Dispatched,
             output: None,
             timestamp: Utc::now(),
         };
 
         assert!(
             store
-                .append_step_entry_if_absent(&run_id, entry.clone())
+                .append_step_entry_if_absent_with_authority(
+                    &ledger_run_id,
+                    entry.clone(),
+                    dispatched_authority.clone(),
+                )
                 .await
                 .unwrap()
         );
         assert!(
             !store
-                .append_step_entry_if_absent(&run_id, entry)
+                .append_step_entry_if_absent_with_authority(
+                    &ledger_run_id,
+                    entry,
+                    dispatched_authority.clone(),
+                )
                 .await
                 .unwrap()
         );
+        store
+            .append_step_entry_with_authority(
+                &ledger_run_id,
+                StepLedgerEntry {
+                    step_id: StepId::from("step-1"),
+                    agent_identity: AgentIdentity::from(crate::run::FLOW_RUN_PROVENANCE_AGENT_ID),
+                    status: StepRunStatus::Dispatched,
+                    output: None,
+                    timestamp: Utc::now(),
+                },
+                dispatched_authority,
+            )
+            .await
+            .expect_err("one dispatch authority must not authorize duplicate step ledger rows");
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_run_store_create_rejects_preset_provenance_ledgers_without_authority() {
+        let (_dir, path) = temp_db_path();
+        let store = SqliteMobStores::open(&path).unwrap().run_store();
+        let mut run = sample_run(MobRunStatus::Running);
+        run.step_ledger.push(StepLedgerEntry {
+            step_id: StepId::from("step-1"),
+            agent_identity: AgentIdentity::from("worker-1"),
+            status: StepRunStatus::Dispatched,
+            output: None,
+            timestamp: Utc::now(),
+        });
+
+        let error = store
+            .create_run(run)
+            .await
+            .expect_err("raw step provenance must be rejected");
+        assert!(error.to_string().contains("step ledger entry"));
+
+        let mut run = sample_run(MobRunStatus::Running);
+        run.failure_ledger.push(FailureLedgerEntry {
+            step_id: StepId::from("step-1"),
+            reason: "caller-injected failure".to_string(),
+            error_report: None,
+            error: None,
+            timestamp: Utc::now(),
+        });
+
+        let error = store
+            .create_run(run)
+            .await
+            .expect_err("raw failure provenance must be rejected");
+        assert!(error.to_string().contains("failure ledger entry"));
+
+        let mut run = sample_run(MobRunStatus::Running);
+        run.schema_version = crate::run::mob_run_schema_version() - 1;
+        let error = store
+            .create_run(run)
+            .await
+            .expect_err("caller-controlled schema version must be rejected");
+        assert!(error.to_string().contains("schema_version"));
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_run_store_snapshot_rejects_missing_authority_without_mutation() {
+        let (_dir, path) = temp_db_path();
+        let store = SqliteMobStores::open(&path).unwrap().run_store();
+        let run = sample_run(MobRunStatus::Running);
+        let run_id = run.run_id.clone();
+        let expected_flow_state = run.flow_state.clone();
+        let authority_input_count = run.flow_authority_inputs.len();
+        store.create_run(run).await.unwrap();
+
+        let error = store
+            .cas_run_snapshot_with_authority(
+                &run_id,
+                MobRunStatus::Running,
+                &expected_flow_state,
+                MobRunStatus::Completed,
+                &expected_flow_state,
+                Vec::new(),
+            )
+            .await
+            .expect_err("missing machine authority must reject snapshot CAS");
+        assert!(
+            error
+                .to_string()
+                .contains("store mutation missing MobMachine authority input")
+        );
+
+        let stored = store.get_run(&run_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, MobRunStatus::Running);
+        assert!(stored.completed_at.is_none());
+        assert_eq!(stored.flow_authority_inputs.len(), authority_input_count);
     }
 
     #[tokio::test]
@@ -3075,6 +2694,9 @@ mod tests {
             .runtime_metadata_store();
         let mob_id = MobId::from("mob");
         let supervisor = SupervisorAuthorityRecord::generate(default_bridge_protocol_version());
+        let supervisor_authority =
+            crate::store::supervisor_authority_persistence_authority_for_record(&supervisor)
+                .unwrap();
         let overlay = ExternalBindingOverlayRecord {
             agent_identity: AgentIdentity::from("worker-1"),
             generation: Generation::new(2),
@@ -3091,7 +2713,7 @@ mod tests {
         };
 
         store
-            .put_supervisor_authority(&mob_id, &supervisor)
+            .put_supervisor_authority(&mob_id, &supervisor, &supervisor_authority)
             .await
             .unwrap();
         let loaded_supervisor = store
@@ -3147,7 +2769,14 @@ mod tests {
             "overlay delete should clear all records for the mob"
         );
 
-        store.delete_supervisor_authority(&mob_id).await.unwrap();
+        let delete_authority =
+            crate::store::supervisor_authority_deletion_authority_for_record(&supervisor).unwrap();
+        assert!(
+            store
+                .delete_supervisor_authority(&mob_id, &supervisor, &delete_authority)
+                .await
+                .unwrap()
+        );
         assert!(
             store
                 .load_supervisor_authority(&mob_id)
@@ -3168,16 +2797,20 @@ mod tests {
         let mob_id = MobId::from("mob");
         let first = SupervisorAuthorityRecord::generate(default_bridge_protocol_version());
         let second = SupervisorAuthorityRecord::generate(default_bridge_protocol_version());
+        let first_authority =
+            crate::store::supervisor_authority_persistence_authority_for_record(&first).unwrap();
+        let second_authority =
+            crate::store::supervisor_authority_persistence_authority_for_record(&second).unwrap();
 
         assert!(
             store
-                .put_supervisor_authority_if_absent(&mob_id, &first)
+                .put_supervisor_authority_if_absent(&mob_id, &first, &first_authority)
                 .await
                 .unwrap()
         );
         assert!(
             !store
-                .put_supervisor_authority_if_absent(&mob_id, &second)
+                .put_supervisor_authority_if_absent(&mob_id, &second, &second_authority)
                 .await
                 .unwrap()
         );
@@ -3197,14 +2830,20 @@ mod tests {
         let first = SupervisorAuthorityRecord::generate(default_bridge_protocol_version());
         let second = SupervisorAuthorityRecord::generate(default_bridge_protocol_version());
         let third = SupervisorAuthorityRecord::generate(default_bridge_protocol_version());
+        let first_authority =
+            crate::store::supervisor_authority_persistence_authority_for_record(&first).unwrap();
+        let second_authority =
+            crate::store::supervisor_authority_persistence_authority_for_record(&second).unwrap();
+        let third_authority =
+            crate::store::supervisor_authority_persistence_authority_for_record(&third).unwrap();
 
         store
-            .put_supervisor_authority(&mob_id, &first)
+            .put_supervisor_authority(&mob_id, &first, &first_authority)
             .await
             .unwrap();
         assert!(
             !store
-                .compare_and_put_supervisor_authority(&mob_id, &second, &third)
+                .compare_and_put_supervisor_authority(&mob_id, &second, &third, &third_authority)
                 .await
                 .unwrap(),
             "mismatched expected authority must not update"
@@ -3215,7 +2854,7 @@ mod tests {
         );
         assert!(
             store
-                .compare_and_put_supervisor_authority(&mob_id, &first, &second)
+                .compare_and_put_supervisor_authority(&mob_id, &first, &second, &second_authority)
                 .await
                 .unwrap(),
             "matching expected authority should update"

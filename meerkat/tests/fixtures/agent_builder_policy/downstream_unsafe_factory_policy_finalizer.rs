@@ -141,7 +141,7 @@ fn main() {
     let builder = AgentBuilder::new()
         .resume_session(forged_factory_policy_session())
         .with_turn_state_handle(Arc::new(
-            meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+            meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
         ));
 
     let result = block_on(async {

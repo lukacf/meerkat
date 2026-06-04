@@ -1,3 +1,5 @@
+#![allow(clippy::redundant_feature_names)]
+
 mod ast;
 mod gen_dispatch;
 mod gen_enums;

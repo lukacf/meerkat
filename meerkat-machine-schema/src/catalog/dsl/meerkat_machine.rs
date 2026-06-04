@@ -1,4 +1,6 @@
 //! MeerkatMachine DSL definition with real bridging types.
+#![allow(clippy::too_many_arguments)]
+
 use super::OptionValueExt;
 use meerkat_machine_dsl::machine;
 
@@ -6,7 +8,18 @@ use meerkat_machine_dsl::machine;
 // Bridging types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct SessionId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -17,6 +30,9 @@ pub struct FenceToken(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Generation(pub u64);
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct RuntimeEpochId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct RunId(pub String);
@@ -38,12 +54,56 @@ pub struct WaitRequestId(pub String);
 /// newtype wrapper around an opaque JSON-encoded string. The DSL writes this
 /// variant directly on `RegisterOp` so guards on `PeerReadyOp`
 /// (`kind_is_mob_member_child`) can reason about the closed set without
-/// string parsing.
+/// string parsing. `BackgroundToolCapacitySlot` is a generated shell admission
+/// reservation, not a background job, so completion-feed publication can
+/// distinguish it from `BackgroundToolOp`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum OperationKind {
     #[default]
     MobMemberChild,
     BackgroundToolOp,
+    BackgroundToolCapacitySlot,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OperationSourceKind {
+    #[default]
+    SessionChild,
+    BackendPeer,
+}
+
+/// Typed source identity for an async operation. The lifecycle machine stores
+/// this on `RegisterOp` so peer-only operation identity is not reconstructed
+/// from display strings or shell-side labels.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct OperationSource {
+    pub kind: OperationSourceKind,
+    pub session_id: Option<SessionId>,
+    pub peer_id: Option<PeerId>,
+    pub address: Option<PeerAddress>,
 }
 
 /// Typed mirror of [`meerkat_core::Provider`] for use inside DSL bridging
@@ -254,7 +314,7 @@ pub struct ToolVisibilityWitness {
 
 impl ToolVisibilityWitness {
     fn len(&self) -> u64 {
-        u64::from(self.last_seen_provenance.is_some())
+        u64::from(self.stable_owner_key.is_some()) + u64::from(self.last_seen_provenance.is_some())
     }
 }
 
@@ -427,6 +487,34 @@ pub enum PeerIngressResponseTerminality {
     TerminalFailed,
 }
 
+/// DSL-owned public peer-ingress authority phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressAuthorityPhaseClass {
+    #[default]
+    Absent,
+    Received,
+    Dropped,
+    Delivered,
+}
+
+/// DSL-owned receive/admission result for classified peer ingress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressReceiveOutcomeClass {
+    #[default]
+    Admitted,
+    DroppedUntrustedSender,
+    DroppedSessionClosed,
+    DroppedInboxFull,
+}
+
+/// DSL-owned admission diagnostic copy emitted with receive authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressAdmissionDiagnosticClass {
+    #[default]
+    TrustedAtAdmission,
+    UntrustedAtAdmission,
+}
+
 /// Peer-ingress transport capability ownership kind (W2-G / issue #264).
 ///
 /// Paired with `peer_ingress_comms_runtime_id` and `peer_ingress_mob_id` in
@@ -575,6 +663,34 @@ pub enum InputTerminalKind {
     Abandoned,
 }
 
+/// Public lifecycle class emitted by generated authority before runtime
+/// surfaces project input state onto their transport enums.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InputPublicLifecycleState {
+    #[default]
+    Accepted,
+    Queued,
+    Staged,
+    Applied,
+    AppliedPendingConsumption,
+    Consumed,
+    Superseded,
+    Coalesced,
+    Abandoned,
+}
+
+/// Public terminal result class emitted by generated authority before runtime
+/// surfaces project input state onto their transport enums.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InputPublicTerminalOutcome {
+    #[default]
+    Completed,
+    Abandoned,
+    Superseded,
+    Coalesced,
+    Cancelled,
+}
+
 /// Typed pending external-surface op. Closed set of literals previously
 /// assigned to `surface_pending_op`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -659,6 +775,95 @@ pub enum TurnTerminalCauseKind {
     FatalFailure,
 }
 
+/// Normalized terminal-cause class used by the surface-result classification
+/// authority. MeerkatMachine groups the closed [`TurnTerminalCauseKind`] set
+/// (plus the absent/`None` cause) into this coarser class before classifying
+/// the surface result, so the surface-result policy is expressed over a small
+/// closed domain. The `terminal_surface_mapping` codegen pass derives both the
+/// `cause_kind -> class` projection and the `(outcome, class) -> surface class`
+/// table mechanically from this machine's transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TerminalCauseClass {
+    #[default]
+    Missing,
+    Unknown,
+    BudgetExhausted,
+    TimeBudgetExceeded,
+    RetryExhausted,
+    StructuredOutputValidationFailed,
+    OtherFailure,
+}
+
+/// Surface result classification emitted by MeerkatMachine for a turn-execution
+/// terminal `(outcome, cause)` pair. This is the machine-owned policy that the
+/// agent loop projects onto `Ok`/`Err` run results; the `terminal_surface_mapping`
+/// codegen pass derives the classification table from the machine's
+/// `ResolveTurnSurfaceResult*` transitions rather than hand-authoring it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfaceResultClass {
+    #[default]
+    Success,
+    HardFailure,
+    Cancelled,
+    MissingTerminal,
+}
+
+/// P0 Dogma Invariant 1: machine-owned LLM-failure recovery verdict. The agent
+/// loop EXTRACTS the typed `LlmRetryFailureKind` (or its absence) and the
+/// one-based `retry_attempt` / `max_retries`, then drives
+/// `ClassifyLlmFailureRecovery`; MeerkatMachine — not the shell `RetryPolicy` —
+/// owns whether the failure may `Recover` (recoverable kind with retries
+/// remaining), is `Exhausted` (recoverable kind past `max_retries`), or is
+/// `Fatal` (no recoverable kind). `Exhausted` and `Fatal` both drive the
+/// existing terminal/return-Err path; the split records the distinct cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LlmFailureRecoveryKind {
+    #[default]
+    Fatal,
+    Recover,
+    Exhausted,
+}
+
+/// Raw failure source fact carried by runtime run-failure handoff. The shell
+/// reports the source that observed the error; MeerkatMachine maps it to
+/// terminal outcome/cause instead of accepting shell-supplied terminal facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RunFailureSourceKind {
+    #[default]
+    Unknown,
+    Llm,
+    StoreError,
+    ToolError,
+    McpError,
+    SessionNotFound,
+    TokenBudgetExceeded,
+    TimeBudgetExceeded,
+    ToolCallBudgetExceeded,
+    MaxTokensReached,
+    ContentFiltered,
+    MaxTurnsReached,
+    Cancelled,
+    InvalidStateTransition,
+    OperationNotFound,
+    DepthLimitExceeded,
+    ConcurrencyLimitExceeded,
+    ConfigError,
+    InvalidToolAccess,
+    InternalError,
+    BuildError,
+    AuthReauthRequired,
+    CallbackPending,
+    StructuredOutputValidationFailed,
+    InvalidOutputSchema,
+    HookDenied,
+    HookTimeout,
+    HookExecutionFailed,
+    HookConfigInvalid,
+    TerminalFailure,
+    NoPendingBoundary,
+    LlmRetryExhausted,
+}
+
 /// Typed classifier for failures surfaced by the runtime apply loop when a
 /// `CoreExecutor::apply` call fails and terminalizes the runtime turn.
 /// The companion `last_runtime_apply_failure_message` state field carries the
@@ -687,6 +892,28 @@ pub enum PreRunPhase {
     Retired,
 }
 
+/// Generated authority for deferred session materialization.
+///
+/// The shell keeps bulky build payloads in a registry, but phase/admission
+/// meaning for the staged lifecycle is owned here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum StagedSessionPhase {
+    #[default]
+    NotStaged,
+    Staged,
+    Promoting,
+    Closing,
+}
+
+/// Explicit host/profile request class for mob operator access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobOperatorAccessRequestKind {
+    #[default]
+    Inherit,
+    Enable,
+    Disable,
+}
+
 /// Typed runtime notice classifier for the `RuntimeNotice` effect. Closed set
 /// of per-transition runtime lifecycle markers (drain exited, runtime reset,
 /// executor stopped/exited, runtime recovered) emitted by the runtime-control
@@ -711,6 +938,409 @@ pub enum RuntimeEffectKind {
     #[default]
     CancelAfterBoundary,
     StopRuntimeExecutor,
+}
+
+/// Typed runtime completion observation supplied by completion waiter plumbing.
+/// Generated `ResolveRuntimeCompletionCleanup` authority owns whether that
+/// observation permits runtime cleanup; surfaces must not match this enum to
+/// decide cleanup locally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeCompletionObservedOutcome {
+    #[default]
+    Completed,
+    CompletedWithoutResult,
+    CallbackPending,
+    Cancelled,
+    Abandoned,
+    RuntimeApplyFailed,
+    FinalizationFailed,
+    RuntimeTerminated,
+}
+
+/// Typed observation of the terminal payload shape produced by runtime-loop
+/// execution. This is input evidence only; the generated
+/// `ResolveRuntimeCompletionResult` transition owns the public waiter class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeCompletionTerminalObservation {
+    #[default]
+    RunResult,
+    NoResult,
+    CallbackPending,
+    MachineTerminal,
+    RuntimeTerminated,
+}
+
+/// Typed observation of whether runtime finalization completed after the
+/// executor produced terminal evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeCompletionFinalizationObservation {
+    #[default]
+    Succeeded,
+    Failed,
+}
+
+/// Typed observation supplied by public session-interrupt surfaces. The
+/// generated `ResolveUserInterruptPublicResult` transition owns the app-facing
+/// result class; REST/RPC/CLI may only map its typed effect to transport shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum UserInterruptObservationKind {
+    #[default]
+    Accepted,
+    IdleNoop,
+    AttachedNoop,
+    StagedNoop,
+    Destroyed,
+    NotInterruptible,
+}
+
+/// Generated public result class for user interrupt requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum UserInterruptPublicResultKind {
+    #[default]
+    Interrupted,
+    NotFound,
+    SessionBusy,
+    Conflict,
+}
+
+/// Generated public completion result class for runtime-loop waiters. Payloads
+/// remain runtime data, but this closed classifier is the authority for which
+/// public `CompletionOutcome` variant may be emitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeCompletionResultClass {
+    #[default]
+    Completed,
+    CompletedWithoutResult,
+    CallbackPending,
+    Cancelled,
+    AbandonedWithError,
+    CompletedWithFinalizationFailure,
+    RuntimeTerminated,
+}
+
+/// Typed observation of the live-session projection available to generated
+/// runtime-completion cleanup authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeCompletionLiveSessionObservation {
+    #[default]
+    NotObserved,
+    Present,
+    Absent,
+}
+
+/// Generated cleanup action for runtime completion side effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeCompletionCleanupAction {
+    #[default]
+    RetainRuntime,
+    CleanupRuntime,
+}
+
+/// Generated authority for whether completion cleanup may release a surface
+/// pre-admission guard. Guard release changes admission/capacity truth, so
+/// surfaces receive this as a generated effect rather than deciding from
+/// waiter success/failure locally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeCompletionPreAdmissionAction {
+    #[default]
+    RetainPreAdmission,
+    ReleasePreAdmission,
+}
+
+/// Typed mechanical failure observed by completion waiter plumbing. This is
+/// input evidence only; generated `ResolveRuntimeCompletionWaitFailure` owns
+/// the public error class and pre-admission action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeCompletionWaitFailureObservation {
+    #[default]
+    ChannelClosed,
+    AuthorityUnavailable,
+}
+
+/// Generated public error class for mechanical runtime completion waiter
+/// failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeCompletionWaitFailurePublicErrorClass {
+    #[default]
+    InternalError,
+}
+
+/// Generated public reason classifier for mechanical runtime completion waiter
+/// failures. Transports may map this closed classifier to their own string/code
+/// representation, but they must not derive it from handwritten error parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeCompletionWaitFailurePublicReason {
+    #[default]
+    CompletionChannelClosed,
+    CompletionAuthorityUnavailable,
+}
+
+/// Generated durability action for runtime-owned ops lifecycle snapshots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeOpsLifecycleDurabilityAction {
+    #[default]
+    RetainSnapshot,
+    DeleteSnapshot,
+}
+
+/// Typed public rejection class for `live/open` admission. The host may track
+/// transport handles, but session/channel lifecycle admission is generated
+/// here before a channel can be materialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveOpenAdmissionRejection {
+    #[default]
+    AlreadyBound,
+    ChannelAlreadyBound,
+}
+
+/// Typed public result class for `live/refresh` after the adapter command
+/// queue accepts a refresh handoff. The RPC surface may only project this
+/// value from a generated `LiveRefreshResultResolved` effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveRefreshPublicStatus {
+    #[default]
+    Queued,
+}
+
+/// Typed public result class for `live/close` after the live host accepts a
+/// close handoff. The RPC surface may only project this value from a generated
+/// `LiveCloseResultResolved` effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveClosePublicStatus {
+    #[default]
+    Closed,
+}
+
+/// Closed classifier for live adapter commands whose queue acceptance backs a
+/// public RPC result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveCommandPublicKind {
+    #[default]
+    SendInput,
+    CommitInput,
+    Interrupt,
+    TruncateAssistantOutput,
+}
+
+/// Closed classifier for live command rejection observations. The live host
+/// can observe why an adapter command handoff failed, but public error-class
+/// truth is generated from this typed fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveCommandRejectionReason {
+    #[default]
+    ChannelNotFound,
+    NoAdapter,
+    ChannelNotReady,
+    UnsupportedCommand,
+    AdapterError,
+    InternalHostError,
+}
+
+/// Typed public error class for live command rejections. RPC surfaces may only
+/// project their JSON-RPC error code from a generated
+/// `LiveCommandRejectionResolved` effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveCommandRejectionPublicErrorClass {
+    #[default]
+    InvalidParams,
+    InternalError,
+}
+
+/// Closed classifier for live channel control requests whose rejection backs a
+/// public RPC error result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveChannelRequestPublicKind {
+    #[default]
+    Status,
+    Close,
+    Refresh,
+    WebrtcAnswer,
+}
+
+/// Closed classifier for live channel control request rejection observations.
+/// The live host can observe missing transport/cache pieces, but public
+/// error-class truth is generated from this typed fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveChannelRequestRejectionReason {
+    #[default]
+    ChannelNotFound,
+    NoAdapter,
+    InvalidToken,
+    InvalidPayload,
+    WebrtcAnswerError,
+    InternalHostError,
+}
+
+/// Typed public error class for live channel control request rejections. RPC
+/// surfaces may only project their JSON-RPC error code from a generated
+/// `LiveChannelRequestRejectionResolved` effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveChannelRequestRejectionPublicErrorClass {
+    #[default]
+    InvalidParams,
+    InternalError,
+}
+
+/// Closed classifier for generated WebRTC answer admission rejections. The
+/// transport can provide bearer material, but token existence, expiry,
+/// channel binding, and single-use admission are decided by MeerkatMachine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveWebrtcAnswerAdmissionRejection {
+    #[default]
+    TokenNotFound,
+    TokenExpired,
+    TokenChannelMismatch,
+    TokenAlreadyConsumed,
+    ChannelNotBound,
+}
+
+/// Closed classifier for generated WebSocket token admission rejections. The
+/// WebSocket transport can present bearer material, but token existence,
+/// expiry, channel binding, and single-use admission are decided by
+/// MeerkatMachine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveWebsocketTokenAdmissionRejection {
+    #[default]
+    TokenNotFound,
+    TokenExpired,
+    TokenChannelMismatch,
+    TokenAlreadyConsumed,
+    ChannelNotBound,
+}
+
+/// Typed public error class for live WebSocket token admission. The transport
+/// projects its close/error code only from the generated admission effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveWebsocketTokenAdmissionPublicErrorClass {
+    #[default]
+    InvalidToken,
+}
+
+/// Typed public success class for `live/webrtc/answer`. The WebRTC stack
+/// produces SDP material, but the public success result is projected only
+/// after a generated `LiveWebrtcAnswerResultResolved` effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveWebrtcAnswerPublicStatus {
+    #[default]
+    Answered,
+}
+
+/// Typed terminal reason for RPC event streams. The router observes transport
+/// end conditions, then submits the closed set here before projecting the
+/// public `*/stream_end` notification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RpcEventStreamTerminalReason {
+    #[default]
+    RemoteEnd,
+    TerminalError,
+    ExplicitClose,
+}
+
+/// Typed transport observation for RPC event-stream termination. The router
+/// submits this non-public observation; generated authority derives the public
+/// terminal reason and error code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RpcEventStreamTerminalObservationKind {
+    #[default]
+    TransportEnded,
+    NotificationQueueOverflow,
+    NotificationReceiverGone,
+}
+
+/// Typed public error code for RPC event-stream terminal notifications. The
+/// RPC surface may only project this value from a generated
+/// `*EventStreamTerminalResolved` effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RpcEventStreamTerminalErrorCode {
+    #[default]
+    StreamQueueOverflow,
+    StreamReceiverGone,
+}
+
+/// Typed public status class for `live/status` after the live host has
+/// observed the adapter transport state. RPC/SDK surfaces may only project
+/// these values from generated `LiveChannelStatusResolved` effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveChannelPublicStatus {
+    #[default]
+    Idle,
+    Opening,
+    Ready,
+    Degraded,
+    Closing,
+    Closed,
+}
+
+/// Typed public degradation reason for `live/status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveChannelDegradationReason {
+    #[default]
+    Unknown,
+    RateLimited,
+    ProviderThrottled,
+    NetworkUnstable,
+    Other,
+}
+
+/// Typed mirror of the public runtime lifecycle projection. The shell passes
+/// only the observed variant; generated transitions own the semantic facts
+/// derived from it (terminality, input admission, queue admission, and ingress
+/// rejection class).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeLifecycleObservedState {
+    #[default]
+    Initializing,
+    Idle,
+    Attached,
+    Running,
+    Retired,
+    Stopped,
+    Destroyed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeLifecycleTerminality {
+    #[default]
+    NonTerminal,
+    Terminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeInputAdmission {
+    #[default]
+    RejectsInput,
+    AcceptsInput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeQueueAdmission {
+    #[default]
+    BlocksQueue,
+    ProcessesQueue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimePrepareAdmission {
+    #[default]
+    NotReady,
+    Ready,
+    Destroyed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeIngressAdmission {
+    #[default]
+    Open,
+    NotReady,
+    Destroyed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeLoopRunBinding {
+    #[default]
+    Blocked,
+    AllocateNew,
+    UsePrebound,
 }
 
 /// Typed reason classifier for the `TurnRunCancelled` effect. Closed set of
@@ -803,6 +1433,27 @@ pub enum ExternalToolSurfaceFailureCause {
     SurfaceUnavailable,
 }
 
+/// Generated surface-request lifecycle phase. Surface transports may project
+/// this value for diagnostics; mutation authority lives in MeerkatMachine
+/// transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfaceRequestPhase {
+    #[default]
+    Pending,
+    Published,
+    Cancelled,
+    Completed,
+}
+
+/// Generated terminal-publication policy recorded when a surface request is
+/// admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfaceRequestTerminalPolicy {
+    #[default]
+    RespondWithoutPublish,
+    PublishOnSuccess,
+}
+
 /// Typed drain-exit reason. Closed mirror of
 /// [`meerkat_core::handles::DrainExitReason`] — replaces the former
 /// literal-string `reason` field on `NotifyDrainExited`.
@@ -885,6 +1536,78 @@ pub enum OperationTerminalOutcomeKind {
     Terminated,
 }
 
+/// Typed public result class for operation lifecycle projections. Shell/tool
+/// surfaces may format these classes, but the lifecycle machine owns the
+/// status-to-public-result classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OperationPublicResultClass {
+    #[default]
+    MissingAuthority,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OperationCompletionFeedClass {
+    #[default]
+    Emit,
+    Suppress,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OperationCompletionWakeClass {
+    #[default]
+    Wake,
+    Ignore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OperationDurabilityClass {
+    #[default]
+    Retain,
+    Discard,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OpRegistrationAdmissionResultKind {
+    #[default]
+    Accept,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OpRegistrationRejectReasonKind {
+    #[default]
+    AlreadyRegistered,
+    MaxConcurrentExceeded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OpLifecycleActionKind {
+    #[default]
+    Start,
+    Fail,
+    PeerReady,
+    ProgressReported,
+    Complete,
+    Abort,
+    Cancel,
+    RetireRequested,
+    RetireCompleted,
+    Terminate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OpLifecycleRejectReasonKind {
+    #[default]
+    OperationNotFound,
+    InvalidTransition,
+    PeerNotExpected,
+    AlreadyPeerReady,
+}
+
 /// Typed input-abandonment reason. Closed mirror of the discriminant set of
 /// [`crate::input_state::InputAbandonReason`] — replaces the former
 /// `format!("{reason:?}")` Debug round-trip in the DSL's
@@ -921,6 +1644,287 @@ pub enum InputLane {
     Steer,
 }
 
+/// Typed live-admission input kind carried by `ResolveAdmissionPlan`.
+///
+/// The runtime shell presents the parsed input discriminant; the generated
+/// machine owns the policy/default/result tuple derived from it before any
+/// admission lifecycle facts may change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionInputKind {
+    #[default]
+    Prompt,
+    PeerMessage,
+    PeerRequest,
+    PeerResponseProgress,
+    PeerResponseTerminal,
+    FlowStep,
+    ExternalEvent,
+    Continuation,
+    Operation,
+}
+
+/// Typed continuation discriminant carried by `ResolveAdmissionPlan`.
+///
+/// Continuations differ in how the runtime must apply them: an ordinary
+/// continuation resumes the pending run (`ResumePending`), while a WorkGraph
+/// attention continuation re-enters as a fresh content turn queued onto the run
+/// boundary. The shell reports only this typed discriminant; MeerkatMachine
+/// owns the lane and run-apply semantics derived from it. Non-continuation
+/// inputs always carry [`AdmissionContinuationKind::Ordinary`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionContinuationKind {
+    #[default]
+    Ordinary,
+    WorkgraphAttention,
+}
+
+/// Typed durability class observed on an input. The shell may observe and
+/// carry this class, but admission validity and recovered-retention behavior
+/// are generated MeerkatMachine decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InputDurabilityKind {
+    #[default]
+    Durable,
+    Ephemeral,
+    Derived,
+    Missing,
+}
+
+/// Typed origin class observed at live admission. The machine combines this
+/// with `AdmissionInputKind` and `InputDurabilityKind` so the shell does not
+/// own the derived-durability legality table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionInputOriginKind {
+    #[default]
+    Operator,
+    Peer,
+    Flow,
+    System,
+    External,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPolicyApplyMode {
+    #[default]
+    StageRunStart,
+    StageRunBoundary,
+    InjectNow,
+    Ignore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPolicyWakeMode {
+    #[default]
+    WakeIfIdle,
+    InterruptYielding,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPolicyQueueMode {
+    None,
+    #[default]
+    Fifo,
+    Coalesce,
+    Supersede,
+    Priority,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPolicyConsumePoint {
+    OnAccept,
+    OnApply,
+    OnRunStart,
+    #[default]
+    OnRunComplete,
+    ExplicitAck,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPolicyDrainPolicy {
+    #[default]
+    QueueNextTurn,
+    SteerBatch,
+    Immediate,
+    Ignore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionRoutingDisposition {
+    #[default]
+    Queue,
+    Steer,
+    Immediate,
+    Drop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionRunApplyBoundary {
+    #[default]
+    RunStart,
+    RunCheckpoint,
+    Immediate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionRuntimeExecutionKind {
+    #[default]
+    ContentTurn,
+    ResumePending,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPeerResponseTerminalApplyIntent {
+    #[default]
+    AppendContextAndRun,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPlanKind {
+    ConsumedOnAccept,
+    #[default]
+    Queued,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionQueueActionKind {
+    #[default]
+    None,
+    EnqueueTo,
+    EnqueueFront,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionExistingQueuedActionKind {
+    #[default]
+    None,
+    Coalesce,
+    Supersede,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionIdempotencyResultKind {
+    #[default]
+    Accept,
+    Deduplicated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionValidationResultKind {
+    #[default]
+    Accept,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerResponseTerminalObservedStatus {
+    #[default]
+    NotPeerTerminal,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionRejectReasonKind {
+    #[default]
+    DurabilityViolation,
+    PeerHandlingModeInvalid,
+    PeerResponseTerminalInvalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum WaitAllAdmissionResultKind {
+    #[default]
+    Accept,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum WaitAllRejectReasonKind {
+    #[default]
+    DuplicateOperation,
+    WaitAlreadyActive,
+    OperationNotFound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredInputObservedPhase {
+    Accepted,
+    #[default]
+    Queued,
+    Staged,
+    Applied,
+    AppliedPendingConsumption,
+    Consumed,
+    Superseded,
+    Coalesced,
+    Abandoned,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredInputNormalizationReasonKind {
+    #[default]
+    QueueAccepted,
+    RollbackStaged,
+    BoundaryReceiptCommitted,
+    MissingBoundaryReceipt,
+}
+
+/// Typed persisted input kind carried by recovered-admission witnesses.
+///
+/// Recovery observes this from the durable input payload, then MeerkatMachine
+/// owns whether the paired runtime semantics and policy stamps are coherent
+/// for that kind. Shell recovery must not rebuild that legality table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredInputKind {
+    #[default]
+    Prompt,
+    PeerMessage,
+    PeerRequest,
+    PeerResponseProgress,
+    PeerResponseTerminal,
+    FlowStep,
+    ExternalEvent,
+    Continuation,
+    Operation,
+}
+
+/// Generated recovery disposition for a persisted input row after the machine
+/// observes its durability class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredInputRecoveryDisposition {
+    #[default]
+    Retain,
+    Discard,
+}
+
+/// Typed persisted runtime apply boundary carried by recovered-admission
+/// witnesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredRunApplyBoundary {
+    #[default]
+    RunStart,
+    RunCheckpoint,
+    Immediate,
+}
+
+/// Typed persisted runtime execution class carried by recovered-admission
+/// witnesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredRuntimeExecutionKind {
+    #[default]
+    ContentTurn,
+    ResumePending,
+}
+
+/// Typed recovered terminal peer-response apply intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredPeerResponseTerminalApplyIntent {
+    #[default]
+    AppendContextAndRun,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RoutingSwitchTurnPhase {
     #[default]
@@ -947,6 +1951,40 @@ pub enum RoutingDenialReason {
     DeniedDuringApproval,
     ScopedOverrideConflict,
     RealtimeTransportConflict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingSwitchApprovalReason {
+    #[default]
+    CrossProvider,
+    CostExceedsThreshold,
+    SafetyHold,
+    UntilChangedFromModelOrigin,
+    RealtimeDetachRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingImageApprovalReason {
+    #[default]
+    CrossProvider,
+    CostExceedsThreshold,
+    SafetyHold,
+    RealtimeDetachRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingImagePlanDenialReason {
+    #[default]
+    UnsupportedTarget,
+    UnsupportedCount,
+    CapabilityPolicy,
+    CostPolicy,
+    SafetyPolicy,
+    ApprovalRequiredButUnavailable,
+    DeniedDuringApproval,
+    ScopedOverrideConflict,
+    RealtimeTransportConflict,
+    ProjectionUnsupported,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -990,6 +2028,135 @@ pub enum RoutingImageTerminal {
     Cancelled,
     Timeout,
     ScopedRestoreFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingImageTerminalObservation {
+    #[default]
+    Generated,
+    EmptyResult,
+    ProviderHttpError,
+    ProviderNativeError,
+    ExecutionFailed,
+    BlobCommitFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingImageProviderErrorCode {
+    #[default]
+    Unknown,
+    OpenAiContentFilter,
+    OpenAiModelRefusal,
+    GeminiSafety,
+    GeminiModelRefusal,
+    GeminiDeadlineExceeded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingProviderTextDisposition {
+    #[default]
+    NotEmitted,
+    Captured,
+    EmittedButNotStored,
+}
+
+/// Typed bridge command class for supervisor-authorized mob peer overlay
+/// observations. The runtime submits this as part of the generated
+/// MeerkatMachine overlay authorization input so the bridge surface does not
+/// decide whether the command peer should be present or absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobPeerOverlayCommandKind {
+    #[default]
+    Wire,
+    Unwire,
+}
+
+/// Generated admission result for supervisor bridge commands that require an
+/// already-bound supervisor. The bridge shell may project this result to the
+/// wire response, but it must not classify binding/epoch/sender admission from
+/// snapshots on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorBridgeCommandAdmissionResultKind {
+    #[default]
+    Accept,
+    Reject,
+}
+
+/// Generated public rejection class for supervisor bridge command admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorBridgeCommandRejectionKind {
+    #[default]
+    NotBound,
+    StaleSupervisor,
+    SenderMismatch,
+}
+
+/// Generated admission result for `BindMember`, before bootstrap transport
+/// checks or supervisor binding mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorBindAdmissionResultKind {
+    #[default]
+    Bootstrap,
+    IdempotentAck,
+    Reject,
+}
+
+/// Generated public rejection class for `BindMember` admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorBindRejectionKind {
+    #[default]
+    AlreadyBound,
+    SenderMismatch,
+}
+
+/// Generated material-admission verdict for `BindMember`. Owns the
+/// transport/identity equality checks the shell previously decided inline:
+/// advertised-address match, raw supervisor-peer sender match, expected
+/// runtime peer-id match, and bootstrap-token match. The shell extracts the
+/// four pure boolean observations and mirrors this verdict; the precedence
+/// (address → sender → peer-id → token, else accept) is encoded in the
+/// transitions below so the first failing check wins exactly as the shell
+/// short-circuited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorBindMaterialAdmissionKind {
+    #[default]
+    Accept,
+    AddressMismatch,
+    SenderMismatch,
+    InvalidPeerSpec,
+    InvalidBootstrapToken,
+}
+
+/// Generated session-liveness verdict for an attempted transcript edit (fork /
+/// rewrite / restore). Owns the disjunction the shell previously decided inline:
+/// a session is busy for transcript-edit purposes iff its runtime is running OR
+/// it has any active inputs. The shell extracts the two pure boolean
+/// observations (`runtime_running`, `has_active_inputs`) it already computes and
+/// mirrors this verdict — `Admissible` -> `Ok(())`, `DeniedBusy` -> the existing
+/// `SESSION_BUSY` rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TranscriptEditAdmissionKind {
+    #[default]
+    Admissible,
+    DeniedBusy,
+}
+
+/// Generated admission result for `AuthorizeSupervisor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorAuthorizeAdmissionResultKind {
+    #[default]
+    Proceed,
+    IdempotentAck,
+    Reject,
+}
+
+/// Generated public rejection class for `AuthorizeSupervisor` admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorAuthorizeRejectionKind {
+    #[default]
+    NotBound,
+    StaleSupervisor,
+    SenderMismatch,
 }
 
 // Track-B (R5): declarative peer endpoint descriptor for the runtime
@@ -1167,8 +2334,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             session_id: Option<SessionId>,
             active_runtime_id: Option<AgentRuntimeId>,
             active_fence_token: Option<FenceToken>,
+            active_runtime_generation: Option<Generation>,
+            active_runtime_epoch_id: Option<RuntimeEpochId>,
             current_run_id: Option<RunId>,
             pre_run_phase: Option<Enum<PreRunPhase>>,
+            runtime_stop_deferred: bool,
             turn_phase: TurnPhase,
             primitive_kind: Option<Enum<TurnPrimitiveKind>>,
             admitted_content_shape: Option<Enum<ContentShape>>,
@@ -1185,6 +2355,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             terminal_cause_kind: Option<Enum<TurnTerminalCauseKind>>,
             last_runtime_apply_failure_cause: Option<Enum<RuntimeApplyFailureCause>>,
             last_runtime_apply_failure_message: Option<String>,
+            runtime_completion_result_run_id: Option<RunId>,
             extraction_attempts: u64,
             max_extraction_retries: u64,
             llm_retry_attempt: u64,
@@ -1212,18 +2383,52 @@ macro_rules! meerkat_catalog_machine_dsl {
             model_routing_pending_switch_phase: Option<Enum<RoutingSwitchTurnPhase>>,
             model_routing_switch_terminal: Map<String, Enum<RoutingSwitchTurnTerminal>>,
             model_routing_switch_denials: Map<String, Enum<RoutingDenialReason>>,
+            model_routing_switch_approval_reasons: Map<String, Enum<RoutingSwitchApprovalReason>>,
             model_routing_image_operation_phases: Map<String, Enum<RoutingImageOperationPhase>>,
             model_routing_image_operation_target_models: Map<String, String>,
             model_routing_image_operation_realtime: Map<String, bool>,
             model_routing_image_operation_requires_scoped_override: Map<String, bool>,
+            model_routing_image_classified_terminals: Map<String, Enum<RoutingImageTerminal>>,
+            model_routing_image_classified_provider_text: Map<String, Enum<RoutingProviderTextDisposition>>,
             model_routing_image_terminals: Map<String, Enum<RoutingImageTerminal>>,
             model_routing_image_terminal_payloads: Map<String, String>,
             model_routing_image_denials: Map<String, Enum<RoutingDenialReason>>,
+            model_routing_image_approval_reasons: Map<String, Enum<RoutingImageApprovalReason>>,
+            model_routing_image_plan_denials: Map<String, Enum<RoutingImagePlanDenialReason>>,
             model_routing_approval_phases: Map<String, Enum<RoutingApprovalPhase>>,
             model_routing_approval_parent_kind: Map<String, Enum<RoutingApprovalParentKind>>,
 
             // --- Registration substate ---
             registration_phase: RegistrationPhase,
+            staged_session_phase: StagedSessionPhase,
+            staged_session_id: Option<SessionId>,
+            staged_session_keep_alive: Option<bool>,
+            staged_session_llm_identity: Option<SessionLlmIdentity>,
+            staged_session_machine_archived_resume_authorized: bool,
+            // Current live/durable LLM identity and capability truth for the
+            // registered session. Host hydration and live reconfiguration are
+            // observations/mechanics; these fields are the generated
+            // authority the runtime surfaces read.
+            current_session_llm_identity: Option<SessionLlmIdentity>,
+            current_session_capability_surface: Option<SessionLlmCapabilitySurface>,
+            current_session_capability_surface_status: SessionLlmCapabilitySurfaceStatus,
+            current_session_capability_base_filter: ToolFilter,
+            session_llm_reconfigure_previous_capability_surface: Option<SessionLlmCapabilitySurface>,
+            session_llm_reconfigure_current_capability_surface: Option<SessionLlmCapabilitySurface>,
+            session_llm_reconfigure_capability_changed: bool,
+            session_llm_reconfigure_previous_capability_base_filter: ToolFilter,
+            session_llm_reconfigure_current_capability_base_filter: ToolFilter,
+            session_llm_reconfigure_committed_visible_set_changed: bool,
+            session_llm_reconfigure_revision_bumped: bool,
+            session_llm_reconfigure_active_visibility_revision: u64,
+            mob_operator_authority_present: bool,
+            mob_operator_principal_token: Option<OpaquePrincipalToken>,
+            mob_operator_can_create_mobs: bool,
+            mob_operator_can_mutate_profiles: bool,
+            mob_operator_managed_mob_scope: Set<String>,
+            mob_operator_spawn_profile_scope: Map<String, Set<String>>,
+            mob_operator_caller_provenance: Option<MobToolCallerProvenance>,
+            mob_operator_audit_invocation_id: Option<String>,
 
             // --- Comms drain substate ---
             drain_phase: DrainPhase,
@@ -1240,14 +2445,22 @@ macro_rules! meerkat_catalog_machine_dsl {
             // reads the minted value back and applies it to its projection
             // rather than minting independently.
             next_staged_visibility_revision: u64,
+            inherited_base_filter: ToolFilter,
             active_filter: ToolFilter,
             staged_filter: ToolFilter,
             active_visibility_revision: u64,
             staged_visibility_revision: u64,
             active_deferred_names: Set<String>,
             staged_deferred_names: Set<String>,
+            requested_visibility_witnesses: Map<String, ToolVisibilityWitness>,
+            filter_visibility_witnesses: Map<String, ToolVisibilityWitness>,
             active_deferred_authorities: Map<String, ToolVisibilityWitness>,
             staged_deferred_authorities: Map<String, ToolVisibilityWitness>,
+            deferred_visibility_authority_catalog: Map<String, ToolVisibilityWitness>,
+            filter_visibility_authority_catalog: Map<String, ToolVisibilityWitness>,
+            turn_tool_overlay_allow_active: bool,
+            turn_tool_overlay_allow_names: Set<String>,
+            turn_tool_overlay_deny_names: Set<String>,
 
             // --- Input lifecycle substate ---
             input_phases: Map<String, InputPhase>,
@@ -1257,32 +2470,142 @@ macro_rules! meerkat_catalog_machine_dsl {
             input_abandon_reason: Map<String, Enum<InputAbandonReason>>,
             input_abandon_attempt_count: Map<String, u64>,
             input_attempt_counts: Map<String, u64>,
+            max_stage_attempts: u64,
             input_run_associations: Map<String, String>,
             input_boundary_sequences: Map<String, u64>,
+            live_boundary_context_sequence_by_run: Map<RunId, u64>,
             next_admission_seq: u64,
+            next_priority_admission_seq: u64,
             input_admission_seq: Map<String, u64>,
             // Unified work-lane membership for admitted inputs. Mutual
             // exclusion between Queue and Steer is structural: an input
             // maps to exactly one `InputLane` value by construction.
             // Replaces the former `queue_lane`/`steer_lane` parallel sets.
             input_lane: Map<String, Enum<InputLane>>,
+            // Machine-owned recovery lane witness for admitted inputs. Unlike
+            // `input_lane`, this survives staging so crash recovery and
+            // rollback can re-enter the lane fact without consulting policy
+            // snapshots or shell caches.
+            input_recovery_lanes: Map<String, Enum<InputLane>>,
+            // Live admission authority witnesses minted by
+            // `ResolveAdmissionPlan`. Queue/steer/consume lifecycle
+            // transitions are guarded by these maps so shell projections
+            // cannot choose admission lane or terminal-on-accept behavior
+            // without generated approval.
+            admission_authorized_lanes: Map<String, Enum<InputLane>>,
+            admission_authorized_plans: Map<String, Enum<AdmissionPlanKind>>,
+            admission_authorized_existing_actions: Map<String, Enum<AdmissionExistingQueuedActionKind>>,
+            admission_authorized_existing_targets: Map<String, String>,
+            admission_idempotency_inputs: Map<String, String>,
+            // Recovered admission witnesses accepted by MeerkatMachine before
+            // shell recovery may re-materialize admission metadata. The lane
+            // map records the machine-validated queue/steer witness so
+            // RecoverInputLifecycle cannot write a different lane.
+            recovered_admitted_inputs: Set<String>,
+            recovered_admitted_lanes: Map<String, Enum<InputLane>>,
 
             // --- Ops lifecycle substate ---
             op_statuses: Map<String, Enum<OperationStatus>>,
             op_completion_seq: Map<String, u64>,
+            completion_sequence_claims: Set<u64>,
+            completion_feed_sequences: Map<String, u64>,
+            completion_feed_kinds: Map<String, Enum<OperationKind>>,
+            completion_feed_terminal_outcomes: Map<String, Enum<OperationTerminalOutcomeKind>>,
+            completion_feed_terminal_payload: Map<String, String>,
             // Terminal-outcome discriminant. Payload (result/error/reason)
             // rides on the companion `op_terminal_payload` map as JSON.
             op_terminal_outcomes: Map<String, Enum<OperationTerminalOutcomeKind>>,
             op_terminal_payload: Map<String, String>,
             op_kinds: Map<String, Enum<OperationKind>>,
+            op_sources: Map<String, OperationSource>,
             op_peer_ready: Map<String, bool>,
             op_progress_counts: Map<String, u64>,
             active_op_count: u64,
             wait_active: bool,
             wait_request_id: Option<WaitRequestId>,
+            wait_run_id: Option<RunId>,
             wait_operation_ids: Set<String>,
             wait_operation_id_tokens: Set<OperationId>,
             next_completion_seq: u64,
+            completion_agent_applied_cursor: u64,
+            completion_runtime_observed_cursor: u64,
+            completion_runtime_injected_cursor: u64,
+
+            // --- Surface request lifecycle substate ---
+            //
+            // Surface transports keep closures, task handles, and response
+            // writers as shell mechanics. Admission, cancellation,
+            // publication, completion, and terminal publish-vs-observation
+            // classification live here so REST/RPC/MCP cannot race local
+            // phase tables against generated runtime authority.
+            surface_request_phases: Map<String, Enum<SurfaceRequestPhase>>,
+            surface_request_terminal_policies: Map<String, Enum<SurfaceRequestTerminalPolicy>>,
+
+            // --- Live channel public result and lifecycle authority ---
+            //
+            // `live/open` presents a shell-minted channel id and session id
+            // for generated admission before the live host can materialize
+            // transport resources. The active channel/session binding below
+            // and the bound LLM identity below are the behavior authority;
+            // host maps are transport caches.
+            live_open_admission_sequence: u64,
+            live_active_channel_by_session: Map<String, String>,
+            live_channel_session_by_channel: Map<String, String>,
+            live_channel_identity_by_channel: Map<String, SessionLlmIdentity>,
+
+            // `live/refresh` observes adapter command-queue acceptance in the
+            // shell, then submits that observation here. The generated effect
+            // below owns the public `Queued` result class and the compatibility
+            // `refresh_enqueued` mirror.
+            live_refresh_result_sequence: u64,
+            live_refresh_queue_acceptance_sequence_by_channel: Map<String, u64>,
+            live_refresh_status_by_channel: Map<String, Enum<LiveRefreshPublicStatus>>,
+            live_close_result_sequence: u64,
+            live_close_observation_sequence_by_channel: Map<String, u64>,
+            live_close_status_by_channel: Map<String, Enum<LiveClosePublicStatus>>,
+            live_command_result_sequence: u64,
+            live_command_acceptance_sequence_by_channel: Map<String, u64>,
+            live_command_kind_by_channel: Map<String, Enum<LiveCommandPublicKind>>,
+            live_command_rejection_sequence: u64,
+            live_command_rejection_reason_by_channel: Map<String, Enum<LiveCommandRejectionReason>>,
+            live_command_rejection_public_error_class_by_channel: Map<String, Enum<LiveCommandRejectionPublicErrorClass>>,
+            live_channel_request_rejection_sequence: u64,
+            live_channel_request_rejection_reason_by_channel: Map<String, Enum<LiveChannelRequestRejectionReason>>,
+            live_channel_request_rejection_public_error_class_by_channel: Map<String, Enum<LiveChannelRequestRejectionPublicErrorClass>>,
+            live_webrtc_token_issue_sequence: u64,
+            live_webrtc_token_channel_by_token: Map<String, String>,
+            live_webrtc_token_expires_at_ms_by_token: Map<String, u64>,
+            live_webrtc_consumed_tokens: Set<String>,
+            live_webrtc_answer_admission_sequence: u64,
+            live_webrtc_answer_result_sequence: u64,
+            live_webrtc_answer_observation_sequence_by_channel: Map<String, u64>,
+            live_webrtc_answer_status_by_channel: Map<String, Enum<LiveWebrtcAnswerPublicStatus>>,
+            live_websocket_token_issue_sequence: u64,
+            live_websocket_token_channel_by_token: Map<String, String>,
+            live_websocket_token_expires_at_ms_by_token: Map<String, u64>,
+            live_websocket_consumed_tokens: Set<String>,
+            live_websocket_token_admission_sequence: u64,
+            live_channel_status_result_sequence: u64,
+            live_channel_status_observation_sequence_by_channel: Map<String, u64>,
+            live_channel_status_by_channel: Map<String, Enum<LiveChannelPublicStatus>>,
+
+            // --- RPC event-stream public result authority ---
+            //
+            // Routers own transport tasks and subscription handles only. The
+            // generated authority below owns stream open result truth, terminal
+            // notification class, and close result classification, including
+            // `already_closed`.
+            session_event_stream_open_result_sequence: u64,
+            session_event_stream_close_result_sequence: u64,
+            session_event_stream_terminal_sequence: u64,
+            active_session_event_streams: Set<String>,
+            closed_session_event_streams: Set<String>,
+            session_event_stream_session_ids: Map<String, String>,
+            mob_event_stream_open_result_sequence: u64,
+            mob_event_stream_close_result_sequence: u64,
+            mob_event_stream_terminal_sequence: u64,
+            active_mob_event_streams: Set<String>,
+            closed_mob_event_streams: Set<String>,
 
             // --- External tool surface substate ---
             known_surfaces: Set<String>,
@@ -1333,6 +2656,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             // responses we owe back to remote peers. Receiver-side guard
             // prevents duplicate replies on the same correlation id.
             inbound_peer_requests: Map<PeerCorrelationId, InboundPeerRequestState>,
+            // Machine-owned handling-mode default for inbound peer requests.
+            // The request's typed lane is recorded at the same generated
+            // authority transition that admits the inbound request, and removed
+            // when the reply terminalizes. Outbound `send_response` may project
+            // this value when the caller omits an explicit terminal response
+            // handling-mode override.
+            inbound_peer_request_lanes: Map<PeerCorrelationId, Enum<InputLane>>,
 
             // --- Session-context advancement (W2-E / issue #264) ---
             //
@@ -1384,6 +2714,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             peer_ingress_owner_kind: Enum<PeerIngressOwnerKind>,
             peer_ingress_comms_runtime_id: Option<CommsRuntimeId>,
             peer_ingress_mob_id: Option<MobId>,
+            // Public peer-ingress lifecycle/admission phase. The classified
+            // queue stores only a projection of this generated fact for
+            // snapshots; receive and dequeue observations must pass through
+            // `ResolvePeerIngressReceive` / `ResolvePeerIngressDequeue`.
+            peer_ingress_authority_phase: Enum<PeerIngressAuthorityPhaseClass>,
 
             // --- Supervisor-bridge authorization (Wave 3 D Row 21) ---
             //
@@ -1393,7 +2728,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             // task's stack; the companion trust edge was router-owned, so
             // the authorization discriminant had split ownership. Now the
             // DSL owns both the kind and the full canonical binding
-            // (`peer_id` + `name` + `address` + `epoch`); the trust edge
+            // (`peer_id` + `name` + `address` + `signing key` + `epoch`); the trust edge
             // in the router stays in lock-step via shell-side
             // `add_trusted_peer` / `remove_trusted_peer` calls that only
             // run after the DSL mutator accepts the corresponding
@@ -1405,17 +2740,28 @@ macro_rules! meerkat_catalog_machine_dsl {
             supervisor_bound_name: Option<String>,
             supervisor_bound_peer_id: Option<String>,
             supervisor_bound_address: Option<String>,
+            supervisor_bound_signing_public_key: Option<String>,
             supervisor_bound_epoch: Option<u64>,
+            supervisor_publish_pending_name: Option<String>,
+            supervisor_publish_pending_peer_id: Option<String>,
+            supervisor_publish_pending_address: Option<String>,
+            supervisor_publish_pending_signing_public_key: Option<String>,
+            supervisor_publish_pending_epoch: Option<u64>,
+            supervisor_revoke_pending_name: Option<String>,
+            supervisor_revoke_pending_peer_id: Option<String>,
+            supervisor_revoke_pending_address: Option<String>,
+            supervisor_revoke_pending_signing_public_key: Option<String>,
+            supervisor_revoke_pending_epoch: Option<u64>,
 
             // --- Track-B (R5): peer-projection state ---
             //
             // Identity-level wiring from MobMachine is projected onto
             // endpoint-level peer sets here. See the schema DSL
             // (`catalog::dsl::meerkat_machine`) for the full rationale;
-            // the `effective` trust set is derived as
-            // `direct_peer_endpoints ∪ mob_overlay_peer_endpoints` by
-            // the comms reconciliation handler (Commit 4) on receipt
-            // of `CommsTrustReconcileRequested`.
+            // the `effective` trust set is emitted with
+            // `CommsTrustReconcileRequested` so the comms reconciliation
+            // handler cannot supply peer-trust truth outside machine
+            // authority.
             //
             // `peer_projection_epoch` carries general effective-set
             // change freshness; `mob_overlay_epoch` is the overlay-
@@ -1433,8 +2779,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             session_id = None,
             active_runtime_id = None,
             active_fence_token = None,
+            active_runtime_generation = None,
+            active_runtime_epoch_id = None,
             current_run_id = None,
             pre_run_phase = None,
+            runtime_stop_deferred = false,
             turn_phase = TurnPhase::Ready,
             primitive_kind = None,
             admitted_content_shape = None,
@@ -1451,6 +2800,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             terminal_cause_kind = None,
             last_runtime_apply_failure_cause = None,
             last_runtime_apply_failure_message = None,
+            runtime_completion_result_run_id = None,
             extraction_attempts = 0,
             max_extraction_retries = 0,
             llm_retry_attempt = 0,
@@ -1476,30 +2826,68 @@ macro_rules! meerkat_catalog_machine_dsl {
             model_routing_pending_switch_phase = None,
             model_routing_switch_terminal = EmptyMap,
             model_routing_switch_denials = EmptyMap,
+            model_routing_switch_approval_reasons = EmptyMap,
             model_routing_image_operation_phases = EmptyMap,
             model_routing_image_operation_target_models = EmptyMap,
             model_routing_image_operation_realtime = EmptyMap,
             model_routing_image_operation_requires_scoped_override = EmptyMap,
+            model_routing_image_classified_terminals = EmptyMap,
+            model_routing_image_classified_provider_text = EmptyMap,
             model_routing_image_terminals = EmptyMap,
             model_routing_image_terminal_payloads = EmptyMap,
             model_routing_image_denials = EmptyMap,
+            model_routing_image_approval_reasons = EmptyMap,
+            model_routing_image_plan_denials = EmptyMap,
             model_routing_approval_phases = EmptyMap,
             model_routing_approval_parent_kind = EmptyMap,
             // Registration substate
             registration_phase = RegistrationPhase::Queuing,
+            staged_session_phase = StagedSessionPhase::NotStaged,
+            staged_session_id = None,
+            staged_session_keep_alive = None,
+            staged_session_llm_identity = None,
+            staged_session_machine_archived_resume_authorized = false,
+            current_session_llm_identity = None,
+            current_session_capability_surface = None,
+            current_session_capability_surface_status = SessionLlmCapabilitySurfaceStatus::Unresolved,
+            current_session_capability_base_filter = ToolFilter::All,
+            session_llm_reconfigure_previous_capability_surface = None,
+            session_llm_reconfigure_current_capability_surface = None,
+            session_llm_reconfigure_capability_changed = false,
+            session_llm_reconfigure_previous_capability_base_filter = ToolFilter::All,
+            session_llm_reconfigure_current_capability_base_filter = ToolFilter::All,
+            session_llm_reconfigure_committed_visible_set_changed = false,
+            session_llm_reconfigure_revision_bumped = false,
+            session_llm_reconfigure_active_visibility_revision = 0,
+            mob_operator_authority_present = false,
+            mob_operator_principal_token = None,
+            mob_operator_can_create_mobs = false,
+            mob_operator_can_mutate_profiles = false,
+            mob_operator_managed_mob_scope = EmptySet,
+            mob_operator_spawn_profile_scope = EmptyMap,
+            mob_operator_caller_provenance = None,
+            mob_operator_audit_invocation_id = None,
             // Comms drain substate
             drain_phase = DrainPhase::Inactive,
             drain_mode = None,
             // Visibility substate
             next_staged_visibility_revision = 0,
+            inherited_base_filter = ToolFilter::All,
             active_filter = ToolFilter::All,
             staged_filter = ToolFilter::All,
             active_visibility_revision = 0,
             staged_visibility_revision = 0,
             active_deferred_names = EmptySet,
             staged_deferred_names = EmptySet,
+            requested_visibility_witnesses = EmptyMap,
+            filter_visibility_witnesses = EmptyMap,
             active_deferred_authorities = EmptyMap,
             staged_deferred_authorities = EmptyMap,
+            deferred_visibility_authority_catalog = EmptyMap,
+            filter_visibility_authority_catalog = EmptyMap,
+            turn_tool_overlay_allow_active = false,
+            turn_tool_overlay_allow_names = EmptySet,
+            turn_tool_overlay_deny_names = EmptySet,
             // Input lifecycle substate
             input_phases = EmptyMap,
             input_terminal_kind = EmptyMap,
@@ -1508,25 +2896,98 @@ macro_rules! meerkat_catalog_machine_dsl {
             input_abandon_reason = EmptyMap,
             input_abandon_attempt_count = EmptyMap,
             input_attempt_counts = EmptyMap,
+            max_stage_attempts = 3,
             input_run_associations = EmptyMap,
             input_boundary_sequences = EmptyMap,
-            next_admission_seq = 0,
+            live_boundary_context_sequence_by_run = EmptyMap,
+            next_admission_seq = 1000000000,
+            next_priority_admission_seq = 999999999,
             input_admission_seq = EmptyMap,
             input_lane = EmptyMap,
+            input_recovery_lanes = EmptyMap,
+            admission_authorized_lanes = EmptyMap,
+            admission_authorized_plans = EmptyMap,
+            admission_authorized_existing_actions = EmptyMap,
+            admission_authorized_existing_targets = EmptyMap,
+            admission_idempotency_inputs = EmptyMap,
+            recovered_admitted_inputs = EmptySet,
+            recovered_admitted_lanes = EmptyMap,
             // Ops lifecycle substate
             op_statuses = EmptyMap,
             op_completion_seq = EmptyMap,
+            completion_sequence_claims = EmptySet,
+            completion_feed_sequences = EmptyMap,
+            completion_feed_kinds = EmptyMap,
+            completion_feed_terminal_outcomes = EmptyMap,
+            completion_feed_terminal_payload = EmptyMap,
             op_terminal_outcomes = EmptyMap,
             op_terminal_payload = EmptyMap,
             op_kinds = EmptyMap,
+            op_sources = EmptyMap,
             op_peer_ready = EmptyMap,
             op_progress_counts = EmptyMap,
             active_op_count = 0,
             wait_active = false,
             wait_request_id = None,
+            wait_run_id = None,
             wait_operation_ids = EmptySet,
             wait_operation_id_tokens = EmptySet,
             next_completion_seq = 0,
+            completion_agent_applied_cursor = 0,
+            completion_runtime_observed_cursor = 0,
+            completion_runtime_injected_cursor = 0,
+            // Surface request lifecycle substate
+            surface_request_phases = EmptyMap,
+            surface_request_terminal_policies = EmptyMap,
+            // Live refresh public result authority
+            live_refresh_result_sequence = 0,
+            live_open_admission_sequence = 0,
+            live_active_channel_by_session = EmptyMap,
+            live_channel_session_by_channel = EmptyMap,
+            live_channel_identity_by_channel = EmptyMap,
+            live_refresh_queue_acceptance_sequence_by_channel = EmptyMap,
+            live_refresh_status_by_channel = EmptyMap,
+            live_close_result_sequence = 0,
+            live_close_observation_sequence_by_channel = EmptyMap,
+            live_close_status_by_channel = EmptyMap,
+            live_command_result_sequence = 0,
+            live_command_acceptance_sequence_by_channel = EmptyMap,
+            live_command_kind_by_channel = EmptyMap,
+            live_command_rejection_sequence = 0,
+            live_command_rejection_reason_by_channel = EmptyMap,
+            live_command_rejection_public_error_class_by_channel = EmptyMap,
+            live_channel_request_rejection_sequence = 0,
+            live_channel_request_rejection_reason_by_channel = EmptyMap,
+            live_channel_request_rejection_public_error_class_by_channel = EmptyMap,
+            live_webrtc_token_issue_sequence = 0,
+            live_webrtc_token_channel_by_token = EmptyMap,
+            live_webrtc_token_expires_at_ms_by_token = EmptyMap,
+            live_webrtc_consumed_tokens = EmptySet,
+            live_webrtc_answer_admission_sequence = 0,
+            live_webrtc_answer_result_sequence = 0,
+            live_webrtc_answer_observation_sequence_by_channel = EmptyMap,
+            live_webrtc_answer_status_by_channel = EmptyMap,
+            live_websocket_token_issue_sequence = 0,
+            live_websocket_token_channel_by_token = EmptyMap,
+            live_websocket_token_expires_at_ms_by_token = EmptyMap,
+            live_websocket_consumed_tokens = EmptySet,
+            live_websocket_token_admission_sequence = 0,
+            live_channel_status_result_sequence = 0,
+            live_channel_status_observation_sequence_by_channel = EmptyMap,
+            live_channel_status_by_channel = EmptyMap,
+            // RPC event-stream public result authority
+            session_event_stream_open_result_sequence = 0,
+            session_event_stream_close_result_sequence = 0,
+            session_event_stream_terminal_sequence = 0,
+            active_session_event_streams = EmptySet,
+            closed_session_event_streams = EmptySet,
+            session_event_stream_session_ids = EmptyMap,
+            mob_event_stream_open_result_sequence = 0,
+            mob_event_stream_close_result_sequence = 0,
+            mob_event_stream_terminal_sequence = 0,
+            active_mob_event_streams = EmptySet,
+            closed_mob_event_streams = EmptySet,
+            // External tool surface substate
             known_surfaces = EmptySet,
             active_surfaces = EmptySet,
             visible_surfaces = EmptySet,
@@ -1552,17 +3013,30 @@ macro_rules! meerkat_catalog_machine_dsl {
             mcp_server_states = EmptyMap,
             pending_peer_requests = EmptyMap,
             inbound_peer_requests = EmptyMap,
+            inbound_peer_request_lanes = EmptyMap,
             last_session_context_updated_at_ms = 0,
             reserved_interaction_streams = EmptySet,
             attached_interaction_streams = EmptySet,
             peer_ingress_owner_kind = PeerIngressOwnerKind::Unattached,
             peer_ingress_comms_runtime_id = None,
             peer_ingress_mob_id = None,
+            peer_ingress_authority_phase = PeerIngressAuthorityPhaseClass::Absent,
             supervisor_binding_kind = SupervisorBindingKind::Unbound,
             supervisor_bound_name = None,
             supervisor_bound_peer_id = None,
             supervisor_bound_address = None,
+            supervisor_bound_signing_public_key = None,
             supervisor_bound_epoch = None,
+            supervisor_publish_pending_name = None,
+            supervisor_publish_pending_peer_id = None,
+            supervisor_publish_pending_address = None,
+            supervisor_publish_pending_signing_public_key = None,
+            supervisor_publish_pending_epoch = None,
+            supervisor_revoke_pending_name = None,
+            supervisor_revoke_pending_peer_id = None,
+            supervisor_revoke_pending_address = None,
+            supervisor_revoke_pending_signing_public_key = None,
+            supervisor_revoke_pending_epoch = None,
             // Track-B (R5): peer-projection state initialised empty.
             local_endpoint = None,
             direct_peer_endpoints = EmptySet,
@@ -1586,12 +3060,37 @@ macro_rules! meerkat_catalog_machine_dsl {
         input MeerkatMachineInput {
             // Direct inputs
             RegisterSession { session_id: SessionId },
-            UnregisterSession { session_id: SessionId },
+            UnregisterSession {
+                session_id: SessionId,
+                agent_runtime_id: Option<AgentRuntimeId>,
+                fence_token: Option<FenceToken>,
+                generation: Option<Generation>,
+                runtime_epoch_id: Option<RuntimeEpochId>,
+            },
+            ResolveRuntimeOpsLifecycleDurability {
+                session_id: SessionId,
+                agent_runtime_id: Option<AgentRuntimeId>,
+                fence_token: Option<FenceToken>,
+                generation: Option<Generation>,
+                runtime_epoch_id: Option<RuntimeEpochId>,
+            },
+            HydrateSessionLlmState {
+                current_identity: SessionLlmIdentity,
+                current_capability_surface: Option<SessionLlmCapabilitySurface>,
+                current_capability_surface_status: SessionLlmCapabilitySurfaceStatus,
+                current_capability_base_filter: ToolFilter,
+            },
             ReconfigureSessionLlmIdentity {
                 previous_identity: SessionLlmIdentity,
                 previous_visibility_state: SessionToolVisibilityState,
                 previous_capability_surface: Option<SessionLlmCapabilitySurface>,
                 previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus,
+                previous_capability_base_filter: ToolFilter,
+                view_image_tool_available: bool,
+                previous_view_image_visible: bool,
+                next_view_image_visible: bool,
+                previous_active_visibility_revision: u64,
+                previous_staged_visibility_revision: u64,
                 target_identity: SessionLlmIdentity,
                 target_capability_surface: SessionLlmCapabilitySurface,
                 next_visibility_state: SessionToolVisibilityState,
@@ -1599,13 +3098,38 @@ macro_rules! meerkat_catalog_machine_dsl {
                 next_active_visibility_revision: u64,
                 tool_visibility_delta: SessionToolVisibilityDelta,
             },
-            PrepareBindings { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId },
+            ClearSessionLlmState,
+            PrepareBindings {
+                agent_runtime_id: AgentRuntimeId,
+                fence_token: FenceToken,
+                generation: Option<Generation>,
+                runtime_epoch_id: Option<RuntimeEpochId>,
+                session_id: SessionId,
+            },
             SetPeerIngressContext { keep_alive: bool },
+            ResolvePeerIngressReceive {
+                kind: Enum<PeerIngressAdmittedKind>,
+                auth_required: bool,
+                auth_exempt: bool,
+                trusted: bool,
+                queued_work_present: bool,
+                queue_closed: bool,
+                queue_capacity_available: bool,
+            },
+            ResolvePeerIngressDequeue {
+                kind: Enum<PeerIngressAdmittedKind>,
+                auth: Enum<PeerIngressAuthClass>,
+                queued_work_remaining: bool,
+            },
             NotifyDrainExited { reason: Enum<DrainExitReason> },
             InterruptCurrentRun,
+            ResolveUserInterruptPublicResult {
+                observation: Enum<UserInterruptObservationKind>,
+                target_present: bool,
+                staged_promotion_busy: bool,
+            },
             CancelAfterBoundary { reason: String },
             StagePersistentFilter { filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness> },
-            RequestDeferredTools { authorities: Map<String, ToolVisibilityWitness> },
             PublishCommittedVisibleSet {
                 active_filter: ToolFilter,
                 staged_filter: ToolFilter,
@@ -1618,10 +3142,94 @@ macro_rules! meerkat_catalog_machine_dsl {
             },
             Recover,
             Retire { session_id: SessionId },
+            StageDeferredSession {
+                session_id: SessionId,
+                keep_alive: bool,
+                has_comms_name: bool,
+                llm_identity: SessionLlmIdentity,
+                machine_archived_resume_authorized: bool,
+            },
+            UpdateDeferredSessionKeepAlive {
+                session_id: SessionId,
+                keep_alive: bool,
+                has_comms_name: bool,
+            },
+            UpdateDeferredSessionLlmIdentity {
+                session_id: SessionId,
+                llm_identity: SessionLlmIdentity,
+            },
+            AuthorizeDeferredSessionSystemContextAppend { session_id: SessionId },
+            BeginDeferredSessionPromotion { session_id: SessionId },
+            AuthorizeDeferredSessionMachineArchivedResume { session_id: SessionId },
+            AbandonDeferredSessionPromotion { session_id: SessionId },
+            FinishDeferredSessionPromotion { session_id: SessionId },
+            BeginDeferredSessionArchive { session_id: SessionId },
+            RestoreDeferredSessionArchive { session_id: SessionId },
+            FinishDeferredSessionArchive { session_id: SessionId },
+            DropDeferredSession { session_id: SessionId },
+            ResolveMobOperatorCreateAuthority {
+                request_kind: Enum<MobOperatorAccessRequestKind>,
+                principal_token: OpaquePrincipalToken,
+                caller_provenance: Option<MobToolCallerProvenance>,
+                audit_invocation_id: Option<String>,
+            },
+            RestoreMobOperatorAuthority {
+                principal_token: OpaquePrincipalToken,
+                can_create_mobs: bool,
+                can_mutate_profiles: bool,
+                managed_mob_scope: Set<String>,
+                spawn_profile_scope: Map<String, Set<String>>,
+                caller_provenance: Option<MobToolCallerProvenance>,
+                audit_invocation_id: Option<String>,
+            },
+            SetMobOperatorProfileMutation {
+                allowed: bool,
+            },
+            SetMobOperatorCreateAuthority {
+                allowed: bool,
+            },
+            GrantMobOperatorManageMob {
+                mob_id: String,
+            },
+            SetMobOperatorSpawnProfilesInMob {
+                mob_id: String,
+                profiles: Set<String>,
+            },
             Reset,
             StopRuntimeExecutor { reason: String },
             RuntimeExecutorExited,
+            ResolveRuntimeCompletionResult {
+                run_id: Option<RunId>,
+                terminal: Enum<RuntimeCompletionTerminalObservation>,
+                finalization: Enum<RuntimeCompletionFinalizationObservation>,
+            },
+            ResolveRuntimeCompletionCleanup {
+                session_id: SessionId,
+                observation_session_id: SessionId,
+                observation_agent_runtime_id: Option<AgentRuntimeId>,
+                observation_fence_token: Option<FenceToken>,
+                observation_runtime_generation: Option<Generation>,
+                observation_runtime_epoch_id: Option<RuntimeEpochId>,
+                outcome: Enum<RuntimeCompletionObservedOutcome>,
+                archived_by_authority: bool,
+                live_session: Enum<RuntimeCompletionLiveSessionObservation>,
+            },
+            ResolveRuntimeCompletionWaitFailure {
+                session_id: SessionId,
+                failure: Enum<RuntimeCompletionWaitFailureObservation>,
+            },
             Destroy { session_id: SessionId },
+            RecoverRuntimeAuthority {
+                session_id: SessionId,
+                state: Enum<RuntimeLifecycleObservedState>,
+                agent_runtime_id: Option<AgentRuntimeId>,
+                fence_token: Option<FenceToken>,
+                runtime_generation: Option<Generation>,
+                runtime_epoch_id: Option<RuntimeEpochId>,
+                current_run_id: Option<RunId>,
+                pre_run_phase: Option<Enum<PreRunPhase>>,
+                silent_intent_overrides: Set<String>,
+            },
             // Absorbed inputs
             EnsureSessionWithExecutor { session_id: SessionId },
             SetSilentIntents { session_id: SessionId, intents: Set<String> },
@@ -1634,7 +3242,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             Abort { session_id: SessionId },
             AbortAll,
             Wait { session_id: SessionId },
-            Ingest { runtime_id: AgentRuntimeId, work_id: WorkId, origin: Enum<WorkOrigin> },
+            Ingest {
+                session_id: SessionId,
+                runtime_id: AgentRuntimeId,
+                fence_token: FenceToken,
+                generation: Option<Generation>,
+                runtime_epoch_id: Option<RuntimeEpochId>,
+                work_id: WorkId,
+                origin: Enum<WorkOrigin>,
+            },
             PublishEvent { kind: String },
             RuntimeState { runtime_id: String },
             ModelRoutingStatus { session_id: SessionId },
@@ -1647,6 +3263,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 requires_approval: bool,
                 approval_available: bool,
                 approval_denied: bool,
+                approval_reason: Option<Enum<RoutingSwitchApprovalReason>>,
                 realtime_detach_allowed: bool,
             },
             RequestUntilChangedSwitchTurn {
@@ -1656,6 +3273,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 requires_approval: bool,
                 approval_available: bool,
                 approval_denied: bool,
+                approval_reason: Option<Enum<RoutingSwitchApprovalReason>>,
                 realtime_detach_allowed: bool,
             },
             CompleteUntilChangedSwitchTurnReconfigure { request_id: String },
@@ -1667,15 +3285,145 @@ macro_rules! meerkat_catalog_machine_dsl {
                 requires_approval: bool,
                 approval_available: bool,
                 approval_denied: bool,
+                approval_reason: Option<Enum<RoutingImageApprovalReason>>,
                 realtime_detach_allowed: bool,
                 requires_scoped_override: bool,
             },
+            DenyImageOperationPlan {
+                operation_id: String,
+                reason: Enum<RoutingImagePlanDenialReason>,
+                terminal_payload: String,
+            },
             ActivateImageOperationOverride { operation_id: String, target_model: String, target_realtime_capable: bool },
+            ClassifyImageOperationTerminal {
+                operation_id: String,
+                observation: Enum<RoutingImageTerminalObservation>,
+                http_status_code: Option<u64>,
+                error_code: Enum<RoutingImageProviderErrorCode>,
+                provider_text: Enum<RoutingProviderTextDisposition>,
+            },
             CompleteImageOperation { operation_id: String, terminal: Enum<RoutingImageTerminal>, terminal_payload: String },
             RestoreImageOperationOverride { operation_id: String },
             LoadBoundaryReceipt { runtime_id: String, sequence: u64 },
             AcceptWithCompletion { input_id: InputId, request_immediate_processing: bool, interrupt_yielding: bool, wake_if_idle: bool },
             AcceptWithoutWake { input_id: InputId },
+            ResolveLiveBoundaryContextReceipt { run_id: RunId, input_id: String },
+            ResolveAdmissionPlan {
+                input_id: String,
+                input_kind: Enum<AdmissionInputKind>,
+                requested_lane: Option<Enum<InputLane>>,
+                continuation_kind: Enum<AdmissionContinuationKind>,
+                silent_intent_match: bool,
+                existing_superseded_input_id: Option<String>,
+                runtime_running: bool,
+                active_turn_boundary_available: bool,
+                without_wake: bool,
+            },
+            ResolveAdmissionValidation {
+                input_id: String,
+                input_kind: Enum<AdmissionInputKind>,
+                input_origin: Enum<AdmissionInputOriginKind>,
+                durability: Enum<InputDurabilityKind>,
+                peer_handling_mode_valid: bool,
+                peer_response_terminal_structurally_valid: bool,
+                peer_response_terminal_observed_status: Enum<PeerResponseTerminalObservedStatus>,
+            },
+            ResolveAdmissionIdempotency { input_id: String, idempotency_key: Option<String> },
+            RegisterAcceptedIdempotency { input_id: String, idempotency_key: String },
+            NormalizeRecoveredInputLifecycle {
+                input_id: String,
+                phase: Enum<RecoveredInputObservedPhase>,
+                applied_boundary_committed: Option<bool>,
+            },
+            ClassifyRecoveredInputDurability {
+                input_id: String,
+                durability: Enum<InputDurabilityKind>,
+            },
+            ResolveInputPublicLifecycle {
+                input_id: String,
+                phase: Enum<RecoveredInputObservedPhase>,
+            },
+            ResolveInputPublicTerminalOutcome {
+                input_id: String,
+                phase: Enum<RecoveredInputObservedPhase>,
+                terminal_kind: Option<Enum<InputTerminalKind>>,
+                abandon_reason: Option<Enum<InputAbandonReason>>,
+            },
+            ClassifyInputTerminality {
+                input_id: String,
+                phase: Enum<RecoveredInputObservedPhase>,
+                terminal_kind: Option<Enum<InputTerminalKind>>,
+                abandon_reason: Option<Enum<InputAbandonReason>>,
+            },
+            // Surface-result classification authority. The agent loop reports
+            // only the typed terminal `(outcome, cause)` facts; the machine owns
+            // the projection from those facts onto the public surface-result
+            // class. `ClassifyTurnTerminalCauseClass` normalizes the closed
+            // cause enum (plus the absent cause) into `TerminalCauseClass`, and
+            // `ResolveTurnSurfaceResult` classifies the `(outcome, class)` pair.
+            ClassifyTurnTerminalCauseClass {
+                cause_kind: Option<Enum<TurnTerminalCauseKind>>,
+            },
+            // Turn-terminality classification. This machine owns the turn_phase
+            // field; the terminality verdict (which turn phases are terminal) is a
+            // machine fact. The shell extracts no fact — it drives this input over
+            // the recovered machine state and mirrors the emitted
+            // TurnTerminalityClassified.terminal, failing closed.
+            ClassifyTurnTerminality {},
+            // P0 Dogma Invariant 1: LLM-failure recovery classification. The
+            // recoverable-vs-fatal AND exhaustion verdict for an LLM call
+            // failure is a machine-owned conclusion, not a unilateral shell
+            // decision. The agent loop EXTRACTS a typed `failure_kind` from the
+            // `AgentError` (absent when the error yields no recoverable kind)
+            // and the one-based `retry_attempt` / `max_retries`, then drives
+            // this input. The machine owns whether the failure may `Recover`
+            // (recoverable kind with retries remaining), is `Exhausted`
+            // (recoverable kind past `max_retries`), or is `Fatal` (no
+            // recoverable kind). The loop mirrors the verdict: `Recover` drives
+            // the existing RecoverableFailure/RetryRequested path; `Exhausted`
+            // and `Fatal` take the existing FatalFailure + return-Err path. The
+            // backoff DELAY mechanics remain shell policy. Fails closed to
+            // `Fatal`.
+            ClassifyLlmFailureRecovery {
+                failure_kind: Option<Enum<LlmRetryFailureKind>>,
+                retry_attempt: u64,
+                max_retries: u64,
+            },
+            ResolveTurnSurfaceResult {
+                outcome: Enum<TurnTerminalOutcome>,
+                cause_class: Enum<TerminalCauseClass>,
+            },
+            AuthorizeStoredInputStateSeed {
+                input_id: String,
+                phase: Enum<RecoveredInputObservedPhase>,
+                terminal_kind: Option<Enum<InputTerminalKind>>,
+                superseded_by: Option<String>,
+                aggregate_id: Option<String>,
+                abandon_reason: Option<Enum<InputAbandonReason>>,
+                abandon_attempt_count: u64,
+                attempt_count: u64,
+                run_id: Option<String>,
+                boundary_sequence: Option<u64>,
+                admission_sequence: Option<u64>,
+                recovery_lane: Option<Enum<InputLane>>,
+            },
+            ClassifyRuntimeLifecycleState {
+                state: Enum<RuntimeLifecycleObservedState>,
+            },
+            ClassifyRuntimeLifecycleDurability {
+                state: Enum<RuntimeLifecycleObservedState>,
+            },
+            ClassifyRuntimeLoopQueueAdmission {
+                state: Enum<RuntimeLifecycleObservedState>,
+                current_run_bound: bool,
+            },
+            ResolveVisibleRuntimePhase {
+                dsl_phase: Enum<RuntimeLifecycleObservedState>,
+                dsl_pre_run_phase: Option<Enum<RuntimeLifecycleObservedState>>,
+                control_phase: Enum<RuntimeLifecycleObservedState>,
+                control_pre_run_phase: Option<Enum<RuntimeLifecycleObservedState>>,
+                has_runtime_persistence: bool,
+            },
             Prepare { session_id: SessionId, run_id: RunId },
             Commit { input_id: InputId, run_id: RunId },
             Fail { run_id: RunId },
@@ -1692,35 +3440,44 @@ macro_rules! meerkat_catalog_machine_dsl {
             },
             StartImmediateAppend { run_id: RunId },
             StartImmediateContext { run_id: RunId },
-            PrimitiveApplied,
-            LlmReturnedToolCalls { tool_count: u64 },
-            LlmReturnedTerminal,
-            RegisterPendingOps { op_refs: Set<String>, barrier_operation_ids: Set<String> },
-            ToolCallsResolved,
-            OpsBarrierSatisfied { operation_ids: Set<String> },
-            BoundaryContinue,
-            BoundaryComplete,
-            EnterExtraction { max_extraction_retries: u64 },
-            ExtractionStart,
-            ExtractionValidationPassed,
-            ExtractionValidationFailed { error: String },
-            ExtractionFailed { error: String },
+            PrimitiveApplied { run_id: RunId },
+            LlmReturnedToolCalls { run_id: RunId, tool_count: u64 },
+            LlmReturnedTerminal { run_id: RunId },
+            RegisterPendingOps {
+                run_id: RunId,
+                op_refs: Set<String>,
+                barrier_operation_ids: Set<String>,
+            },
+            ToolCallsResolved { run_id: RunId },
+            OpsBarrierSatisfied { run_id: RunId, operation_ids: Set<String> },
+            BoundaryContinue { run_id: RunId },
+            BoundaryComplete { run_id: RunId },
+            EnterExtraction { run_id: RunId, max_extraction_retries: u64 },
+            ExtractionStart { run_id: RunId },
+            ExtractionValidationPassed { run_id: RunId },
+            ExtractionValidationFailed { run_id: RunId, error: String },
+            ExtractionFailed { run_id: RunId, error: String },
             RecoverableFailure {
+                run_id: RunId,
                 failure_kind: Enum<LlmRetryFailureKind>,
                 retry_attempt: u64,
                 max_retries: u64,
                 selected_delay_ms: u64,
                 error: String,
             },
-            FatalFailure { terminal_cause_kind: Enum<TurnTerminalCauseKind>, error: String },
-            RetryRequested { retry_attempt: u64 },
-            CancelNow,
-            RequestCancelAfterBoundary,
-            CancellationObserved,
-            AcknowledgeTerminal { outcome: Enum<TurnTerminalOutcome> },
-            TurnLimitReached,
-            BudgetExhausted,
-            TimeBudgetExceeded,
+            FatalFailure {
+                run_id: RunId,
+                terminal_failure_source: Enum<RunFailureSourceKind>,
+                error: String,
+            },
+            RetryRequested { run_id: RunId, retry_attempt: u64 },
+            CancelNow { run_id: RunId },
+            RequestCancelAfterBoundary { run_id: RunId },
+            CancellationObserved { run_id: RunId },
+            AcknowledgeTerminal { run_id: RunId, outcome: Enum<TurnTerminalOutcome> },
+            TurnLimitReached { run_id: RunId },
+            BudgetExhausted { run_id: RunId },
+            TimeBudgetExceeded { run_id: RunId },
             ForceCancelNoRun,
             RunCompleted { run_id: RunId },
             ServiceTurnCommitted { run_id: RunId },
@@ -1728,12 +3485,20 @@ macro_rules! meerkat_catalog_machine_dsl {
                 run_id: RunId,
                 runtime_apply_failure_cause: Option<Enum<RuntimeApplyFailureCause>>,
                 runtime_apply_failure_message: Option<String>,
-                terminal_outcome: Enum<TurnTerminalOutcome>,
-                terminal_cause_kind: Enum<TurnTerminalCauseKind>,
+                machine_terminal_failure_observed: bool,
+                terminal_failure_source: Option<Enum<RunFailureSourceKind>>,
                 error: String,
             },
             RunCancelled { run_id: RunId },
             // Input lifecycle inputs
+            RecoverAdmittedInput {
+                input_id: String,
+                input_kind: Enum<RecoveredInputKind>,
+                runtime_boundary: Enum<RecoveredRunApplyBoundary>,
+                runtime_execution_kind: Enum<RecoveredRuntimeExecutionKind>,
+                runtime_peer_response_terminal_apply_intent: Option<Enum<RecoveredPeerResponseTerminalApplyIntent>>,
+                lane: Enum<InputLane>,
+            },
             RecoverInputLifecycle {
                 input_id: String,
                 phase: Enum<InputPhase>,
@@ -1745,14 +3510,20 @@ macro_rules! meerkat_catalog_machine_dsl {
                 attempt_count: u64,
                 run_id: Option<String>,
                 boundary_sequence: Option<u64>,
+                admission_sequence: Option<u64>,
+                admission_sequence_recovery: Option<Enum<RecoveredInputNormalizationReasonKind>>,
+                recovery_lane: Option<Enum<InputLane>>,
                 lane: Option<Enum<InputLane>>,
             },
             QueueAccepted { input_id: String },
             SteerAccepted { input_id: String },
             ChangeLane { input_id: String, new_lane: Enum<InputLane> },
+            PrioritizeInput { input_id: String },
+            DeferInputBehindBacklog { input_id: String },
             StageForRun { input_id: String, run_id: String },
             IncrementAttemptCount { input_id: String },
             RollbackStaged { input_id: String, lane: Enum<InputLane> },
+            ResolveStagedRollback { input_id: String, lane: Enum<InputLane> },
             MarkApplied { input_id: String },
             MarkAppliedPendingConsumption { input_id: String },
             ConsumeInput { input_id: String },
@@ -1771,7 +3542,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             // `OperationTerminalOutcome` encoded as JSON by the shell. The
             // DSL does not parse the payload; it only tracks the closed-set
             // discriminant so guards can reason about it.
-            RegisterOp { operation_id: String, kind: Enum<OperationKind> },
+            RegisterOp {
+                operation_id: String,
+                kind: Enum<OperationKind>,
+                source: Option<OperationSource>,
+                max_concurrent: Option<u64>,
+            },
             StartOp { operation_id: String },
             CompleteOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
             FailOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
@@ -1782,39 +3558,228 @@ macro_rules! meerkat_catalog_machine_dsl {
             RetireRequestedOp { operation_id: String },
             RetireCompletedOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
             TerminateOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
-            RequestWaitAll { wait_request_id: WaitRequestId, operation_ids: Set<String>, operation_id_tokens: Set<OperationId> },
-            SatisfyWaitAll { wait_request_id: WaitRequestId, operation_id_tokens: Set<OperationId> },
+            ResolveOpLifecycleTransitionRejection {
+                operation_id: String,
+                action: Enum<OpLifecycleActionKind>,
+            },
+            RecoverOpRecord {
+                operation_id: String,
+                status: Enum<OperationStatus>,
+                kind: Enum<OperationKind>,
+                source: Option<OperationSource>,
+                peer_ready: bool,
+                progress_count: u64,
+                terminal_outcome: Option<Enum<OperationTerminalOutcomeKind>>,
+                terminal_payload: Option<String>,
+                completion_sequence: Option<u64>,
+            },
+            ClassifyOperationTerminality {
+                operation_id: String,
+                status: Enum<OperationStatus>,
+            },
+            ClassifyOperationPublicResult {
+                operation_id: String,
+                status: Enum<OperationStatus>,
+            },
+            ClassifyOperationTransitionIdempotence {
+                operation_id: String,
+                action: Enum<OpLifecycleActionKind>,
+                status: Enum<OperationStatus>,
+            },
+            ClassifyOperationCompletionFeed {
+                operation_id: String,
+                kind: Enum<OperationKind>,
+            },
+            ClassifyOperationCompletionWake {
+                operation_id: String,
+                kind: Enum<OperationKind>,
+            },
+            ClassifyOperationDurability {
+                operation_id: String,
+                kind: Enum<OperationKind>,
+            },
+            ClassifyRecoveredOperationRecord {
+                operation_id: String,
+                status: Enum<OperationStatus>,
+                kind: Enum<OperationKind>,
+                terminal_outcome_present: bool,
+                terminal_payload_present: bool,
+                completion_sequence_present: bool,
+            },
+            RecoverCompletionFeedEntry {
+                operation_id: String,
+                kind: Enum<OperationKind>,
+                terminal_outcome: Enum<OperationTerminalOutcomeKind>,
+                terminal_payload: String,
+                completion_sequence: u64,
+            },
+            RecoverOpsCompletionCursor { next_completion_seq: u64 },
+            RecoverCompletionConsumerCursors {
+                agent_applied_cursor: u64,
+                runtime_observed_cursor: u64,
+                runtime_injected_cursor: u64,
+            },
+            AdvanceAgentCompletionCursor { cursor: u64 },
+            AdvanceRuntimeObservedCompletionCursor { cursor: u64 },
+            AdvanceRuntimeInjectedCompletionCursor { cursor: u64 },
+            EvictCompletedOp { operation_id: String },
+            CollectCompletedOp { operation_id: String },
+            ResolveWaitAllAdmission {
+                wait_request_id: WaitRequestId,
+                operation_id_sequence: Seq<String>,
+                operation_ids: Set<String>,
+                operation_id_tokens: Set<OperationId>,
+                operation_token_by_id: Map<String, OperationId>,
+                operation_id_by_token: Map<OperationId, String>,
+                duplicate_operation_id: Option<String>,
+                not_found_operation_id: Option<String>,
+            },
+            RequestWaitAll {
+                run_id: RunId,
+                wait_request_id: WaitRequestId,
+                operation_id_sequence: Seq<String>,
+                operation_ids: Set<String>,
+                operation_id_tokens: Set<OperationId>,
+                operation_token_by_id: Map<String, OperationId>,
+                operation_id_by_token: Map<OperationId, String>,
+            },
+            SatisfyWaitAll {
+                wait_request_id: WaitRequestId,
+                run_id: RunId,
+                operation_id_tokens: Set<OperationId>,
+            },
             CancelWaitAll,
+            // Surface request lifecycle inputs. These are fed by REST/RPC/MCP
+            // executors after their route/catalog layer has supplied typed
+            // request semantics.
+            AdmitSurfaceRequest {
+                request_key: String,
+                terminal_policy: Enum<SurfaceRequestTerminalPolicy>,
+            },
+            ClassifySurfaceRequestTerminal { request_key: String, success: bool },
+            CancelSurfaceRequest { request_key: String },
+            PublishSurfaceRequest { request_key: String },
+            PublishOrCancelSurfaceRequest { request_key: String },
+            FinishSurfaceRequestUnpublished { request_key: String },
+            ResolveLiveOpenAdmission {
+                session_id: String,
+                channel_id: String,
+                llm_identity: SessionLlmIdentity,
+            },
+            AbandonLiveOpenAdmission { session_id: String, channel_id: String },
+            RecordLiveRefreshQueued { channel_id: String, queue_acceptance_sequence: u64 },
+            RecordLiveCloseClosed { session_id: String, channel_id: String, close_observation_sequence: u64 },
+            RecordLiveCommandAccepted {
+                channel_id: String,
+                command: Enum<LiveCommandPublicKind>,
+                command_acceptance_sequence: u64,
+            },
+            RecordLiveCommandRejected {
+                channel_id: String,
+                command: Enum<LiveCommandPublicKind>,
+                rejection: Enum<LiveCommandRejectionReason>,
+            },
+            RecordLiveChannelRequestRejected {
+                channel_id: String,
+                request: Enum<LiveChannelRequestPublicKind>,
+                rejection: Enum<LiveChannelRequestRejectionReason>,
+            },
+            RecordLiveWebrtcTokenIssued {
+                session_id: String,
+                channel_id: String,
+                token: String,
+                issued_at_ms: u64,
+                ttl_ms: u64,
+            },
+            ResolveLiveWebrtcAnswerAdmission {
+                session_id: String,
+                channel_id: String,
+                token: String,
+                observed_at_ms: u64,
+            },
+            RecordLiveWebrtcAnswerAccepted {
+                session_id: String,
+                channel_id: String,
+                answer_observation_sequence: u64,
+            },
+            RecordLiveWebsocketTokenIssued {
+                session_id: String,
+                channel_id: String,
+                token: String,
+                issued_at_ms: u64,
+                ttl_ms: u64,
+            },
+            ResolveLiveWebsocketTokenAdmission {
+                session_id: String,
+                channel_id: String,
+                token: String,
+                observed_at_ms: u64,
+            },
+            RecordSessionEventStreamOpened { stream_id: String, session_id: String },
+            RecordSessionEventStreamTerminated {
+                stream_id: String,
+                observation: Enum<RpcEventStreamTerminalObservationKind>,
+                detail: Option<String>,
+            },
+            ResolveSessionEventStreamClose { stream_id: String },
+            RecordMobEventStreamOpened { stream_id: String },
+            RecordMobEventStreamTerminated {
+                stream_id: String,
+                observation: Enum<RpcEventStreamTerminalObservationKind>,
+                detail: Option<String>,
+            },
+            ResolveMobEventStreamClose { stream_id: String },
+            RecordLiveChannelStatus {
+                channel_id: String,
+                status: Enum<LiveChannelPublicStatus>,
+                status_observation_sequence: u64,
+                degradation_reason: Option<Enum<LiveChannelDegradationReason>>,
+                degradation_detail: Option<String>,
+            },
             // Comms drain inputs
             SpawnDrain { mode: DrainMode },
             StopDrain,
-            DrainExitedClean,
-            DrainExitedRespawnable,
             // Visibility inputs
             // Dogma round 4, wave 2b #12: `StageVisibilityFilter` no longer
             // accepts a revision parameter — the DSL mints it via
             // `next_staged_visibility_revision` in the transition's update.
-            StageVisibilityFilter { filter: ToolFilter },
+            StageVisibilityFilter {
+                filter: ToolFilter,
+                witnesses: Map<String, ToolVisibilityWitness>,
+            },
+            ReplaceFilterToolAuthorityCatalog { catalog: Map<String, ToolVisibilityWitness> },
             CommitVisibilityFilter { filter: ToolFilter, revision: u64 },
             StageDeferredNames { names: Set<String> },
+            RequestDeferredTools { authorities: Map<String, ToolVisibilityWitness> },
+            ReplaceDeferredToolAuthorityCatalog { catalog: Map<String, ToolVisibilityWitness> },
             CommitDeferredNames { authorities: Map<String, ToolVisibilityWitness> },
-            // Sync the DSL monotonic staged-revision counter to at least the
-            // max of externally-installed active/staged revisions. Fired
-            // from the shell's `replace_visibility_state` path (recovery
-            // and LLM-reconfigure hot-swap), so subsequent
-            // `StageVisibilityFilter` / `StageDeferredNames` mints advance
-            // from the already-durable high-water mark rather than 0 —
-            // preserving `max(active, staged)`-advance across external
-            // state installs.
+            SetTurnToolOverlay {
+                allow_active: bool,
+                allow_names: Set<String>,
+                deny_names: Set<String>,
+            },
+            ClearTurnToolOverlay,
+            // Generated authority for full visibility-state replacement. The
+            // name is retained for compatibility with older schema artifacts;
+            // the transition now admits filters, witnesses, deferred authority
+            // maps, and revision high-water marks before any shell projection
+            // may be overwritten.
             SyncVisibilityRevisions {
+                capability_base_filter: ToolFilter,
+                inherited_base_filter: ToolFilter,
+                active_filter: ToolFilter,
+                staged_filter: ToolFilter,
                 active_revision: u64,
                 staged_revision: u64,
                 active_deferred_names: Set<String>,
                 staged_deferred_names: Set<String>,
+                requested_witnesses: Map<String, ToolVisibilityWitness>,
+                filter_witnesses: Map<String, ToolVisibilityWitness>,
                 active_deferred_authorities: Map<String, ToolVisibilityWitness>,
                 staged_deferred_authorities: Map<String, ToolVisibilityWitness>,
             },
             SurfaceRegister { surface_id: String },
+            SurfaceSetRemovalTimeout { timeout_ms: u64 },
             SurfaceStageAdd { surface_id: String, now_ms: u64 },
             SurfaceStageRemove { surface_id: String, now_ms: u64 },
             SurfaceStageReload { surface_id: String, now_ms: u64 },
@@ -1855,8 +3820,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             PeerRequestSent { corr_id: PeerCorrelationId, to: String },
             PeerResponseProgressArrived { corr_id: PeerCorrelationId },
             PeerResponseTerminalArrived { corr_id: PeerCorrelationId, disposition: PeerTerminalDisposition },
+            PeerResponseRejected { corr_id: PeerCorrelationId },
             PeerRequestTimedOut { corr_id: PeerCorrelationId },
-            PeerRequestReceived { corr_id: PeerCorrelationId },
+            PeerRequestReceived { corr_id: PeerCorrelationId, handling_mode: Enum<InputLane> },
             PeerResponseReplied { corr_id: PeerCorrelationId },
             // Session-context advancement input (W2-E). Shell fires this at every
             // site that mutates canonical session truth (prompt append, external
@@ -1890,25 +3856,68 @@ macro_rules! meerkat_catalog_machine_dsl {
             DetachIngress,
             // Supervisor-bridge authorization (Wave 3 D Row 21).
             //
-            // `BindSupervisor` establishes the initial binding from the
-            // `Unbound` state. `AuthorizeSupervisor` rotates an already
-            // `Bound` binding — the shell enforces the "new supervisor must
-            // be authorized by the current supervisor" gate via
-            // sender-authentication on the incoming request before firing
-            // this input. `RevokeSupervisor` tears the binding down and
-            // returns to `Unbound`; the `epoch` and `peer_id` arguments
-            // must match the current binding so a stale revoke cannot
-            // clear a rotated binding.
+            // `ResolveSupervisorBindAdmission` and
+            // `ResolveSupervisorAuthorizeAdmission` classify bridge
+            // admission against canonical supervisor binding truth before
+            // the shell emits wire replies or mutates trust. `BindSupervisor`
+            // establishes the initial binding from the `Unbound` state.
+            // `AuthorizeSupervisor` rotates an already `Bound` binding after
+            // generated admission has accepted the current supervisor as the
+            // sender. `RevokeSupervisor` tears the binding down and returns
+            // to `Unbound`; the `epoch` and `peer_id` arguments must match
+            // the current binding so a stale revoke cannot clear a rotated
+            // binding.
+            ResolveSupervisorBindAdmission {
+                supervisor_peer_id: String,
+                supervisor_epoch: u64,
+                sender_peer_id: Option<String>,
+            },
+            // Material `BindMember` admission: the transport/identity equality
+            // verdict the shell previously decided inline (advertised-address
+            // match, raw supervisor-peer sender match, expected runtime peer-id
+            // match, bootstrap-token match). The shell supplies the four pure
+            // boolean observations it already computes; the machine emits the
+            // typed verdict in the same precedence order the shell short-circuited.
+            ResolveSupervisorBindMaterialAdmission {
+                address_matches: bool,
+                sender_matches_supervisor: bool,
+                expected_peer_id_matches: bool,
+                bootstrap_token_matches: bool,
+            },
+            // Transcript-edit session-liveness admission: the `SESSION_BUSY`
+            // disjunction the shell previously decided inline (a session is busy
+            // for fork / rewrite / restore iff its runtime is running OR it holds
+            // any active inputs). The shell supplies the two pure boolean
+            // observations it already computes (`runtime_running`,
+            // `has_active_inputs`); the machine emits the typed verdict.
+            ResolveTranscriptEditAdmission {
+                runtime_running: bool,
+                has_active_inputs: bool,
+            },
+            ResolveSupervisorAuthorizeAdmission {
+                supervisor_peer_id: String,
+                supervisor_epoch: u64,
+                sender_peer_id: Option<String>,
+            },
             BindSupervisor {
                 name: String,
                 peer_id: String,
                 address: String,
+                signing_public_key: String,
                 epoch: u64,
             },
             AuthorizeSupervisor {
                 name: String,
                 peer_id: String,
                 address: String,
+                signing_public_key: String,
+                epoch: u64,
+            },
+            RequestSupervisorTrustPublish {
+                name: String,
+                peer_id: String,
+                address: String,
+                signing_public_key: String,
                 epoch: u64,
             },
             RevokeSupervisor {
@@ -1926,11 +3935,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             // `BindSupervisor` / `AuthorizeSupervisor` / `RevokeSupervisor`
             // DSL commit, then stages one of these four inputs carrying
             // the `epoch` observed on the producer effect. The
-            // transitions guard on `peer_id` and `epoch` matching the
-            // current `supervisor_bound_*` binding, so a stale ack for
-            // epoch `N - 1` arriving after the binding has rotated to
-            // epoch `N` is rejected by the DSL without clearing the
-            // outstanding obligation.
+            // publish feedback guards on the current `supervisor_bound_*`
+            // binding. Revoke feedback guards on the pending revoke
+            // obligation recorded by `RevokeSupervisor`, so live trust
+            // removal happens only after the generated revoke effect and
+            // failure feedback can restore the binding.
             SupervisorTrustEdgePublished {
                 peer_id: String,
                 epoch: u64,
@@ -1962,6 +3971,22 @@ macro_rules! meerkat_catalog_machine_dsl {
             },
             RemoveDirectPeerEndpoint {
                 endpoint: PeerEndpoint,
+            },
+            ResolveSupervisorBridgeCommandAdmission {
+                supervisor_peer_id: String,
+                supervisor_epoch: u64,
+                sender_peer_id: Option<String>,
+            },
+            AuthorizeSupervisorMobPeerOverlay {
+                supervisor_peer_id: String,
+                supervisor_epoch: u64,
+                recipient_peer_id: String,
+                overlay_epoch: u64,
+                endpoints: Set<PeerEndpoint>,
+                endpoint_count: u64,
+                command_peer_id: String,
+                command_endpoint: PeerEndpoint,
+                command_kind: Enum<MobPeerOverlayCommandKind>,
             },
             ApplyMobPeerOverlay {
                 epoch: u64,
@@ -1995,6 +4020,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 response_status: Enum<PeerIngressResponseStatus>,
                 in_reply_to: String,
             },
+            ClassifyPeerResponseReply { status: Enum<PeerIngressResponseStatus> },
             ClassifyPlainEvent { source_name: String },
             EnsureDrainRunning,
         }
@@ -2005,6 +4031,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             RuntimeDestroyed { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             TurnRunStarted { run_id: RunId },
             TurnBoundaryApplied { run_id: RunId, boundary_sequence: u64 },
+            LiveBoundaryContextReceiptResolved {
+                run_id: RunId,
+                input_id: String,
+                boundary: Enum<AdmissionRunApplyBoundary>,
+                boundary_sequence: u64,
+            },
             TurnRunCompleted { run_id: RunId, outcome: Enum<TurnTerminalOutcome> },
             // `error` is a display message projection. The terminal cause is
             // carried by `terminal_cause_kind`, not inferred from this string.
@@ -2026,12 +4058,51 @@ macro_rules! meerkat_catalog_machine_dsl {
             // as human-readable context.
             RuntimeNotice { kind: Enum<RuntimeNoticeKind>, detail: String },
             RuntimeEffectFact { kind: Enum<RuntimeEffectKind>, reason: String },
+            RuntimeCompletionResultResolved {
+                session_id: SessionId,
+                agent_runtime_id: Option<AgentRuntimeId>,
+                fence_token: Option<FenceToken>,
+                runtime_generation: Option<Generation>,
+                runtime_epoch_id: Option<RuntimeEpochId>,
+                run_id: Option<RunId>,
+                result_class: Enum<RuntimeCompletionResultClass>,
+                cleanup_outcome: Enum<RuntimeCompletionObservedOutcome>,
+            },
+            RuntimeCompletionCleanupResolved {
+                session_id: SessionId,
+                action: Enum<RuntimeCompletionCleanupAction>,
+                pre_admission_action: Enum<RuntimeCompletionPreAdmissionAction>,
+            },
+            RuntimeCompletionWaitFailureResolved {
+                session_id: SessionId,
+                failure: Enum<RuntimeCompletionWaitFailureObservation>,
+                pre_admission_action: Enum<RuntimeCompletionPreAdmissionAction>,
+                public_error_class: Enum<RuntimeCompletionWaitFailurePublicErrorClass>,
+                public_reason: Enum<RuntimeCompletionWaitFailurePublicReason>,
+                resumable: bool,
+            },
+            RuntimeOpsLifecycleDurabilityResolved {
+                session_id: SessionId,
+                agent_runtime_id: Option<AgentRuntimeId>,
+                fence_token: Option<FenceToken>,
+                generation: Option<Generation>,
+                runtime_epoch_id: Option<RuntimeEpochId>,
+                action: Enum<RuntimeOpsLifecycleDurabilityAction>,
+            },
+            UserInterruptPublicResultResolved {
+                result: Enum<UserInterruptPublicResultKind>,
+            },
             ModelRoutingStatusChanged { topology_epoch: u64 },
             SwitchTurnDenied { request_id: String, reason: Enum<RoutingDenialReason> },
             SwitchTurnPersistentReconfigureRequested { request_id: String, target_model: String },
             SwitchTurnFiniteOverrideActivated { request_id: String, target_model: String, turns_remaining: u64 },
             SwitchTurnFiniteOverrideRestored { request_id: String },
             ImageOperationPhaseChanged { operation_id: String, phase: Enum<RoutingImageOperationPhase> },
+            ImageOperationTerminalClassified {
+                operation_id: String,
+                terminal: Enum<RoutingImageTerminal>,
+                provider_text: Enum<RoutingProviderTextDisposition>,
+            },
             ImageOperationDenied { operation_id: String, reason: Enum<RoutingDenialReason> },
             ModelRoutingApprovalTerminalized { approval_id: String, phase: Enum<RoutingApprovalPhase> },
             // Absorbed effects
@@ -2042,6 +4113,108 @@ macro_rules! meerkat_catalog_machine_dsl {
             ApplyControlPlaneCommand,
             InitiateRecycle,
             IngressAccepted,
+            AdmissionResolved {
+                input_id: String,
+                policy_version: u64,
+                policy_apply_mode: Enum<AdmissionPolicyApplyMode>,
+                policy_wake_mode: Enum<AdmissionPolicyWakeMode>,
+                policy_queue_mode: Enum<AdmissionPolicyQueueMode>,
+                policy_consume_point: Enum<AdmissionPolicyConsumePoint>,
+                policy_drain_policy: Enum<AdmissionPolicyDrainPolicy>,
+                policy_routing_disposition: Enum<AdmissionRoutingDisposition>,
+                lane: Enum<InputLane>,
+                plan: Enum<AdmissionPlanKind>,
+                queue_action: Enum<AdmissionQueueActionKind>,
+                existing_action: Enum<AdmissionExistingQueuedActionKind>,
+                existing_input_id: Option<String>,
+                requires_active_pre_admission: bool,
+                runtime_boundary: Enum<AdmissionRunApplyBoundary>,
+                runtime_execution_kind: Enum<AdmissionRuntimeExecutionKind>,
+                runtime_peer_response_terminal_apply_intent: Option<Enum<AdmissionPeerResponseTerminalApplyIntent>>,
+                record_transcript: bool,
+                request_immediate_processing: bool,
+                interrupt_yielding: bool,
+                wake_if_idle: bool,
+            },
+            AdmissionValidationResolved {
+                input_id: String,
+                result: Enum<AdmissionValidationResultKind>,
+                reject_reason: Option<Enum<AdmissionRejectReasonKind>>,
+            },
+            AdmissionIdempotencyResolved {
+                input_id: String,
+                result: Enum<AdmissionIdempotencyResultKind>,
+                existing_input_id: Option<String>,
+            },
+            RecoveredInputLifecycleNormalized {
+                input_id: String,
+                phase: Enum<InputPhase>,
+                terminal_kind: Option<Enum<InputTerminalKind>>,
+                recovered: bool,
+                abandoned: bool,
+                requeued: bool,
+                history_reason: Option<Enum<RecoveredInputNormalizationReasonKind>>,
+            },
+            RecoveredInputDurabilityClassified {
+                input_id: String,
+                disposition: Enum<RecoveredInputRecoveryDisposition>,
+            },
+            InputPublicLifecycleResolved {
+                input_id: String,
+                phase: Enum<InputPublicLifecycleState>,
+            },
+            InputPublicTerminalOutcomeResolved {
+                input_id: String,
+                terminal_outcome: Option<Enum<InputPublicTerminalOutcome>>,
+            },
+            InputBehavioralTerminalityResolved { input_id: String, terminal: bool },
+            TurnTerminalCauseClassResolved {
+                cause_kind: Option<Enum<TurnTerminalCauseKind>>,
+                cause_class: Enum<TerminalCauseClass>,
+            },
+            TurnTerminalityClassified { terminal: bool },
+            // P0 Dogma Invariant 1: machine-owned LLM-failure recovery verdict.
+            // The agent loop mirrors this: `Recover` drives the existing
+            // RecoverableFailure/RetryRequested path; `Exhausted` / `Fatal`
+            // take the existing FatalFailure + return-Err path.
+            LlmFailureRecoveryClassified { recovery: Enum<LlmFailureRecoveryKind> },
+            TurnSurfaceResultResolved {
+                outcome: Enum<TurnTerminalOutcome>,
+                cause_class: Enum<TerminalCauseClass>,
+                surface_class: Enum<SurfaceResultClass>,
+            },
+            StoredInputStateSeedAuthorized { input_id: String },
+            RuntimeLifecycleStateClassified {
+                state: Enum<RuntimeLifecycleObservedState>,
+                terminality: Enum<RuntimeLifecycleTerminality>,
+                input_admission: Enum<RuntimeInputAdmission>,
+                queue_admission: Enum<RuntimeQueueAdmission>,
+                prepare_admission: Enum<RuntimePrepareAdmission>,
+                ingress_admission: Enum<RuntimeIngressAdmission>,
+            },
+            RuntimeLifecycleDurabilityClassified {
+                state: Enum<RuntimeLifecycleObservedState>,
+                durable_state: Enum<RuntimeLifecycleObservedState>,
+            },
+            RuntimeLoopQueueAdmissionClassified {
+                state: Enum<RuntimeLifecycleObservedState>,
+                current_run_bound: bool,
+                queue_admission: Enum<RuntimeQueueAdmission>,
+                run_binding: Enum<RuntimeLoopRunBinding>,
+            },
+            // Machine-owned arbitration of the authoritative/visible runtime
+            // phase between the DSL lifecycle authority and the durable control
+            // projection. `publish_control` is the terminal-precedence decision
+            // (whether the published control projection supersedes the live DSL
+            // phase); `selected_raw_phase` is the chosen phase without the
+            // visibility rewrite; `visible_phase` is the externally-visible phase
+            // after the Running+pre_run(Retired)->Retired rewrite. The shell
+            // mirrors all three and re-derives nothing.
+            VisibleRuntimePhaseResolved {
+                publish_control: bool,
+                selected_raw_phase: Enum<RuntimeLifecycleObservedState>,
+                visible_phase: Enum<RuntimeLifecycleObservedState>,
+            },
             PostAdmissionSignal { signal: Enum<PostAdmissionSignalKind> },
             ReadyForRun,
             InputLifecycleNotice,
@@ -2056,19 +4229,247 @@ macro_rules! meerkat_catalog_machine_dsl {
             NotifyOpWatcher { operation_id: String },
             ExposeOperationPeer { operation_id: String },
             RetainTerminalRecord { operation_id: String },
+            DiscardRecoveredOperationRecord { operation_id: String },
+            OperationTerminal { operation_id: String },
+            OperationNonTerminal { operation_id: String },
+            OperationPublicResultClassified {
+                operation_id: String,
+                result: Enum<OperationPublicResultClass>,
+            },
+            OperationCompletionFeedClassified {
+                operation_id: String,
+                result: Enum<OperationCompletionFeedClass>,
+            },
+            OperationCompletionWakeClassified {
+                operation_id: String,
+                result: Enum<OperationCompletionWakeClass>,
+            },
+            OperationDurabilityClassified {
+                operation_id: String,
+                result: Enum<OperationDurabilityClass>,
+            },
+            OperationTransitionIdempotentSuccess {
+                operation_id: String,
+                action: Enum<OpLifecycleActionKind>,
+                status: Enum<OperationStatus>,
+            },
+            OperationTransitionNotIdempotent {
+                operation_id: String,
+                action: Enum<OpLifecycleActionKind>,
+                status: Enum<OperationStatus>,
+            },
             EvictCompletedRecord { operation_id: String },
+            CompletionFeedEntryRecovered {
+                operation_id: String,
+                seq: u64,
+                kind: Enum<OperationKind>,
+                terminal_outcome: Enum<OperationTerminalOutcomeKind>,
+                terminal_payload: String,
+            },
             CompletionProduced { seq: u64, operation_id: OperationId, kind: OperationKind },
-            WaitAllSatisfied { wait_request_id: WaitRequestId, operation_ids: Set<OperationId> },
+            AgentCompletionCursorAdvanced { cursor: u64 },
+            RuntimeObservedCompletionCursorAdvanced { cursor: u64 },
+            RuntimeInjectedCompletionCursorAdvanced { cursor: u64 },
+            OpRegistrationAdmissionResolved {
+                operation_id: String,
+                result: Enum<OpRegistrationAdmissionResultKind>,
+                reject_reason: Option<Enum<OpRegistrationRejectReasonKind>>,
+                max_concurrent_limit: Option<u64>,
+                active_op_count: u64,
+            },
+            OpLifecycleTransitionRejected {
+                operation_id: String,
+                action: Enum<OpLifecycleActionKind>,
+                reason: Enum<OpLifecycleRejectReasonKind>,
+                status: Option<Enum<OperationStatus>>,
+            },
+            WaitAllAdmissionResolved {
+                wait_request_id: WaitRequestId,
+                result: Enum<WaitAllAdmissionResultKind>,
+                reject_reason: Option<Enum<WaitAllRejectReasonKind>>,
+                rejected_operation_id: Option<String>,
+            },
+            WaitAllSatisfied {
+                wait_request_id: WaitRequestId,
+                run_id: RunId,
+                operation_ids: Set<OperationId>,
+            },
             CollectCompletedResult,
+            SurfaceRequestAdmissionAccepted { request_key: String },
+            SurfaceRequestAdmissionDuplicate { request_key: String },
+            SurfaceRequestNotFound { request_key: String },
+            SurfaceRequestTerminalPublish { request_key: String },
+            SurfaceRequestTerminalRespondWithoutPublish { request_key: String },
+            SurfaceRequestCancelled { request_key: String },
+            SurfaceRequestAlreadyCancelled { request_key: String },
+            SurfaceRequestAlreadyPublished { request_key: String },
+            SurfaceRequestAlreadyCompleted { request_key: String },
+            SurfaceRequestPublished { request_key: String },
+            SurfaceRequestAlreadyTerminal {
+                request_key: String,
+                current: Enum<SurfaceRequestPhase>,
+            },
+            SurfaceRequestCancelledBeforePublish { request_key: String },
+            SurfaceRequestCompleted { request_key: String },
+            SurfaceRequestSupersededByCancel { request_key: String },
+            LiveRefreshResultResolved {
+                channel_id: String,
+                status: Enum<LiveRefreshPublicStatus>,
+                refresh_enqueued: bool,
+                sequence: u64,
+                queue_acceptance_sequence: u64,
+            },
+            LiveCloseResultResolved {
+                channel_id: String,
+                status: Enum<LiveClosePublicStatus>,
+                closed: bool,
+                sequence: u64,
+                close_observation_sequence: u64,
+            },
+            LiveCommandResultResolved {
+                channel_id: String,
+                command: Enum<LiveCommandPublicKind>,
+                accepted: bool,
+                sequence: u64,
+                command_acceptance_sequence: u64,
+            },
+            LiveCommandRejectionResolved {
+                channel_id: String,
+                command: Enum<LiveCommandPublicKind>,
+                rejection: Enum<LiveCommandRejectionReason>,
+                public_error_class: Enum<LiveCommandRejectionPublicErrorClass>,
+                sequence: u64,
+            },
+            LiveChannelRequestRejectionResolved {
+                channel_id: String,
+                request: Enum<LiveChannelRequestPublicKind>,
+                rejection: Enum<LiveChannelRequestRejectionReason>,
+                public_error_class: Enum<LiveChannelRequestRejectionPublicErrorClass>,
+                sequence: u64,
+            },
+            LiveWebrtcTokenIssued {
+                session_id: String,
+                channel_id: String,
+                token: String,
+                expires_at_ms: u64,
+                sequence: u64,
+            },
+            LiveWebrtcAnswerAdmissionResolved {
+                session_id: String,
+                channel_id: String,
+                token: String,
+                admitted: bool,
+                rejection: Option<Enum<LiveWebrtcAnswerAdmissionRejection>>,
+                public_error_class: Option<Enum<LiveChannelRequestRejectionPublicErrorClass>>,
+                sequence: u64,
+            },
+            LiveWebrtcAnswerResultResolved {
+                channel_id: String,
+                status: Enum<LiveWebrtcAnswerPublicStatus>,
+                answered: bool,
+                sequence: u64,
+                answer_observation_sequence: u64,
+            },
+            LiveWebsocketTokenIssued {
+                session_id: String,
+                channel_id: String,
+                token: String,
+                expires_at_ms: u64,
+                sequence: u64,
+            },
+            LiveWebsocketTokenAdmissionResolved {
+                session_id: String,
+                channel_id: String,
+                token: String,
+                admitted: bool,
+                rejection: Option<Enum<LiveWebsocketTokenAdmissionRejection>>,
+                public_error_class: Option<Enum<LiveWebsocketTokenAdmissionPublicErrorClass>>,
+                sequence: u64,
+            },
+            LiveOpenAdmissionResolved {
+                session_id: String,
+                channel_id: String,
+                bound_llm_identity: Option<SessionLlmIdentity>,
+                admitted: bool,
+                rejection: Option<Enum<LiveOpenAdmissionRejection>>,
+                sequence: u64,
+            },
+            LiveOpenAdmissionAbandoned {
+                session_id: String,
+                channel_id: String,
+                sequence: u64,
+            },
+            SessionEventStreamOpenResolved {
+                stream_id: String,
+                session_id: String,
+                opened: bool,
+                sequence: u64,
+            },
+            SessionEventStreamTerminalResolved {
+                stream_id: String,
+                session_id: String,
+                reason: Enum<RpcEventStreamTerminalReason>,
+                error_code: Option<Enum<RpcEventStreamTerminalErrorCode>>,
+                detail: Option<String>,
+                sequence: u64,
+            },
+            SessionEventStreamCloseResolved {
+                stream_id: String,
+                closed: bool,
+                already_closed: bool,
+                sequence: u64,
+            },
+            MobEventStreamOpenResolved {
+                stream_id: String,
+                opened: bool,
+                sequence: u64,
+            },
+            MobEventStreamTerminalResolved {
+                stream_id: String,
+                reason: Enum<RpcEventStreamTerminalReason>,
+                error_code: Option<Enum<RpcEventStreamTerminalErrorCode>>,
+                detail: Option<String>,
+                sequence: u64,
+            },
+            MobEventStreamCloseResolved {
+                stream_id: String,
+                closed: bool,
+                already_closed: bool,
+                sequence: u64,
+            },
+            LiveChannelStatusResolved {
+                channel_id: String,
+                status: Enum<LiveChannelPublicStatus>,
+                sequence: u64,
+                status_observation_sequence: u64,
+                degradation_reason: Option<Enum<LiveChannelDegradationReason>>,
+                degradation_detail: Option<String>,
+            },
             EnqueueClassifiedEntry,
             PeerIngressClassified {
                 class: Enum<PeerIngressInputClass>,
+                // Machine-owned actionable grouping verdict: encodes which
+                // input classes wake the actionable runtime-ingress consumer.
+                // The shell mirrors this bit rather than re-deriving the
+                // many-to-one class->actionable POLICY.
+                actionable: bool,
                 kind: Enum<PeerIngressAdmittedKind>,
                 auth: Enum<PeerIngressAuthClass>,
                 lifecycle_kind: Option<Enum<PeerIngressLifecycleClass>>,
                 lifecycle_peer: Option<String>,
                 request_id: Option<String>,
                 response_terminality: Option<Enum<PeerIngressResponseTerminality>>,
+            },
+            PeerResponseReplyClassified {
+                response_terminality: Enum<PeerIngressResponseTerminality>,
+            },
+            PeerIngressReceiveResolved {
+                outcome: Enum<PeerIngressReceiveOutcomeClass>,
+                admission_diagnostic: Option<Enum<PeerIngressAdmissionDiagnosticClass>>,
+                phase: Enum<PeerIngressAuthorityPhaseClass>,
+            },
+            PeerIngressDequeueResolved {
+                phase: Enum<PeerIngressAuthorityPhaseClass>,
             },
             SpawnDrainTask,
             // `surface_id` stays `String`: it's an opaque surface identity,
@@ -2095,13 +4496,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             CloseSurfaceConnection { surface_id: String },
             RejectSurfaceCall { surface_id: String, cause: Enum<ExternalToolSurfaceFailureCause> },
             PublishSupervisorTrustEdge {
+                local_endpoint: Option<PeerEndpoint>,
                 peer_id: String,
                 name: String,
                 address: String,
                 signing_public_key: Option<String>,
                 epoch: u64,
             },
-            RevokeSupervisorTrustEdge { peer_id: String, epoch: u64 },
+            RevokeSupervisorTrustEdge { local_endpoint: Option<PeerEndpoint>, peer_id: String, epoch: u64 },
             // MCP server lifecycle effects.
             McpServerStateChanged { server_id: McpServerId, new_state: McpServerState },
             McpServerReloadRequested { server_id: McpServerId },
@@ -2129,8 +4531,41 @@ macro_rules! meerkat_catalog_machine_dsl {
             InteractionStreamCleanup { corr_id: PeerCorrelationId },
             // Track-B (R5) peer-projection effects.
             LocalEndpointChanged { endpoint: Option<PeerEndpoint> },
+            SupervisorBindAdmissionResolved {
+                result: Enum<SupervisorBindAdmissionResultKind>,
+                rejection: Option<Enum<SupervisorBindRejectionKind>>,
+            },
+            SupervisorBindMaterialAdmissionResolved {
+                verdict: Enum<SupervisorBindMaterialAdmissionKind>,
+            },
+            TranscriptEditAdmissionResolved {
+                verdict: Enum<TranscriptEditAdmissionKind>,
+            },
+            SupervisorAuthorizeAdmissionResolved {
+                result: Enum<SupervisorAuthorizeAdmissionResultKind>,
+                rejection: Option<Enum<SupervisorAuthorizeRejectionKind>>,
+                previous_name: Option<String>,
+                previous_peer_id: Option<String>,
+                previous_address: Option<String>,
+                previous_signing_public_key: Option<String>,
+                previous_epoch: Option<u64>,
+            },
+            SupervisorBridgeCommandAdmissionResolved {
+                result: Enum<SupervisorBridgeCommandAdmissionResultKind>,
+                rejection: Option<Enum<SupervisorBridgeCommandRejectionKind>>,
+            },
+            SessionLlmReconfigurePlanResolved {
+                previous_capability_surface: Option<SessionLlmCapabilitySurface>,
+                current_capability_surface: Option<SessionLlmCapabilitySurface>,
+                capability_changed: bool,
+                previous_capability_base_filter: ToolFilter,
+                current_capability_base_filter: ToolFilter,
+                committed_visible_set_changed: bool,
+                revision_bumped: bool,
+                active_visibility_revision: u64,
+            },
             PeerProjectionChanged { peer_projection_epoch: u64 },
-            CommsTrustReconcileRequested { peer_projection_epoch: u64 },
+            CommsTrustReconcileRequested { local_endpoint: Option<PeerEndpoint>, peer_projection_epoch: u64, direct_peer_endpoints: Set<PeerEndpoint>, mob_overlay_peer_endpoints: Set<PeerEndpoint> },
         }
 
         // =====================================================================
@@ -2142,6 +4577,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition RuntimeDestroyed => routed [MobMachine],
         disposition TurnRunStarted => local,
         disposition TurnBoundaryApplied => local,
+        disposition LiveBoundaryContextReceiptResolved => local,
         disposition TurnRunCompleted => local,
         disposition TurnRunFailed => local,
         disposition TurnRunCancelled => local,
@@ -2151,6 +4587,11 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition CommittedVisibleSetPublished => external,
         disposition RuntimeNotice => external,
         disposition RuntimeEffectFact => local,
+        disposition RuntimeCompletionResultResolved => local,
+        disposition RuntimeCompletionCleanupResolved => local,
+        disposition RuntimeCompletionWaitFailureResolved => local,
+        disposition RuntimeOpsLifecycleDurabilityResolved => local,
+        disposition UserInterruptPublicResultResolved => local,
         disposition ModelRoutingStatusChanged => external,
         disposition SwitchTurnDenied => external,
         disposition SwitchTurnPersistentReconfigureRequested => local,
@@ -2158,6 +4599,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition SwitchTurnFiniteOverrideRestored => local,
         disposition ImageOperationPhaseChanged => external,
         disposition ImageOperationDenied => external,
+        disposition ImageOperationTerminalClassified => local,
         disposition ModelRoutingApprovalTerminalized => external,
         // Absorbed effect dispositions
         disposition ResolveAdmission => local,
@@ -2167,6 +4609,23 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition ApplyControlPlaneCommand => local,
         disposition InitiateRecycle => local,
         disposition IngressAccepted => external,
+        disposition AdmissionResolved => local,
+        disposition AdmissionValidationResolved => local,
+        disposition AdmissionIdempotencyResolved => local,
+        disposition RecoveredInputLifecycleNormalized => local,
+        disposition RecoveredInputDurabilityClassified => local,
+        disposition InputPublicLifecycleResolved => local,
+        disposition InputPublicTerminalOutcomeResolved => local,
+        disposition InputBehavioralTerminalityResolved => local,
+        disposition TurnTerminalCauseClassResolved => local,
+        disposition LlmFailureRecoveryClassified => local,
+        disposition TurnTerminalityClassified => local,
+        disposition TurnSurfaceResultResolved => local,
+        disposition StoredInputStateSeedAuthorized => local,
+        disposition RuntimeLifecycleStateClassified => local,
+        disposition RuntimeLifecycleDurabilityClassified => local,
+        disposition RuntimeLoopQueueAdmissionClassified => local,
+        disposition VisibleRuntimePhaseResolved => local,
         disposition PostAdmissionSignal => local,
         disposition ReadyForRun => local,
         disposition InputLifecycleNotice => external,
@@ -2181,12 +4640,64 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition NotifyOpWatcher => local,
         disposition ExposeOperationPeer => local,
         disposition RetainTerminalRecord => local,
+        disposition DiscardRecoveredOperationRecord => local,
+        disposition OperationTerminal => local,
+        disposition OperationNonTerminal => local,
+        disposition OperationPublicResultClassified => local,
+        disposition OperationCompletionFeedClassified => local,
+        disposition OperationCompletionWakeClassified => local,
+        disposition OperationDurabilityClassified => local,
+        disposition OperationTransitionIdempotentSuccess => local,
+        disposition OperationTransitionNotIdempotent => local,
         disposition EvictCompletedRecord => local,
+        disposition CompletionFeedEntryRecovered => local,
         disposition CompletionProduced => local,
+        disposition AgentCompletionCursorAdvanced => local,
+        disposition RuntimeObservedCompletionCursorAdvanced => local,
+        disposition RuntimeInjectedCompletionCursorAdvanced => local,
+        disposition OpRegistrationAdmissionResolved => local,
+        disposition OpLifecycleTransitionRejected => local,
+        disposition WaitAllAdmissionResolved => local,
         disposition WaitAllSatisfied => external handoff ops_barrier_satisfaction,
         disposition CollectCompletedResult => local,
+        disposition SurfaceRequestAdmissionAccepted => local,
+        disposition SurfaceRequestAdmissionDuplicate => local,
+        disposition SurfaceRequestNotFound => local,
+        disposition SurfaceRequestTerminalPublish => local,
+        disposition SurfaceRequestTerminalRespondWithoutPublish => local,
+        disposition SurfaceRequestCancelled => local,
+        disposition SurfaceRequestAlreadyCancelled => local,
+        disposition SurfaceRequestAlreadyPublished => local,
+        disposition SurfaceRequestAlreadyCompleted => local,
+        disposition SurfaceRequestPublished => local,
+        disposition SurfaceRequestAlreadyTerminal => local,
+        disposition SurfaceRequestCancelledBeforePublish => local,
+        disposition SurfaceRequestCompleted => local,
+        disposition SurfaceRequestSupersededByCancel => local,
+        disposition LiveRefreshResultResolved => local,
+        disposition LiveCloseResultResolved => local,
+        disposition LiveCommandResultResolved => local,
+        disposition LiveCommandRejectionResolved => local,
+        disposition LiveChannelRequestRejectionResolved => local,
+        disposition LiveWebrtcTokenIssued => local,
+        disposition LiveWebrtcAnswerAdmissionResolved => local,
+        disposition LiveWebrtcAnswerResultResolved => local,
+        disposition LiveWebsocketTokenIssued => local,
+        disposition LiveWebsocketTokenAdmissionResolved => local,
+        disposition LiveOpenAdmissionResolved => local,
+        disposition LiveOpenAdmissionAbandoned => local,
+        disposition SessionEventStreamOpenResolved => local,
+        disposition SessionEventStreamTerminalResolved => local,
+        disposition SessionEventStreamCloseResolved => local,
+        disposition MobEventStreamOpenResolved => local,
+        disposition MobEventStreamTerminalResolved => local,
+        disposition MobEventStreamCloseResolved => local,
+        disposition LiveChannelStatusResolved => local,
         disposition EnqueueClassifiedEntry => local,
         disposition PeerIngressClassified => local,
+        disposition PeerResponseReplyClassified => local,
+        disposition PeerIngressReceiveResolved => local,
+        disposition PeerIngressDequeueResolved => local,
         disposition SpawnDrainTask => local,
         disposition ScheduleSurfaceCompletion => external handoff surface_completion,
         disposition RefreshVisibleSurfaceSet => external handoff surface_snapshot_alignment,
@@ -2195,6 +4706,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition RejectSurfaceCall => external,
         disposition PublishSupervisorTrustEdge => external handoff supervisor_trust_publish,
         disposition RevokeSupervisorTrustEdge => external handoff supervisor_trust_revoke,
+        disposition SupervisorBridgeCommandAdmissionResolved => local,
         disposition McpServerStateChanged => external,
         disposition McpServerReloadRequested => external,
         disposition PeerInteractionStateChanged => external,
@@ -2204,8 +4716,13 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition InteractionStreamStateChanged => external,
         disposition InteractionStreamCleanup => external,
         disposition LocalEndpointChanged => external,
+        disposition SupervisorBindAdmissionResolved => local,
+        disposition SupervisorBindMaterialAdmissionResolved => local,
+        disposition TranscriptEditAdmissionResolved => local,
+        disposition SupervisorAuthorizeAdmissionResolved => local,
+        disposition SessionLlmReconfigurePlanResolved => local,
         disposition PeerProjectionChanged => external,
-        disposition CommsTrustReconcileRequested => external,
+        disposition CommsTrustReconcileRequested => external handoff comms_trust_reconcile,
 
         // =====================================================================
         // Helpers
@@ -2213,6 +4730,113 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         helper deferred_authority_has_identity(witness: ToolVisibilityWitness) -> bool {
             witness.len() > 0
+        }
+
+        helper op_lifecycle_action_status_valid(
+            action: OpLifecycleActionKind,
+            status: OperationStatus
+        ) -> bool {
+            (action == OpLifecycleActionKind::Start
+                && status == OperationStatus::Provisioning)
+            || (action == OpLifecycleActionKind::Fail
+                && (status == OperationStatus::Provisioning
+                    || status == OperationStatus::Running
+                    || status == OperationStatus::Retiring))
+            || (action == OpLifecycleActionKind::PeerReady
+                && (status == OperationStatus::Running
+                    || status == OperationStatus::Retiring))
+            || (action == OpLifecycleActionKind::ProgressReported
+                && (status == OperationStatus::Running
+                    || status == OperationStatus::Retiring))
+            || (action == OpLifecycleActionKind::Complete
+                && (status == OperationStatus::Running
+                    || status == OperationStatus::Retiring))
+            || (action == OpLifecycleActionKind::Abort
+                && status == OperationStatus::Provisioning)
+            || (action == OpLifecycleActionKind::Cancel
+                && (status == OperationStatus::Provisioning
+                    || status == OperationStatus::Running
+                    || status == OperationStatus::Retiring))
+            || (action == OpLifecycleActionKind::RetireRequested
+                && status == OperationStatus::Running)
+            || (action == OpLifecycleActionKind::RetireCompleted
+                && (status == OperationStatus::Running
+                    || status == OperationStatus::Retiring))
+            || (action == OpLifecycleActionKind::Terminate
+                && (status == OperationStatus::Provisioning
+                    || status == OperationStatus::Running
+                    || status == OperationStatus::Retiring))
+        }
+
+        helper operation_status_terminal(status: OperationStatus) -> bool {
+            status == OperationStatus::Completed
+            || status == OperationStatus::Failed
+            || status == OperationStatus::Aborted
+            || status == OperationStatus::Cancelled
+            || status == OperationStatus::Retired
+            || status == OperationStatus::Terminated
+        }
+
+        // P0 Dogma Invariant 1: the recoverable-vs-fatal recovery FORK for an
+        // LLM failure is a machine-owned conclusion, not a shell verdict the
+        // machine merely records. The shell may EXTRACT a typed
+        // `LlmRetryFailureKind` from an `AgentError`, but the machine OWNS the
+        // recoverability classification: this helper is the single authority on
+        // which failure kinds may legitimately drive a turn into ErrorRecovery.
+        // The `RecoverableFailure` transition guards on it, so a shell verdict
+        // can never smuggle a non-recoverable kind into recovery.
+        helper llm_failure_kind_recoverable(kind: LlmRetryFailureKind) -> bool {
+            kind == LlmRetryFailureKind::RateLimited
+            || kind == LlmRetryFailureKind::NetworkTimeout
+            || kind == LlmRetryFailureKind::CallTimeout
+            || kind == LlmRetryFailureKind::RetryableProviderError
+        }
+
+        helper operation_source_valid(source: Option<OperationSource>) -> bool {
+            source == None
+            || ((source.get("value").kind == OperationSourceKind::SessionChild)
+                && source.get("value").session_id != None
+                && source.get("value").peer_id == None
+                && source.get("value").address == None)
+            || ((source.get("value").kind == OperationSourceKind::BackendPeer)
+                && source.get("value").session_id == None
+                && source.get("value").peer_id != None
+                && source.get("value").address != None)
+        }
+
+        helper op_lifecycle_transition_rejection_idempotent(
+            action: OpLifecycleActionKind,
+            status: OperationStatus
+        ) -> bool {
+            (action == OpLifecycleActionKind::Start
+                && status == OperationStatus::Running)
+            || (action == OpLifecycleActionKind::RetireRequested
+                && status == OperationStatus::Retiring)
+            || ((action == OpLifecycleActionKind::PeerReady
+                    || action == OpLifecycleActionKind::ProgressReported
+                    || action == OpLifecycleActionKind::RetireRequested
+                    || action == OpLifecycleActionKind::RetireCompleted
+                    || action == OpLifecycleActionKind::Abort)
+                && operation_status_terminal(status))
+        }
+
+        helper wait_operation_token_witness_valid(
+            operation_ids: Set<String>,
+            operation_id_tokens: Set<OperationId>,
+            operation_token_by_id: Map<String, OperationId>,
+            operation_id_by_token: Map<OperationId, String>
+        ) -> bool {
+            operation_ids.len() == operation_id_tokens.len()
+            && operation_token_by_id.keys() == operation_ids
+            && operation_id_by_token.keys() == operation_id_tokens
+            && for_all(operation_id in operation_ids,
+                operation_id_by_token.get_cloned(
+                    operation_token_by_id.get_cloned(operation_id).get("value")
+                ).get("value") == operation_id)
+            && for_all(operation_id_token in operation_id_tokens,
+                operation_token_by_id.get_cloned(
+                    operation_id_by_token.get_cloned(operation_id_token).get("value")
+                ).get("value") == operation_id_token)
         }
 
         helper deferred_authorities_have_identity(
@@ -2223,6 +4847,280 @@ macro_rules! meerkat_catalog_machine_dsl {
                 deferred_authority_has_identity(witnesses.get_cloned(requested_name).get("value")))
         }
 
+        helper meerkat_tool_visibility_filter_names(filter: ToolFilter) -> Set<String> {
+            if filter.is_unit_variant(ToolFilter::All) {
+                EmptySet
+            } else {
+                if filter.is_tuple_variant(ToolFilter::Allow) {
+                    filter.string_set_payload(ToolFilter::Allow, "names")
+                } else {
+                    filter.string_set_payload(ToolFilter::Deny, "names")
+                }
+            }
+        }
+
+        helper meerkat_tool_visibility_filter_has_identity_witnesses(
+            filter: ToolFilter,
+            witnesses: Map<String, ToolVisibilityWitness>
+        ) -> bool {
+            for_all(name in meerkat_tool_visibility_filter_names(filter),
+                witnesses.contains_key(name)
+                && deferred_authority_has_identity(witnesses.get_cloned(name).get("value")))
+        }
+
+        helper meerkat_tool_visibility_authorities_match_names(
+            names: Set<String>,
+            witnesses: Map<String, ToolVisibilityWitness>,
+            authorities: Map<String, ToolVisibilityWitness>
+        ) -> bool {
+            authorities.keys() == names
+            && for_all(name in names,
+                witnesses.contains_key(name)
+                &&
+                authorities.get_cloned(name).get("value") == witnesses.get_cloned(name).get("value"))
+        }
+
+        helper meerkat_tool_visibility_authorities_are_catalog_backed(
+            authorities: Map<String, ToolVisibilityWitness>,
+            authority_catalog: Map<String, ToolVisibilityWitness>
+        ) -> bool {
+            for_all(name in authorities.keys(),
+                authority_catalog.contains_key(name)
+                && authorities.get_cloned(name).get("value") == authority_catalog.get_cloned(name).get("value")
+                && deferred_authority_has_identity(authorities.get_cloned(name).get("value")))
+        }
+
+        helper meerkat_tool_visibility_filter_has_catalog_witnesses(
+            filter: ToolFilter,
+            witnesses: Map<String, ToolVisibilityWitness>,
+            authority_catalog: Map<String, ToolVisibilityWitness>
+        ) -> bool {
+            for_all(name in meerkat_tool_visibility_filter_names(filter),
+                witnesses.contains_key(name)
+                && authority_catalog.contains_key(name)
+                && witnesses.get_cloned(name).get("value") == authority_catalog.get_cloned(name).get("value")
+                && deferred_authority_has_identity(witnesses.get_cloned(name).get("value")))
+        }
+
+        helper meerkat_tool_visibility_filter_witnesses_are_catalog_backed(
+            witnesses: Map<String, ToolVisibilityWitness>,
+            authority_catalog: Map<String, ToolVisibilityWitness>
+        ) -> bool {
+            for_all(name in witnesses.keys(),
+                authority_catalog.contains_key(name)
+                && witnesses.get_cloned(name).get("value") == authority_catalog.get_cloned(name).get("value")
+                && deferred_authority_has_identity(witnesses.get_cloned(name).get("value")))
+        }
+
+        helper meerkat_tool_visibility_names_are_catalog_backed(
+            names: Set<String>,
+            authority_catalog: Map<String, ToolVisibilityWitness>
+        ) -> bool {
+            for_all(name in names,
+                authority_catalog.contains_key(name)
+                && deferred_authority_has_identity(authority_catalog.get_cloned(name).get("value")))
+        }
+
+        helper meerkat_tool_visibility_publish_matches_catalog(
+            active_filter: ToolFilter,
+            staged_filter: ToolFilter,
+            active_deferred_authorities: Map<String, ToolVisibilityWitness>,
+            staged_deferred_authorities: Map<String, ToolVisibilityWitness>,
+            filter_witnesses: Map<String, ToolVisibilityWitness>,
+            deferred_authority_catalog: Map<String, ToolVisibilityWitness>,
+            filter_authority_catalog: Map<String, ToolVisibilityWitness>
+        ) -> bool {
+            meerkat_tool_visibility_filter_has_catalog_witnesses(active_filter, filter_witnesses, filter_authority_catalog)
+            && meerkat_tool_visibility_filter_has_catalog_witnesses(staged_filter, filter_witnesses, filter_authority_catalog)
+            && meerkat_tool_visibility_authorities_are_catalog_backed(active_deferred_authorities, deferred_authority_catalog)
+            && meerkat_tool_visibility_authorities_are_catalog_backed(staged_deferred_authorities, deferred_authority_catalog)
+        }
+
+        helper meerkat_tool_visibility_state_replacement_matches(
+            inherited_base_filter: ToolFilter,
+            active_filter: ToolFilter,
+            staged_filter: ToolFilter,
+            active_requested_deferred_names: Set<String>,
+            staged_requested_deferred_names: Set<String>,
+            requested_witnesses: Map<String, ToolVisibilityWitness>,
+            filter_witnesses: Map<String, ToolVisibilityWitness>,
+            active_deferred_authorities: Map<String, ToolVisibilityWitness>,
+            staged_deferred_authorities: Map<String, ToolVisibilityWitness>,
+            deferred_authority_catalog: Map<String, ToolVisibilityWitness>,
+            filter_authority_catalog: Map<String, ToolVisibilityWitness>,
+            active_visibility_revision: u64,
+            staged_visibility_revision: u64
+        ) -> bool {
+            (active_visibility_revision != staged_visibility_revision
+                || (active_filter == staged_filter
+                    && active_requested_deferred_names == staged_requested_deferred_names
+                    && active_deferred_authorities == staged_deferred_authorities))
+            && for_all(name in requested_witnesses.keys(),
+                active_requested_deferred_names.contains(name) || staged_requested_deferred_names.contains(name))
+            && meerkat_tool_visibility_filter_witnesses_are_catalog_backed(filter_witnesses, filter_authority_catalog)
+            && meerkat_tool_visibility_filter_has_catalog_witnesses(inherited_base_filter, filter_witnesses, filter_authority_catalog)
+            && meerkat_tool_visibility_filter_has_catalog_witnesses(active_filter, filter_witnesses, filter_authority_catalog)
+            && meerkat_tool_visibility_filter_has_catalog_witnesses(staged_filter, filter_witnesses, filter_authority_catalog)
+            && meerkat_tool_visibility_authorities_are_catalog_backed(requested_witnesses, deferred_authority_catalog)
+            && meerkat_tool_visibility_authorities_are_catalog_backed(active_deferred_authorities, deferred_authority_catalog)
+            && meerkat_tool_visibility_authorities_are_catalog_backed(staged_deferred_authorities, deferred_authority_catalog)
+            && meerkat_tool_visibility_authorities_match_names(
+                active_requested_deferred_names, requested_witnesses, active_deferred_authorities)
+            && meerkat_tool_visibility_authorities_match_names(
+                staged_requested_deferred_names, requested_witnesses, staged_deferred_authorities)
+        }
+
+        helper meerkat_session_llm_filter_has_view_image_only(filter: ToolFilter) -> bool {
+            filter.string_set_payload(ToolFilter::Deny, "names").len() == 1
+            && filter.string_set_payload(ToolFilter::Deny, "names").contains("view_image")
+        }
+
+        helper meerkat_session_llm_capability_base_filter_matches(
+            target_capability_surface: SessionLlmCapabilitySurface,
+            next_capability_base_filter: ToolFilter
+        ) -> bool {
+            if target_capability_surface.image_tool_results {
+                next_capability_base_filter.is_unit_variant(ToolFilter::All)
+            } else {
+                next_capability_base_filter.is_tuple_variant(ToolFilter::Deny)
+                && meerkat_session_llm_filter_has_view_image_only(next_capability_base_filter)
+            }
+        }
+
+        helper meerkat_session_llm_hydrated_capability_base_filter_matches(
+            current_capability_surface: Option<SessionLlmCapabilitySurface>,
+            current_capability_surface_status: SessionLlmCapabilitySurfaceStatus,
+            current_capability_base_filter: ToolFilter
+        ) -> bool {
+            if current_capability_surface_status == SessionLlmCapabilitySurfaceStatus::Resolved {
+                current_capability_surface != None
+                && meerkat_session_llm_capability_base_filter_matches(
+                    current_capability_surface.get("value"),
+                    current_capability_base_filter)
+            } else {
+                current_capability_surface == None
+                && current_capability_base_filter.is_unit_variant(ToolFilter::All)
+            }
+        }
+
+        helper meerkat_session_llm_capability_base_filter_replacement_matches(
+            current_capability_surface: Option<SessionLlmCapabilitySurface>,
+            current_capability_surface_status: SessionLlmCapabilitySurfaceStatus,
+            current_capability_base_filter: ToolFilter,
+            next_capability_base_filter: ToolFilter
+        ) -> bool {
+            if current_capability_surface_status == SessionLlmCapabilitySurfaceStatus::Resolved {
+                current_capability_surface != None
+                && meerkat_session_llm_capability_base_filter_matches(
+                    current_capability_surface.get("value"),
+                    next_capability_base_filter)
+            } else {
+                next_capability_base_filter == current_capability_base_filter
+            }
+        }
+
+        helper meerkat_session_llm_filter_allows_view_image(filter: ToolFilter) -> bool {
+            filter.is_unit_variant(ToolFilter::All)
+            || (filter.is_tuple_variant(ToolFilter::Allow)
+                && filter.string_set_payload(ToolFilter::Allow, "names").contains("view_image"))
+            || (filter.is_tuple_variant(ToolFilter::Deny)
+                && !filter.string_set_payload(ToolFilter::Deny, "names").contains("view_image"))
+        }
+
+        helper meerkat_session_llm_visibility_state_allows_view_image(
+            view_image_tool_available: bool,
+            visibility_state: SessionToolVisibilityState
+        ) -> bool {
+            view_image_tool_available
+            && meerkat_session_llm_filter_allows_view_image(visibility_state.capability_base_filter)
+            && meerkat_session_llm_filter_allows_view_image(visibility_state.inherited_base_filter)
+            && meerkat_session_llm_filter_allows_view_image(visibility_state.active_filter)
+        }
+
+        helper meerkat_session_llm_expected_next_visibility_revision(
+            committed_visible_set_changed: bool,
+            previous_active_visibility_revision: u64,
+            previous_staged_visibility_revision: u64
+        ) -> u64 {
+            if committed_visible_set_changed {
+                if previous_active_visibility_revision >= previous_staged_visibility_revision {
+                    previous_active_visibility_revision + 1
+                } else {
+                    previous_staged_visibility_revision + 1
+                }
+            } else {
+                previous_active_visibility_revision
+            }
+        }
+
+        helper meerkat_session_llm_visibility_shape_matches(
+            previous_visibility_state: SessionToolVisibilityState,
+            next_visibility_state: SessionToolVisibilityState,
+            previous_capability_base_filter: ToolFilter,
+            next_capability_base_filter: ToolFilter,
+            previous_active_visibility_revision: u64,
+            previous_staged_visibility_revision: u64,
+            next_active_visibility_revision: u64
+        ) -> bool {
+            previous_visibility_state.capability_base_filter == previous_capability_base_filter
+            && next_visibility_state.capability_base_filter == next_capability_base_filter
+            && previous_visibility_state.inherited_base_filter == next_visibility_state.inherited_base_filter
+            && previous_visibility_state.active_filter == next_visibility_state.active_filter
+            && previous_visibility_state.staged_filter == next_visibility_state.staged_filter
+            && previous_visibility_state.active_requested_deferred_names == next_visibility_state.active_requested_deferred_names
+            && previous_visibility_state.staged_requested_deferred_names == next_visibility_state.staged_requested_deferred_names
+            && previous_visibility_state.staged_revision == next_visibility_state.staged_revision
+            && previous_visibility_state.requested_witnesses == next_visibility_state.requested_witnesses
+            && previous_visibility_state.filter_witnesses == next_visibility_state.filter_witnesses
+            && previous_visibility_state.active_revision == previous_active_visibility_revision
+            && previous_visibility_state.staged_revision == previous_staged_visibility_revision
+            && next_visibility_state.active_revision == next_active_visibility_revision
+        }
+
+        helper meerkat_session_llm_visibility_delta_matches(
+            tool_visibility_delta: SessionToolVisibilityDelta,
+            previous_capability_base_filter: ToolFilter,
+            next_capability_base_filter: ToolFilter,
+            committed_visible_set_changed: bool
+        ) -> bool {
+            tool_visibility_delta.previous_capability_base_filter == previous_capability_base_filter
+            && tool_visibility_delta.current_capability_base_filter == next_capability_base_filter
+            && tool_visibility_delta.committed_visible_set_changed == committed_visible_set_changed
+            && tool_visibility_delta.revision_bumped == committed_visible_set_changed
+        }
+
+        helper meerkat_session_llm_visibility_reconfigure_plan_matches(
+            previous_visibility_state: SessionToolVisibilityState,
+            next_visibility_state: SessionToolVisibilityState,
+            previous_capability_base_filter: ToolFilter,
+            next_capability_base_filter: ToolFilter,
+            view_image_tool_available: bool,
+            previous_view_image_visible: bool,
+            next_view_image_visible: bool,
+            previous_active_visibility_revision: u64,
+            previous_staged_visibility_revision: u64,
+            next_active_visibility_revision: u64,
+            tool_visibility_delta: SessionToolVisibilityDelta
+        ) -> bool {
+            meerkat_session_llm_visibility_shape_matches(
+                previous_visibility_state, next_visibility_state,
+                previous_capability_base_filter, next_capability_base_filter,
+                previous_active_visibility_revision, previous_staged_visibility_revision,
+                next_active_visibility_revision)
+            && previous_view_image_visible == meerkat_session_llm_visibility_state_allows_view_image(
+                view_image_tool_available, previous_visibility_state)
+            && next_view_image_visible == meerkat_session_llm_visibility_state_allows_view_image(
+                view_image_tool_available, next_visibility_state)
+            && next_active_visibility_revision == meerkat_session_llm_expected_next_visibility_revision(
+                previous_view_image_visible != next_view_image_visible,
+                previous_active_visibility_revision,
+                previous_staged_visibility_revision)
+            && meerkat_session_llm_visibility_delta_matches(
+                tool_visibility_delta, previous_capability_base_filter,
+                next_capability_base_filter,
+                previous_view_image_visible != next_view_image_visible)
+        }
+
         // =====================================================================
         // Invariants
         // =====================================================================
@@ -2231,14 +5129,39 @@ macro_rules! meerkat_catalog_machine_dsl {
             self.active_fence_token == None || self.active_runtime_id != None
         }
 
+        invariant runtime_generation_requires_bound_runtime {
+            self.active_runtime_generation == None || self.active_runtime_id != None
+        }
+
+        invariant runtime_epoch_requires_bound_runtime {
+            self.active_runtime_epoch_id == None || self.active_runtime_id != None
+        }
+
+        invariant runtime_binding_identity_is_typed {
+            self.active_runtime_id == None
+            || self.active_runtime_generation != None
+            || self.active_runtime_epoch_id != None
+        }
+
         invariant running_has_current_run {
             self.lifecycle_phase != Phase::Running || self.current_run_id != None
+        }
+
+        invariant deferred_stop_requires_active_runtime_phase {
+            self.runtime_stop_deferred == false
+            || self.lifecycle_phase == Phase::Running
+            || self.lifecycle_phase == Phase::Attached
         }
 
         invariant current_run_only_while_running_or_retired {
             self.current_run_id == None
             || self.lifecycle_phase == Phase::Running
             || self.lifecycle_phase == Phase::Retired
+        }
+
+        invariant current_run_has_pre_run_phase {
+            (self.current_run_id == None && self.pre_run_phase == None)
+            || (self.current_run_id != None && self.pre_run_phase != None)
         }
 
         invariant staged_surface_ops_are_known_and_sequenced {
@@ -2271,8 +5194,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         // Supervisor-binding tagged-union discipline (Wave 3 D Row 21).
-        // `Unbound` carries no companions; `Bound` carries all four
-        // (`name`, `peer_id`, `address`, `epoch`). A half-populated binding
+        // `Unbound` carries no companions; `Bound` carries all five
+        // (`name`, `peer_id`, `address`, `signing key`, `epoch`). A half-populated binding
         // is structurally unrepresentable — the split-ownership regression
         // class is closed by construction.
         invariant supervisor_binding_consistency {
@@ -2280,12 +5203,40 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.supervisor_bound_name == None
                 && self.supervisor_bound_peer_id == None
                 && self.supervisor_bound_address == None
+                && self.supervisor_bound_signing_public_key == None
                 && self.supervisor_bound_epoch == None)
             || (self.supervisor_binding_kind == SupervisorBindingKind::Bound
                 && self.supervisor_bound_name != None
                 && self.supervisor_bound_peer_id != None
                 && self.supervisor_bound_address != None
+                && self.supervisor_bound_signing_public_key != None
                 && self.supervisor_bound_epoch != None)
+        }
+
+        invariant supervisor_revoke_pending_consistency {
+            (self.supervisor_revoke_pending_name == None
+                && self.supervisor_revoke_pending_peer_id == None
+                && self.supervisor_revoke_pending_address == None
+                && self.supervisor_revoke_pending_signing_public_key == None
+                && self.supervisor_revoke_pending_epoch == None)
+            || (self.supervisor_revoke_pending_name != None
+                && self.supervisor_revoke_pending_peer_id != None
+                && self.supervisor_revoke_pending_address != None
+                && self.supervisor_revoke_pending_signing_public_key != None
+                && self.supervisor_revoke_pending_epoch != None)
+        }
+
+        invariant supervisor_publish_pending_consistency {
+            (self.supervisor_publish_pending_name == None
+                && self.supervisor_publish_pending_peer_id == None
+                && self.supervisor_publish_pending_address == None
+                && self.supervisor_publish_pending_signing_public_key == None
+                && self.supervisor_publish_pending_epoch == None)
+            || (self.supervisor_publish_pending_name != None
+                && self.supervisor_publish_pending_peer_id != None
+                && self.supervisor_publish_pending_address != None
+                && self.supervisor_publish_pending_signing_public_key != None
+                && self.supervisor_publish_pending_epoch != None)
         }
 
 
@@ -2307,88 +5258,660 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RegisterSession { session_id }
             update {
                 self.session_id = Some(session_id);
+                self.current_session_llm_identity = None;
+                self.current_session_capability_surface = None;
+                self.current_session_capability_surface_status =
+                    SessionLlmCapabilitySurfaceStatus::Unresolved;
+                self.current_session_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_previous_capability_surface = None;
+                self.session_llm_reconfigure_current_capability_surface = None;
+                self.session_llm_reconfigure_capability_changed = false;
+                self.session_llm_reconfigure_previous_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_current_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_committed_visible_set_changed = false;
+                self.session_llm_reconfigure_revision_bumped = false;
+                self.session_llm_reconfigure_active_visibility_revision = 0;
             }
             to Idle
+        }
+
+        transition StageDeferredSession {
+            on input StageDeferredSession {
+                session_id, keep_alive, has_comms_name, llm_identity,
+                machine_archived_resume_authorized
+            }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "not_already_staged" { self.staged_session_phase == StagedSessionPhase::NotStaged }
+            guard "no_staged_session_id" { self.staged_session_id == None }
+            guard "keep_alive_requires_comms_name" { !keep_alive || has_comms_name }
+            update {
+                self.staged_session_phase = StagedSessionPhase::Staged;
+                self.staged_session_id = Some(session_id);
+                self.staged_session_keep_alive = Some(keep_alive);
+                self.staged_session_llm_identity = Some(llm_identity);
+                self.staged_session_machine_archived_resume_authorized =
+                    machine_archived_resume_authorized;
+            }
+            to Initializing
+        }
+
+        transition UpdateDeferredSessionKeepAlive {
+            on input UpdateDeferredSessionKeepAlive {
+                session_id, keep_alive, has_comms_name
+            }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "staged_or_promoting" {
+                self.staged_session_phase == StagedSessionPhase::Staged
+                    || self.staged_session_phase == StagedSessionPhase::Promoting
+            }
+            guard "session_matches" { self.staged_session_id == Some(session_id) }
+            guard "keep_alive_requires_comms_name" { !keep_alive || has_comms_name }
+            update {
+                self.staged_session_keep_alive = Some(keep_alive);
+            }
+            to Initializing
+        }
+
+        transition BeginDeferredSessionPromotion {
+            on input BeginDeferredSessionPromotion { session_id }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "staged" { self.staged_session_phase == StagedSessionPhase::Staged }
+            guard "session_matches" { self.staged_session_id == Some(session_id) }
+            update {
+                self.staged_session_phase = StagedSessionPhase::Promoting;
+            }
+            to Initializing
+        }
+
+        transition UpdateDeferredSessionLlmIdentity {
+            on input UpdateDeferredSessionLlmIdentity { session_id, llm_identity }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "staged_or_promoting" {
+                self.staged_session_phase == StagedSessionPhase::Staged
+                    || self.staged_session_phase == StagedSessionPhase::Promoting
+            }
+            guard "session_matches" { self.staged_session_id == Some(session_id) }
+            update {
+                self.staged_session_llm_identity = Some(llm_identity);
+            }
+            to Initializing
+        }
+
+        transition AuthorizeDeferredSessionSystemContextAppendStaged {
+            on input AuthorizeDeferredSessionSystemContextAppend { session_id }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "staged" { self.staged_session_phase == StagedSessionPhase::Staged }
+            guard "session_matches" { self.staged_session_id == Some(session_id) }
+            update {}
+            to Initializing
+        }
+
+        transition AuthorizeDeferredSessionSystemContextAppendPromoting {
+            on input AuthorizeDeferredSessionSystemContextAppend { session_id }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "promoting" { self.staged_session_phase == StagedSessionPhase::Promoting }
+            guard "session_matches" { self.staged_session_id == Some(session_id) }
+            update {}
+            to Initializing
+        }
+
+        transition AuthorizeDeferredSessionMachineArchivedResume {
+            on input AuthorizeDeferredSessionMachineArchivedResume { session_id }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "promoting" { self.staged_session_phase == StagedSessionPhase::Promoting }
+            guard "session_matches" { self.staged_session_id == Some(session_id) }
+            update {
+                self.staged_session_machine_archived_resume_authorized = true;
+            }
+            to Initializing
+        }
+
+        transition AbandonDeferredSessionPromotion {
+            on input AbandonDeferredSessionPromotion { session_id }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "promoting" { self.staged_session_phase == StagedSessionPhase::Promoting }
+            guard "session_matches" { self.staged_session_id == Some(session_id) }
+            update {
+                self.staged_session_phase = StagedSessionPhase::Staged;
+            }
+            to Initializing
+        }
+
+        transition FinishDeferredSessionPromotion {
+            on input FinishDeferredSessionPromotion { session_id }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "promoting" { self.staged_session_phase == StagedSessionPhase::Promoting }
+            guard "session_matches" { self.staged_session_id == Some(session_id) }
+            update {
+                self.staged_session_phase = StagedSessionPhase::NotStaged;
+                self.staged_session_id = None;
+                self.staged_session_keep_alive = None;
+                self.staged_session_llm_identity = None;
+                self.staged_session_machine_archived_resume_authorized = false;
+            }
+            to Initializing
+        }
+
+        transition BeginDeferredSessionArchive {
+            on input BeginDeferredSessionArchive { session_id }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "staged" { self.staged_session_phase == StagedSessionPhase::Staged }
+            guard "session_matches" { self.staged_session_id == Some(session_id) }
+            update {
+                self.staged_session_phase = StagedSessionPhase::Closing;
+            }
+            to Initializing
+        }
+
+        transition RestoreDeferredSessionArchive {
+            on input RestoreDeferredSessionArchive { session_id }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "closing" { self.staged_session_phase == StagedSessionPhase::Closing }
+            guard "session_matches" { self.staged_session_id == Some(session_id) }
+            update {
+                self.staged_session_phase = StagedSessionPhase::Staged;
+            }
+            to Initializing
+        }
+
+        transition FinishDeferredSessionArchive {
+            on input FinishDeferredSessionArchive { session_id }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "closing" { self.staged_session_phase == StagedSessionPhase::Closing }
+            guard "session_matches" { self.staged_session_id == Some(session_id) }
+            update {
+                self.staged_session_phase = StagedSessionPhase::NotStaged;
+                self.staged_session_id = None;
+                self.staged_session_keep_alive = None;
+                self.staged_session_llm_identity = None;
+                self.staged_session_machine_archived_resume_authorized = false;
+            }
+            to Initializing
+        }
+
+        transition DropDeferredSessionStaged {
+            on input DropDeferredSession { session_id }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "staged" { self.staged_session_phase == StagedSessionPhase::Staged }
+            guard "session_matches" { self.staged_session_id == Some(session_id) }
+            update {
+                self.staged_session_phase = StagedSessionPhase::NotStaged;
+                self.staged_session_id = None;
+                self.staged_session_keep_alive = None;
+                self.staged_session_llm_identity = None;
+                self.staged_session_machine_archived_resume_authorized = false;
+            }
+            to Initializing
+        }
+
+        transition DropDeferredSessionPromoting {
+            on input DropDeferredSession { session_id }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "promoting" { self.staged_session_phase == StagedSessionPhase::Promoting }
+            guard "session_matches" { self.staged_session_id == Some(session_id) }
+            update {
+                self.staged_session_phase = StagedSessionPhase::NotStaged;
+                self.staged_session_id = None;
+                self.staged_session_keep_alive = None;
+                self.staged_session_llm_identity = None;
+                self.staged_session_machine_archived_resume_authorized = false;
+            }
+            to Initializing
+        }
+
+        transition DropDeferredSessionClosing {
+            on input DropDeferredSession { session_id }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "closing" { self.staged_session_phase == StagedSessionPhase::Closing }
+            guard "session_matches" { self.staged_session_id == Some(session_id) }
+            update {
+                self.staged_session_phase = StagedSessionPhase::NotStaged;
+                self.staged_session_id = None;
+                self.staged_session_keep_alive = None;
+                self.staged_session_llm_identity = None;
+                self.staged_session_machine_archived_resume_authorized = false;
+            }
+            to Initializing
+        }
+
+        transition ResolveMobOperatorCreateAuthority {
+            on input ResolveMobOperatorCreateAuthority {
+                request_kind, principal_token, caller_provenance, audit_invocation_id
+            }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "explicit_enable" { request_kind == MobOperatorAccessRequestKind::Enable }
+            update {
+                self.mob_operator_authority_present = true;
+                self.mob_operator_principal_token = Some(principal_token);
+                self.mob_operator_can_create_mobs = true;
+                self.mob_operator_can_mutate_profiles = true;
+                self.mob_operator_managed_mob_scope = EmptySet;
+                self.mob_operator_spawn_profile_scope = EmptyMap;
+                self.mob_operator_caller_provenance = caller_provenance;
+                self.mob_operator_audit_invocation_id = audit_invocation_id;
+            }
+            to Initializing
+        }
+
+        transition ResolveMobOperatorCreateAuthorityAbsent {
+            on input ResolveMobOperatorCreateAuthority {
+                request_kind, principal_token, caller_provenance, audit_invocation_id
+            }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "not_explicit_enable" { request_kind != MobOperatorAccessRequestKind::Enable }
+            update {
+                self.mob_operator_authority_present = false;
+                self.mob_operator_principal_token = None;
+                self.mob_operator_can_create_mobs = false;
+                self.mob_operator_can_mutate_profiles = false;
+                self.mob_operator_managed_mob_scope = EmptySet;
+                self.mob_operator_spawn_profile_scope = EmptyMap;
+                self.mob_operator_caller_provenance = None;
+                self.mob_operator_audit_invocation_id = None;
+            }
+            to Initializing
+        }
+
+        transition RestoreMobOperatorAuthority {
+            on input RestoreMobOperatorAuthority {
+                principal_token, can_create_mobs, can_mutate_profiles,
+                managed_mob_scope, spawn_profile_scope, caller_provenance,
+                audit_invocation_id
+            }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            update {
+                self.mob_operator_authority_present = true;
+                self.mob_operator_principal_token = Some(principal_token);
+                self.mob_operator_can_create_mobs = can_create_mobs;
+                self.mob_operator_can_mutate_profiles = can_mutate_profiles;
+                self.mob_operator_managed_mob_scope = managed_mob_scope;
+                self.mob_operator_spawn_profile_scope = spawn_profile_scope;
+                self.mob_operator_caller_provenance = caller_provenance;
+                self.mob_operator_audit_invocation_id = audit_invocation_id;
+            }
+            to Initializing
+        }
+
+        transition SetMobOperatorProfileMutation {
+            on input SetMobOperatorProfileMutation { allowed }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "authority_present" { self.mob_operator_authority_present }
+            update {
+                self.mob_operator_can_mutate_profiles = allowed;
+            }
+            to Initializing
+        }
+
+        transition SetMobOperatorCreateAuthority {
+            on input SetMobOperatorCreateAuthority { allowed }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "authority_present" { self.mob_operator_authority_present }
+            update {
+                self.mob_operator_can_create_mobs = allowed;
+            }
+            to Initializing
+        }
+
+        transition GrantMobOperatorManageMob {
+            on input GrantMobOperatorManageMob { mob_id }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "authority_present" { self.mob_operator_authority_present }
+            update {
+                self.mob_operator_managed_mob_scope.insert(mob_id);
+            }
+            to Initializing
+        }
+
+        transition SetMobOperatorSpawnProfilesInMob {
+            on input SetMobOperatorSpawnProfilesInMob { mob_id, profiles }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "authority_present" { self.mob_operator_authority_present }
+            update {
+                self.mob_operator_spawn_profile_scope.insert(mob_id, profiles);
+            }
+            to Initializing
         }
 
         // 3. UnregisterSession: per-phase → Idle (NOT a self-loop, goes to Idle)
         // Cannot use per_phase because target is always Idle, not source phase.
         transition UnregisterSessionIdle {
-            on input UnregisterSession { session_id }
+            on input UnregisterSession { session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id }
             guard { self.lifecycle_phase == Phase::Idle }
             guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_matches_observation" { self.active_runtime_id == agent_runtime_id }
+            guard "fence_binding_matches_observation" { self.active_fence_token == fence_token }
+            guard "generation_binding_matches_observation" { self.active_runtime_generation == generation }
+            guard "epoch_binding_matches_observation" { self.active_runtime_epoch_id == runtime_epoch_id }
             update {
                 self.session_id = None;
                 self.active_runtime_id = None;
                 self.active_fence_token = None;
+                self.active_runtime_generation = None;
+                self.active_runtime_epoch_id = None;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.current_session_llm_identity = None;
+                self.current_session_capability_surface = None;
+                self.current_session_capability_surface_status =
+                    SessionLlmCapabilitySurfaceStatus::Unresolved;
+                self.current_session_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_previous_capability_surface = None;
+                self.session_llm_reconfigure_current_capability_surface = None;
+                self.session_llm_reconfigure_capability_changed = false;
+                self.session_llm_reconfigure_previous_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_current_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_committed_visible_set_changed = false;
+                self.session_llm_reconfigure_revision_bumped = false;
+                self.session_llm_reconfigure_active_visibility_revision = 0;
                 self.registration_phase = RegistrationPhase::Queuing;
             }
             to Idle
         }
         transition UnregisterSessionAttached {
-            on input UnregisterSession { session_id }
+            on input UnregisterSession { session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_matches_observation" { self.active_runtime_id == agent_runtime_id }
+            guard "fence_binding_matches_observation" { self.active_fence_token == fence_token }
+            guard "generation_binding_matches_observation" { self.active_runtime_generation == generation }
+            guard "epoch_binding_matches_observation" { self.active_runtime_epoch_id == runtime_epoch_id }
             update {
                 self.session_id = None;
                 self.active_runtime_id = None;
                 self.active_fence_token = None;
+                self.active_runtime_generation = None;
+                self.active_runtime_epoch_id = None;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.current_session_llm_identity = None;
+                self.current_session_capability_surface = None;
+                self.current_session_capability_surface_status =
+                    SessionLlmCapabilitySurfaceStatus::Unresolved;
+                self.current_session_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_previous_capability_surface = None;
+                self.session_llm_reconfigure_current_capability_surface = None;
+                self.session_llm_reconfigure_capability_changed = false;
+                self.session_llm_reconfigure_previous_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_current_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_committed_visible_set_changed = false;
+                self.session_llm_reconfigure_revision_bumped = false;
+                self.session_llm_reconfigure_active_visibility_revision = 0;
                 self.registration_phase = RegistrationPhase::Queuing;
             }
             to Idle
         }
         transition UnregisterSessionRunning {
-            on input UnregisterSession { session_id }
+            on input UnregisterSession { session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_matches_observation" { self.active_runtime_id == agent_runtime_id }
+            guard "fence_binding_matches_observation" { self.active_fence_token == fence_token }
+            guard "generation_binding_matches_observation" { self.active_runtime_generation == generation }
+            guard "epoch_binding_matches_observation" { self.active_runtime_epoch_id == runtime_epoch_id }
             update {
                 self.session_id = None;
                 self.active_runtime_id = None;
                 self.active_fence_token = None;
+                self.active_runtime_generation = None;
+                self.active_runtime_epoch_id = None;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.current_session_llm_identity = None;
+                self.current_session_capability_surface = None;
+                self.current_session_capability_surface_status =
+                    SessionLlmCapabilitySurfaceStatus::Unresolved;
+                self.current_session_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_previous_capability_surface = None;
+                self.session_llm_reconfigure_current_capability_surface = None;
+                self.session_llm_reconfigure_capability_changed = false;
+                self.session_llm_reconfigure_previous_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_current_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_committed_visible_set_changed = false;
+                self.session_llm_reconfigure_revision_bumped = false;
+                self.session_llm_reconfigure_active_visibility_revision = 0;
                 self.registration_phase = RegistrationPhase::Queuing;
             }
             to Idle
         }
         transition UnregisterSessionRetired {
-            on input UnregisterSession { session_id }
+            on input UnregisterSession { session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id }
             guard { self.lifecycle_phase == Phase::Retired }
             guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_matches_observation" { self.active_runtime_id == agent_runtime_id }
+            guard "fence_binding_matches_observation" { self.active_fence_token == fence_token }
+            guard "generation_binding_matches_observation" { self.active_runtime_generation == generation }
+            guard "epoch_binding_matches_observation" { self.active_runtime_epoch_id == runtime_epoch_id }
             update {
                 self.session_id = None;
                 self.active_runtime_id = None;
                 self.active_fence_token = None;
+                self.active_runtime_generation = None;
+                self.active_runtime_epoch_id = None;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.current_session_llm_identity = None;
+                self.current_session_capability_surface = None;
+                self.current_session_capability_surface_status =
+                    SessionLlmCapabilitySurfaceStatus::Unresolved;
+                self.current_session_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_previous_capability_surface = None;
+                self.session_llm_reconfigure_current_capability_surface = None;
+                self.session_llm_reconfigure_capability_changed = false;
+                self.session_llm_reconfigure_previous_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_current_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_committed_visible_set_changed = false;
+                self.session_llm_reconfigure_revision_bumped = false;
+                self.session_llm_reconfigure_active_visibility_revision = 0;
                 self.registration_phase = RegistrationPhase::Queuing;
             }
             to Idle
         }
         transition UnregisterSessionStopped {
-            on input UnregisterSession { session_id }
+            on input UnregisterSession { session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id }
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_matches_observation" { self.active_runtime_id == agent_runtime_id }
+            guard "fence_binding_matches_observation" { self.active_fence_token == fence_token }
+            guard "generation_binding_matches_observation" { self.active_runtime_generation == generation }
+            guard "epoch_binding_matches_observation" { self.active_runtime_epoch_id == runtime_epoch_id }
             update {
                 self.session_id = None;
                 self.active_runtime_id = None;
                 self.active_fence_token = None;
+                self.active_runtime_generation = None;
+                self.active_runtime_epoch_id = None;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.current_session_llm_identity = None;
+                self.current_session_capability_surface = None;
+                self.current_session_capability_surface_status =
+                    SessionLlmCapabilitySurfaceStatus::Unresolved;
+                self.current_session_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_previous_capability_surface = None;
+                self.session_llm_reconfigure_current_capability_surface = None;
+                self.session_llm_reconfigure_capability_changed = false;
+                self.session_llm_reconfigure_previous_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_current_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_committed_visible_set_changed = false;
+                self.session_llm_reconfigure_revision_bumped = false;
+                self.session_llm_reconfigure_active_visibility_revision = 0;
                 self.registration_phase = RegistrationPhase::Queuing;
             }
             to Idle
         }
 
-        // 4. ReconfigureSessionLlmIdentity: Attached + Running self-loops
+        transition ResolveRuntimeOpsLifecycleDurabilityIdle {
+            on input ResolveRuntimeOpsLifecycleDurability { session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_matches_observation" { self.active_runtime_id == agent_runtime_id }
+            guard "fence_binding_matches_observation" { self.active_fence_token == fence_token }
+            guard "generation_binding_matches_observation" { self.active_runtime_generation == generation }
+            guard "epoch_binding_matches_observation" { self.active_runtime_epoch_id == runtime_epoch_id }
+            update {}
+            to Idle
+            emit RuntimeOpsLifecycleDurabilityResolved {
+                session_id: session_id,
+                agent_runtime_id: agent_runtime_id,
+                fence_token: fence_token,
+                generation: generation,
+                runtime_epoch_id: runtime_epoch_id,
+                action: RuntimeOpsLifecycleDurabilityAction::DeleteSnapshot
+            }
+        }
+        transition ResolveRuntimeOpsLifecycleDurabilityAttached {
+            on input ResolveRuntimeOpsLifecycleDurability { session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_matches_observation" { self.active_runtime_id == agent_runtime_id }
+            guard "fence_binding_matches_observation" { self.active_fence_token == fence_token }
+            guard "generation_binding_matches_observation" { self.active_runtime_generation == generation }
+            guard "epoch_binding_matches_observation" { self.active_runtime_epoch_id == runtime_epoch_id }
+            update {}
+            to Attached
+            emit RuntimeOpsLifecycleDurabilityResolved {
+                session_id: session_id,
+                agent_runtime_id: agent_runtime_id,
+                fence_token: fence_token,
+                generation: generation,
+                runtime_epoch_id: runtime_epoch_id,
+                action: RuntimeOpsLifecycleDurabilityAction::DeleteSnapshot
+            }
+        }
+        transition ResolveRuntimeOpsLifecycleDurabilityRunning {
+            on input ResolveRuntimeOpsLifecycleDurability { session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_matches_observation" { self.active_runtime_id == agent_runtime_id }
+            guard "fence_binding_matches_observation" { self.active_fence_token == fence_token }
+            guard "generation_binding_matches_observation" { self.active_runtime_generation == generation }
+            guard "epoch_binding_matches_observation" { self.active_runtime_epoch_id == runtime_epoch_id }
+            update {}
+            to Running
+            emit RuntimeOpsLifecycleDurabilityResolved {
+                session_id: session_id,
+                agent_runtime_id: agent_runtime_id,
+                fence_token: fence_token,
+                generation: generation,
+                runtime_epoch_id: runtime_epoch_id,
+                action: RuntimeOpsLifecycleDurabilityAction::DeleteSnapshot
+            }
+        }
+        transition ResolveRuntimeOpsLifecycleDurabilityRetired {
+            on input ResolveRuntimeOpsLifecycleDurability { session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id }
+            guard { self.lifecycle_phase == Phase::Retired }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_matches_observation" { self.active_runtime_id == agent_runtime_id }
+            guard "fence_binding_matches_observation" { self.active_fence_token == fence_token }
+            guard "generation_binding_matches_observation" { self.active_runtime_generation == generation }
+            guard "epoch_binding_matches_observation" { self.active_runtime_epoch_id == runtime_epoch_id }
+            update {}
+            to Retired
+            emit RuntimeOpsLifecycleDurabilityResolved {
+                session_id: session_id,
+                agent_runtime_id: agent_runtime_id,
+                fence_token: fence_token,
+                generation: generation,
+                runtime_epoch_id: runtime_epoch_id,
+                action: RuntimeOpsLifecycleDurabilityAction::RetainSnapshot
+            }
+        }
+        transition ResolveRuntimeOpsLifecycleDurabilityStopped {
+            on input ResolveRuntimeOpsLifecycleDurability { session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_matches_observation" { self.active_runtime_id == agent_runtime_id }
+            guard "fence_binding_matches_observation" { self.active_fence_token == fence_token }
+            guard "generation_binding_matches_observation" { self.active_runtime_generation == generation }
+            guard "epoch_binding_matches_observation" { self.active_runtime_epoch_id == runtime_epoch_id }
+            update {}
+            to Stopped
+            emit RuntimeOpsLifecycleDurabilityResolved {
+                session_id: session_id,
+                agent_runtime_id: agent_runtime_id,
+                fence_token: fence_token,
+                generation: generation,
+                runtime_epoch_id: runtime_epoch_id,
+                action: RuntimeOpsLifecycleDurabilityAction::RetainSnapshot
+            }
+        }
+
+        // 4. Current session LLM/capability authority. Host hydration and
+        // live hot-swap mechanics must enter through generated inputs before
+        // projection caches or public capability reads may observe them.
+        transition HydrateSessionLlmStateIdle {
+            on input HydrateSessionLlmState {
+                current_identity, current_capability_surface,
+                current_capability_surface_status, current_capability_base_filter
+            }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
+            guard "capability_base_filter_matches_surface" {
+                meerkat_session_llm_hydrated_capability_base_filter_matches(
+                    current_capability_surface,
+                    current_capability_surface_status,
+                    current_capability_base_filter) == true
+            }
+            update {
+                self.current_session_llm_identity = Some(current_identity);
+                self.current_session_capability_surface = current_capability_surface;
+                self.current_session_capability_surface_status = current_capability_surface_status;
+                self.current_session_capability_base_filter = current_capability_base_filter;
+            }
+            to Idle
+        }
+        transition HydrateSessionLlmStateAttached {
+            on input HydrateSessionLlmState {
+                current_identity, current_capability_surface,
+                current_capability_surface_status, current_capability_base_filter
+            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "runtime_is_bound" { self.active_runtime_id != None }
+            guard "capability_base_filter_matches_surface" {
+                meerkat_session_llm_hydrated_capability_base_filter_matches(
+                    current_capability_surface,
+                    current_capability_surface_status,
+                    current_capability_base_filter) == true
+            }
+            update {
+                self.current_session_llm_identity = Some(current_identity);
+                self.current_session_capability_surface = current_capability_surface;
+                self.current_session_capability_surface_status = current_capability_surface_status;
+                self.current_session_capability_base_filter = current_capability_base_filter;
+            }
+            to Attached
+        }
+        transition HydrateSessionLlmStateRunning {
+            on input HydrateSessionLlmState {
+                current_identity, current_capability_surface,
+                current_capability_surface_status, current_capability_base_filter
+            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "runtime_is_bound" { self.active_runtime_id != None }
+            guard "capability_base_filter_matches_surface" {
+                meerkat_session_llm_hydrated_capability_base_filter_matches(
+                    current_capability_surface,
+                    current_capability_surface_status,
+                    current_capability_base_filter) == true
+            }
+            update {
+                self.current_session_llm_identity = Some(current_identity);
+                self.current_session_capability_surface = current_capability_surface;
+                self.current_session_capability_surface_status = current_capability_surface_status;
+                self.current_session_capability_base_filter = current_capability_base_filter;
+            }
+            to Running
+        }
+
         transition ReconfigureSessionLlmIdentityAttached {
             on input ReconfigureSessionLlmIdentity {
                 previous_identity, previous_visibility_state,
                 previous_capability_surface, previous_capability_surface_status,
+                previous_capability_base_filter, view_image_tool_available,
+                previous_view_image_visible, next_view_image_visible,
+                previous_active_visibility_revision, previous_staged_visibility_revision,
                 target_identity, target_capability_surface,
                 next_visibility_state, next_capability_base_filter,
                 next_active_visibility_revision, tool_visibility_delta
@@ -2396,13 +5919,73 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             guard "runtime_is_bound" { self.active_runtime_id != None }
-            update {}
+            guard "previous_identity_matches_current" {
+                self.current_session_llm_identity == Some(previous_identity)
+            }
+            guard "previous_capability_surface_matches_current" {
+                self.current_session_capability_surface == previous_capability_surface
+            }
+            guard "previous_capability_surface_status_matches_current" {
+                self.current_session_capability_surface_status == previous_capability_surface_status
+            }
+            guard "previous_capability_base_filter_matches_current" {
+                self.current_session_capability_base_filter == previous_capability_base_filter
+            }
+            guard "next_capability_base_filter_matches_target" {
+                meerkat_session_llm_capability_base_filter_matches(
+                    target_capability_surface, next_capability_base_filter) == true
+            }
+            guard "visibility_reconfigure_plan_matches" {
+                meerkat_session_llm_visibility_reconfigure_plan_matches(
+                    previous_visibility_state, next_visibility_state,
+                    previous_capability_base_filter, next_capability_base_filter,
+                    view_image_tool_available, previous_view_image_visible,
+                    next_view_image_visible, previous_active_visibility_revision,
+                    previous_staged_visibility_revision, next_active_visibility_revision,
+                    tool_visibility_delta) == true
+            }
+            update {
+                self.current_session_llm_identity = Some(target_identity);
+                self.current_session_capability_surface = Some(target_capability_surface);
+                self.current_session_capability_surface_status =
+                    SessionLlmCapabilitySurfaceStatus::Resolved;
+                self.current_session_capability_base_filter = next_capability_base_filter;
+                self.session_llm_reconfigure_previous_capability_surface =
+                    previous_capability_surface;
+                self.session_llm_reconfigure_current_capability_surface =
+                    Some(target_capability_surface);
+                self.session_llm_reconfigure_capability_changed =
+                    previous_capability_surface != Some(target_capability_surface);
+                self.session_llm_reconfigure_previous_capability_base_filter =
+                    previous_capability_base_filter;
+                self.session_llm_reconfigure_current_capability_base_filter =
+                    next_capability_base_filter;
+                self.session_llm_reconfigure_committed_visible_set_changed =
+                    previous_view_image_visible != next_view_image_visible;
+                self.session_llm_reconfigure_revision_bumped =
+                    previous_view_image_visible != next_view_image_visible;
+                self.session_llm_reconfigure_active_visibility_revision =
+                    next_active_visibility_revision;
+            }
             to Attached
+            emit SessionLlmReconfigurePlanResolved {
+                previous_capability_surface: self.session_llm_reconfigure_previous_capability_surface,
+                current_capability_surface: self.session_llm_reconfigure_current_capability_surface,
+                capability_changed: self.session_llm_reconfigure_capability_changed,
+                previous_capability_base_filter: self.session_llm_reconfigure_previous_capability_base_filter,
+                current_capability_base_filter: self.session_llm_reconfigure_current_capability_base_filter,
+                committed_visible_set_changed: self.session_llm_reconfigure_committed_visible_set_changed,
+                revision_bumped: self.session_llm_reconfigure_revision_bumped,
+                active_visibility_revision: self.session_llm_reconfigure_active_visibility_revision,
+            }
         }
         transition ReconfigureSessionLlmIdentityRunning {
             on input ReconfigureSessionLlmIdentity {
                 previous_identity, previous_visibility_state,
                 previous_capability_surface, previous_capability_surface_status,
+                previous_capability_base_filter, view_image_tool_available,
+                previous_view_image_visible, next_view_image_visible,
+                previous_active_visibility_revision, previous_staged_visibility_revision,
                 target_identity, target_capability_surface,
                 next_visibility_state, next_capability_base_filter,
                 next_active_visibility_revision, tool_visibility_delta
@@ -2410,7 +5993,200 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             guard "runtime_is_bound" { self.active_runtime_id != None }
-            update {}
+            guard "previous_identity_matches_current" {
+                self.current_session_llm_identity == Some(previous_identity)
+            }
+            guard "previous_capability_surface_matches_current" {
+                self.current_session_capability_surface == previous_capability_surface
+            }
+            guard "previous_capability_surface_status_matches_current" {
+                self.current_session_capability_surface_status == previous_capability_surface_status
+            }
+            guard "previous_capability_base_filter_matches_current" {
+                self.current_session_capability_base_filter == previous_capability_base_filter
+            }
+            guard "next_capability_base_filter_matches_target" {
+                meerkat_session_llm_capability_base_filter_matches(
+                    target_capability_surface, next_capability_base_filter) == true
+            }
+            guard "visibility_reconfigure_plan_matches" {
+                meerkat_session_llm_visibility_reconfigure_plan_matches(
+                    previous_visibility_state, next_visibility_state,
+                    previous_capability_base_filter, next_capability_base_filter,
+                    view_image_tool_available, previous_view_image_visible,
+                    next_view_image_visible, previous_active_visibility_revision,
+                    previous_staged_visibility_revision, next_active_visibility_revision,
+                    tool_visibility_delta) == true
+            }
+            update {
+                self.current_session_llm_identity = Some(target_identity);
+                self.current_session_capability_surface = Some(target_capability_surface);
+                self.current_session_capability_surface_status =
+                    SessionLlmCapabilitySurfaceStatus::Resolved;
+                self.current_session_capability_base_filter = next_capability_base_filter;
+                self.session_llm_reconfigure_previous_capability_surface =
+                    previous_capability_surface;
+                self.session_llm_reconfigure_current_capability_surface =
+                    Some(target_capability_surface);
+                self.session_llm_reconfigure_capability_changed =
+                    previous_capability_surface != Some(target_capability_surface);
+                self.session_llm_reconfigure_previous_capability_base_filter =
+                    previous_capability_base_filter;
+                self.session_llm_reconfigure_current_capability_base_filter =
+                    next_capability_base_filter;
+                self.session_llm_reconfigure_committed_visible_set_changed =
+                    previous_view_image_visible != next_view_image_visible;
+                self.session_llm_reconfigure_revision_bumped =
+                    previous_view_image_visible != next_view_image_visible;
+                self.session_llm_reconfigure_active_visibility_revision =
+                    next_active_visibility_revision;
+            }
+            to Running
+            emit SessionLlmReconfigurePlanResolved {
+                previous_capability_surface: self.session_llm_reconfigure_previous_capability_surface,
+                current_capability_surface: self.session_llm_reconfigure_current_capability_surface,
+                capability_changed: self.session_llm_reconfigure_capability_changed,
+                previous_capability_base_filter: self.session_llm_reconfigure_previous_capability_base_filter,
+                current_capability_base_filter: self.session_llm_reconfigure_current_capability_base_filter,
+                committed_visible_set_changed: self.session_llm_reconfigure_committed_visible_set_changed,
+                revision_bumped: self.session_llm_reconfigure_revision_bumped,
+                active_visibility_revision: self.session_llm_reconfigure_active_visibility_revision,
+            }
+        }
+        transition ReconfigureSessionLlmIdentityIdle {
+            on input ReconfigureSessionLlmIdentity {
+                previous_identity, previous_visibility_state,
+                previous_capability_surface, previous_capability_surface_status,
+                previous_capability_base_filter, view_image_tool_available,
+                previous_view_image_visible, next_view_image_visible,
+                previous_active_visibility_revision, previous_staged_visibility_revision,
+                target_identity, target_capability_surface,
+                next_visibility_state, next_capability_base_filter,
+                next_active_visibility_revision, tool_visibility_delta
+            }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
+            guard "previous_identity_matches_current" {
+                self.current_session_llm_identity == Some(previous_identity)
+            }
+            guard "previous_capability_surface_matches_current" {
+                self.current_session_capability_surface == previous_capability_surface
+            }
+            guard "previous_capability_surface_status_matches_current" {
+                self.current_session_capability_surface_status == previous_capability_surface_status
+            }
+            guard "previous_capability_base_filter_matches_current" {
+                self.current_session_capability_base_filter == previous_capability_base_filter
+            }
+            guard "next_capability_base_filter_matches_target" {
+                meerkat_session_llm_capability_base_filter_matches(
+                    target_capability_surface, next_capability_base_filter) == true
+            }
+            guard "visibility_reconfigure_plan_matches" {
+                meerkat_session_llm_visibility_reconfigure_plan_matches(
+                    previous_visibility_state, next_visibility_state,
+                    previous_capability_base_filter, next_capability_base_filter,
+                    view_image_tool_available, previous_view_image_visible,
+                    next_view_image_visible, previous_active_visibility_revision,
+                    previous_staged_visibility_revision, next_active_visibility_revision,
+                    tool_visibility_delta) == true
+            }
+            update {
+                self.current_session_llm_identity = Some(target_identity);
+                self.current_session_capability_surface = Some(target_capability_surface);
+                self.current_session_capability_surface_status =
+                    SessionLlmCapabilitySurfaceStatus::Resolved;
+                self.current_session_capability_base_filter = next_capability_base_filter;
+                self.session_llm_reconfigure_previous_capability_surface =
+                    previous_capability_surface;
+                self.session_llm_reconfigure_current_capability_surface =
+                    Some(target_capability_surface);
+                self.session_llm_reconfigure_capability_changed =
+                    previous_capability_surface != Some(target_capability_surface);
+                self.session_llm_reconfigure_previous_capability_base_filter =
+                    previous_capability_base_filter;
+                self.session_llm_reconfigure_current_capability_base_filter =
+                    next_capability_base_filter;
+                self.session_llm_reconfigure_committed_visible_set_changed =
+                    previous_view_image_visible != next_view_image_visible;
+                self.session_llm_reconfigure_revision_bumped =
+                    previous_view_image_visible != next_view_image_visible;
+                self.session_llm_reconfigure_active_visibility_revision =
+                    next_active_visibility_revision;
+            }
+            to Idle
+            emit SessionLlmReconfigurePlanResolved {
+                previous_capability_surface: self.session_llm_reconfigure_previous_capability_surface,
+                current_capability_surface: self.session_llm_reconfigure_current_capability_surface,
+                capability_changed: self.session_llm_reconfigure_capability_changed,
+                previous_capability_base_filter: self.session_llm_reconfigure_previous_capability_base_filter,
+                current_capability_base_filter: self.session_llm_reconfigure_current_capability_base_filter,
+                committed_visible_set_changed: self.session_llm_reconfigure_committed_visible_set_changed,
+                revision_bumped: self.session_llm_reconfigure_revision_bumped,
+                active_visibility_revision: self.session_llm_reconfigure_active_visibility_revision,
+            }
+        }
+        transition ClearSessionLlmStateIdle {
+            on input ClearSessionLlmState
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.current_session_llm_identity = None;
+                self.current_session_capability_surface = None;
+                self.current_session_capability_surface_status =
+                    SessionLlmCapabilitySurfaceStatus::Unresolved;
+                self.current_session_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_previous_capability_surface = None;
+                self.session_llm_reconfigure_current_capability_surface = None;
+                self.session_llm_reconfigure_capability_changed = false;
+                self.session_llm_reconfigure_previous_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_current_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_committed_visible_set_changed = false;
+                self.session_llm_reconfigure_revision_bumped = false;
+                self.session_llm_reconfigure_active_visibility_revision = 0;
+            }
+            to Idle
+        }
+        transition ClearSessionLlmStateAttached {
+            on input ClearSessionLlmState
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.current_session_llm_identity = None;
+                self.current_session_capability_surface = None;
+                self.current_session_capability_surface_status =
+                    SessionLlmCapabilitySurfaceStatus::Unresolved;
+                self.current_session_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_previous_capability_surface = None;
+                self.session_llm_reconfigure_current_capability_surface = None;
+                self.session_llm_reconfigure_capability_changed = false;
+                self.session_llm_reconfigure_previous_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_current_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_committed_visible_set_changed = false;
+                self.session_llm_reconfigure_revision_bumped = false;
+                self.session_llm_reconfigure_active_visibility_revision = 0;
+            }
+            to Attached
+        }
+        transition ClearSessionLlmStateRunning {
+            on input ClearSessionLlmState
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.current_session_llm_identity = None;
+                self.current_session_capability_surface = None;
+                self.current_session_capability_surface_status =
+                    SessionLlmCapabilitySurfaceStatus::Unresolved;
+                self.current_session_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_previous_capability_surface = None;
+                self.session_llm_reconfigure_current_capability_surface = None;
+                self.session_llm_reconfigure_capability_changed = false;
+                self.session_llm_reconfigure_previous_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_current_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_committed_visible_set_changed = false;
+                self.session_llm_reconfigure_revision_bumped = false;
+                self.session_llm_reconfigure_active_visibility_revision = 0;
+            }
             to Running
         }
 
@@ -2435,7 +6211,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed
+                approval_reason, realtime_detach_allowed
             }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "approval_unavailable" { requires_approval && !approval_available }
@@ -2452,14 +6228,16 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed
+                approval_reason, realtime_detach_allowed
             }
             guard "approval_denied" { requires_approval && approval_available && approval_denied }
+            guard "approval_reason_present" { approval_reason != None }
             update {
                 self.model_routing_approval_phases.insert(request_id, RoutingApprovalPhase::Denied);
                 self.model_routing_approval_parent_kind.insert(request_id, RoutingApprovalParentKind::SwitchTurn);
                 self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
                 self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::DeniedDuringApproval);
+                self.model_routing_switch_approval_reasons.insert(request_id, approval_reason.get("value"));
             }
             to Idle
             emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::DeniedDuringApproval }
@@ -2471,7 +6249,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed
+                approval_reason, realtime_detach_allowed
             }
             guard "scoped_conflict" {
                 self.model_routing_turn_override_id != None
@@ -2491,7 +6269,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed
+                approval_reason, realtime_detach_allowed
             }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "positive_turns" { turns > 0 }
@@ -2520,7 +6298,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestUntilChangedSwitchTurn {
                 request_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed
+                approval_reason, realtime_detach_allowed
             }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "approval_satisfied" { !requires_approval || (approval_available && !approval_denied) }
@@ -2544,7 +6322,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestUntilChangedSwitchTurn {
                 request_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed
+                approval_reason, realtime_detach_allowed
             }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "approval_unavailable" { requires_approval && !approval_available }
@@ -2561,14 +6339,16 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestUntilChangedSwitchTurn {
                 request_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed
+                approval_reason, realtime_detach_allowed
             }
             guard "approval_denied" { requires_approval && approval_available && approval_denied }
+            guard "approval_reason_present" { approval_reason != None }
             update {
                 self.model_routing_approval_phases.insert(request_id, RoutingApprovalPhase::Denied);
                 self.model_routing_approval_parent_kind.insert(request_id, RoutingApprovalParentKind::SwitchTurn);
                 self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
                 self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::DeniedDuringApproval);
+                self.model_routing_switch_approval_reasons.insert(request_id, approval_reason.get("value"));
             }
             to Idle
             emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::DeniedDuringApproval }
@@ -2662,7 +6442,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input BeginImageOperation {
                 operation_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed, requires_scoped_override
+                approval_reason, realtime_detach_allowed, requires_scoped_override
             }
             guard "operation_in_operation_conflict" { self.model_routing_operation_override_id != None }
             update {
@@ -2679,7 +6459,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input BeginImageOperation {
                 operation_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed, requires_scoped_override
+                approval_reason, realtime_detach_allowed, requires_scoped_override
             }
             guard "approval_unavailable" { requires_approval && !approval_available }
             update {
@@ -2696,15 +6476,17 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input BeginImageOperation {
                 operation_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed, requires_scoped_override
+                approval_reason, realtime_detach_allowed, requires_scoped_override
             }
             guard "approval_denied" { requires_approval && approval_available && approval_denied }
+            guard "approval_reason_present" { approval_reason != None }
             update {
                 self.model_routing_approval_phases.insert(operation_id, RoutingApprovalPhase::Denied);
                 self.model_routing_approval_parent_kind.insert(operation_id, RoutingApprovalParentKind::ImageOperation);
                 self.model_routing_image_operation_phases.insert(operation_id, RoutingImageOperationPhase::Terminal);
                 self.model_routing_image_terminals.insert(operation_id, RoutingImageTerminal::Denied);
                 self.model_routing_image_denials.insert(operation_id, RoutingDenialReason::DeniedDuringApproval);
+                self.model_routing_image_approval_reasons.insert(operation_id, approval_reason.get("value"));
             }
             to Idle
             emit ImageOperationDenied { operation_id: operation_id, reason: RoutingDenialReason::DeniedDuringApproval }
@@ -2716,7 +6498,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input BeginImageOperation {
                 operation_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed, requires_scoped_override
+                approval_reason, realtime_detach_allowed, requires_scoped_override
             }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "no_operation_in_operation" { self.model_routing_operation_override_id == None }
@@ -2735,6 +6517,20 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit ImageOperationPhaseChanged { operation_id: operation_id, phase: RoutingImageOperationPhase::PlanResolved }
+        }
+
+        transition DenyImageOperationPlan {
+            per_phase [Idle, Attached, Running]
+            on input DenyImageOperationPlan { operation_id, reason, terminal_payload }
+            guard "operation_not_recorded" { !self.model_routing_image_operation_phases.contains_key(operation_id) }
+            update {
+                self.model_routing_image_operation_phases.insert(operation_id, RoutingImageOperationPhase::Terminal);
+                self.model_routing_image_terminals.insert(operation_id, RoutingImageTerminal::Denied);
+                self.model_routing_image_terminal_payloads.insert(operation_id, terminal_payload);
+                self.model_routing_image_plan_denials.insert(operation_id, reason);
+            }
+            to Idle
+            emit ImageOperationPhaseChanged { operation_id: operation_id, phase: RoutingImageOperationPhase::Terminal }
         }
 
         transition ActivateImageOperationOverride {
@@ -2757,6 +6553,185 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit ModelRoutingStatusChanged { topology_epoch: self.model_routing_topology_epoch }
         }
 
+        transition ClassifyImageOperationTerminalGenerated {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyImageOperationTerminal { operation_id, observation, http_status_code, error_code, provider_text }
+            guard "operation_recorded" { self.model_routing_image_operation_phases.contains_key(operation_id) }
+            guard "generated_observation" { observation == RoutingImageTerminalObservation::Generated }
+            update {
+                self.model_routing_image_classified_terminals.insert(operation_id, RoutingImageTerminal::Generated);
+                self.model_routing_image_classified_provider_text.insert(operation_id, provider_text);
+            }
+            to Idle
+            emit ImageOperationTerminalClassified {
+                operation_id: operation_id,
+                terminal: RoutingImageTerminal::Generated,
+                provider_text: provider_text
+            }
+        }
+
+        transition ClassifyImageOperationTerminalEmpty {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyImageOperationTerminal { operation_id, observation, http_status_code, error_code, provider_text }
+            guard "operation_recorded" { self.model_routing_image_operation_phases.contains_key(operation_id) }
+            guard "empty_observation" { observation == RoutingImageTerminalObservation::EmptyResult }
+            update {
+                self.model_routing_image_classified_terminals.insert(operation_id, RoutingImageTerminal::EmptyResult);
+                self.model_routing_image_classified_provider_text.insert(operation_id, provider_text);
+            }
+            to Idle
+            emit ImageOperationTerminalClassified {
+                operation_id: operation_id,
+                terminal: RoutingImageTerminal::EmptyResult,
+                provider_text: provider_text
+            }
+        }
+
+        transition ClassifyImageOperationTerminalMechanicalFailure {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyImageOperationTerminal { operation_id, observation, http_status_code, error_code, provider_text }
+            guard "operation_recorded" { self.model_routing_image_operation_phases.contains_key(operation_id) }
+            guard "mechanical_failure" {
+                observation == RoutingImageTerminalObservation::ExecutionFailed
+                || observation == RoutingImageTerminalObservation::BlobCommitFailed
+            }
+            update {
+                self.model_routing_image_classified_terminals.insert(operation_id, RoutingImageTerminal::Failed);
+                self.model_routing_image_classified_provider_text.insert(operation_id, provider_text);
+            }
+            to Idle
+            emit ImageOperationTerminalClassified {
+                operation_id: operation_id,
+                terminal: RoutingImageTerminal::Failed,
+                provider_text: provider_text
+            }
+        }
+
+        transition ClassifyImageOperationTerminalTimeout {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyImageOperationTerminal { operation_id, observation, http_status_code, error_code, provider_text }
+            guard "operation_recorded" { self.model_routing_image_operation_phases.contains_key(operation_id) }
+            guard "provider_error_observation" {
+                observation == RoutingImageTerminalObservation::ProviderHttpError
+                || observation == RoutingImageTerminalObservation::ProviderNativeError
+            }
+            guard "timeout_evidence" {
+                http_status_code == Some(408)
+                || http_status_code == Some(504)
+                || error_code == RoutingImageProviderErrorCode::GeminiDeadlineExceeded
+            }
+            update {
+                self.model_routing_image_classified_terminals.insert(operation_id, RoutingImageTerminal::Timeout);
+                self.model_routing_image_classified_provider_text.insert(operation_id, provider_text);
+            }
+            to Idle
+            emit ImageOperationTerminalClassified {
+                operation_id: operation_id,
+                terminal: RoutingImageTerminal::Timeout,
+                provider_text: provider_text
+            }
+        }
+
+        transition ClassifyImageOperationTerminalCancelled {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyImageOperationTerminal { operation_id, observation, http_status_code, error_code, provider_text }
+            guard "operation_recorded" { self.model_routing_image_operation_phases.contains_key(operation_id) }
+            guard "provider_http_error" { observation == RoutingImageTerminalObservation::ProviderHttpError }
+            guard "cancelled_status" { http_status_code == Some(499) }
+            update {
+                self.model_routing_image_classified_terminals.insert(operation_id, RoutingImageTerminal::Cancelled);
+                self.model_routing_image_classified_provider_text.insert(operation_id, provider_text);
+            }
+            to Idle
+            emit ImageOperationTerminalClassified {
+                operation_id: operation_id,
+                terminal: RoutingImageTerminal::Cancelled,
+                provider_text: provider_text
+            }
+        }
+
+        transition ClassifyImageOperationTerminalSafetyFiltered {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyImageOperationTerminal { operation_id, observation, http_status_code, error_code, provider_text }
+            guard "operation_recorded" { self.model_routing_image_operation_phases.contains_key(operation_id) }
+            guard "provider_error_observation" {
+                observation == RoutingImageTerminalObservation::ProviderHttpError
+                || observation == RoutingImageTerminalObservation::ProviderNativeError
+            }
+            guard "safety_code" {
+                error_code == RoutingImageProviderErrorCode::OpenAiContentFilter
+                || error_code == RoutingImageProviderErrorCode::GeminiSafety
+            }
+            update {
+                self.model_routing_image_classified_terminals.insert(operation_id, RoutingImageTerminal::SafetyFiltered);
+                self.model_routing_image_classified_provider_text.insert(operation_id, provider_text);
+            }
+            to Idle
+            emit ImageOperationTerminalClassified {
+                operation_id: operation_id,
+                terminal: RoutingImageTerminal::SafetyFiltered,
+                provider_text: provider_text
+            }
+        }
+
+        transition ClassifyImageOperationTerminalRefused {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyImageOperationTerminal { operation_id, observation, http_status_code, error_code, provider_text }
+            guard "operation_recorded" { self.model_routing_image_operation_phases.contains_key(operation_id) }
+            guard "provider_error_observation" {
+                observation == RoutingImageTerminalObservation::ProviderHttpError
+                || observation == RoutingImageTerminalObservation::ProviderNativeError
+            }
+            guard "refusal_code" {
+                error_code == RoutingImageProviderErrorCode::OpenAiModelRefusal
+                || error_code == RoutingImageProviderErrorCode::GeminiModelRefusal
+            }
+            update {
+                self.model_routing_image_classified_terminals.insert(operation_id, RoutingImageTerminal::RefusedByProvider);
+                self.model_routing_image_classified_provider_text.insert(operation_id, provider_text);
+            }
+            to Idle
+            emit ImageOperationTerminalClassified {
+                operation_id: operation_id,
+                terminal: RoutingImageTerminal::RefusedByProvider,
+                provider_text: provider_text
+            }
+        }
+
+        transition ClassifyImageOperationTerminalProviderFailed {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyImageOperationTerminal { operation_id, observation, http_status_code, error_code, provider_text }
+            guard "operation_recorded" { self.model_routing_image_operation_phases.contains_key(operation_id) }
+            guard "provider_error_observation" {
+                observation == RoutingImageTerminalObservation::ProviderHttpError
+                || observation == RoutingImageTerminalObservation::ProviderNativeError
+            }
+            guard "not_timeout" {
+                http_status_code != Some(408)
+                && http_status_code != Some(504)
+                && error_code != RoutingImageProviderErrorCode::GeminiDeadlineExceeded
+            }
+            guard "not_cancelled" { http_status_code != Some(499) }
+            guard "not_safety" {
+                error_code != RoutingImageProviderErrorCode::OpenAiContentFilter
+                && error_code != RoutingImageProviderErrorCode::GeminiSafety
+            }
+            guard "not_refusal" {
+                error_code != RoutingImageProviderErrorCode::OpenAiModelRefusal
+                && error_code != RoutingImageProviderErrorCode::GeminiModelRefusal
+            }
+            update {
+                self.model_routing_image_classified_terminals.insert(operation_id, RoutingImageTerminal::Failed);
+                self.model_routing_image_classified_provider_text.insert(operation_id, provider_text);
+            }
+            to Idle
+            emit ImageOperationTerminalClassified {
+                operation_id: operation_id,
+                terminal: RoutingImageTerminal::Failed,
+                provider_text: provider_text
+            }
+        }
+
         transition CompleteImageOperation {
             per_phase [Idle, Attached, Running]
             on input CompleteImageOperation { operation_id, terminal, terminal_payload }
@@ -2764,10 +6739,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "operation_requires_scoped_override" {
                 self.model_routing_image_operation_requires_scoped_override.contains_key(operation_id)
             }
+            guard "terminal_classified" {
+                self.model_routing_image_classified_terminals.get_cloned(operation_id) == Some(terminal)
+            }
             update {
                 self.model_routing_image_operation_phases.insert(operation_id, RoutingImageOperationPhase::RestoringScopedOverride);
                 self.model_routing_image_terminals.insert(operation_id, terminal);
                 self.model_routing_image_terminal_payloads.insert(operation_id, terminal_payload);
+                self.model_routing_image_classified_terminals.remove(operation_id);
+                self.model_routing_image_classified_provider_text.remove(operation_id);
             }
             to Idle
             emit ImageOperationPhaseChanged { operation_id: operation_id, phase: RoutingImageOperationPhase::RestoringScopedOverride }
@@ -2781,6 +6761,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 !self.model_routing_image_operation_requires_scoped_override.contains_key(operation_id)
             }
             guard "no_operation_override_active" { self.model_routing_operation_override_id == None }
+            guard "terminal_classified" {
+                self.model_routing_image_classified_terminals.get_cloned(operation_id) == Some(terminal)
+            }
             update {
                 self.model_routing_image_operation_phases.insert(operation_id, RoutingImageOperationPhase::Terminal);
                 self.model_routing_image_terminals.insert(operation_id, terminal);
@@ -2788,6 +6771,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.model_routing_image_operation_target_models.remove(operation_id);
                 self.model_routing_image_operation_realtime.remove(operation_id);
                 self.model_routing_image_operation_requires_scoped_override.remove(operation_id);
+                self.model_routing_image_classified_terminals.remove(operation_id);
+                self.model_routing_image_classified_provider_text.remove(operation_id);
             }
             to Idle
             emit ImageOperationPhaseChanged { operation_id: operation_id, phase: RoutingImageOperationPhase::Terminal }
@@ -2830,78 +6815,194 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "deferred_authorities_have_identity" {
                 deferred_authorities_have_identity(authorities.keys(), authorities)
             }
+            guard "deferred_authorities_match_machine_catalog" {
+                meerkat_tool_visibility_authorities_are_catalog_backed(
+                    authorities, self.deferred_visibility_authority_catalog)
+            }
+            guard "existing_requested_witness_preserved" {
+                for_all(name in self.requested_visibility_witnesses.keys(),
+                    (self.active_deferred_names.contains(name) == false
+                        && self.staged_deferred_names.contains(name) == false)
+                    || (authorities.contains_key(name)
+                        && authorities.get_cloned(name).get("value") == self.requested_visibility_witnesses.get_cloned(name).get("value")))
+            }
+            guard "existing_staged_authority_preserved" {
+                for_all(name in self.staged_deferred_authorities.keys(),
+                    authorities.contains_key(name)
+                    && authorities.get_cloned(name).get("value") == self.staged_deferred_authorities.get_cloned(name).get("value"))
+            }
             update {
                 self.next_staged_visibility_revision = self.next_staged_visibility_revision + 1;
                 self.staged_deferred_names = authorities.keys();
+                self.requested_visibility_witnesses = authorities;
                 self.staged_deferred_authorities = authorities;
                 self.staged_visibility_revision = self.next_staged_visibility_revision;
             }
             to Idle
         }
 
-        // 7. PrepareBindings: different source→target mappings per phase
-        // Initializing → Initializing (no guard, emits RuntimeBound)
+        // 7. PrepareBindings: different source→target mappings per phase.
+        // Exact re-assertions of the current runtime binding are generated
+        // idempotent no-ops with no RuntimeBound effect; new bindings emit
+        // RuntimeBound from the generated authority path below.
+        transition PrepareBindingsIdempotent {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_exact" { self.active_runtime_id == Some(agent_runtime_id) }
+            guard "fence_binding_exact" { self.active_fence_token == Some(fence_token) }
+            guard "generation_binding_exact" { self.active_runtime_generation == generation }
+            guard "epoch_binding_exact" { self.active_runtime_epoch_id == runtime_epoch_id }
+            guard "typed_binding_identity_present" { generation != None || runtime_epoch_id != None }
+            update {}
+            to Idle
+        }
+        // Initializing → Initializing (emits RuntimeBound for new binding)
         transition PrepareBindingsInitializing {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id }
             guard { self.lifecycle_phase == Phase::Initializing }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_absent_or_same" { self.active_runtime_id == None || self.active_runtime_id == Some(agent_runtime_id) }
+            guard "fence_binding_absent_or_same" { self.active_fence_token == None || self.active_fence_token == Some(fence_token) }
+            guard "generation_binding_absent_or_same" { self.active_runtime_generation == None || self.active_runtime_generation == generation }
+            guard "epoch_binding_absent_or_same" { self.active_runtime_epoch_id == None || self.active_runtime_epoch_id == runtime_epoch_id }
+            guard "typed_binding_identity_present" { generation != None || runtime_epoch_id != None }
+            guard "runtime_binding_not_already_exact" {
+                self.active_runtime_id != Some(agent_runtime_id)
+                || self.active_fence_token != Some(fence_token)
+                || self.active_runtime_generation != generation
+                || self.active_runtime_epoch_id != runtime_epoch_id
+            }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
                 self.active_fence_token = Some(fence_token);
+                self.active_runtime_generation = generation;
+                self.active_runtime_epoch_id = runtime_epoch_id;
             }
             to Initializing
             emit RuntimeBound { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
         }
         // Idle → Attached
         transition PrepareBindingsIdle {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id }
             guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_absent_or_same" { self.active_runtime_id == None || self.active_runtime_id == Some(agent_runtime_id) }
+            guard "fence_binding_absent_or_same" { self.active_fence_token == None || self.active_fence_token == Some(fence_token) }
+            guard "generation_binding_absent_or_same" { self.active_runtime_generation == None || self.active_runtime_generation == generation }
+            guard "epoch_binding_absent_or_same" { self.active_runtime_epoch_id == None || self.active_runtime_epoch_id == runtime_epoch_id }
+            guard "typed_binding_identity_present" { generation != None || runtime_epoch_id != None }
+            guard "runtime_binding_not_already_exact" {
+                self.active_runtime_id != Some(agent_runtime_id)
+                || self.active_fence_token != Some(fence_token)
+                || self.active_runtime_generation != generation
+                || self.active_runtime_epoch_id != runtime_epoch_id
+            }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
                 self.active_fence_token = Some(fence_token);
+                self.active_runtime_generation = generation;
+                self.active_runtime_epoch_id = runtime_epoch_id;
             }
             to Attached
             emit RuntimeBound { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
         }
         // Attached → Attached
         transition PrepareBindingsAttached {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id }
             guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_absent_or_same" { self.active_runtime_id == None || self.active_runtime_id == Some(agent_runtime_id) }
+            guard "fence_binding_absent_or_same" { self.active_fence_token == None || self.active_fence_token == Some(fence_token) }
+            guard "generation_binding_absent_or_same" { self.active_runtime_generation == None || self.active_runtime_generation == generation }
+            guard "epoch_binding_absent_or_same" { self.active_runtime_epoch_id == None || self.active_runtime_epoch_id == runtime_epoch_id }
+            guard "typed_binding_identity_present" { generation != None || runtime_epoch_id != None }
+            guard "runtime_binding_not_already_exact" {
+                self.active_runtime_id != Some(agent_runtime_id)
+                || self.active_fence_token != Some(fence_token)
+                || self.active_runtime_generation != generation
+                || self.active_runtime_epoch_id != runtime_epoch_id
+            }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
                 self.active_fence_token = Some(fence_token);
+                self.active_runtime_generation = generation;
+                self.active_runtime_epoch_id = runtime_epoch_id;
             }
             to Attached
             emit RuntimeBound { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
         }
         // Running → Running
         transition PrepareBindingsRunning {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_absent_or_same" { self.active_runtime_id == None || self.active_runtime_id == Some(agent_runtime_id) }
+            guard "fence_binding_absent_or_same" { self.active_fence_token == None || self.active_fence_token == Some(fence_token) }
+            guard "generation_binding_absent_or_same" { self.active_runtime_generation == None || self.active_runtime_generation == generation }
+            guard "epoch_binding_absent_or_same" { self.active_runtime_epoch_id == None || self.active_runtime_epoch_id == runtime_epoch_id }
+            guard "typed_binding_identity_present" { generation != None || runtime_epoch_id != None }
+            guard "runtime_binding_not_already_exact" {
+                self.active_runtime_id != Some(agent_runtime_id)
+                || self.active_fence_token != Some(fence_token)
+                || self.active_runtime_generation != generation
+                || self.active_runtime_epoch_id != runtime_epoch_id
+            }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
                 self.active_fence_token = Some(fence_token);
+                self.active_runtime_generation = generation;
+                self.active_runtime_epoch_id = runtime_epoch_id;
             }
             to Running
             emit RuntimeBound { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
         }
         // Retired → Retired
         transition PrepareBindingsRetired {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id }
             guard { self.lifecycle_phase == Phase::Retired }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_absent_or_same" { self.active_runtime_id == None || self.active_runtime_id == Some(agent_runtime_id) }
+            guard "fence_binding_absent_or_same" { self.active_fence_token == None || self.active_fence_token == Some(fence_token) }
+            guard "generation_binding_absent_or_same" { self.active_runtime_generation == None || self.active_runtime_generation == generation }
+            guard "epoch_binding_absent_or_same" { self.active_runtime_epoch_id == None || self.active_runtime_epoch_id == runtime_epoch_id }
+            guard "typed_binding_identity_present" { generation != None || runtime_epoch_id != None }
+            guard "runtime_binding_not_already_exact" {
+                self.active_runtime_id != Some(agent_runtime_id)
+                || self.active_fence_token != Some(fence_token)
+                || self.active_runtime_generation != generation
+                || self.active_runtime_epoch_id != runtime_epoch_id
+            }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
                 self.active_fence_token = Some(fence_token);
+                self.active_runtime_generation = generation;
+                self.active_runtime_epoch_id = runtime_epoch_id;
             }
             to Retired
             emit RuntimeBound { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
         }
         // Stopped → Stopped (inline in hand-written catalog)
         transition PrepareBindingsStopped {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id }
             guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_absent_or_same" { self.active_runtime_id == None || self.active_runtime_id == Some(agent_runtime_id) }
+            guard "fence_binding_absent_or_same" { self.active_fence_token == None || self.active_fence_token == Some(fence_token) }
+            guard "generation_binding_absent_or_same" { self.active_runtime_generation == None || self.active_runtime_generation == generation }
+            guard "epoch_binding_absent_or_same" { self.active_runtime_epoch_id == None || self.active_runtime_epoch_id == runtime_epoch_id }
+            guard "typed_binding_identity_present" { generation != None || runtime_epoch_id != None }
+            guard "runtime_binding_not_already_exact" {
+                self.active_runtime_id != Some(agent_runtime_id)
+                || self.active_fence_token != Some(fence_token)
+                || self.active_runtime_generation != generation
+                || self.active_runtime_epoch_id != runtime_epoch_id
+            }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
                 self.active_fence_token = Some(fence_token);
+                self.active_runtime_generation = generation;
+                self.active_runtime_epoch_id = runtime_epoch_id;
             }
             to Stopped
             emit RuntimeBound { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
@@ -2916,12 +7017,251 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
         }
 
-        // 9. NotifyDrainExited: per-phase self-loop, guard session_registered, emit RuntimeNotice
+        // 8b. Peer-ingress receive/dequeue authority.
+        //
+        // The classified queue supplies only admission-time observations:
+        // auth requirement, generated auth exemption, current trust read, and
+        // queue occupancy. MeerkatMachine owns the derived public admission
+        // result and peer-ingress authority phase. The queue may project the
+        // emitted phase for snapshots, but it must not derive these facts.
+        transition ResolvePeerIngressReceiveClosed {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressReceive {
+                kind, auth_required, auth_exempt, trusted, queued_work_present,
+                queue_closed, queue_capacity_available
+            }
+            guard "session_registered" { self.session_id != None }
+            guard "queue_closed" { queue_closed == true }
+            update {}
+            to Idle
+            emit PeerIngressReceiveResolved {
+                outcome: PeerIngressReceiveOutcomeClass::DroppedSessionClosed,
+                admission_diagnostic: None,
+                phase: self.peer_ingress_authority_phase
+            }
+        }
+        transition ResolvePeerIngressReceiveFull {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressReceive {
+                kind, auth_required, auth_exempt, trusted, queued_work_present,
+                queue_closed, queue_capacity_available
+            }
+            guard "session_registered" { self.session_id != None }
+            guard "queue_open" { queue_closed == false }
+            guard "queue_full" { queue_capacity_available == false }
+            update {}
+            to Idle
+            emit PeerIngressReceiveResolved {
+                outcome: PeerIngressReceiveOutcomeClass::DroppedInboxFull,
+                admission_diagnostic: None,
+                phase: self.peer_ingress_authority_phase
+            }
+        }
+        transition ResolvePeerIngressReceivePlainEvent {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressReceive {
+                kind, auth_required, auth_exempt, trusted, queued_work_present,
+                queue_closed, queue_capacity_available
+            }
+            guard "session_registered" { self.session_id != None }
+            guard "queue_open" { queue_closed == false }
+            guard "queue_capacity_available" { queue_capacity_available == true }
+            guard "plain_event" { kind == PeerIngressAdmittedKind::PlainEvent }
+            update {}
+            to Idle
+            emit PeerIngressReceiveResolved {
+                outcome: PeerIngressReceiveOutcomeClass::Admitted,
+                admission_diagnostic: None,
+                phase: self.peer_ingress_authority_phase
+            }
+        }
+        transition ResolvePeerIngressReceiveTrusted {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressReceive {
+                kind, auth_required, auth_exempt, trusted, queued_work_present,
+                queue_closed, queue_capacity_available
+            }
+            guard "session_registered" { self.session_id != None }
+            guard "queue_open" { queue_closed == false }
+            guard "queue_capacity_available" { queue_capacity_available == true }
+            guard "external_entry" { kind != PeerIngressAdmittedKind::PlainEvent }
+            guard "trusted_sender" { trusted == true }
+            update {
+                self.peer_ingress_authority_phase = PeerIngressAuthorityPhaseClass::Received;
+            }
+            to Idle
+            emit PeerIngressReceiveResolved {
+                outcome: PeerIngressReceiveOutcomeClass::Admitted,
+                admission_diagnostic: Some(PeerIngressAdmissionDiagnosticClass::TrustedAtAdmission),
+                phase: PeerIngressAuthorityPhaseClass::Received
+            }
+        }
+        transition ResolvePeerIngressReceiveAuthExemptUntrusted {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressReceive {
+                kind, auth_required, auth_exempt, trusted, queued_work_present,
+                queue_closed, queue_capacity_available
+            }
+            guard "session_registered" { self.session_id != None }
+            guard "queue_open" { queue_closed == false }
+            guard "queue_capacity_available" { queue_capacity_available == true }
+            guard "external_entry" { kind != PeerIngressAdmittedKind::PlainEvent }
+            guard "untrusted_sender" { trusted == false }
+            guard "auth_exempt" { auth_exempt == true }
+            update {
+                self.peer_ingress_authority_phase = PeerIngressAuthorityPhaseClass::Received;
+            }
+            to Idle
+            emit PeerIngressReceiveResolved {
+                outcome: PeerIngressReceiveOutcomeClass::Admitted,
+                admission_diagnostic: Some(PeerIngressAdmissionDiagnosticClass::UntrustedAtAdmission),
+                phase: PeerIngressAuthorityPhaseClass::Received
+            }
+        }
+        transition ResolvePeerIngressReceiveAuthOpenUntrusted {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressReceive {
+                kind, auth_required, auth_exempt, trusted, queued_work_present,
+                queue_closed, queue_capacity_available
+            }
+            guard "session_registered" { self.session_id != None }
+            guard "queue_open" { queue_closed == false }
+            guard "queue_capacity_available" { queue_capacity_available == true }
+            guard "external_entry" { kind != PeerIngressAdmittedKind::PlainEvent }
+            guard "untrusted_sender" { trusted == false }
+            guard "auth_required_disabled" { auth_required == false }
+            guard "auth_not_exempt" { auth_exempt == false }
+            update {
+                self.peer_ingress_authority_phase = PeerIngressAuthorityPhaseClass::Received;
+            }
+            to Idle
+            emit PeerIngressReceiveResolved {
+                outcome: PeerIngressReceiveOutcomeClass::Admitted,
+                admission_diagnostic: Some(PeerIngressAdmissionDiagnosticClass::UntrustedAtAdmission),
+                phase: PeerIngressAuthorityPhaseClass::Received
+            }
+        }
+        transition ResolvePeerIngressReceiveUntrustedQueuedDrop {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressReceive {
+                kind, auth_required, auth_exempt, trusted, queued_work_present,
+                queue_closed, queue_capacity_available
+            }
+            guard "session_registered" { self.session_id != None }
+            guard "queue_open" { queue_closed == false }
+            guard "queue_capacity_available" { queue_capacity_available == true }
+            guard "external_entry" { kind != PeerIngressAdmittedKind::PlainEvent }
+            guard "untrusted_sender" { trusted == false }
+            guard "auth_required" { auth_required == true }
+            guard "auth_not_exempt" { auth_exempt == false }
+            guard "queued_work_present" { queued_work_present == true }
+            update {
+                self.peer_ingress_authority_phase = PeerIngressAuthorityPhaseClass::Received;
+            }
+            to Idle
+            emit PeerIngressReceiveResolved {
+                outcome: PeerIngressReceiveOutcomeClass::DroppedUntrustedSender,
+                admission_diagnostic: Some(PeerIngressAdmissionDiagnosticClass::UntrustedAtAdmission),
+                phase: PeerIngressAuthorityPhaseClass::Received
+            }
+        }
+        transition ResolvePeerIngressReceiveUntrustedEmptyDrop {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressReceive {
+                kind, auth_required, auth_exempt, trusted, queued_work_present,
+                queue_closed, queue_capacity_available
+            }
+            guard "session_registered" { self.session_id != None }
+            guard "queue_open" { queue_closed == false }
+            guard "queue_capacity_available" { queue_capacity_available == true }
+            guard "external_entry" { kind != PeerIngressAdmittedKind::PlainEvent }
+            guard "untrusted_sender" { trusted == false }
+            guard "auth_required" { auth_required == true }
+            guard "auth_not_exempt" { auth_exempt == false }
+            guard "queued_work_empty" { queued_work_present == false }
+            update {
+                self.peer_ingress_authority_phase = PeerIngressAuthorityPhaseClass::Dropped;
+            }
+            to Idle
+            emit PeerIngressReceiveResolved {
+                outcome: PeerIngressReceiveOutcomeClass::DroppedUntrustedSender,
+                admission_diagnostic: Some(PeerIngressAdmissionDiagnosticClass::UntrustedAtAdmission),
+                phase: PeerIngressAuthorityPhaseClass::Dropped
+            }
+        }
+        transition ResolvePeerIngressDequeuePlainEvent {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressDequeue { kind, auth, queued_work_remaining }
+            guard "session_registered" { self.session_id != None }
+            guard "plain_event" { kind == PeerIngressAdmittedKind::PlainEvent }
+            update {}
+            to Idle
+            emit PeerIngressDequeueResolved {
+                phase: self.peer_ingress_authority_phase
+            }
+        }
+        transition ResolvePeerIngressDequeueAuthExemptExternal {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressDequeue { kind, auth, queued_work_remaining }
+            guard "session_registered" { self.session_id != None }
+            guard "external_entry" { kind != PeerIngressAdmittedKind::PlainEvent }
+            guard "auth_exempt" { auth == PeerIngressAuthClass::SupervisorBridgeExempt }
+            update {}
+            to Idle
+            emit PeerIngressDequeueResolved {
+                phase: self.peer_ingress_authority_phase
+            }
+        }
+        transition ResolvePeerIngressDequeueRequiredRemaining {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressDequeue { kind, auth, queued_work_remaining }
+            guard "session_registered" { self.session_id != None }
+            guard "external_entry" { kind != PeerIngressAdmittedKind::PlainEvent }
+            guard "auth_required" { auth == PeerIngressAuthClass::Required }
+            guard "queued_work_remaining" { queued_work_remaining == true }
+            update {
+                self.peer_ingress_authority_phase = PeerIngressAuthorityPhaseClass::Received;
+            }
+            to Idle
+            emit PeerIngressDequeueResolved {
+                phase: PeerIngressAuthorityPhaseClass::Received
+            }
+        }
+        transition ResolvePeerIngressDequeueRequiredEmpty {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolvePeerIngressDequeue { kind, auth, queued_work_remaining }
+            guard "session_registered" { self.session_id != None }
+            guard "external_entry" { kind != PeerIngressAdmittedKind::PlainEvent }
+            guard "auth_required" { auth == PeerIngressAuthClass::Required }
+            guard "queued_work_empty" { queued_work_remaining == false }
+            update {
+                self.peer_ingress_authority_phase = PeerIngressAuthorityPhaseClass::Delivered;
+            }
+            to Idle
+            emit PeerIngressDequeueResolved {
+                phase: PeerIngressAuthorityPhaseClass::Delivered
+            }
+        }
+
+        // 9. NotifyDrainExited: the runtime reports the observed exit reason;
+        // the machine owns whether that exit leaves the drain respawnable or
+        // stopped. The shell must not classify clean-vs-respawnable from a
+        // local slot table.
         transition NotifyDrainExited {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input NotifyDrainExited { reason }
             guard "session_registered" { self.session_id != None }
-            update {}
+            update {
+                if self.drain_phase == DrainPhase::Running {
+                    if self.drain_mode == Some(DrainMode::PersistentHost)
+                        && reason == DrainExitReason::Failed
+                    {
+                        self.drain_phase = DrainPhase::ExitedRespawnable;
+                    } else {
+                        self.drain_phase = DrainPhase::Stopped;
+                    }
+                }
+            }
             to Idle
             emit RuntimeNotice { kind: RuntimeNoticeKind::Drain, detail: "drain exited" }
         }
@@ -2942,6 +7282,88 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
             emit WakeInterrupt
             emit RequestCancellationAtBoundary
+        }
+
+        // ResolveUserInterruptPublicResult: generated public-result authority
+        // for session interrupt surfaces. Runtime/surfaces provide typed
+        // observations (accepted, noop state, destroyed/missing, or
+        // non-interruptible); this transition owns whether the public result is
+        // success, not-found, session-busy, or conflict.
+        transition ResolveUserInterruptPublicResultAccepted {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveUserInterruptPublicResult { observation, target_present, staged_promotion_busy }
+            guard "accepted" { observation == UserInterruptObservationKind::Accepted }
+            update {}
+            to Idle
+            emit UserInterruptPublicResultResolved {
+                result: UserInterruptPublicResultKind::Interrupted
+            }
+        }
+
+        transition ResolveUserInterruptPublicResultNoop {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveUserInterruptPublicResult { observation, target_present, staged_promotion_busy }
+            guard "not_promoting" { staged_promotion_busy == false }
+            guard "noop_state" {
+                observation == UserInterruptObservationKind::IdleNoop
+                || observation == UserInterruptObservationKind::AttachedNoop
+                || observation == UserInterruptObservationKind::StagedNoop
+            }
+            update {}
+            to Idle
+            emit UserInterruptPublicResultResolved {
+                result: UserInterruptPublicResultKind::Interrupted
+            }
+        }
+
+        transition ResolveUserInterruptPublicResultDestroyedPresent {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveUserInterruptPublicResult { observation, target_present, staged_promotion_busy }
+            guard "not_promoting" { staged_promotion_busy == false }
+            guard "destroyed" { observation == UserInterruptObservationKind::Destroyed }
+            guard "target_present" { target_present == true }
+            update {}
+            to Idle
+            emit UserInterruptPublicResultResolved {
+                result: UserInterruptPublicResultKind::Interrupted
+            }
+        }
+
+        transition ResolveUserInterruptPublicResultDestroyedMissing {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveUserInterruptPublicResult { observation, target_present, staged_promotion_busy }
+            guard "not_promoting" { staged_promotion_busy == false }
+            guard "destroyed" { observation == UserInterruptObservationKind::Destroyed }
+            guard "target_missing" { target_present == false }
+            update {}
+            to Idle
+            emit UserInterruptPublicResultResolved {
+                result: UserInterruptPublicResultKind::NotFound
+            }
+        }
+
+        transition ResolveUserInterruptPublicResultPromotingConflict {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveUserInterruptPublicResult { observation, target_present, staged_promotion_busy }
+            guard "not_accepted" { observation != UserInterruptObservationKind::Accepted }
+            guard "promoting" { staged_promotion_busy == true }
+            update {}
+            to Idle
+            emit UserInterruptPublicResultResolved {
+                result: UserInterruptPublicResultKind::SessionBusy
+            }
+        }
+
+        transition ResolveUserInterruptPublicResultNotInterruptibleConflict {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveUserInterruptPublicResult { observation, target_present, staged_promotion_busy }
+            guard "not_promoting" { staged_promotion_busy == false }
+            guard "not_interruptible" { observation == UserInterruptObservationKind::NotInterruptible }
+            update {}
+            to Idle
+            emit UserInterruptPublicResultResolved {
+                result: UserInterruptPublicResultKind::Conflict
+            }
         }
 
         // 11. CancelAfterBoundary: Attached + Running self-loops
@@ -3009,6 +7431,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "staged_deferred_authorities_have_identity" {
                 deferred_authorities_have_identity(staged_requested_deferred_names, staged_deferred_authorities)
             }
+            guard "visibility_authority_matches_machine_catalog" {
+                meerkat_tool_visibility_publish_matches_catalog(
+                    active_filter, staged_filter,
+                    active_deferred_authorities, staged_deferred_authorities,
+                    self.filter_visibility_witnesses,
+                    self.deferred_visibility_authority_catalog,
+                    self.filter_visibility_authority_catalog)
+            }
             update {
                 self.active_filter = active_filter;
                 self.staged_filter = staged_filter;
@@ -3068,6 +7498,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "staged_deferred_authorities_have_identity" {
                 deferred_authorities_have_identity(staged_requested_deferred_names, staged_deferred_authorities)
             }
+            guard "visibility_authority_matches_machine_catalog" {
+                meerkat_tool_visibility_publish_matches_catalog(
+                    active_filter, staged_filter,
+                    active_deferred_authorities, staged_deferred_authorities,
+                    self.filter_visibility_witnesses,
+                    self.deferred_visibility_authority_catalog,
+                    self.filter_visibility_authority_catalog)
+            }
             update {
                 self.active_filter = active_filter;
                 self.staged_filter = staged_filter;
@@ -3120,6 +7558,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "staged_deferred_authorities_have_identity" {
                 deferred_authorities_have_identity(staged_requested_deferred_names, staged_deferred_authorities)
+            }
+            guard "visibility_authority_matches_machine_catalog" {
+                meerkat_tool_visibility_publish_matches_catalog(
+                    active_filter, staged_filter,
+                    active_deferred_authorities, staged_deferred_authorities,
+                    self.filter_visibility_witnesses,
+                    self.deferred_visibility_authority_catalog,
+                    self.filter_visibility_authority_catalog)
             }
             update {
                 self.active_filter = active_filter;
@@ -3174,6 +7620,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "staged_deferred_authorities_have_identity" {
                 deferred_authorities_have_identity(staged_requested_deferred_names, staged_deferred_authorities)
             }
+            guard "visibility_authority_matches_machine_catalog" {
+                meerkat_tool_visibility_publish_matches_catalog(
+                    active_filter, staged_filter,
+                    active_deferred_authorities, staged_deferred_authorities,
+                    self.filter_visibility_witnesses,
+                    self.deferred_visibility_authority_catalog,
+                    self.filter_visibility_authority_catalog)
+            }
             update {
                 self.active_filter = active_filter;
                 self.staged_filter = staged_filter;
@@ -3227,6 +7681,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "staged_deferred_authorities_have_identity" {
                 deferred_authorities_have_identity(staged_requested_deferred_names, staged_deferred_authorities)
             }
+            guard "visibility_authority_matches_machine_catalog" {
+                meerkat_tool_visibility_publish_matches_catalog(
+                    active_filter, staged_filter,
+                    active_deferred_authorities, staged_deferred_authorities,
+                    self.filter_visibility_witnesses,
+                    self.deferred_visibility_authority_catalog,
+                    self.filter_visibility_authority_catalog)
+            }
             update {
                 self.active_filter = active_filter;
                 self.staged_filter = staged_filter;
@@ -3252,13 +7714,46 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.lifecycle_phase == Phase::Attached
                 || self.lifecycle_phase == Phase::Running
             }
-            update {}
+            guard "runtime_binding_present" {
+                self.active_runtime_id != None && self.active_fence_token != None
+            }
+            update {
+                self.runtime_stop_deferred = false;
+            }
             to Retired
             emit RuntimeRetired { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
+        }
+        transition RetireRequestedFromIdleUnbound {
+            on input Retire { session_id }
+            guard {
+                self.lifecycle_phase == Phase::Idle
+                || self.lifecycle_phase == Phase::Attached
+                || self.lifecycle_phase == Phase::Running
+            }
+            guard "runtime_binding_absent" {
+                self.active_runtime_id == None || self.active_fence_token == None
+            }
+            update {
+                self.runtime_stop_deferred = false;
+            }
+            to Retired
         }
         transition RetireAlreadyRetired {
             on input Retire { session_id }
             guard { self.lifecycle_phase == Phase::Retired }
+            guard "runtime_binding_present" {
+                self.active_runtime_id != None && self.active_fence_token != None
+            }
+            update {}
+            to Retired
+            emit RuntimeRetired { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
+        }
+        transition RetireAlreadyRetiredUnbound {
+            on input Retire { session_id }
+            guard { self.lifecycle_phase == Phase::Retired }
+            guard "runtime_binding_absent" {
+                self.active_runtime_id == None || self.active_fence_token == None
+            }
             update {}
             to Retired
         }
@@ -3276,6 +7771,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.current_run_id = None;
                 self.active_fence_token = None;
                 self.pre_run_phase = None;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
             }
             to Idle
@@ -3292,6 +7788,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
             }
             to Initializing
@@ -3304,6 +7801,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
             }
             to Idle
@@ -3316,6 +7814,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
             }
             to Retired
@@ -3327,6 +7826,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input StopRuntimeExecutor { reason }
             guard { self.lifecycle_phase == Phase::Attached }
             update {
+                self.runtime_stop_deferred = true;
                 self.silent_intent_overrides = EmptySet;
             }
             to Attached
@@ -3338,6 +7838,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input StopRuntimeExecutor { reason }
             guard { self.lifecycle_phase == Phase::Running }
             update {
+                if self.current_run_id != None {
+                    self.runtime_stop_deferred = true;
+                } else {
+                    self.runtime_stop_deferred = false;
+                }
                 self.silent_intent_overrides = EmptySet;
             }
             to Running
@@ -3356,7 +7861,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
+                self.registration_phase = RegistrationPhase::Queuing;
             }
             to Stopped
             emit RuntimeNotice { kind: RuntimeNoticeKind::Exit, detail: "runtime executor exited" }
@@ -3367,7 +7874,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
+                self.registration_phase = RegistrationPhase::Queuing;
             }
             to Stopped
             emit RuntimeNotice { kind: RuntimeNoticeKind::Exit, detail: "runtime executor exited" }
@@ -3376,7 +7885,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RuntimeExecutorExited
             guard { self.lifecycle_phase == Phase::Idle }
             update {
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
+                self.registration_phase = RegistrationPhase::Queuing;
             }
             to Stopped
             emit RuntimeNotice { kind: RuntimeNoticeKind::Exit, detail: "runtime executor exited" }
@@ -3387,7 +7898,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
+                self.registration_phase = RegistrationPhase::Queuing;
             }
             to Stopped
             emit RuntimeNotice { kind: RuntimeNoticeKind::Exit, detail: "runtime executor exited" }
@@ -3395,8 +7908,512 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition RuntimeExecutorExitedFromStopped {
             on input RuntimeExecutorExited
             guard { self.lifecycle_phase == Phase::Stopped }
-            update {}
+            update {
+                self.runtime_stop_deferred = false;
+                self.registration_phase = RegistrationPhase::Queuing;
+            }
             to Stopped
+        }
+
+        // 16a. ResolveRuntimeCompletionResult: generated public completion
+        // result class for runtime-loop waiter observations. Runtime carries
+        // payload bytes/JSON, but the public result variant is selected here.
+        transition ResolveRuntimeCompletionResultCompleted {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveRuntimeCompletionResult { run_id, terminal, finalization }
+            guard "session_registered" { self.session_id != None }
+            guard "run_correlated" {
+                run_id != None
+                && self.runtime_completion_result_run_id == run_id
+            }
+            guard "finalization_succeeded" { finalization == RuntimeCompletionFinalizationObservation::Succeeded }
+            guard "terminal_run_result" { terminal == RuntimeCompletionTerminalObservation::RunResult }
+            update {}
+            to Idle
+            emit RuntimeCompletionResultResolved {
+                session_id: self.session_id.get("value"),
+                agent_runtime_id: self.active_runtime_id,
+                fence_token: self.active_fence_token,
+                runtime_generation: self.active_runtime_generation,
+                runtime_epoch_id: self.active_runtime_epoch_id,
+                run_id: run_id,
+                result_class: RuntimeCompletionResultClass::Completed,
+                cleanup_outcome: RuntimeCompletionObservedOutcome::Completed
+            }
+        }
+
+        transition ResolveRuntimeCompletionResultWithoutResult {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveRuntimeCompletionResult { run_id, terminal, finalization }
+            guard "session_registered" { self.session_id != None }
+            guard "run_correlated" {
+                run_id != None
+                && self.runtime_completion_result_run_id == run_id
+            }
+            guard "finalization_succeeded" { finalization == RuntimeCompletionFinalizationObservation::Succeeded }
+            guard "terminal_no_result" { terminal == RuntimeCompletionTerminalObservation::NoResult }
+            update {}
+            to Idle
+            emit RuntimeCompletionResultResolved {
+                session_id: self.session_id.get("value"),
+                agent_runtime_id: self.active_runtime_id,
+                fence_token: self.active_fence_token,
+                runtime_generation: self.active_runtime_generation,
+                runtime_epoch_id: self.active_runtime_epoch_id,
+                run_id: run_id,
+                result_class: RuntimeCompletionResultClass::CompletedWithoutResult,
+                cleanup_outcome: RuntimeCompletionObservedOutcome::CompletedWithoutResult
+            }
+        }
+
+        transition ResolveRuntimeCompletionResultCallbackPending {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveRuntimeCompletionResult { run_id, terminal, finalization }
+            guard "session_registered" { self.session_id != None }
+            guard "run_correlated" {
+                run_id != None
+                && self.runtime_completion_result_run_id == run_id
+            }
+            guard "finalization_succeeded" { finalization == RuntimeCompletionFinalizationObservation::Succeeded }
+            guard "terminal_callback_pending" { terminal == RuntimeCompletionTerminalObservation::CallbackPending }
+            update {}
+            to Idle
+            emit RuntimeCompletionResultResolved {
+                session_id: self.session_id.get("value"),
+                agent_runtime_id: self.active_runtime_id,
+                fence_token: self.active_fence_token,
+                runtime_generation: self.active_runtime_generation,
+                runtime_epoch_id: self.active_runtime_epoch_id,
+                run_id: run_id,
+                result_class: RuntimeCompletionResultClass::CallbackPending,
+                cleanup_outcome: RuntimeCompletionObservedOutcome::CallbackPending
+            }
+        }
+
+        transition ResolveRuntimeCompletionResultCancelled {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveRuntimeCompletionResult { run_id, terminal, finalization }
+            guard "session_registered" { self.session_id != None }
+            guard "run_correlated" {
+                run_id != None
+                && self.runtime_completion_result_run_id == run_id
+            }
+            guard "finalization_succeeded" { finalization == RuntimeCompletionFinalizationObservation::Succeeded }
+            guard "terminal_machine" { terminal == RuntimeCompletionTerminalObservation::MachineTerminal }
+            guard "machine_cancelled" { self.terminal_outcome == Some(TurnTerminalOutcome::Cancelled) }
+            update {}
+            to Idle
+            emit RuntimeCompletionResultResolved {
+                session_id: self.session_id.get("value"),
+                agent_runtime_id: self.active_runtime_id,
+                fence_token: self.active_fence_token,
+                runtime_generation: self.active_runtime_generation,
+                runtime_epoch_id: self.active_runtime_epoch_id,
+                run_id: run_id,
+                result_class: RuntimeCompletionResultClass::Cancelled,
+                cleanup_outcome: RuntimeCompletionObservedOutcome::Cancelled
+            }
+        }
+
+        transition ResolveRuntimeCompletionResultRuntimeApplyFailed {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveRuntimeCompletionResult { run_id, terminal, finalization }
+            guard "session_registered" { self.session_id != None }
+            guard "run_correlated" {
+                run_id != None
+                && self.runtime_completion_result_run_id == run_id
+            }
+            guard "finalization_succeeded" { finalization == RuntimeCompletionFinalizationObservation::Succeeded }
+            guard "terminal_machine" { terminal == RuntimeCompletionTerminalObservation::MachineTerminal }
+            guard "machine_failed" {
+                self.terminal_outcome == Some(TurnTerminalOutcome::Failed)
+                || self.terminal_outcome == Some(TurnTerminalOutcome::BudgetExhausted)
+                || self.terminal_outcome == Some(TurnTerminalOutcome::TimeBudgetExceeded)
+                || self.terminal_outcome == Some(TurnTerminalOutcome::StructuredOutputValidationFailed)
+            }
+            guard "machine_failure_cause_known" {
+                self.terminal_cause_kind != None
+                && self.terminal_cause_kind != Some(TurnTerminalCauseKind::Unknown)
+            }
+            guard "machine_runtime_apply_failed" {
+                self.terminal_cause_kind == Some(TurnTerminalCauseKind::RuntimeApplyFailure)
+            }
+            update {}
+            to Idle
+            emit RuntimeCompletionResultResolved {
+                session_id: self.session_id.get("value"),
+                agent_runtime_id: self.active_runtime_id,
+                fence_token: self.active_fence_token,
+                runtime_generation: self.active_runtime_generation,
+                runtime_epoch_id: self.active_runtime_epoch_id,
+                run_id: run_id,
+                result_class: RuntimeCompletionResultClass::AbandonedWithError,
+                cleanup_outcome: RuntimeCompletionObservedOutcome::RuntimeApplyFailed
+            }
+        }
+
+        transition ResolveRuntimeCompletionResultMachineFailed {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveRuntimeCompletionResult { run_id, terminal, finalization }
+            guard "session_registered" { self.session_id != None }
+            guard "run_correlated" {
+                run_id != None
+                && self.runtime_completion_result_run_id == run_id
+            }
+            guard "finalization_succeeded" { finalization == RuntimeCompletionFinalizationObservation::Succeeded }
+            guard "terminal_machine" { terminal == RuntimeCompletionTerminalObservation::MachineTerminal }
+            guard "machine_failed" {
+                self.terminal_outcome == Some(TurnTerminalOutcome::Failed)
+                || self.terminal_outcome == Some(TurnTerminalOutcome::BudgetExhausted)
+                || self.terminal_outcome == Some(TurnTerminalOutcome::TimeBudgetExceeded)
+                || self.terminal_outcome == Some(TurnTerminalOutcome::StructuredOutputValidationFailed)
+            }
+            guard "machine_failure_cause_known" {
+                self.terminal_cause_kind != None
+                && self.terminal_cause_kind != Some(TurnTerminalCauseKind::Unknown)
+            }
+            guard "machine_not_runtime_apply_failed" {
+                self.terminal_cause_kind != Some(TurnTerminalCauseKind::RuntimeApplyFailure)
+            }
+            update {}
+            to Idle
+            emit RuntimeCompletionResultResolved {
+                session_id: self.session_id.get("value"),
+                agent_runtime_id: self.active_runtime_id,
+                fence_token: self.active_fence_token,
+                runtime_generation: self.active_runtime_generation,
+                runtime_epoch_id: self.active_runtime_epoch_id,
+                run_id: run_id,
+                result_class: RuntimeCompletionResultClass::AbandonedWithError,
+                cleanup_outcome: RuntimeCompletionObservedOutcome::Abandoned
+            }
+        }
+
+        transition ResolveRuntimeCompletionResultFinalizationFailureWithResult {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveRuntimeCompletionResult { run_id, terminal, finalization }
+            guard "session_registered" { self.session_id != None }
+            guard "run_correlated" {
+                run_id != None
+                && (
+                    self.runtime_completion_result_run_id == run_id
+                    || self.current_run_id == run_id
+                )
+            }
+            guard "finalization_failed" { finalization == RuntimeCompletionFinalizationObservation::Failed }
+            guard "terminal_run_result" { terminal == RuntimeCompletionTerminalObservation::RunResult }
+            update {}
+            to Idle
+            emit RuntimeCompletionResultResolved {
+                session_id: self.session_id.get("value"),
+                agent_runtime_id: self.active_runtime_id,
+                fence_token: self.active_fence_token,
+                runtime_generation: self.active_runtime_generation,
+                runtime_epoch_id: self.active_runtime_epoch_id,
+                run_id: run_id,
+                result_class: RuntimeCompletionResultClass::CompletedWithFinalizationFailure,
+                cleanup_outcome: RuntimeCompletionObservedOutcome::FinalizationFailed
+            }
+        }
+
+        transition ResolveRuntimeCompletionResultFinalizationFailureWithoutResult {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveRuntimeCompletionResult { run_id, terminal, finalization }
+            guard "session_registered" { self.session_id != None }
+            guard "run_correlated" {
+                run_id != None
+                && (
+                    self.runtime_completion_result_run_id == run_id
+                    || self.current_run_id == run_id
+                )
+            }
+            guard "finalization_failed" { finalization == RuntimeCompletionFinalizationObservation::Failed }
+            guard "terminal_without_result" {
+                terminal == RuntimeCompletionTerminalObservation::NoResult
+                || terminal == RuntimeCompletionTerminalObservation::CallbackPending
+            }
+            update {}
+            to Idle
+            emit RuntimeCompletionResultResolved {
+                session_id: self.session_id.get("value"),
+                agent_runtime_id: self.active_runtime_id,
+                fence_token: self.active_fence_token,
+                runtime_generation: self.active_runtime_generation,
+                runtime_epoch_id: self.active_runtime_epoch_id,
+                run_id: run_id,
+                result_class: RuntimeCompletionResultClass::AbandonedWithError,
+                cleanup_outcome: RuntimeCompletionObservedOutcome::RuntimeApplyFailed
+            }
+        }
+
+        transition ResolveRuntimeCompletionResultRuntimeTerminated {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveRuntimeCompletionResult { run_id, terminal, finalization }
+            guard "session_registered" { self.session_id != None }
+            guard "no_run_result" { run_id == None }
+            guard "finalization_succeeded" { finalization == RuntimeCompletionFinalizationObservation::Succeeded }
+            guard "terminal_runtime_terminated" { terminal == RuntimeCompletionTerminalObservation::RuntimeTerminated }
+            update {}
+            to Idle
+            emit RuntimeCompletionResultResolved {
+                session_id: self.session_id.get("value"),
+                agent_runtime_id: self.active_runtime_id,
+                fence_token: self.active_fence_token,
+                runtime_generation: self.active_runtime_generation,
+                runtime_epoch_id: self.active_runtime_epoch_id,
+                run_id: None,
+                result_class: RuntimeCompletionResultClass::RuntimeTerminated,
+                cleanup_outcome: RuntimeCompletionObservedOutcome::RuntimeTerminated
+            }
+        }
+        transition ResolveRuntimeCompletionResultRuntimeTerminatedDestroyed {
+            per_phase [Destroyed]
+            on input ResolveRuntimeCompletionResult { run_id, terminal, finalization }
+            guard "session_registered" { self.session_id != None }
+            guard "no_run_result" { run_id == None }
+            guard "finalization_succeeded" { finalization == RuntimeCompletionFinalizationObservation::Succeeded }
+            guard "terminal_runtime_terminated" { terminal == RuntimeCompletionTerminalObservation::RuntimeTerminated }
+            update {}
+            to Destroyed
+            emit RuntimeCompletionResultResolved {
+                session_id: self.session_id.get("value"),
+                agent_runtime_id: self.active_runtime_id,
+                fence_token: self.active_fence_token,
+                runtime_generation: self.active_runtime_generation,
+                runtime_epoch_id: self.active_runtime_epoch_id,
+                run_id: None,
+                result_class: RuntimeCompletionResultClass::RuntimeTerminated,
+                cleanup_outcome: RuntimeCompletionObservedOutcome::RuntimeTerminated
+            }
+        }
+
+        // 16b. ResolveRuntimeCompletionCleanup: generated cleanup action for
+        // completion waiter observations. The shell may observe a typed
+        // completion outcome and read authoritative archive/live-session
+        // facts, but runtime cleanup/admission side effects may only follow
+        // this generated action.
+        transition ResolveRuntimeCompletionCleanupArchived {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveRuntimeCompletionCleanup {
+                session_id, observation_session_id, observation_agent_runtime_id,
+                observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome,
+                archived_by_authority, live_session
+            }
+            guard "observation_matches_session" { observation_session_id == session_id }
+            guard "observation_matches_runtime_binding" {
+                self.active_runtime_id == observation_agent_runtime_id
+                && self.active_fence_token == observation_fence_token
+                && self.active_runtime_generation == observation_runtime_generation
+                && self.active_runtime_epoch_id == observation_runtime_epoch_id
+            }
+            guard "archived_by_generated_authority" { archived_by_authority == true }
+            update {}
+            to Idle
+            emit RuntimeCompletionCleanupResolved {
+                session_id: session_id,
+                action: RuntimeCompletionCleanupAction::CleanupRuntime,
+                pre_admission_action: RuntimeCompletionPreAdmissionAction::ReleasePreAdmission
+            }
+        }
+
+        transition ResolveRuntimeCompletionCleanupRuntimeTerminated {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveRuntimeCompletionCleanup {
+                session_id, observation_session_id, observation_agent_runtime_id,
+                observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome,
+                archived_by_authority, live_session
+            }
+            guard "observation_matches_session" { observation_session_id == session_id }
+            guard "observation_matches_runtime_binding" {
+                self.active_runtime_id == observation_agent_runtime_id
+                && self.active_fence_token == observation_fence_token
+                && self.active_runtime_generation == observation_runtime_generation
+                && self.active_runtime_epoch_id == observation_runtime_epoch_id
+            }
+            guard "not_archived" { archived_by_authority == false }
+            guard "runtime_terminated" { outcome == RuntimeCompletionObservedOutcome::RuntimeTerminated }
+            update {}
+            to Idle
+            emit RuntimeCompletionCleanupResolved {
+                session_id: session_id,
+                action: RuntimeCompletionCleanupAction::CleanupRuntime,
+                pre_admission_action: RuntimeCompletionPreAdmissionAction::ReleasePreAdmission
+            }
+        }
+
+        transition ResolveRuntimeCompletionCleanupFinalizationFailed {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveRuntimeCompletionCleanup {
+                session_id, observation_session_id, observation_agent_runtime_id,
+                observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome,
+                archived_by_authority, live_session
+            }
+            guard "observation_matches_session" { observation_session_id == session_id }
+            guard "observation_matches_runtime_binding" {
+                self.active_runtime_id == observation_agent_runtime_id
+                && self.active_fence_token == observation_fence_token
+                && self.active_runtime_generation == observation_runtime_generation
+                && self.active_runtime_epoch_id == observation_runtime_epoch_id
+            }
+            guard "not_archived" { archived_by_authority == false }
+            guard "finalization_failed" { outcome == RuntimeCompletionObservedOutcome::FinalizationFailed }
+            update {}
+            to Idle
+            emit RuntimeCompletionCleanupResolved {
+                session_id: session_id,
+                action: RuntimeCompletionCleanupAction::CleanupRuntime,
+                pre_admission_action: RuntimeCompletionPreAdmissionAction::ReleasePreAdmission
+            }
+        }
+
+        transition ResolveRuntimeCompletionCleanupRuntimeApplyFailed {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveRuntimeCompletionCleanup {
+                session_id, observation_session_id, observation_agent_runtime_id,
+                observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome,
+                archived_by_authority, live_session
+            }
+            guard "observation_matches_session" { observation_session_id == session_id }
+            guard "observation_matches_runtime_binding" {
+                self.active_runtime_id == observation_agent_runtime_id
+                && self.active_fence_token == observation_fence_token
+                && self.active_runtime_generation == observation_runtime_generation
+                && self.active_runtime_epoch_id == observation_runtime_epoch_id
+            }
+            guard "not_archived" { archived_by_authority == false }
+            guard "runtime_apply_failed" { outcome == RuntimeCompletionObservedOutcome::RuntimeApplyFailed }
+            update {}
+            to Idle
+            emit RuntimeCompletionCleanupResolved {
+                session_id: session_id,
+                action: RuntimeCompletionCleanupAction::CleanupRuntime,
+                pre_admission_action: RuntimeCompletionPreAdmissionAction::ReleasePreAdmission
+            }
+        }
+
+        transition ResolveRuntimeCompletionCleanupAbandonedWithoutLiveSession {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveRuntimeCompletionCleanup {
+                session_id, observation_session_id, observation_agent_runtime_id,
+                observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome,
+                archived_by_authority, live_session
+            }
+            guard "observation_matches_session" { observation_session_id == session_id }
+            guard "observation_matches_runtime_binding" {
+                self.active_runtime_id == observation_agent_runtime_id
+                && self.active_fence_token == observation_fence_token
+                && self.active_runtime_generation == observation_runtime_generation
+                && self.active_runtime_epoch_id == observation_runtime_epoch_id
+            }
+            guard "not_archived" { archived_by_authority == false }
+            guard "abandoned" { outcome == RuntimeCompletionObservedOutcome::Abandoned }
+            guard "live_absent" { live_session == RuntimeCompletionLiveSessionObservation::Absent }
+            update {}
+            to Idle
+            emit RuntimeCompletionCleanupResolved {
+                session_id: session_id,
+                action: RuntimeCompletionCleanupAction::CleanupRuntime,
+                pre_admission_action: RuntimeCompletionPreAdmissionAction::ReleasePreAdmission
+            }
+        }
+
+        transition ResolveRuntimeCompletionCleanupCancelledWithoutLiveSession {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveRuntimeCompletionCleanup {
+                session_id, observation_session_id, observation_agent_runtime_id,
+                observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome,
+                archived_by_authority, live_session
+            }
+            guard "observation_matches_session" { observation_session_id == session_id }
+            guard "observation_matches_runtime_binding" {
+                self.active_runtime_id == observation_agent_runtime_id
+                && self.active_fence_token == observation_fence_token
+                && self.active_runtime_generation == observation_runtime_generation
+                && self.active_runtime_epoch_id == observation_runtime_epoch_id
+            }
+            guard "not_archived" { archived_by_authority == false }
+            guard "cancelled" { outcome == RuntimeCompletionObservedOutcome::Cancelled }
+            guard "live_absent" { live_session == RuntimeCompletionLiveSessionObservation::Absent }
+            update {}
+            to Idle
+            emit RuntimeCompletionCleanupResolved {
+                session_id: session_id,
+                action: RuntimeCompletionCleanupAction::CleanupRuntime,
+                pre_admission_action: RuntimeCompletionPreAdmissionAction::ReleasePreAdmission
+            }
+        }
+
+        transition ResolveRuntimeCompletionCleanupRetain {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveRuntimeCompletionCleanup {
+                session_id, observation_session_id, observation_agent_runtime_id,
+                observation_fence_token, observation_runtime_generation, observation_runtime_epoch_id, outcome,
+                archived_by_authority, live_session
+            }
+            guard "observation_matches_session" { observation_session_id == session_id }
+            guard "observation_matches_runtime_binding" {
+                self.active_runtime_id == observation_agent_runtime_id
+                && self.active_fence_token == observation_fence_token
+                && self.active_runtime_generation == observation_runtime_generation
+                && self.active_runtime_epoch_id == observation_runtime_epoch_id
+            }
+            guard "not_archived" { archived_by_authority == false }
+            guard "cleanup_outcome_absent" {
+                outcome == RuntimeCompletionObservedOutcome::Completed
+                || outcome == RuntimeCompletionObservedOutcome::CompletedWithoutResult
+                || outcome == RuntimeCompletionObservedOutcome::CallbackPending
+                || (outcome == RuntimeCompletionObservedOutcome::Abandoned
+                    && live_session != RuntimeCompletionLiveSessionObservation::Absent)
+                || (outcome == RuntimeCompletionObservedOutcome::Cancelled
+                    && live_session != RuntimeCompletionLiveSessionObservation::Absent)
+            }
+            update {}
+            to Idle
+            emit RuntimeCompletionCleanupResolved {
+                session_id: session_id,
+                action: RuntimeCompletionCleanupAction::RetainRuntime,
+                pre_admission_action: RuntimeCompletionPreAdmissionAction::ReleasePreAdmission
+            }
+        }
+
+        // 16c. ResolveRuntimeCompletionWaitFailure: generated public error
+        // and pre-admission authority for mechanical waiter failures. The
+        // surface may observe a typed waiter failure, but public failure class
+        // and admission release are selected here.
+        transition ResolveRuntimeCompletionWaitFailureChannelClosed {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveRuntimeCompletionWaitFailure { session_id, failure }
+            guard "session_registered" { self.session_id != None }
+            guard "session_matches" { self.session_id.get("value") == session_id }
+            guard "channel_closed" { failure == RuntimeCompletionWaitFailureObservation::ChannelClosed }
+            update {}
+            to Idle
+            emit RuntimeCompletionWaitFailureResolved {
+                session_id: session_id,
+                failure: failure,
+                pre_admission_action: RuntimeCompletionPreAdmissionAction::ReleasePreAdmission,
+                public_error_class: RuntimeCompletionWaitFailurePublicErrorClass::InternalError,
+                public_reason: RuntimeCompletionWaitFailurePublicReason::CompletionChannelClosed,
+                resumable: false
+            }
+        }
+
+        transition ResolveRuntimeCompletionWaitFailureAuthorityUnavailable {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveRuntimeCompletionWaitFailure { session_id, failure }
+            guard "session_registered" { self.session_id != None }
+            guard "session_matches" { self.session_id.get("value") == session_id }
+            guard "authority_unavailable" { failure == RuntimeCompletionWaitFailureObservation::AuthorityUnavailable }
+            update {}
+            to Idle
+            emit RuntimeCompletionWaitFailureResolved {
+                session_id: session_id,
+                failure: failure,
+                pre_admission_action: RuntimeCompletionPreAdmissionAction::ReleasePreAdmission,
+                public_error_class: RuntimeCompletionWaitFailurePublicErrorClass::InternalError,
+                public_reason: RuntimeCompletionWaitFailurePublicReason::CompletionAuthorityUnavailable,
+                resumable: false
+            }
         }
 
         // 17. Destroy: from all non-Destroyed bound runtime phases → Destroyed.
@@ -3407,6 +8424,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
                 self.registration_phase = RegistrationPhase::Queuing;
             }
@@ -3425,6 +8443,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.runtime_stop_deferred = false;
                 self.silent_intent_overrides = EmptySet;
                 self.registration_phase = RegistrationPhase::Queuing;
             }
@@ -3469,6 +8488,190 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit RuntimeNotice { kind: RuntimeNoticeKind::Recover, detail: "runtime recovered" }
         }
 
+        // 18b. RecoverRuntimeAuthority: seed runtime-observed lifecycle facts
+        // through generated authority during registration/recovery. The shell
+        // may supply only typed observations; the machine owns the resulting
+        // lifecycle, session, runtime binding, run binding, and silent-intent
+        // facts.
+        transition RecoverRuntimeAuthorityInitializing {
+            on input RecoverRuntimeAuthority {
+                session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id,
+                pre_run_phase, silent_intent_overrides
+            }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "observed_initializing" { state == RuntimeLifecycleObservedState::Initializing }
+            guard "no_run_binding" { current_run_id == None && pre_run_phase == None }
+            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
+            guard "generation_requires_runtime" { runtime_generation == None || agent_runtime_id != None }
+            guard "epoch_requires_runtime" { runtime_epoch_id == None || agent_runtime_id != None }
+            guard "binding_identity_present_when_runtime_bound" { agent_runtime_id == None || runtime_generation != None || runtime_epoch_id != None }
+            update {
+                self.session_id = Some(session_id);
+                self.active_runtime_id = agent_runtime_id;
+                self.active_fence_token = fence_token;
+                self.active_runtime_generation = runtime_generation;
+                self.active_runtime_epoch_id = runtime_epoch_id;
+                self.current_run_id = current_run_id;
+                self.pre_run_phase = pre_run_phase;
+                self.runtime_stop_deferred = false;
+                self.silent_intent_overrides = silent_intent_overrides;
+            }
+            to Initializing
+        }
+        transition RecoverRuntimeAuthorityIdle {
+            on input RecoverRuntimeAuthority {
+                session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id,
+                pre_run_phase, silent_intent_overrides
+            }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "observed_idle" { state == RuntimeLifecycleObservedState::Idle }
+            guard "no_run_binding" { current_run_id == None && pre_run_phase == None }
+            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
+            guard "generation_requires_runtime" { runtime_generation == None || agent_runtime_id != None }
+            guard "epoch_requires_runtime" { runtime_epoch_id == None || agent_runtime_id != None }
+            guard "binding_identity_present_when_runtime_bound" { agent_runtime_id == None || runtime_generation != None || runtime_epoch_id != None }
+            update {
+                self.session_id = Some(session_id);
+                self.active_runtime_id = agent_runtime_id;
+                self.active_fence_token = fence_token;
+                self.active_runtime_generation = runtime_generation;
+                self.active_runtime_epoch_id = runtime_epoch_id;
+                self.current_run_id = current_run_id;
+                self.pre_run_phase = pre_run_phase;
+                self.runtime_stop_deferred = false;
+                self.silent_intent_overrides = silent_intent_overrides;
+            }
+            to Idle
+        }
+        transition RecoverRuntimeAuthorityAttached {
+            on input RecoverRuntimeAuthority {
+                session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id,
+                pre_run_phase, silent_intent_overrides
+            }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "observed_attached" { state == RuntimeLifecycleObservedState::Attached }
+            guard "no_run_binding" { current_run_id == None && pre_run_phase == None }
+            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
+            guard "generation_requires_runtime" { runtime_generation == None || agent_runtime_id != None }
+            guard "epoch_requires_runtime" { runtime_epoch_id == None || agent_runtime_id != None }
+            guard "binding_identity_present_when_runtime_bound" { agent_runtime_id == None || runtime_generation != None || runtime_epoch_id != None }
+            update {
+                self.session_id = Some(session_id);
+                self.active_runtime_id = agent_runtime_id;
+                self.active_fence_token = fence_token;
+                self.active_runtime_generation = runtime_generation;
+                self.active_runtime_epoch_id = runtime_epoch_id;
+                self.current_run_id = current_run_id;
+                self.pre_run_phase = pre_run_phase;
+                self.runtime_stop_deferred = false;
+                self.silent_intent_overrides = silent_intent_overrides;
+            }
+            to Attached
+        }
+        transition RecoverRuntimeAuthorityRunning {
+            on input RecoverRuntimeAuthority {
+                session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id,
+                pre_run_phase, silent_intent_overrides
+            }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "observed_running" { state == RuntimeLifecycleObservedState::Running }
+            guard "run_binding_complete" { current_run_id != None && pre_run_phase != None }
+            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
+            guard "generation_requires_runtime" { runtime_generation == None || agent_runtime_id != None }
+            guard "epoch_requires_runtime" { runtime_epoch_id == None || agent_runtime_id != None }
+            guard "binding_identity_present_when_runtime_bound" { agent_runtime_id == None || runtime_generation != None || runtime_epoch_id != None }
+            update {
+                self.session_id = Some(session_id);
+                self.active_runtime_id = agent_runtime_id;
+                self.active_fence_token = fence_token;
+                self.active_runtime_generation = runtime_generation;
+                self.active_runtime_epoch_id = runtime_epoch_id;
+                self.current_run_id = current_run_id;
+                self.pre_run_phase = pre_run_phase;
+                self.runtime_stop_deferred = false;
+                self.silent_intent_overrides = silent_intent_overrides;
+            }
+            to Running
+        }
+        transition RecoverRuntimeAuthorityRetired {
+            on input RecoverRuntimeAuthority {
+                session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id,
+                pre_run_phase, silent_intent_overrides
+            }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "observed_retired" { state == RuntimeLifecycleObservedState::Retired }
+            guard "run_binding_pair" {
+                (current_run_id == None && pre_run_phase == None)
+                || (current_run_id != None && pre_run_phase != None)
+            }
+            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
+            guard "generation_requires_runtime" { runtime_generation == None || agent_runtime_id != None }
+            guard "epoch_requires_runtime" { runtime_epoch_id == None || agent_runtime_id != None }
+            guard "binding_identity_present_when_runtime_bound" { agent_runtime_id == None || runtime_generation != None || runtime_epoch_id != None }
+            update {
+                self.session_id = Some(session_id);
+                self.active_runtime_id = agent_runtime_id;
+                self.active_fence_token = fence_token;
+                self.active_runtime_generation = runtime_generation;
+                self.active_runtime_epoch_id = runtime_epoch_id;
+                self.current_run_id = current_run_id;
+                self.pre_run_phase = pre_run_phase;
+                self.runtime_stop_deferred = false;
+                self.silent_intent_overrides = silent_intent_overrides;
+            }
+            to Retired
+        }
+        transition RecoverRuntimeAuthorityStopped {
+            on input RecoverRuntimeAuthority {
+                session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id,
+                pre_run_phase, silent_intent_overrides
+            }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "observed_stopped" { state == RuntimeLifecycleObservedState::Stopped }
+            guard "no_run_binding" { current_run_id == None && pre_run_phase == None }
+            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
+            guard "generation_requires_runtime" { runtime_generation == None || agent_runtime_id != None }
+            guard "epoch_requires_runtime" { runtime_epoch_id == None || agent_runtime_id != None }
+            guard "binding_identity_present_when_runtime_bound" { agent_runtime_id == None || runtime_generation != None || runtime_epoch_id != None }
+            update {
+                self.session_id = Some(session_id);
+                self.active_runtime_id = agent_runtime_id;
+                self.active_fence_token = fence_token;
+                self.active_runtime_generation = runtime_generation;
+                self.active_runtime_epoch_id = runtime_epoch_id;
+                self.current_run_id = current_run_id;
+                self.pre_run_phase = pre_run_phase;
+                self.runtime_stop_deferred = false;
+                self.silent_intent_overrides = silent_intent_overrides;
+            }
+            to Stopped
+        }
+        transition RecoverRuntimeAuthorityDestroyed {
+            on input RecoverRuntimeAuthority {
+                session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id,
+                pre_run_phase, silent_intent_overrides
+            }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "observed_destroyed" { state == RuntimeLifecycleObservedState::Destroyed }
+            guard "no_run_binding" { current_run_id == None && pre_run_phase == None }
+            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
+            guard "generation_requires_runtime" { runtime_generation == None || agent_runtime_id != None }
+            guard "epoch_requires_runtime" { runtime_epoch_id == None || agent_runtime_id != None }
+            guard "binding_identity_present_when_runtime_bound" { agent_runtime_id == None || runtime_generation != None || runtime_epoch_id != None }
+            update {
+                self.session_id = Some(session_id);
+                self.active_runtime_id = agent_runtime_id;
+                self.active_fence_token = fence_token;
+                self.active_runtime_generation = runtime_generation;
+                self.active_runtime_epoch_id = runtime_epoch_id;
+                self.current_run_id = current_run_id;
+                self.pre_run_phase = pre_run_phase;
+                self.runtime_stop_deferred = false;
+                self.silent_intent_overrides = silent_intent_overrides;
+            }
+            to Destroyed
+        }
+
         // =====================================================================
         // Absorbed transitions
         // =====================================================================
@@ -3489,6 +8692,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Attached }
             update {
                 self.registration_phase = RegistrationPhase::Active;
+                self.runtime_stop_deferred = false;
             }
             to Attached
         }
@@ -3600,8 +8804,12 @@ macro_rules! meerkat_catalog_machine_dsl {
         // 23. Ingest: Idle/Attached/Running self-loops, emit ResolveAdmission
         transition Ingest {
             per_phase [Idle, Attached, Running]
-            on input Ingest { runtime_id, work_id, origin }
-            guard "session_registered" { self.session_id != None }
+            on input Ingest { session_id, runtime_id, fence_token, generation, runtime_epoch_id, work_id, origin }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_matches_input" { self.active_runtime_id == Some(runtime_id) }
+            guard "fence_binding_matches_input" { self.active_fence_token == Some(fence_token) }
+            guard "generation_binding_matches_input" { self.active_runtime_generation == generation }
+            guard "epoch_binding_matches_input" { self.active_runtime_epoch_id == runtime_epoch_id }
             update {}
             to Idle
             emit ResolveAdmission
@@ -3751,6 +8959,1792 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit IngressAccepted
         }
 
+        // 26a. ResolveAdmissionValidation: generated public admission-result
+        // class authority. The shell may parse raw input observations, but the
+        // accepted/rejected result class and typed rejection reason are emitted
+        // here before idempotency, lifecycle, ledger, or surface projections
+        // can change.
+        transition ResolveAdmissionValidationDurabilityRejected {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionValidation { input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
+            guard "durability_invalid" {
+                durability == InputDurabilityKind::Missing
+                || (durability == InputDurabilityKind::Derived
+                    && (input_origin == AdmissionInputOriginKind::Operator
+                        || input_origin == AdmissionInputOriginKind::Peer
+                        || input_origin == AdmissionInputOriginKind::External
+                        || input_kind == AdmissionInputKind::Prompt
+                        || input_kind == AdmissionInputKind::PeerMessage
+                        || input_kind == AdmissionInputKind::PeerRequest
+                        || input_kind == AdmissionInputKind::PeerResponseTerminal
+                        || input_kind == AdmissionInputKind::FlowStep))
+            }
+            update {}
+            to Idle
+            emit AdmissionValidationResolved {
+                input_id: input_id,
+                result: AdmissionValidationResultKind::Reject,
+                reject_reason: Some(AdmissionRejectReasonKind::DurabilityViolation)
+            }
+        }
+
+        transition ResolveAdmissionValidationPeerHandlingRejected {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionValidation { input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
+            guard "durability_authorized" {
+                durability == InputDurabilityKind::Durable
+                || durability == InputDurabilityKind::Ephemeral
+                || (durability == InputDurabilityKind::Derived
+                    && (input_origin == AdmissionInputOriginKind::Flow
+                        || input_origin == AdmissionInputOriginKind::System)
+                    && input_kind != AdmissionInputKind::Prompt
+                    && input_kind != AdmissionInputKind::PeerMessage
+                    && input_kind != AdmissionInputKind::PeerRequest
+                    && input_kind != AdmissionInputKind::PeerResponseTerminal
+                    && input_kind != AdmissionInputKind::FlowStep)
+            }
+            guard "peer_handling_mode_invalid" { peer_handling_mode_valid == false }
+            update {}
+            to Idle
+            emit AdmissionValidationResolved {
+                input_id: input_id,
+                result: AdmissionValidationResultKind::Reject,
+                reject_reason: Some(AdmissionRejectReasonKind::PeerHandlingModeInvalid)
+            }
+        }
+
+        transition ResolveAdmissionValidationPeerTerminalRejected {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionValidation { input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
+            guard "durability_authorized" {
+                durability == InputDurabilityKind::Durable
+                || durability == InputDurabilityKind::Ephemeral
+                || (durability == InputDurabilityKind::Derived
+                    && (input_origin == AdmissionInputOriginKind::Flow
+                        || input_origin == AdmissionInputOriginKind::System)
+                    && input_kind != AdmissionInputKind::Prompt
+                    && input_kind != AdmissionInputKind::PeerMessage
+                    && input_kind != AdmissionInputKind::PeerRequest
+                    && input_kind != AdmissionInputKind::PeerResponseTerminal
+                    && input_kind != AdmissionInputKind::FlowStep)
+            }
+            guard "peer_handling_mode_valid" { peer_handling_mode_valid == true }
+            guard "peer_response_terminal_invalid" {
+                peer_response_terminal_structurally_valid == false
+                || peer_response_terminal_observed_status == PeerResponseTerminalObservedStatus::Cancelled
+            }
+            update {}
+            to Idle
+            emit AdmissionValidationResolved {
+                input_id: input_id,
+                result: AdmissionValidationResultKind::Reject,
+                reject_reason: Some(AdmissionRejectReasonKind::PeerResponseTerminalInvalid)
+            }
+        }
+
+        transition ResolveAdmissionValidationAccepted {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionValidation { input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
+            guard "durability_authorized" {
+                durability == InputDurabilityKind::Durable
+                || durability == InputDurabilityKind::Ephemeral
+                || (durability == InputDurabilityKind::Derived
+                    && (input_origin == AdmissionInputOriginKind::Flow
+                        || input_origin == AdmissionInputOriginKind::System)
+                    && input_kind != AdmissionInputKind::Prompt
+                    && input_kind != AdmissionInputKind::PeerMessage
+                    && input_kind != AdmissionInputKind::PeerRequest
+                    && input_kind != AdmissionInputKind::PeerResponseTerminal
+                    && input_kind != AdmissionInputKind::FlowStep)
+            }
+            guard "peer_handling_mode_valid" { peer_handling_mode_valid == true }
+            guard "peer_response_terminal_structurally_valid" { peer_response_terminal_structurally_valid == true }
+            guard "peer_response_terminal_status_supported" {
+                peer_response_terminal_observed_status != PeerResponseTerminalObservedStatus::Cancelled
+            }
+            update {}
+            to Idle
+            emit AdmissionValidationResolved {
+                input_id: input_id,
+                result: AdmissionValidationResultKind::Accept,
+                reject_reason: None
+            }
+        }
+
+        // 26b. NormalizeRecoveredInputLifecycle: generated recovery
+        // lifecycle-normalization authority. The shell supplies typed
+        // observations from durable storage (observed phase and boundary
+        // receipt presence); the machine emits the normalized lifecycle fact
+        // and accounting deltas that the recovery shell may project into the
+        // recovered bundle. Consume-on-accept must arrive as an already
+        // terminal seed; recovery does not consult persisted policy mirrors
+        // to turn an accepted row into a terminal fact.
+        transition NormalizeRecoveredInputAcceptedQueue {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input NormalizeRecoveredInputLifecycle { input_id, phase, applied_boundary_committed }
+            guard "accepted_phase" { phase == RecoveredInputObservedPhase::Accepted }
+            update {}
+            to Idle
+            emit RecoveredInputLifecycleNormalized {
+                input_id: input_id,
+                phase: InputPhase::Queued,
+                terminal_kind: None,
+                recovered: true,
+                abandoned: false,
+                requeued: true,
+                history_reason: Some(RecoveredInputNormalizationReasonKind::QueueAccepted)
+            }
+        }
+
+        transition NormalizeRecoveredInputStaged {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input NormalizeRecoveredInputLifecycle { input_id, phase, applied_boundary_committed }
+            guard "staged_phase" { phase == RecoveredInputObservedPhase::Staged }
+            update {}
+            to Idle
+            emit RecoveredInputLifecycleNormalized {
+                input_id: input_id,
+                phase: InputPhase::Queued,
+                terminal_kind: None,
+                recovered: true,
+                abandoned: false,
+                requeued: true,
+                history_reason: Some(RecoveredInputNormalizationReasonKind::RollbackStaged)
+            }
+        }
+
+        transition NormalizeRecoveredInputAppliedCommitted {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input NormalizeRecoveredInputLifecycle { input_id, phase, applied_boundary_committed }
+            guard "applied_phase" {
+                phase == RecoveredInputObservedPhase::Applied
+                || phase == RecoveredInputObservedPhase::AppliedPendingConsumption
+            }
+            guard "boundary_committed_observed" {
+                applied_boundary_committed != None
+                && applied_boundary_committed.get("value") == true
+            }
+            update {}
+            to Idle
+            emit RecoveredInputLifecycleNormalized {
+                input_id: input_id,
+                phase: InputPhase::Consumed,
+                terminal_kind: Some(InputTerminalKind::Consumed),
+                recovered: true,
+                abandoned: false,
+                requeued: false,
+                history_reason: Some(RecoveredInputNormalizationReasonKind::BoundaryReceiptCommitted)
+            }
+        }
+
+        transition NormalizeRecoveredInputAppliedMissingReceipt {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input NormalizeRecoveredInputLifecycle { input_id, phase, applied_boundary_committed }
+            guard "applied_phase" {
+                phase == RecoveredInputObservedPhase::Applied
+                || phase == RecoveredInputObservedPhase::AppliedPendingConsumption
+            }
+            guard "boundary_missing_observed" {
+                applied_boundary_committed != None
+                && applied_boundary_committed.get("value") == false
+            }
+            update {}
+            to Idle
+            emit RecoveredInputLifecycleNormalized {
+                input_id: input_id,
+                phase: InputPhase::Queued,
+                terminal_kind: None,
+                recovered: true,
+                abandoned: false,
+                requeued: false,
+                history_reason: Some(RecoveredInputNormalizationReasonKind::MissingBoundaryReceipt)
+            }
+        }
+
+        transition NormalizeRecoveredInputAppliedUnobservedReceipt {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input NormalizeRecoveredInputLifecycle { input_id, phase, applied_boundary_committed }
+            guard "applied_phase" {
+                phase == RecoveredInputObservedPhase::Applied
+                || phase == RecoveredInputObservedPhase::AppliedPendingConsumption
+            }
+            guard "boundary_receipt_unobserved" { applied_boundary_committed == None }
+            update {}
+            to Idle
+            emit RecoveredInputLifecycleNormalized {
+                input_id: input_id,
+                phase: if phase == RecoveredInputObservedPhase::Applied { InputPhase::Applied } else { InputPhase::AppliedPendingConsumption },
+                terminal_kind: None,
+                recovered: true,
+                abandoned: false,
+                requeued: false,
+                history_reason: None
+            }
+        }
+
+        transition NormalizeRecoveredInputQueued {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input NormalizeRecoveredInputLifecycle { input_id, phase, applied_boundary_committed }
+            guard "queued_phase" { phase == RecoveredInputObservedPhase::Queued }
+            update {}
+            to Idle
+            emit RecoveredInputLifecycleNormalized {
+                input_id: input_id,
+                phase: InputPhase::Queued,
+                terminal_kind: None,
+                recovered: true,
+                abandoned: false,
+                requeued: false,
+                history_reason: None
+            }
+        }
+
+        // 26c. ClassifyRecoveredInputDurability: generated durability
+        // retention authority. Persistent recovery may only retain/drop a row
+        // after this typed effect is observed; ledgers and queues must not
+        // interpret durability classes themselves.
+        transition ClassifyRecoveredInputDurabilityDiscardEphemeral {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ClassifyRecoveredInputDurability { input_id, durability }
+            guard "ephemeral_durability" { durability == InputDurabilityKind::Ephemeral }
+            update {}
+            to Idle
+            emit RecoveredInputDurabilityClassified {
+                input_id: input_id,
+                disposition: RecoveredInputRecoveryDisposition::Discard
+            }
+        }
+
+        transition ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissing {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ClassifyRecoveredInputDurability { input_id, durability }
+            guard "retained_durability" {
+                durability == InputDurabilityKind::Durable
+                || durability == InputDurabilityKind::Derived
+                || durability == InputDurabilityKind::Missing
+            }
+            update {}
+            to Idle
+            emit RecoveredInputDurabilityClassified {
+                input_id: input_id,
+                disposition: RecoveredInputRecoveryDisposition::Retain
+            }
+        }
+
+        // 26d. ResolveInputPublicLifecycle /
+        // ResolveInputPublicTerminalOutcome: generated public projection
+        // authority for RPC/SDK-facing input lifecycle/result classes.
+        // Surfaces pass only the machine-derived seed facts; the generated
+        // transitions own the public class, including the
+        // cancelled-vs-abandoned terminal distinction.
+        transition ResolveInputPublicLifecycleAccepted {
+            per_phase [Idle]
+            on input ResolveInputPublicLifecycle { input_id, phase }
+            guard "accepted_phase" { phase == RecoveredInputObservedPhase::Accepted }
+            update {}
+            to Idle
+            emit InputPublicLifecycleResolved { input_id: input_id, phase: InputPublicLifecycleState::Accepted }
+        }
+
+        transition ResolveInputPublicLifecycleQueued {
+            per_phase [Idle]
+            on input ResolveInputPublicLifecycle { input_id, phase }
+            guard "queued_phase" { phase == RecoveredInputObservedPhase::Queued }
+            update {}
+            to Idle
+            emit InputPublicLifecycleResolved { input_id: input_id, phase: InputPublicLifecycleState::Queued }
+        }
+
+        transition ResolveInputPublicLifecycleStaged {
+            per_phase [Idle]
+            on input ResolveInputPublicLifecycle { input_id, phase }
+            guard "staged_phase" { phase == RecoveredInputObservedPhase::Staged }
+            update {}
+            to Idle
+            emit InputPublicLifecycleResolved { input_id: input_id, phase: InputPublicLifecycleState::Staged }
+        }
+
+        transition ResolveInputPublicLifecycleApplied {
+            per_phase [Idle]
+            on input ResolveInputPublicLifecycle { input_id, phase }
+            guard "applied_phase" { phase == RecoveredInputObservedPhase::Applied }
+            update {}
+            to Idle
+            emit InputPublicLifecycleResolved { input_id: input_id, phase: InputPublicLifecycleState::Applied }
+        }
+
+        transition ResolveInputPublicLifecycleAppliedPendingConsumption {
+            per_phase [Idle]
+            on input ResolveInputPublicLifecycle { input_id, phase }
+            guard "applied_pending_consumption_phase" { phase == RecoveredInputObservedPhase::AppliedPendingConsumption }
+            update {}
+            to Idle
+            emit InputPublicLifecycleResolved { input_id: input_id, phase: InputPublicLifecycleState::AppliedPendingConsumption }
+        }
+
+        transition ResolveInputPublicLifecycleConsumed {
+            per_phase [Idle]
+            on input ResolveInputPublicLifecycle { input_id, phase }
+            guard "consumed_phase" { phase == RecoveredInputObservedPhase::Consumed }
+            update {}
+            to Idle
+            emit InputPublicLifecycleResolved { input_id: input_id, phase: InputPublicLifecycleState::Consumed }
+        }
+
+        transition ResolveInputPublicLifecycleSuperseded {
+            per_phase [Idle]
+            on input ResolveInputPublicLifecycle { input_id, phase }
+            guard "superseded_phase" { phase == RecoveredInputObservedPhase::Superseded }
+            update {}
+            to Idle
+            emit InputPublicLifecycleResolved { input_id: input_id, phase: InputPublicLifecycleState::Superseded }
+        }
+
+        transition ResolveInputPublicLifecycleCoalesced {
+            per_phase [Idle]
+            on input ResolveInputPublicLifecycle { input_id, phase }
+            guard "coalesced_phase" { phase == RecoveredInputObservedPhase::Coalesced }
+            update {}
+            to Idle
+            emit InputPublicLifecycleResolved { input_id: input_id, phase: InputPublicLifecycleState::Coalesced }
+        }
+
+        transition ResolveInputPublicLifecycleAbandoned {
+            per_phase [Idle]
+            on input ResolveInputPublicLifecycle { input_id, phase }
+            guard "abandoned_phase" { phase == RecoveredInputObservedPhase::Abandoned }
+            update {}
+            to Idle
+            emit InputPublicLifecycleResolved { input_id: input_id, phase: InputPublicLifecycleState::Abandoned }
+        }
+
+        transition ResolveInputPublicTerminalOutcomeNonTerminal {
+            per_phase [Idle]
+            on input ResolveInputPublicTerminalOutcome { input_id, phase, terminal_kind, abandon_reason }
+            guard "non_terminal_phase" {
+                phase == RecoveredInputObservedPhase::Accepted
+                || phase == RecoveredInputObservedPhase::Queued
+                || phase == RecoveredInputObservedPhase::Staged
+                || phase == RecoveredInputObservedPhase::Applied
+                || phase == RecoveredInputObservedPhase::AppliedPendingConsumption
+            }
+            guard "terminal_absent" { terminal_kind == None && abandon_reason == None }
+            update {}
+            to Idle
+            emit InputPublicTerminalOutcomeResolved { input_id: input_id, terminal_outcome: None }
+        }
+
+        transition ResolveInputPublicTerminalOutcomeConsumed {
+            per_phase [Idle]
+            on input ResolveInputPublicTerminalOutcome { input_id, phase, terminal_kind, abandon_reason }
+            guard "consumed_phase" { phase == RecoveredInputObservedPhase::Consumed }
+            guard "consumed_terminal" {
+                terminal_kind == Some(InputTerminalKind::Consumed)
+                && abandon_reason == None
+            }
+            update {}
+            to Idle
+            emit InputPublicTerminalOutcomeResolved { input_id: input_id, terminal_outcome: Some(InputPublicTerminalOutcome::Completed) }
+        }
+
+        transition ResolveInputPublicTerminalOutcomeSuperseded {
+            per_phase [Idle]
+            on input ResolveInputPublicTerminalOutcome { input_id, phase, terminal_kind, abandon_reason }
+            guard "superseded_phase" { phase == RecoveredInputObservedPhase::Superseded }
+            guard "superseded_terminal" {
+                terminal_kind == Some(InputTerminalKind::Superseded)
+                && abandon_reason == None
+            }
+            update {}
+            to Idle
+            emit InputPublicTerminalOutcomeResolved { input_id: input_id, terminal_outcome: Some(InputPublicTerminalOutcome::Superseded) }
+        }
+
+        transition ResolveInputPublicTerminalOutcomeCoalesced {
+            per_phase [Idle]
+            on input ResolveInputPublicTerminalOutcome { input_id, phase, terminal_kind, abandon_reason }
+            guard "coalesced_phase" { phase == RecoveredInputObservedPhase::Coalesced }
+            guard "coalesced_terminal" {
+                terminal_kind == Some(InputTerminalKind::Coalesced)
+                && abandon_reason == None
+            }
+            update {}
+            to Idle
+            emit InputPublicTerminalOutcomeResolved { input_id: input_id, terminal_outcome: Some(InputPublicTerminalOutcome::Coalesced) }
+        }
+
+        transition ResolveInputPublicTerminalOutcomeCancelled {
+            per_phase [Idle]
+            on input ResolveInputPublicTerminalOutcome { input_id, phase, terminal_kind, abandon_reason }
+            guard "abandoned_phase" { phase == RecoveredInputObservedPhase::Abandoned }
+            guard "cancelled_terminal" {
+                terminal_kind == Some(InputTerminalKind::Abandoned)
+                && abandon_reason == Some(InputAbandonReason::Cancelled)
+            }
+            update {}
+            to Idle
+            emit InputPublicTerminalOutcomeResolved { input_id: input_id, terminal_outcome: Some(InputPublicTerminalOutcome::Cancelled) }
+        }
+
+        transition ResolveInputPublicTerminalOutcomeAbandoned {
+            per_phase [Idle]
+            on input ResolveInputPublicTerminalOutcome { input_id, phase, terminal_kind, abandon_reason }
+            guard "abandoned_phase" { phase == RecoveredInputObservedPhase::Abandoned }
+            guard "abandoned_terminal" {
+                terminal_kind == Some(InputTerminalKind::Abandoned)
+                && abandon_reason != None
+                && abandon_reason != Some(InputAbandonReason::Cancelled)
+            }
+            update {}
+            to Idle
+            emit InputPublicTerminalOutcomeResolved { input_id: input_id, terminal_outcome: Some(InputPublicTerminalOutcome::Abandoned) }
+        }
+
+        // ClassifyInputTerminality: generated behavioral terminality
+        // authority for recovery, active-input filtering, and other paths
+        // where terminality changes behavior rather than public result class.
+        transition ClassifyInputTerminalityNonTerminal {
+            per_phase [Idle]
+            on input ClassifyInputTerminality { input_id, phase, terminal_kind, abandon_reason }
+            guard "non_terminal_phase" {
+                phase == RecoveredInputObservedPhase::Accepted
+                || phase == RecoveredInputObservedPhase::Queued
+                || phase == RecoveredInputObservedPhase::Staged
+                || phase == RecoveredInputObservedPhase::Applied
+                || phase == RecoveredInputObservedPhase::AppliedPendingConsumption
+            }
+            guard "terminal_absent" { terminal_kind == None && abandon_reason == None }
+            update {}
+            to Idle
+            emit InputBehavioralTerminalityResolved { input_id: input_id, terminal: false }
+        }
+
+        transition ClassifyInputTerminalityConsumed {
+            per_phase [Idle]
+            on input ClassifyInputTerminality { input_id, phase, terminal_kind, abandon_reason }
+            guard "consumed_phase" { phase == RecoveredInputObservedPhase::Consumed }
+            guard "consumed_terminal" {
+                terminal_kind == Some(InputTerminalKind::Consumed)
+                && abandon_reason == None
+            }
+            update {}
+            to Idle
+            emit InputBehavioralTerminalityResolved { input_id: input_id, terminal: true }
+        }
+
+        transition ClassifyInputTerminalitySuperseded {
+            per_phase [Idle]
+            on input ClassifyInputTerminality { input_id, phase, terminal_kind, abandon_reason }
+            guard "superseded_phase" { phase == RecoveredInputObservedPhase::Superseded }
+            guard "superseded_terminal" {
+                terminal_kind == Some(InputTerminalKind::Superseded)
+                && abandon_reason == None
+            }
+            update {}
+            to Idle
+            emit InputBehavioralTerminalityResolved { input_id: input_id, terminal: true }
+        }
+
+        transition ClassifyInputTerminalityCoalesced {
+            per_phase [Idle]
+            on input ClassifyInputTerminality { input_id, phase, terminal_kind, abandon_reason }
+            guard "coalesced_phase" { phase == RecoveredInputObservedPhase::Coalesced }
+            guard "coalesced_terminal" {
+                terminal_kind == Some(InputTerminalKind::Coalesced)
+                && abandon_reason == None
+            }
+            update {}
+            to Idle
+            emit InputBehavioralTerminalityResolved { input_id: input_id, terminal: true }
+        }
+
+        transition ClassifyInputTerminalityAbandoned {
+            per_phase [Idle]
+            on input ClassifyInputTerminality { input_id, phase, terminal_kind, abandon_reason }
+            guard "abandoned_phase" { phase == RecoveredInputObservedPhase::Abandoned }
+            guard "abandoned_terminal" {
+                terminal_kind == Some(InputTerminalKind::Abandoned)
+                && abandon_reason != None
+            }
+            update {}
+            to Idle
+            emit InputBehavioralTerminalityResolved { input_id: input_id, terminal: true }
+        }
+
+        // AuthorizeStoredInputStateSeed: generated persistence handoff for
+        // DSL-owned input seed facts at the store boundary. Stores may carry
+        // arbitrary shell metadata, but lifecycle/admission/recovery seed
+        // facts must pass through this typed authority before a new durable
+        // write is accepted.
+        transition AuthorizeStoredInputStateSeed {
+            per_phase [Idle]
+            on input AuthorizeStoredInputStateSeed {
+                input_id,
+                phase,
+                terminal_kind,
+                superseded_by,
+                aggregate_id,
+                abandon_reason,
+                abandon_attempt_count,
+                attempt_count,
+                run_id,
+                boundary_sequence,
+                admission_sequence,
+                recovery_lane
+            }
+            guard "stored_seed_terminal_payload_matches_phase" {
+                (
+                    phase == RecoveredInputObservedPhase::Consumed
+                    && terminal_kind == Some(InputTerminalKind::Consumed)
+                    && superseded_by == None
+                    && aggregate_id == None
+                    && abandon_reason == None
+                )
+                || (
+                    phase == RecoveredInputObservedPhase::Superseded
+                    && terminal_kind == Some(InputTerminalKind::Superseded)
+                    && superseded_by != None
+                    && aggregate_id == None
+                    && abandon_reason == None
+                )
+                || (
+                    phase == RecoveredInputObservedPhase::Coalesced
+                    && terminal_kind == Some(InputTerminalKind::Coalesced)
+                    && superseded_by == None
+                    && aggregate_id != None
+                    && abandon_reason == None
+                )
+                || (
+                    phase == RecoveredInputObservedPhase::Abandoned
+                    && terminal_kind == Some(InputTerminalKind::Abandoned)
+                    && superseded_by == None
+                    && aggregate_id == None
+                    && abandon_reason != None
+                )
+                || (
+                    phase != RecoveredInputObservedPhase::Consumed
+                    && phase != RecoveredInputObservedPhase::Superseded
+                    && phase != RecoveredInputObservedPhase::Coalesced
+                    && phase != RecoveredInputObservedPhase::Abandoned
+                    && terminal_kind == None
+                    && superseded_by == None
+                    && aggregate_id == None
+                    && abandon_reason == None
+                    && abandon_attempt_count == 0
+                )
+            }
+            guard "stored_seed_terminal_has_no_recovery_lane" {
+                (
+                    phase != RecoveredInputObservedPhase::Consumed
+                    && phase != RecoveredInputObservedPhase::Superseded
+                    && phase != RecoveredInputObservedPhase::Coalesced
+                    && phase != RecoveredInputObservedPhase::Abandoned
+                )
+                || recovery_lane == None
+            }
+            guard "stored_seed_max_attempts_reason_matches_count" {
+                abandon_reason != Some(InputAbandonReason::MaxAttemptsExhausted)
+                || abandon_attempt_count == attempt_count
+            }
+            guard "stored_seed_max_attempts_reason_matches_policy" {
+                abandon_reason != Some(InputAbandonReason::MaxAttemptsExhausted)
+                || attempt_count >= self.max_stage_attempts
+            }
+            update {}
+            to Idle
+            emit StoredInputStateSeedAuthorized { input_id: input_id }
+        }
+
+        // ClassifyRuntimeLifecycleState: generated lifecycle/admission fact
+        // authority for behavior that only receives the runtime's public
+        // projection. The shell may mirror the state variant into the DSL, but
+        // the terminality, input admission, queue-processing, prepare, and
+        // ingress rejection classes below are generated feedback.
+        transition ClassifyRuntimeLifecycleInitializing {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleState { state }
+            guard "initializing_state" { state == RuntimeLifecycleObservedState::Initializing }
+            update {}
+            to Idle
+            emit RuntimeLifecycleStateClassified {
+                state: state,
+                terminality: RuntimeLifecycleTerminality::NonTerminal,
+                input_admission: RuntimeInputAdmission::RejectsInput,
+                queue_admission: RuntimeQueueAdmission::BlocksQueue,
+                prepare_admission: RuntimePrepareAdmission::NotReady,
+                ingress_admission: RuntimeIngressAdmission::Open
+            }
+        }
+
+        transition ClassifyRuntimeLifecycleIdle {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleState { state }
+            guard "idle_state" { state == RuntimeLifecycleObservedState::Idle }
+            update {}
+            to Idle
+            emit RuntimeLifecycleStateClassified {
+                state: state,
+                terminality: RuntimeLifecycleTerminality::NonTerminal,
+                input_admission: RuntimeInputAdmission::AcceptsInput,
+                queue_admission: RuntimeQueueAdmission::ProcessesQueue,
+                prepare_admission: RuntimePrepareAdmission::Ready,
+                ingress_admission: RuntimeIngressAdmission::Open
+            }
+        }
+
+        transition ClassifyRuntimeLifecycleAttached {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleState { state }
+            guard "attached_state" { state == RuntimeLifecycleObservedState::Attached }
+            update {}
+            to Idle
+            emit RuntimeLifecycleStateClassified {
+                state: state,
+                terminality: RuntimeLifecycleTerminality::NonTerminal,
+                input_admission: RuntimeInputAdmission::AcceptsInput,
+                queue_admission: RuntimeQueueAdmission::ProcessesQueue,
+                prepare_admission: RuntimePrepareAdmission::Ready,
+                ingress_admission: RuntimeIngressAdmission::Open
+            }
+        }
+
+        transition ClassifyRuntimeLifecycleRunning {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleState { state }
+            guard "running_state" { state == RuntimeLifecycleObservedState::Running }
+            update {}
+            to Idle
+            emit RuntimeLifecycleStateClassified {
+                state: state,
+                terminality: RuntimeLifecycleTerminality::NonTerminal,
+                input_admission: RuntimeInputAdmission::AcceptsInput,
+                queue_admission: RuntimeQueueAdmission::BlocksQueue,
+                prepare_admission: RuntimePrepareAdmission::NotReady,
+                ingress_admission: RuntimeIngressAdmission::Open
+            }
+        }
+
+        transition ClassifyRuntimeLifecycleRetired {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleState { state }
+            guard "retired_state" { state == RuntimeLifecycleObservedState::Retired }
+            update {}
+            to Idle
+            emit RuntimeLifecycleStateClassified {
+                state: state,
+                terminality: RuntimeLifecycleTerminality::NonTerminal,
+                input_admission: RuntimeInputAdmission::RejectsInput,
+                queue_admission: RuntimeQueueAdmission::ProcessesQueue,
+                prepare_admission: RuntimePrepareAdmission::NotReady,
+                ingress_admission: RuntimeIngressAdmission::NotReady
+            }
+        }
+
+        transition ClassifyRuntimeLifecycleStopped {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleState { state }
+            guard "stopped_state" { state == RuntimeLifecycleObservedState::Stopped }
+            update {}
+            to Idle
+            emit RuntimeLifecycleStateClassified {
+                state: state,
+                terminality: RuntimeLifecycleTerminality::NonTerminal,
+                input_admission: RuntimeInputAdmission::RejectsInput,
+                queue_admission: RuntimeQueueAdmission::BlocksQueue,
+                prepare_admission: RuntimePrepareAdmission::NotReady,
+                ingress_admission: RuntimeIngressAdmission::NotReady
+            }
+        }
+
+        transition ClassifyRuntimeLifecycleDestroyed {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleState { state }
+            guard "destroyed_state" { state == RuntimeLifecycleObservedState::Destroyed }
+            update {}
+            to Idle
+            emit RuntimeLifecycleStateClassified {
+                state: state,
+                terminality: RuntimeLifecycleTerminality::Terminal,
+                input_admission: RuntimeInputAdmission::RejectsInput,
+                queue_admission: RuntimeQueueAdmission::BlocksQueue,
+                prepare_admission: RuntimePrepareAdmission::Destroyed,
+                ingress_admission: RuntimeIngressAdmission::Destroyed
+            }
+        }
+
+        // ClassifyRuntimeLifecycleDurability: generated authority for the
+        // store-visible recovery lifecycle projection. Live `Attached` is
+        // process-local executor attachment; the machine maps it to durable
+        // `Idle` for persistence while all other lifecycle states preserve
+        // their observed variant.
+        transition ClassifyRuntimeDurabilityInitializing {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleDurability { state }
+            guard "initializing_state" { state == RuntimeLifecycleObservedState::Initializing }
+            update {}
+            to Idle
+            emit RuntimeLifecycleDurabilityClassified {
+                state: state,
+                durable_state: RuntimeLifecycleObservedState::Initializing
+            }
+        }
+
+        transition ClassifyRuntimeDurabilityIdle {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleDurability { state }
+            guard "idle_state" { state == RuntimeLifecycleObservedState::Idle }
+            update {}
+            to Idle
+            emit RuntimeLifecycleDurabilityClassified {
+                state: state,
+                durable_state: RuntimeLifecycleObservedState::Idle
+            }
+        }
+
+        transition ClassifyRuntimeDurabilityAttached {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleDurability { state }
+            guard "attached_state" { state == RuntimeLifecycleObservedState::Attached }
+            update {}
+            to Idle
+            emit RuntimeLifecycleDurabilityClassified {
+                state: state,
+                durable_state: RuntimeLifecycleObservedState::Idle
+            }
+        }
+
+        transition ClassifyRuntimeDurabilityRunning {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleDurability { state }
+            guard "running_state" { state == RuntimeLifecycleObservedState::Running }
+            update {}
+            to Idle
+            emit RuntimeLifecycleDurabilityClassified {
+                state: state,
+                durable_state: RuntimeLifecycleObservedState::Running
+            }
+        }
+
+        transition ClassifyRuntimeDurabilityRetired {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleDurability { state }
+            guard "retired_state" { state == RuntimeLifecycleObservedState::Retired }
+            update {}
+            to Idle
+            emit RuntimeLifecycleDurabilityClassified {
+                state: state,
+                durable_state: RuntimeLifecycleObservedState::Retired
+            }
+        }
+
+        transition ClassifyRuntimeDurabilityStopped {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleDurability { state }
+            guard "stopped_state" { state == RuntimeLifecycleObservedState::Stopped }
+            update {}
+            to Idle
+            emit RuntimeLifecycleDurabilityClassified {
+                state: state,
+                durable_state: RuntimeLifecycleObservedState::Stopped
+            }
+        }
+
+        transition ClassifyRuntimeDurabilityDestroyed {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleDurability { state }
+            guard "destroyed_state" { state == RuntimeLifecycleObservedState::Destroyed }
+            update {}
+            to Idle
+            emit RuntimeLifecycleDurabilityClassified {
+                state: state,
+                durable_state: RuntimeLifecycleObservedState::Destroyed
+            }
+        }
+
+        // ClassifyRuntimeLoopQueueAdmission: generated authority for the
+        // runtime loop's queue-drain admission. The shell provides only the
+        // observed lifecycle variant and whether a generated run binding is
+        // present; the generated feedback owns both queue admission and
+        // whether to reuse that prebound run id.
+        transition ClassifyRuntimeLoopQueueInitializing {
+            per_phase [Idle]
+            on input ClassifyRuntimeLoopQueueAdmission { state, current_run_bound }
+            guard "initializing_state" { state == RuntimeLifecycleObservedState::Initializing }
+            guard "no_current_run" { current_run_bound == false }
+            update {}
+            to Idle
+            emit RuntimeLoopQueueAdmissionClassified {
+                state: state,
+                current_run_bound: current_run_bound,
+                queue_admission: RuntimeQueueAdmission::BlocksQueue,
+                run_binding: RuntimeLoopRunBinding::Blocked
+            }
+        }
+
+        transition ClassifyRuntimeLoopQueueIdle {
+            per_phase [Idle]
+            on input ClassifyRuntimeLoopQueueAdmission { state, current_run_bound }
+            guard "idle_state" { state == RuntimeLifecycleObservedState::Idle }
+            guard "no_current_run" { current_run_bound == false }
+            update {}
+            to Idle
+            emit RuntimeLoopQueueAdmissionClassified {
+                state: state,
+                current_run_bound: current_run_bound,
+                queue_admission: RuntimeQueueAdmission::ProcessesQueue,
+                run_binding: RuntimeLoopRunBinding::AllocateNew
+            }
+        }
+
+        transition ClassifyRuntimeLoopQueueAttached {
+            per_phase [Idle]
+            on input ClassifyRuntimeLoopQueueAdmission { state, current_run_bound }
+            guard "attached_state" { state == RuntimeLifecycleObservedState::Attached }
+            guard "no_current_run" { current_run_bound == false }
+            update {}
+            to Idle
+            emit RuntimeLoopQueueAdmissionClassified {
+                state: state,
+                current_run_bound: current_run_bound,
+                queue_admission: RuntimeQueueAdmission::ProcessesQueue,
+                run_binding: RuntimeLoopRunBinding::AllocateNew
+            }
+        }
+
+        transition ClassifyRuntimeLoopQueueRunningWithoutBinding {
+            per_phase [Idle]
+            on input ClassifyRuntimeLoopQueueAdmission { state, current_run_bound }
+            guard "running_state" { state == RuntimeLifecycleObservedState::Running }
+            guard "no_current_run" { current_run_bound == false }
+            update {}
+            to Idle
+            emit RuntimeLoopQueueAdmissionClassified {
+                state: state,
+                current_run_bound: current_run_bound,
+                queue_admission: RuntimeQueueAdmission::BlocksQueue,
+                run_binding: RuntimeLoopRunBinding::Blocked
+            }
+        }
+
+        transition ClassifyRuntimeLoopQueueRunningWithBinding {
+            per_phase [Idle]
+            on input ClassifyRuntimeLoopQueueAdmission { state, current_run_bound }
+            guard "running_state" { state == RuntimeLifecycleObservedState::Running }
+            guard "has_current_run" { current_run_bound == true }
+            update {}
+            to Idle
+            emit RuntimeLoopQueueAdmissionClassified {
+                state: state,
+                current_run_bound: current_run_bound,
+                queue_admission: RuntimeQueueAdmission::ProcessesQueue,
+                run_binding: RuntimeLoopRunBinding::UsePrebound
+            }
+        }
+
+        transition ClassifyRuntimeLoopQueueRetired {
+            per_phase [Idle]
+            on input ClassifyRuntimeLoopQueueAdmission { state, current_run_bound }
+            guard "retired_state" { state == RuntimeLifecycleObservedState::Retired }
+            guard "no_current_run" { current_run_bound == false }
+            update {}
+            to Idle
+            emit RuntimeLoopQueueAdmissionClassified {
+                state: state,
+                current_run_bound: current_run_bound,
+                queue_admission: RuntimeQueueAdmission::ProcessesQueue,
+                run_binding: RuntimeLoopRunBinding::AllocateNew
+            }
+        }
+
+        transition ClassifyRuntimeLoopQueueStopped {
+            per_phase [Idle]
+            on input ClassifyRuntimeLoopQueueAdmission { state, current_run_bound }
+            guard "stopped_state" { state == RuntimeLifecycleObservedState::Stopped }
+            guard "no_current_run" { current_run_bound == false }
+            update {}
+            to Idle
+            emit RuntimeLoopQueueAdmissionClassified {
+                state: state,
+                current_run_bound: current_run_bound,
+                queue_admission: RuntimeQueueAdmission::BlocksQueue,
+                run_binding: RuntimeLoopRunBinding::Blocked
+            }
+        }
+
+        transition ClassifyRuntimeLoopQueueDestroyed {
+            per_phase [Idle]
+            on input ClassifyRuntimeLoopQueueAdmission { state, current_run_bound }
+            guard "destroyed_state" { state == RuntimeLifecycleObservedState::Destroyed }
+            guard "no_current_run" { current_run_bound == false }
+            update {}
+            to Idle
+            emit RuntimeLoopQueueAdmissionClassified {
+                state: state,
+                current_run_bound: current_run_bound,
+                queue_admission: RuntimeQueueAdmission::BlocksQueue,
+                run_binding: RuntimeLoopRunBinding::Blocked
+            }
+        }
+
+        // ResolveVisibleRuntimePhase: generated authority for the
+        // authoritative/visible runtime-phase arbitration between the DSL
+        // lifecycle authority and the durable control projection. The shell
+        // feeds only the five pure RuntimeState observations (the live DSL
+        // phase + its pre-run marker, the published control phase + its pre-run
+        // marker, and whether this session is runtime-persistent). The machine
+        // owns BOTH the terminal-precedence policy (`publish_control`) AND the
+        // Running+pre_run(Retired)->Retired visibility rewrite; the shell mirrors
+        // `publish_control`, `selected_raw_phase`, and `visible_phase` verbatim.
+        //
+        // `publish_control` is true iff:
+        //   has_runtime_persistence
+        //   && control_phase != dsl_phase
+        //   && (dsl_phase terminal {Retired,Stopped,Destroyed}
+        //       || control_phase {Running,Retired,Stopped,Destroyed})
+        //   && NOT (control==Retired && dsl==Running && dsl_pre_run==Some(Retired))
+        // (the special case fails closed to publish_control=false so the live
+        // run-return-in-progress DSL phase keeps visibility authority).
+        //
+        // When publish_control: selected_raw_phase = control_phase and
+        // visible_phase = visible(control_phase, control_pre_run_phase).
+        // Otherwise: selected_raw_phase = dsl_phase and
+        // visible_phase = visible(dsl_phase, dsl_pre_run_phase), where
+        // visible(p, pr) rewrites Running+Some(Retired) pre-run to Retired.
+        // Each transition self-loops in Idle on a transient projection authority
+        // (classification never mutates the session machine).
+
+        // publish_control == true: control supersedes DSL.
+        transition ResolveVisibleRuntimePhasePublishControlVisibleRewrite {
+            per_phase [Idle]
+            on input ResolveVisibleRuntimePhase {
+                dsl_phase,
+                dsl_pre_run_phase,
+                control_phase,
+                control_pre_run_phase,
+                has_runtime_persistence
+            }
+            guard "publish_control" {
+                has_runtime_persistence == true
+                && control_phase != dsl_phase
+                && (
+                    dsl_phase == RuntimeLifecycleObservedState::Retired
+                    || dsl_phase == RuntimeLifecycleObservedState::Stopped
+                    || dsl_phase == RuntimeLifecycleObservedState::Destroyed
+                    || control_phase == RuntimeLifecycleObservedState::Running
+                    || control_phase == RuntimeLifecycleObservedState::Retired
+                    || control_phase == RuntimeLifecycleObservedState::Stopped
+                    || control_phase == RuntimeLifecycleObservedState::Destroyed
+                )
+                && !(
+                    control_phase == RuntimeLifecycleObservedState::Retired
+                    && dsl_phase == RuntimeLifecycleObservedState::Running
+                    && dsl_pre_run_phase == Some(RuntimeLifecycleObservedState::Retired)
+                )
+            }
+            guard "control_visible_rewrite" {
+                control_phase == RuntimeLifecycleObservedState::Running
+                && control_pre_run_phase == Some(RuntimeLifecycleObservedState::Retired)
+            }
+            update {}
+            to Idle
+            emit VisibleRuntimePhaseResolved {
+                publish_control: true,
+                selected_raw_phase: control_phase,
+                visible_phase: RuntimeLifecycleObservedState::Retired
+            }
+        }
+
+        transition ResolveVisibleRuntimePhasePublishControlNoRewrite {
+            per_phase [Idle]
+            on input ResolveVisibleRuntimePhase {
+                dsl_phase,
+                dsl_pre_run_phase,
+                control_phase,
+                control_pre_run_phase,
+                has_runtime_persistence
+            }
+            guard "publish_control" {
+                has_runtime_persistence == true
+                && control_phase != dsl_phase
+                && (
+                    dsl_phase == RuntimeLifecycleObservedState::Retired
+                    || dsl_phase == RuntimeLifecycleObservedState::Stopped
+                    || dsl_phase == RuntimeLifecycleObservedState::Destroyed
+                    || control_phase == RuntimeLifecycleObservedState::Running
+                    || control_phase == RuntimeLifecycleObservedState::Retired
+                    || control_phase == RuntimeLifecycleObservedState::Stopped
+                    || control_phase == RuntimeLifecycleObservedState::Destroyed
+                )
+                && !(
+                    control_phase == RuntimeLifecycleObservedState::Retired
+                    && dsl_phase == RuntimeLifecycleObservedState::Running
+                    && dsl_pre_run_phase == Some(RuntimeLifecycleObservedState::Retired)
+                )
+            }
+            guard "control_no_visible_rewrite" {
+                !(
+                    control_phase == RuntimeLifecycleObservedState::Running
+                    && control_pre_run_phase == Some(RuntimeLifecycleObservedState::Retired)
+                )
+            }
+            update {}
+            to Idle
+            emit VisibleRuntimePhaseResolved {
+                publish_control: true,
+                selected_raw_phase: control_phase,
+                visible_phase: control_phase
+            }
+        }
+
+        // publish_control == false: live DSL phase keeps visibility authority.
+        transition ResolveVisibleRuntimePhaseKeepDslVisibleRewrite {
+            per_phase [Idle]
+            on input ResolveVisibleRuntimePhase {
+                dsl_phase,
+                dsl_pre_run_phase,
+                control_phase,
+                control_pre_run_phase,
+                has_runtime_persistence
+            }
+            guard "keep_dsl" {
+                !(
+                    has_runtime_persistence == true
+                    && control_phase != dsl_phase
+                    && (
+                        dsl_phase == RuntimeLifecycleObservedState::Retired
+                        || dsl_phase == RuntimeLifecycleObservedState::Stopped
+                        || dsl_phase == RuntimeLifecycleObservedState::Destroyed
+                        || control_phase == RuntimeLifecycleObservedState::Running
+                        || control_phase == RuntimeLifecycleObservedState::Retired
+                        || control_phase == RuntimeLifecycleObservedState::Stopped
+                        || control_phase == RuntimeLifecycleObservedState::Destroyed
+                    )
+                    && !(
+                        control_phase == RuntimeLifecycleObservedState::Retired
+                        && dsl_phase == RuntimeLifecycleObservedState::Running
+                        && dsl_pre_run_phase == Some(RuntimeLifecycleObservedState::Retired)
+                    )
+                )
+            }
+            guard "dsl_visible_rewrite" {
+                dsl_phase == RuntimeLifecycleObservedState::Running
+                && dsl_pre_run_phase == Some(RuntimeLifecycleObservedState::Retired)
+            }
+            update {}
+            to Idle
+            emit VisibleRuntimePhaseResolved {
+                publish_control: false,
+                selected_raw_phase: dsl_phase,
+                visible_phase: RuntimeLifecycleObservedState::Retired
+            }
+        }
+
+        transition ResolveVisibleRuntimePhaseKeepDslNoRewrite {
+            per_phase [Idle]
+            on input ResolveVisibleRuntimePhase {
+                dsl_phase,
+                dsl_pre_run_phase,
+                control_phase,
+                control_pre_run_phase,
+                has_runtime_persistence
+            }
+            guard "keep_dsl" {
+                !(
+                    has_runtime_persistence == true
+                    && control_phase != dsl_phase
+                    && (
+                        dsl_phase == RuntimeLifecycleObservedState::Retired
+                        || dsl_phase == RuntimeLifecycleObservedState::Stopped
+                        || dsl_phase == RuntimeLifecycleObservedState::Destroyed
+                        || control_phase == RuntimeLifecycleObservedState::Running
+                        || control_phase == RuntimeLifecycleObservedState::Retired
+                        || control_phase == RuntimeLifecycleObservedState::Stopped
+                        || control_phase == RuntimeLifecycleObservedState::Destroyed
+                    )
+                    && !(
+                        control_phase == RuntimeLifecycleObservedState::Retired
+                        && dsl_phase == RuntimeLifecycleObservedState::Running
+                        && dsl_pre_run_phase == Some(RuntimeLifecycleObservedState::Retired)
+                    )
+                )
+            }
+            guard "dsl_no_visible_rewrite" {
+                !(
+                    dsl_phase == RuntimeLifecycleObservedState::Running
+                    && dsl_pre_run_phase == Some(RuntimeLifecycleObservedState::Retired)
+                )
+            }
+            update {}
+            to Idle
+            emit VisibleRuntimePhaseResolved {
+                publish_control: false,
+                selected_raw_phase: dsl_phase,
+                visible_phase: dsl_phase
+            }
+        }
+
+        // 26d. ResolveAdmissionIdempotency: generated idempotency admission
+        // authority. The shell provides only the parsed key, if any; the
+        // machine owns the key-to-input map and therefore owns whether an
+        // input is newly admitted or publicly classified as deduplicated.
+        transition ResolveAdmissionIdempotencyNoKey {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionIdempotency { input_id, idempotency_key }
+            guard "no_idempotency_key" { idempotency_key == None }
+            update {}
+            to Idle
+            emit AdmissionIdempotencyResolved {
+                input_id: input_id,
+                result: AdmissionIdempotencyResultKind::Accept,
+                existing_input_id: None
+            }
+        }
+
+        transition ResolveAdmissionIdempotencyNewKey {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionIdempotency { input_id, idempotency_key }
+            guard "idempotency_key_present" { idempotency_key != None }
+            guard "idempotency_key_unclaimed" {
+                !self.admission_idempotency_inputs.contains_key(idempotency_key.get("value"))
+            }
+            update {}
+            to Idle
+            emit AdmissionIdempotencyResolved {
+                input_id: input_id,
+                result: AdmissionIdempotencyResultKind::Accept,
+                existing_input_id: None
+            }
+        }
+
+        transition ResolveAdmissionIdempotencyDuplicate {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionIdempotency { input_id, idempotency_key }
+            guard "idempotency_key_present" { idempotency_key != None }
+            guard "idempotency_key_claimed" {
+                self.admission_idempotency_inputs.contains_key(idempotency_key.get("value"))
+            }
+            update {}
+            to Idle
+            emit AdmissionIdempotencyResolved {
+                input_id: input_id,
+                result: AdmissionIdempotencyResultKind::Deduplicated,
+                existing_input_id: Some(self.admission_idempotency_inputs.get_cloned(idempotency_key.get("value")).get("value"))
+            }
+        }
+
+        transition RegisterAcceptedIdempotency {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RegisterAcceptedIdempotency { input_id, idempotency_key }
+            guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "idempotency_key_unclaimed_or_same_input" {
+                !self.admission_idempotency_inputs.contains_key(idempotency_key)
+                || self.admission_idempotency_inputs.get_cloned(idempotency_key).get("value") == input_id
+            }
+            update {
+                self.admission_idempotency_inputs.insert(idempotency_key, input_id);
+            }
+            to Idle
+            emit InputLifecycleNotice
+        }
+
+        // 26d. ResolveAdmissionPlan: generated live-admission policy/default
+        // authority. The shell presents parsed input observations only
+        // (kind, optional requested lane, silent-intent match, and whether a
+        // coalescing candidate exists). This transition emits the full typed
+        // admission result and records the lane/plan witness that later
+        // lifecycle transitions require.
+        transition ResolveAdmissionPlanRequestedTerminalQueue {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "runtime_running_matches_phase" {
+                (runtime_running == true && self.lifecycle_phase == Phase::Running)
+                || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "terminal_queue_override" {
+                input_kind == AdmissionInputKind::PeerResponseTerminal
+                && requested_lane == Some(InputLane::Queue)
+                && silent_intent_match == false
+            }
+            update {
+                self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
+                self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+                self.admission_authorized_existing_actions.remove(input_id);
+                self.admission_authorized_existing_targets.remove(input_id);
+            }
+            to Idle
+            emit AdmissionResolved {
+                input_id: input_id,
+                policy_version: 1,
+                policy_apply_mode: AdmissionPolicyApplyMode::StageRunStart,
+                policy_wake_mode: if without_wake { AdmissionPolicyWakeMode::None } else { AdmissionPolicyWakeMode::WakeIfIdle },
+                policy_queue_mode: AdmissionPolicyQueueMode::Fifo,
+                policy_consume_point: AdmissionPolicyConsumePoint::OnRunComplete,
+                policy_drain_policy: AdmissionPolicyDrainPolicy::QueueNextTurn,
+                policy_routing_disposition: AdmissionRoutingDisposition::Queue,
+                lane: InputLane::Queue,
+                plan: AdmissionPlanKind::Queued,
+                queue_action: AdmissionQueueActionKind::EnqueueTo,
+                existing_action: AdmissionExistingQueuedActionKind::None,
+                existing_input_id: None,
+                requires_active_pre_admission: without_wake == false,
+                runtime_boundary: AdmissionRunApplyBoundary::RunStart,
+                runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
+                runtime_peer_response_terminal_apply_intent: Some(AdmissionPeerResponseTerminalApplyIntent::AppendContextAndRun),
+                record_transcript: true,
+                request_immediate_processing: false,
+                interrupt_yielding: false,
+                wake_if_idle: without_wake == false
+            }
+        }
+
+        transition ResolveAdmissionPlanRequestedTerminalSteer {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "runtime_running_matches_phase" {
+                (runtime_running == true && self.lifecycle_phase == Phase::Running)
+                || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "terminal_steer_override" {
+                input_kind == AdmissionInputKind::PeerResponseTerminal
+                && requested_lane == Some(InputLane::Steer)
+                && silent_intent_match == false
+            }
+            update {
+                self.admission_authorized_lanes.insert(input_id, InputLane::Steer);
+                self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+                self.admission_authorized_existing_actions.remove(input_id);
+                self.admission_authorized_existing_targets.remove(input_id);
+            }
+            to Idle
+            emit AdmissionResolved {
+                input_id: input_id,
+                policy_version: 1,
+                policy_apply_mode: AdmissionPolicyApplyMode::StageRunStart,
+                policy_wake_mode: if without_wake {
+                    AdmissionPolicyWakeMode::None
+                } else {
+                    if runtime_running || active_turn_boundary_available {
+                        AdmissionPolicyWakeMode::InterruptYielding
+                    } else {
+                        AdmissionPolicyWakeMode::WakeIfIdle
+                    }
+                },
+                policy_queue_mode: AdmissionPolicyQueueMode::Fifo,
+                policy_consume_point: AdmissionPolicyConsumePoint::OnRunComplete,
+                policy_drain_policy: AdmissionPolicyDrainPolicy::SteerBatch,
+                policy_routing_disposition: AdmissionRoutingDisposition::Steer,
+                lane: InputLane::Steer,
+                plan: AdmissionPlanKind::Queued,
+                queue_action: AdmissionQueueActionKind::EnqueueTo,
+                existing_action: AdmissionExistingQueuedActionKind::None,
+                existing_input_id: None,
+                requires_active_pre_admission: true,
+                runtime_boundary: AdmissionRunApplyBoundary::RunStart,
+                runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
+                runtime_peer_response_terminal_apply_intent: Some(AdmissionPeerResponseTerminalApplyIntent::AppendContextAndRun),
+                record_transcript: true,
+                request_immediate_processing: true,
+                interrupt_yielding: false,
+                wake_if_idle: false
+            }
+        }
+
+        transition ResolveAdmissionPlanRequestedQueue {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "runtime_running_matches_phase" {
+                (runtime_running == true && self.lifecycle_phase == Phase::Running)
+                || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "queue_override" {
+                requested_lane == Some(InputLane::Queue)
+                && input_kind != AdmissionInputKind::PeerResponseProgress
+                && input_kind != AdmissionInputKind::PeerResponseTerminal
+                && continuation_kind == AdmissionContinuationKind::Ordinary
+                && (silent_intent_match == false || input_kind == AdmissionInputKind::PeerRequest)
+            }
+            update {
+                self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
+                self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+                self.admission_authorized_existing_actions.remove(input_id);
+                self.admission_authorized_existing_targets.remove(input_id);
+            }
+            to Idle
+            emit AdmissionResolved {
+                input_id: input_id,
+                policy_version: 1,
+                policy_apply_mode: AdmissionPolicyApplyMode::StageRunStart,
+                policy_wake_mode: if without_wake || silent_intent_match {
+                    AdmissionPolicyWakeMode::None
+                } else {
+                    if runtime_running || active_turn_boundary_available {
+                        AdmissionPolicyWakeMode::None
+                    } else {
+                        AdmissionPolicyWakeMode::WakeIfIdle
+                    }
+                },
+                policy_queue_mode: AdmissionPolicyQueueMode::Fifo,
+                policy_consume_point: AdmissionPolicyConsumePoint::OnRunComplete,
+                policy_drain_policy: AdmissionPolicyDrainPolicy::QueueNextTurn,
+                policy_routing_disposition: AdmissionRoutingDisposition::Queue,
+                lane: InputLane::Queue,
+                plan: AdmissionPlanKind::Queued,
+                queue_action: AdmissionQueueActionKind::EnqueueTo,
+                existing_action: AdmissionExistingQueuedActionKind::None,
+                existing_input_id: None,
+                requires_active_pre_admission: without_wake == false
+                    && silent_intent_match == false
+                    && runtime_running == false
+                    && active_turn_boundary_available == false,
+                runtime_boundary: AdmissionRunApplyBoundary::RunStart,
+                runtime_execution_kind: if input_kind == AdmissionInputKind::Continuation {
+                    AdmissionRuntimeExecutionKind::ResumePending
+                } else {
+                    AdmissionRuntimeExecutionKind::ContentTurn
+                },
+                runtime_peer_response_terminal_apply_intent: None,
+                record_transcript: input_kind != AdmissionInputKind::Continuation && input_kind != AdmissionInputKind::Operation,
+                request_immediate_processing: false,
+                interrupt_yielding: false,
+                wake_if_idle: without_wake == false
+                    && silent_intent_match == false
+                    && runtime_running == false
+                    && active_turn_boundary_available == false
+            }
+        }
+
+        transition ResolveAdmissionPlanRequestedSteer {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "runtime_running_matches_phase" {
+                (runtime_running == true && self.lifecycle_phase == Phase::Running)
+                || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "steer_override" {
+                requested_lane == Some(InputLane::Steer)
+                && input_kind != AdmissionInputKind::PeerResponseProgress
+                && input_kind != AdmissionInputKind::PeerResponseTerminal
+                && continuation_kind == AdmissionContinuationKind::Ordinary
+                && (silent_intent_match == false || input_kind == AdmissionInputKind::PeerRequest)
+            }
+            update {
+                self.admission_authorized_lanes.insert(input_id, InputLane::Steer);
+                self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+                self.admission_authorized_existing_actions.remove(input_id);
+                self.admission_authorized_existing_targets.remove(input_id);
+            }
+            to Idle
+            emit AdmissionResolved {
+                input_id: input_id,
+                policy_version: 1,
+                policy_apply_mode: if silent_intent_match { AdmissionPolicyApplyMode::StageRunStart } else { AdmissionPolicyApplyMode::StageRunBoundary },
+                policy_wake_mode: if without_wake || silent_intent_match {
+                    AdmissionPolicyWakeMode::None
+                } else {
+                    if runtime_running || active_turn_boundary_available {
+                        AdmissionPolicyWakeMode::InterruptYielding
+                    } else {
+                        AdmissionPolicyWakeMode::WakeIfIdle
+                    }
+                },
+                policy_queue_mode: AdmissionPolicyQueueMode::Fifo,
+                policy_consume_point: AdmissionPolicyConsumePoint::OnRunComplete,
+                policy_drain_policy: AdmissionPolicyDrainPolicy::SteerBatch,
+                policy_routing_disposition: AdmissionRoutingDisposition::Steer,
+                lane: InputLane::Steer,
+                plan: AdmissionPlanKind::Queued,
+                queue_action: AdmissionQueueActionKind::EnqueueTo,
+                existing_action: AdmissionExistingQueuedActionKind::None,
+                existing_input_id: None,
+                requires_active_pre_admission: true,
+                runtime_boundary: if silent_intent_match { AdmissionRunApplyBoundary::RunStart } else { AdmissionRunApplyBoundary::RunCheckpoint },
+                runtime_execution_kind: if input_kind == AdmissionInputKind::Continuation {
+                    AdmissionRuntimeExecutionKind::ResumePending
+                } else {
+                    AdmissionRuntimeExecutionKind::ContentTurn
+                },
+                runtime_peer_response_terminal_apply_intent: None,
+                record_transcript: input_kind != AdmissionInputKind::Continuation && input_kind != AdmissionInputKind::Operation,
+                request_immediate_processing: true,
+                interrupt_yielding: false,
+                wake_if_idle: false
+            }
+        }
+
+        transition ResolveAdmissionPlanDefaultQueueKind {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "runtime_running_matches_phase" {
+                (runtime_running == true && self.lifecycle_phase == Phase::Running)
+                || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "default_queue_kind" {
+                requested_lane == None
+                && silent_intent_match == false
+                && (input_kind == AdmissionInputKind::Prompt
+                    || input_kind == AdmissionInputKind::FlowStep
+                    || input_kind == AdmissionInputKind::ExternalEvent)
+            }
+            update {
+                self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
+                self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+                self.admission_authorized_existing_actions.remove(input_id);
+                self.admission_authorized_existing_targets.remove(input_id);
+            }
+            to Idle
+            emit AdmissionResolved {
+                input_id: input_id,
+                policy_version: 1,
+                policy_apply_mode: AdmissionPolicyApplyMode::StageRunStart,
+                policy_wake_mode: if without_wake {
+                    AdmissionPolicyWakeMode::None
+                } else {
+                    if runtime_running || active_turn_boundary_available {
+                        AdmissionPolicyWakeMode::None
+                    } else {
+                        AdmissionPolicyWakeMode::WakeIfIdle
+                    }
+                },
+                policy_queue_mode: AdmissionPolicyQueueMode::Fifo,
+                policy_consume_point: AdmissionPolicyConsumePoint::OnRunComplete,
+                policy_drain_policy: AdmissionPolicyDrainPolicy::QueueNextTurn,
+                policy_routing_disposition: AdmissionRoutingDisposition::Queue,
+                lane: InputLane::Queue,
+                plan: AdmissionPlanKind::Queued,
+                queue_action: AdmissionQueueActionKind::EnqueueTo,
+                existing_action: AdmissionExistingQueuedActionKind::None,
+                existing_input_id: None,
+                requires_active_pre_admission: without_wake == false
+                    && runtime_running == false
+                    && active_turn_boundary_available == false,
+                runtime_boundary: AdmissionRunApplyBoundary::RunStart,
+                runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
+                runtime_peer_response_terminal_apply_intent: None,
+                record_transcript: true,
+                request_immediate_processing: false,
+                interrupt_yielding: false,
+                wake_if_idle: without_wake == false
+                    && runtime_running == false
+                    && active_turn_boundary_available == false
+            }
+        }
+
+        transition ResolveAdmissionPlanDefaultPeerMessageOrRequest {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "runtime_running_matches_phase" {
+                (runtime_running == true && self.lifecycle_phase == Phase::Running)
+                || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "default_peer_message_or_request" {
+                requested_lane == None
+                && (input_kind == AdmissionInputKind::PeerMessage
+                    || input_kind == AdmissionInputKind::PeerRequest)
+                && (silent_intent_match == false || input_kind == AdmissionInputKind::PeerRequest)
+            }
+            update {
+                self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
+                self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+                self.admission_authorized_existing_actions.remove(input_id);
+                self.admission_authorized_existing_targets.remove(input_id);
+            }
+            to Idle
+            emit AdmissionResolved {
+                input_id: input_id,
+                policy_version: 1,
+                policy_apply_mode: AdmissionPolicyApplyMode::StageRunStart,
+                policy_wake_mode: if without_wake || silent_intent_match {
+                    AdmissionPolicyWakeMode::None
+                } else {
+                    if runtime_running || active_turn_boundary_available {
+                        AdmissionPolicyWakeMode::InterruptYielding
+                    } else {
+                        AdmissionPolicyWakeMode::WakeIfIdle
+                    }
+                },
+                policy_queue_mode: AdmissionPolicyQueueMode::Fifo,
+                policy_consume_point: AdmissionPolicyConsumePoint::OnRunComplete,
+                policy_drain_policy: AdmissionPolicyDrainPolicy::QueueNextTurn,
+                policy_routing_disposition: AdmissionRoutingDisposition::Queue,
+                lane: InputLane::Queue,
+                plan: AdmissionPlanKind::Queued,
+                queue_action: AdmissionQueueActionKind::EnqueueTo,
+                existing_action: AdmissionExistingQueuedActionKind::None,
+                existing_input_id: None,
+                requires_active_pre_admission: without_wake == false && silent_intent_match == false,
+                runtime_boundary: AdmissionRunApplyBoundary::RunStart,
+                runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
+                runtime_peer_response_terminal_apply_intent: None,
+                record_transcript: true,
+                request_immediate_processing: false,
+                interrupt_yielding: without_wake == false
+                    && silent_intent_match == false
+                    && (runtime_running == true || active_turn_boundary_available == true),
+                wake_if_idle: without_wake == false
+                    && silent_intent_match == false
+                    && runtime_running == false
+                    && active_turn_boundary_available == false
+            }
+        }
+
+        transition ResolveAdmissionPlanPeerResponseProgress {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "runtime_running_matches_phase" {
+                (runtime_running == true && self.lifecycle_phase == Phase::Running)
+                || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "peer_response_progress" {
+                input_kind == AdmissionInputKind::PeerResponseProgress
+                && silent_intent_match == false
+            }
+            guard "coalesce_target_tracked_if_present" {
+                existing_superseded_input_id == None
+                || self.input_phases.contains_key(existing_superseded_input_id.get("value"))
+            }
+            update {
+                self.admission_authorized_lanes.insert(input_id, InputLane::Steer);
+                self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+                if existing_superseded_input_id != None {
+                    self.admission_authorized_existing_actions.insert(input_id, AdmissionExistingQueuedActionKind::Coalesce);
+                    self.admission_authorized_existing_targets.insert(input_id, existing_superseded_input_id.get("value"));
+                } else {
+                    self.admission_authorized_existing_actions.remove(input_id);
+                    self.admission_authorized_existing_targets.remove(input_id);
+                }
+            }
+            to Idle
+            emit AdmissionResolved {
+                input_id: input_id,
+                policy_version: 1,
+                policy_apply_mode: AdmissionPolicyApplyMode::StageRunBoundary,
+                policy_wake_mode: AdmissionPolicyWakeMode::None,
+                policy_queue_mode: AdmissionPolicyQueueMode::Coalesce,
+                policy_consume_point: AdmissionPolicyConsumePoint::OnRunComplete,
+                policy_drain_policy: AdmissionPolicyDrainPolicy::SteerBatch,
+                policy_routing_disposition: AdmissionRoutingDisposition::Steer,
+                lane: InputLane::Steer,
+                plan: AdmissionPlanKind::Queued,
+                queue_action: AdmissionQueueActionKind::EnqueueTo,
+                existing_action: if existing_superseded_input_id != None { AdmissionExistingQueuedActionKind::Coalesce } else { AdmissionExistingQueuedActionKind::None },
+                existing_input_id: existing_superseded_input_id,
+                requires_active_pre_admission: false,
+                runtime_boundary: AdmissionRunApplyBoundary::RunCheckpoint,
+                runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
+                runtime_peer_response_terminal_apply_intent: None,
+                record_transcript: true,
+                request_immediate_processing: false,
+                interrupt_yielding: false,
+                wake_if_idle: false
+            }
+        }
+
+        transition ResolveAdmissionPlanDefaultPeerResponseTerminal {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "runtime_running_matches_phase" {
+                (runtime_running == true && self.lifecycle_phase == Phase::Running)
+                || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "default_peer_response_terminal" {
+                input_kind == AdmissionInputKind::PeerResponseTerminal
+                && requested_lane == None
+                && silent_intent_match == false
+            }
+            update {
+                self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
+                self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+                self.admission_authorized_existing_actions.remove(input_id);
+                self.admission_authorized_existing_targets.remove(input_id);
+            }
+            to Idle
+            emit AdmissionResolved {
+                input_id: input_id,
+                policy_version: 1,
+                policy_apply_mode: AdmissionPolicyApplyMode::StageRunStart,
+                policy_wake_mode: if without_wake { AdmissionPolicyWakeMode::None } else { AdmissionPolicyWakeMode::WakeIfIdle },
+                policy_queue_mode: AdmissionPolicyQueueMode::Fifo,
+                policy_consume_point: AdmissionPolicyConsumePoint::OnRunComplete,
+                policy_drain_policy: AdmissionPolicyDrainPolicy::QueueNextTurn,
+                policy_routing_disposition: AdmissionRoutingDisposition::Queue,
+                lane: InputLane::Queue,
+                plan: AdmissionPlanKind::Queued,
+                queue_action: AdmissionQueueActionKind::EnqueueTo,
+                existing_action: AdmissionExistingQueuedActionKind::None,
+                existing_input_id: None,
+                requires_active_pre_admission: without_wake == false,
+                runtime_boundary: AdmissionRunApplyBoundary::RunStart,
+                runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
+                runtime_peer_response_terminal_apply_intent: Some(AdmissionPeerResponseTerminalApplyIntent::AppendContextAndRun),
+                record_transcript: true,
+                request_immediate_processing: false,
+                interrupt_yielding: false,
+                wake_if_idle: without_wake == false
+            }
+        }
+
+        transition ResolveAdmissionPlanDefaultContinuation {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "runtime_running_matches_phase" {
+                (runtime_running == true && self.lifecycle_phase == Phase::Running)
+                || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "default_continuation" {
+                input_kind == AdmissionInputKind::Continuation
+                && requested_lane == None
+                && continuation_kind == AdmissionContinuationKind::Ordinary
+                && silent_intent_match == false
+            }
+            update {
+                self.admission_authorized_lanes.insert(input_id, InputLane::Steer);
+                self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+                self.admission_authorized_existing_actions.remove(input_id);
+                self.admission_authorized_existing_targets.remove(input_id);
+            }
+            to Idle
+            emit AdmissionResolved {
+                input_id: input_id,
+                policy_version: 1,
+                policy_apply_mode: AdmissionPolicyApplyMode::StageRunBoundary,
+                policy_wake_mode: if without_wake {
+                    AdmissionPolicyWakeMode::None
+                } else {
+                    if runtime_running || active_turn_boundary_available {
+                        AdmissionPolicyWakeMode::InterruptYielding
+                    } else {
+                        AdmissionPolicyWakeMode::WakeIfIdle
+                    }
+                },
+                policy_queue_mode: AdmissionPolicyQueueMode::Fifo,
+                policy_consume_point: AdmissionPolicyConsumePoint::OnRunComplete,
+                policy_drain_policy: AdmissionPolicyDrainPolicy::SteerBatch,
+                policy_routing_disposition: AdmissionRoutingDisposition::Steer,
+                lane: InputLane::Steer,
+                plan: AdmissionPlanKind::Queued,
+                queue_action: AdmissionQueueActionKind::EnqueueTo,
+                existing_action: AdmissionExistingQueuedActionKind::None,
+                existing_input_id: None,
+                requires_active_pre_admission: without_wake == false,
+                runtime_boundary: AdmissionRunApplyBoundary::RunCheckpoint,
+                runtime_execution_kind: AdmissionRuntimeExecutionKind::ResumePending,
+                runtime_peer_response_terminal_apply_intent: None,
+                record_transcript: false,
+                request_immediate_processing: false,
+                interrupt_yielding: without_wake == false
+                    && (runtime_running == true || active_turn_boundary_available == true),
+                wake_if_idle: without_wake == false
+                    && runtime_running == false
+                    && active_turn_boundary_available == false
+            }
+        }
+
+        // WorkGraph attention continuations re-enter as a fresh queued content
+        // turn rather than resuming the pending run. The typed
+        // `continuation_kind` discriminant routes them here directly so the
+        // Queue lane and `RunStart`/`ContentTurn` run-apply semantics are emitted
+        // by the machine; the runtime shell no longer forces a queue lane or
+        // overrides the projected runtime semantics.
+        transition ResolveAdmissionPlanWorkgraphAttentionContinuation {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "runtime_running_matches_phase" {
+                (runtime_running == true && self.lifecycle_phase == Phase::Running)
+                || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "workgraph_attention_continuation" {
+                input_kind == AdmissionInputKind::Continuation
+                && continuation_kind == AdmissionContinuationKind::WorkgraphAttention
+                && silent_intent_match == false
+            }
+            update {
+                self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
+                self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+                self.admission_authorized_existing_actions.remove(input_id);
+                self.admission_authorized_existing_targets.remove(input_id);
+            }
+            to Idle
+            emit AdmissionResolved {
+                input_id: input_id,
+                policy_version: 1,
+                policy_apply_mode: AdmissionPolicyApplyMode::StageRunStart,
+                policy_wake_mode: if without_wake {
+                    AdmissionPolicyWakeMode::None
+                } else {
+                    if runtime_running || active_turn_boundary_available {
+                        AdmissionPolicyWakeMode::None
+                    } else {
+                        AdmissionPolicyWakeMode::WakeIfIdle
+                    }
+                },
+                policy_queue_mode: AdmissionPolicyQueueMode::Fifo,
+                policy_consume_point: AdmissionPolicyConsumePoint::OnRunComplete,
+                policy_drain_policy: AdmissionPolicyDrainPolicy::QueueNextTurn,
+                policy_routing_disposition: AdmissionRoutingDisposition::Queue,
+                lane: InputLane::Queue,
+                plan: AdmissionPlanKind::Queued,
+                queue_action: AdmissionQueueActionKind::EnqueueTo,
+                existing_action: AdmissionExistingQueuedActionKind::None,
+                existing_input_id: None,
+                requires_active_pre_admission: without_wake == false
+                    && runtime_running == false
+                    && active_turn_boundary_available == false,
+                runtime_boundary: AdmissionRunApplyBoundary::RunStart,
+                runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
+                runtime_peer_response_terminal_apply_intent: None,
+                record_transcript: false,
+                request_immediate_processing: false,
+                interrupt_yielding: false,
+                wake_if_idle: without_wake == false
+                    && runtime_running == false
+                    && active_turn_boundary_available == false
+            }
+        }
+
+        transition ResolveAdmissionPlanOperation {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "runtime_running_matches_phase" {
+                (runtime_running == true && self.lifecycle_phase == Phase::Running)
+                || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "operation" {
+                input_kind == AdmissionInputKind::Operation
+                && requested_lane == None
+                && silent_intent_match == false
+            }
+            update {
+                self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
+                self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::ConsumedOnAccept);
+                self.admission_authorized_existing_actions.remove(input_id);
+                self.admission_authorized_existing_targets.remove(input_id);
+            }
+            to Idle
+            emit AdmissionResolved {
+                input_id: input_id,
+                policy_version: 1,
+                policy_apply_mode: AdmissionPolicyApplyMode::Ignore,
+                policy_wake_mode: AdmissionPolicyWakeMode::None,
+                policy_queue_mode: AdmissionPolicyQueueMode::Priority,
+                policy_consume_point: AdmissionPolicyConsumePoint::OnAccept,
+                policy_drain_policy: AdmissionPolicyDrainPolicy::Ignore,
+                policy_routing_disposition: AdmissionRoutingDisposition::Drop,
+                lane: InputLane::Queue,
+                plan: AdmissionPlanKind::ConsumedOnAccept,
+                queue_action: AdmissionQueueActionKind::None,
+                existing_action: AdmissionExistingQueuedActionKind::None,
+                existing_input_id: None,
+                requires_active_pre_admission: false,
+                runtime_boundary: AdmissionRunApplyBoundary::RunStart,
+                runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
+                runtime_peer_response_terminal_apply_intent: None,
+                record_transcript: false,
+                request_immediate_processing: false,
+                interrupt_yielding: false,
+                wake_if_idle: false
+            }
+        }
+
         // 27. Peer-ingress classification.
         //
         // Comms supplies only parsed transport facts. The DSL owns the
@@ -3776,6 +10770,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ActionableMessage,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Message,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -3797,6 +10792,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ActionableMessage,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Message,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -3821,6 +10817,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleAdded,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
@@ -3851,6 +10848,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleAdded,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
@@ -3881,6 +10879,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleAdded,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
@@ -3911,6 +10910,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
@@ -3941,6 +10941,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
@@ -3971,6 +10972,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
@@ -4001,6 +11003,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
@@ -4031,6 +11034,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
@@ -4061,6 +11065,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
@@ -4091,6 +11096,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
@@ -4121,6 +11127,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
@@ -4151,6 +11158,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
@@ -4181,6 +11189,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
@@ -4212,6 +11221,33 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::SilentRequest,
+                actionable: false,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::SupervisorBridgeExempt,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestSupervisorSilentIdle {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_supervisor_silent_request" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent == "supervisor.bridge"
+                && self.silent_intent_overrides.contains(request_intent)
+            }
+            update {}
+            to Idle
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::SilentRequest,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::SupervisorBridgeExempt,
                 lifecycle_kind: None,
@@ -4237,6 +11273,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::SilentRequest,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::SupervisorBridgeExempt,
                 lifecycle_kind: None,
@@ -4265,6 +11302,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::SilentRequest,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -4293,6 +11331,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::SilentRequest,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -4318,6 +11357,33 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ActionableRequest,
+                actionable: true,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::SupervisorBridgeExempt,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestSupervisorIdle {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_supervisor_request" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent == "supervisor.bridge"
+                && !self.silent_intent_overrides.contains(request_intent)
+            }
+            update {}
+            to Idle
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::ActionableRequest,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::SupervisorBridgeExempt,
                 lifecycle_kind: None,
@@ -4343,6 +11409,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ActionableRequest,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::SupervisorBridgeExempt,
                 lifecycle_kind: None,
@@ -4371,6 +11438,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ActionableRequest,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -4399,6 +11467,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ActionableRequest,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -4423,6 +11492,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleAdded,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
@@ -4453,6 +11523,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleAdded,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
@@ -4483,6 +11554,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleAdded,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
@@ -4513,6 +11585,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
@@ -4543,6 +11616,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
@@ -4573,6 +11647,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
@@ -4603,6 +11678,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
@@ -4633,6 +11709,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
@@ -4663,6 +11740,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
@@ -4693,6 +11771,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
@@ -4723,6 +11802,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
@@ -4753,6 +11833,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
@@ -4783,6 +11864,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
@@ -4813,6 +11895,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ResponseProgress,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Response,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -4837,6 +11920,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ResponseProgress,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Response,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -4861,6 +11945,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ResponseTerminal,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Response,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -4885,6 +11970,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ResponseTerminal,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Response,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -4909,6 +11995,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ResponseTerminal,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Response,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -4933,6 +12020,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ResponseTerminal,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Response,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -4954,6 +12042,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::Ack,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Ack,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -4975,6 +12064,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::Ack,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Ack,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -4992,6 +12082,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PlainEvent,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::PlainEvent,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -5009,12 +12100,46 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PlainEvent,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::PlainEvent,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
                 lifecycle_peer: None,
                 request_id: None,
                 response_terminality: None
+            }
+        }
+
+        transition ClassifyPeerResponseReplyAccepted {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on signal ClassifyPeerResponseReply { status }
+            guard "peer_reply_status_accepted" { status == PeerIngressResponseStatus::Accepted }
+            update {}
+            to Idle
+            emit PeerResponseReplyClassified {
+                response_terminality: PeerIngressResponseTerminality::Progress
+            }
+        }
+
+        transition ClassifyPeerResponseReplyCompleted {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on signal ClassifyPeerResponseReply { status }
+            guard "peer_reply_status_completed" { status == PeerIngressResponseStatus::Completed }
+            update {}
+            to Idle
+            emit PeerResponseReplyClassified {
+                response_terminality: PeerIngressResponseTerminality::TerminalCompleted
+            }
+        }
+
+        transition ClassifyPeerResponseReplyFailed {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on signal ClassifyPeerResponseReply { status }
+            guard "peer_reply_status_failed" { status == PeerIngressResponseStatus::Failed }
+            update {}
+            to Idle
+            emit PeerResponseReplyClassified {
+                response_terminality: PeerIngressResponseTerminality::TerminalFailed
             }
         }
 
@@ -5026,6 +12151,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_run_id = Some(run_id);
                 self.pre_run_phase = Some(PreRunPhase::Idle);
+                self.runtime_completion_result_run_id = None;
             }
             to Running
             emit SubmitRunPrimitive
@@ -5037,6 +12163,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_run_id = Some(run_id);
                 self.pre_run_phase = Some(PreRunPhase::Attached);
+                self.runtime_completion_result_run_id = None;
             }
             to Running
             emit SubmitRunPrimitive
@@ -5049,12 +12176,59 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_run_id = Some(run_id);
                 self.pre_run_phase = Some(PreRunPhase::Retired);
+                self.runtime_completion_result_run_id = None;
             }
             to Running
             emit SubmitRunPrimitive
         }
 
         // 30. Turn execution absorption
+        transition StartConversationRunIdleWithBinding {
+            on input StartConversationRun { run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "runtime_binding_present" { self.active_runtime_id != None }
+            guard "turn_resettable" {
+                self.turn_phase == TurnPhase::Ready
+                || self.turn_phase == TurnPhase::Completed
+                || self.turn_phase == TurnPhase::Failed
+                || self.turn_phase == TurnPhase::Cancelled
+            }
+            guard "conversation_shape_matches_primitive" {
+                primitive_kind == TurnPrimitiveKind::ConversationTurn
+                && (admitted_content_shape == ContentShape::Conversation
+                    || admitted_content_shape == ContentShape::ConversationAndContext
+                    || admitted_content_shape == ContentShape::Context
+                    || admitted_content_shape == ContentShape::Empty)
+            }
+            update {
+                self.current_run_id = Some(run_id);
+                self.pre_run_phase = Some(PreRunPhase::Attached);
+                self.turn_phase = TurnPhase::ApplyingPrimitive;
+                self.primitive_kind = Some(primitive_kind);
+                self.admitted_content_shape = Some(admitted_content_shape);
+                self.vision_enabled = vision_enabled;
+                self.image_tool_results_enabled = image_tool_results_enabled;
+                self.tool_calls_pending = 0;
+                self.pending_op_refs = EmptySet;
+                self.barrier_operation_ids = EmptySet;
+                self.has_barrier_ops = false;
+                self.barrier_satisfied = false;
+                self.boundary_count = 0;
+                self.cancel_after_boundary = false;
+                self.terminal_outcome = None;
+                self.terminal_cause_kind = None;
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
+                self.extraction_attempts = 0;
+                self.max_extraction_retries = max_extraction_retries;
+                self.llm_retry_attempt = 0;
+                self.llm_retry_max_retries = 0;
+                self.llm_retry_selected_delay_ms = 0;
+                self.llm_retry_last_failure_kind = None;
+            }
+            to Running
+            emit TurnRunStarted { run_id: run_id }
+        }
         transition StartConversationRunInitializing {
             on input StartConversationRun { run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries }
             guard { self.lifecycle_phase == Phase::Initializing }
@@ -5419,8 +12593,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition PrimitiveAppliedConversation {
-            on input PrimitiveApplied
+            on input PrimitiveApplied { run_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_applying_conversation" {
                 self.turn_phase == TurnPhase::ApplyingPrimitive
                 && self.primitive_kind == Some(TurnPrimitiveKind::ConversationTurn)
@@ -5433,8 +12608,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition PrimitiveAppliedImmediateCompleted {
-            on input PrimitiveApplied
+            on input PrimitiveApplied { run_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_applying_immediate" {
                 self.turn_phase == TurnPhase::ApplyingPrimitive
                 && (self.primitive_kind == Some(TurnPrimitiveKind::ImmediateAppend)
@@ -5449,12 +12625,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
             emit TurnBoundaryApplied { run_id: self.current_run_id.get("value"), boundary_sequence: self.boundary_count }
             emit TurnRunCompleted { run_id: self.current_run_id.get("value"), outcome: TurnTerminalOutcome::Completed }
-            emit TurnCheckCompaction
         }
 
         transition PrimitiveAppliedImmediateCancelled {
-            on input PrimitiveApplied
+            on input PrimitiveApplied { run_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_applying_immediate" {
                 self.turn_phase == TurnPhase::ApplyingPrimitive
                 && (self.primitive_kind == Some(TurnPrimitiveKind::ImmediateAppend)
@@ -5470,12 +12646,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
             emit TurnBoundaryApplied { run_id: self.current_run_id.get("value"), boundary_sequence: self.boundary_count }
             emit TurnRunCancelled { run_id: self.current_run_id.get("value"), reason: TurnCancellationReason::Observed }
-            emit TurnCheckCompaction
         }
 
         transition LlmReturnedToolCallsPositive {
-            on input LlmReturnedToolCalls { tool_count }
+            on input LlmReturnedToolCalls { run_id, tool_count }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_calling_llm" { self.turn_phase == TurnPhase::CallingLlm }
             guard "tool_count_positive" { tool_count > 0 }
             update {
@@ -5486,8 +12662,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition LlmReturnedToolCallsZero {
-            on input LlmReturnedToolCalls { tool_count }
+            on input LlmReturnedToolCalls { run_id, tool_count }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_calling_llm" { self.turn_phase == TurnPhase::CallingLlm }
             guard "tool_count_zero" { tool_count == 0 }
             update {
@@ -5498,8 +12675,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition LlmReturnedTerminal {
-            on input LlmReturnedTerminal
+            on input LlmReturnedTerminal { run_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_calling_llm" { self.turn_phase == TurnPhase::CallingLlm }
             update {
                 self.turn_phase = TurnPhase::DrainingBoundary;
@@ -5508,8 +12686,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition RegisterPendingOps {
-            on input RegisterPendingOps { op_refs, barrier_operation_ids }
+            on input RegisterPendingOps { run_id, op_refs, barrier_operation_ids }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_waiting_or_calling" { self.turn_phase == TurnPhase::CallingLlm || self.turn_phase == TurnPhase::WaitingForOps }
             update {
                 self.turn_phase = TurnPhase::WaitingForOps;
@@ -5523,19 +12702,22 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition ToolCallsResolvedToCalling {
-            on input ToolCallsResolved
+            on input ToolCallsResolved { run_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_waiting_for_ops" { self.turn_phase == TurnPhase::WaitingForOps }
             guard "barrier_not_satisfied" { self.barrier_satisfied == false }
             update {
                 self.turn_phase = TurnPhase::CallingLlm;
             }
             to Running
+            emit TurnCheckCompaction
         }
 
         transition ToolCallsResolvedToBoundary {
-            on input ToolCallsResolved
+            on input ToolCallsResolved { run_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_waiting_for_ops" { self.turn_phase == TurnPhase::WaitingForOps }
             guard "barrier_satisfied" { self.barrier_satisfied == true }
             update {
@@ -5545,8 +12727,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition OpsBarrierSatisfied {
-            on input OpsBarrierSatisfied { operation_ids }
+            on input OpsBarrierSatisfied { run_id, operation_ids }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_waiting_for_ops" { self.turn_phase == TurnPhase::WaitingForOps }
             guard "matching_barrier_ids" { operation_ids == self.barrier_operation_ids }
             update {
@@ -5559,8 +12742,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition BoundaryContinueToCalling {
-            on input BoundaryContinue
+            on input BoundaryContinue { run_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_draining_boundary" { self.turn_phase == TurnPhase::DrainingBoundary }
             guard "cancel_after_boundary_not_requested" { self.cancel_after_boundary == false }
             update {
@@ -5573,8 +12757,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition BoundaryContinueToCancelled {
-            on input BoundaryContinue
+            on input BoundaryContinue { run_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_draining_boundary" { self.turn_phase == TurnPhase::DrainingBoundary }
             guard "cancel_after_boundary_requested" { self.cancel_after_boundary == true }
             update {
@@ -5586,12 +12771,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
             emit TurnBoundaryApplied { run_id: self.current_run_id.get("value"), boundary_sequence: self.boundary_count }
             emit TurnRunCancelled { run_id: self.current_run_id.get("value"), reason: TurnCancellationReason::Observed }
-            emit TurnCheckCompaction
         }
 
         transition BoundaryCompleteCompleted {
-            on input BoundaryComplete
+            on input BoundaryComplete { run_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_draining_boundary" { self.turn_phase == TurnPhase::DrainingBoundary }
             guard "cancel_after_boundary_not_requested" { self.cancel_after_boundary == false }
             update {
@@ -5602,12 +12787,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
             emit TurnBoundaryApplied { run_id: self.current_run_id.get("value"), boundary_sequence: self.boundary_count }
             emit TurnRunCompleted { run_id: self.current_run_id.get("value"), outcome: TurnTerminalOutcome::Completed }
-            emit TurnCheckCompaction
         }
 
         transition BoundaryCompleteCancelled {
-            on input BoundaryComplete
+            on input BoundaryComplete { run_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_draining_boundary" { self.turn_phase == TurnPhase::DrainingBoundary }
             guard "cancel_after_boundary_requested" { self.cancel_after_boundary == true }
             update {
@@ -5619,12 +12804,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
             emit TurnBoundaryApplied { run_id: self.current_run_id.get("value"), boundary_sequence: self.boundary_count }
             emit TurnRunCancelled { run_id: self.current_run_id.get("value"), reason: TurnCancellationReason::Observed }
-            emit TurnCheckCompaction
         }
 
         transition EnterExtraction {
-            on input EnterExtraction { max_extraction_retries }
+            on input EnterExtraction { run_id, max_extraction_retries }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_draining_boundary" { self.turn_phase == TurnPhase::DrainingBoundary }
             update {
                 self.turn_phase = TurnPhase::Extracting;
@@ -5634,18 +12819,21 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition ExtractionStart {
-            on input ExtractionStart
+            on input ExtractionStart { run_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_extracting" { self.turn_phase == TurnPhase::Extracting }
             update {
                 self.turn_phase = TurnPhase::CallingLlm;
             }
             to Running
+            emit TurnCheckCompaction
         }
 
         transition ExtractionValidationPassed {
-            on input ExtractionValidationPassed
+            on input ExtractionValidationPassed { run_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_extracting" { self.turn_phase == TurnPhase::Extracting }
             update {
                 self.turn_phase = TurnPhase::Completed;
@@ -5653,12 +12841,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Running
             emit TurnRunCompleted { run_id: self.current_run_id.get("value"), outcome: TurnTerminalOutcome::Completed }
-            emit TurnCheckCompaction
         }
 
         transition ExtractionValidationFailedRetry {
-            on input ExtractionValidationFailed { error }
+            on input ExtractionValidationFailed { run_id, error }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_extracting" { self.turn_phase == TurnPhase::Extracting }
             guard "retries_remaining" { self.extraction_attempts < self.max_extraction_retries }
             update {
@@ -5670,8 +12858,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition ExtractionValidationFailedExhausted {
-            on input ExtractionValidationFailed { error }
+            on input ExtractionValidationFailed { run_id, error }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_extracting" { self.turn_phase == TurnPhase::Extracting }
             guard "retries_exhausted" { self.extraction_attempts >= self.max_extraction_retries }
             update {
@@ -5688,8 +12877,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition ExtractionFailedTerminal {
-            on input ExtractionFailed { error }
+            on input ExtractionFailed { run_id, error }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_extracting_calling_or_draining" {
                 self.turn_phase == TurnPhase::Extracting
                 || self.turn_phase == TurnPhase::CallingLlm
@@ -5710,6 +12900,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition RecoverableFailure {
             on input RecoverableFailure {
+                run_id,
                 failure_kind,
                 retry_attempt,
                 max_retries,
@@ -5717,6 +12908,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 error
             }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_non_terminal" {
                 self.turn_phase == TurnPhase::CallingLlm
                 || self.turn_phase == TurnPhase::WaitingForOps
@@ -5724,6 +12916,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.turn_phase == TurnPhase::Extracting
             }
             guard "retry_attempt_present" { retry_attempt > 0 }
+            // P0 Dogma Invariant 1: revalidate the recoverable-vs-fatal fork.
+            // The machine — not the shell `RetryPolicy` — is the authority on
+            // whether this failure_kind may enter ErrorRecovery. A
+            // non-recoverable kind is rejected even if the shell built the
+            // input.
+            guard "failure_kind_recoverable" { llm_failure_kind_recoverable(failure_kind) }
+            // P0 Dogma Invariant 1: revalidate retry exhaustion. The one-based
+            // `retry_attempt` must not exceed `max_retries`; a past-exhaustion
+            // recovery attempt is rejected by the machine rather than recorded.
+            guard "retries_remaining" { retry_attempt <= max_retries }
             update {
                 self.turn_phase = TurnPhase::ErrorRecovery;
                 self.llm_retry_attempt = retry_attempt;
@@ -5735,26 +12937,28 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition FatalFailure {
-            on input FatalFailure { terminal_cause_kind, error }
+            on input FatalFailure { run_id, terminal_failure_source, error }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_not_terminal" { self.turn_phase != TurnPhase::Completed && self.turn_phase != TurnPhase::Failed && self.turn_phase != TurnPhase::Cancelled }
-            guard "terminal_cause_known" { terminal_cause_kind != TurnTerminalCauseKind::Unknown }
+            guard "terminal_failure_source_known" { terminal_failure_source != RunFailureSourceKind::Unknown }
             update {
                 self.turn_phase = TurnPhase::Failed;
-                self.terminal_outcome = Some(TurnTerminalOutcome::Failed);
-                self.terminal_cause_kind = Some(terminal_cause_kind);
+                self.terminal_outcome = Some(if terminal_failure_source == RunFailureSourceKind::TokenBudgetExceeded || terminal_failure_source == RunFailureSourceKind::ToolCallBudgetExceeded { TurnTerminalOutcome::BudgetExhausted } else { if terminal_failure_source == RunFailureSourceKind::TimeBudgetExceeded { TurnTerminalOutcome::TimeBudgetExceeded } else { if terminal_failure_source == RunFailureSourceKind::StructuredOutputValidationFailed || terminal_failure_source == RunFailureSourceKind::InvalidOutputSchema { TurnTerminalOutcome::StructuredOutputValidationFailed } else { TurnTerminalOutcome::Failed } } });
+                self.terminal_cause_kind = Some(if terminal_failure_source == RunFailureSourceKind::HookDenied { TurnTerminalCauseKind::HookDenied } else { if terminal_failure_source == RunFailureSourceKind::HookTimeout || terminal_failure_source == RunFailureSourceKind::HookExecutionFailed || terminal_failure_source == RunFailureSourceKind::HookConfigInvalid { TurnTerminalCauseKind::HookFailure } else { if terminal_failure_source == RunFailureSourceKind::Llm { TurnTerminalCauseKind::LlmFailure } else { if terminal_failure_source == RunFailureSourceKind::ToolError || terminal_failure_source == RunFailureSourceKind::InvalidToolAccess { TurnTerminalCauseKind::ToolFailure } else { if terminal_failure_source == RunFailureSourceKind::StructuredOutputValidationFailed || terminal_failure_source == RunFailureSourceKind::InvalidOutputSchema { TurnTerminalCauseKind::StructuredOutputValidationFailed } else { if terminal_failure_source == RunFailureSourceKind::TokenBudgetExceeded || terminal_failure_source == RunFailureSourceKind::ToolCallBudgetExceeded { TurnTerminalCauseKind::BudgetExhausted } else { if terminal_failure_source == RunFailureSourceKind::TimeBudgetExceeded { TurnTerminalCauseKind::TimeBudgetExceeded } else { if terminal_failure_source == RunFailureSourceKind::LlmRetryExhausted { TurnTerminalCauseKind::RetryExhausted } else { if terminal_failure_source == RunFailureSourceKind::MaxTurnsReached { TurnTerminalCauseKind::TurnLimitReached } else { TurnTerminalCauseKind::FatalFailure } } } } } } } } });
             }
             to Running
             emit TurnRunFailed {
                 run_id: self.current_run_id.get("value"),
-                terminal_cause_kind: terminal_cause_kind,
+                terminal_cause_kind: self.terminal_cause_kind.get("value"),
                 error: error
             }
         }
 
         transition RetryRequested {
-            on input RetryRequested { retry_attempt }
+            on input RetryRequested { run_id, retry_attempt }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_error_recovery" { self.turn_phase == TurnPhase::ErrorRecovery }
             guard "retry_attempt_matches" { retry_attempt == self.llm_retry_attempt }
             update {
@@ -5765,8 +12969,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition CancelNow {
-            on input CancelNow
+            on input CancelNow { run_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_cancellable" {
                 self.turn_phase != TurnPhase::Ready
                 && self.turn_phase != TurnPhase::Completed
@@ -5780,8 +12985,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition RequestCancelAfterBoundary {
-            on input RequestCancelAfterBoundary
+            on input RequestCancelAfterBoundary { run_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_cancellable" {
                 self.turn_phase != TurnPhase::Ready
                 && self.turn_phase != TurnPhase::Completed
@@ -5795,8 +13001,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition CancellationObserved {
-            on input CancellationObserved
+            on input CancellationObserved { run_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_cancelling" { self.turn_phase == TurnPhase::Cancelling }
             update {
                 self.turn_phase = TurnPhase::Cancelled;
@@ -5807,8 +13014,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition AcknowledgeTerminal {
-            on input AcknowledgeTerminal { outcome }
+            on input AcknowledgeTerminal { run_id, outcome }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_terminal" {
                 self.turn_phase == TurnPhase::Completed
                 || self.turn_phase == TurnPhase::Failed
@@ -5840,8 +13048,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition TurnLimitReached {
-            on input TurnLimitReached
+            on input TurnLimitReached { run_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_not_terminal" { self.turn_phase != TurnPhase::Completed && self.turn_phase != TurnPhase::Failed && self.turn_phase != TurnPhase::Cancelled }
             update {
                 self.turn_phase = TurnPhase::Failed;
@@ -5857,8 +13066,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition BudgetExhausted {
-            on input BudgetExhausted
+            on input BudgetExhausted { run_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_not_terminal" { self.turn_phase != TurnPhase::Completed && self.turn_phase != TurnPhase::Failed && self.turn_phase != TurnPhase::Cancelled }
             update {
                 self.turn_phase = TurnPhase::Failed;
@@ -5874,8 +13084,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition TimeBudgetExceeded {
-            on input TimeBudgetExceeded
+            on input TimeBudgetExceeded { run_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_not_terminal" { self.turn_phase != TurnPhase::Completed && self.turn_phase != TurnPhase::Failed && self.turn_phase != TurnPhase::Cancelled }
             update {
                 self.turn_phase = TurnPhase::Failed;
@@ -5914,6 +13125,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                     self.turn_phase = TurnPhase::Completed;
                     self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
                 }
+                self.runtime_completion_result_run_id = Some(run_id);
             }
             to Running
         }
@@ -5962,18 +13174,103 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition RunFailed {
-            on input RunFailed { run_id, runtime_apply_failure_cause, runtime_apply_failure_message, terminal_outcome, terminal_cause_kind, error }
+            on input RunFailed { run_id, runtime_apply_failure_cause, runtime_apply_failure_message, machine_terminal_failure_observed, terminal_failure_source, error }
             guard { self.lifecycle_phase == Phase::Running }
             guard "run_matches_binding" { self.current_run_id == Some(run_id) }
-            guard "terminal_cause_known" { terminal_cause_kind != TurnTerminalCauseKind::Unknown }
+            guard "runtime_apply_failure_not_machine_terminal_failure" { runtime_apply_failure_cause == None || !machine_terminal_failure_observed }
+            guard "machine_terminal_failure_not_raw_source" { !machine_terminal_failure_observed || terminal_failure_source == None }
+            guard "machine_terminal_failure_requires_existing_outcome" { !machine_terminal_failure_observed || (self.terminal_outcome != None && self.terminal_outcome != Some(TurnTerminalOutcome::None) && self.terminal_outcome != Some(TurnTerminalOutcome::Completed) && self.terminal_outcome != Some(TurnTerminalOutcome::Cancelled)) }
+            guard "machine_terminal_failure_requires_existing_known_cause" { !machine_terminal_failure_observed || (self.terminal_cause_kind != None && self.terminal_cause_kind != Some(TurnTerminalCauseKind::Unknown)) }
+            guard "machine_terminal_failure_existing_outcome_matches_cause" { !machine_terminal_failure_observed || self.terminal_outcome == Some(if self.terminal_cause_kind == Some(TurnTerminalCauseKind::BudgetExhausted) { TurnTerminalOutcome::BudgetExhausted } else { if self.terminal_cause_kind == Some(TurnTerminalCauseKind::TimeBudgetExceeded) { TurnTerminalOutcome::TimeBudgetExceeded } else { if self.terminal_cause_kind == Some(TurnTerminalCauseKind::StructuredOutputValidationFailed) { TurnTerminalOutcome::StructuredOutputValidationFailed } else { TurnTerminalOutcome::Failed } } }) }
+            guard "terminal_failure_source_known_if_present" { terminal_failure_source != Some(RunFailureSourceKind::Unknown) }
             update {
                 self.turn_phase = TurnPhase::Failed;
-                self.terminal_outcome = Some(terminal_outcome);
-                self.terminal_cause_kind = Some(terminal_cause_kind);
+                if self.terminal_outcome == None || self.terminal_outcome == Some(TurnTerminalOutcome::None) {
+                    self.terminal_outcome = Some(
+                        if terminal_failure_source == Some(RunFailureSourceKind::TokenBudgetExceeded)
+                            || terminal_failure_source == Some(RunFailureSourceKind::ToolCallBudgetExceeded)
+                        {
+                            TurnTerminalOutcome::BudgetExhausted
+                        } else {
+                            if terminal_failure_source == Some(RunFailureSourceKind::TimeBudgetExceeded) {
+                                TurnTerminalOutcome::TimeBudgetExceeded
+                            } else {
+                                if terminal_failure_source == Some(RunFailureSourceKind::StructuredOutputValidationFailed)
+                                    || terminal_failure_source == Some(RunFailureSourceKind::InvalidOutputSchema)
+                                {
+                                    TurnTerminalOutcome::StructuredOutputValidationFailed
+                                } else {
+                                    TurnTerminalOutcome::Failed
+                                }
+                            }
+                        }
+                    );
+                }
+                if self.terminal_cause_kind == None || self.terminal_cause_kind == Some(TurnTerminalCauseKind::Unknown) {
+                    self.terminal_cause_kind = Some(
+                        if runtime_apply_failure_cause != None {
+                            TurnTerminalCauseKind::RuntimeApplyFailure
+                        } else {
+                            if terminal_failure_source == Some(RunFailureSourceKind::HookDenied) {
+                                TurnTerminalCauseKind::HookDenied
+                            } else {
+                                if terminal_failure_source == Some(RunFailureSourceKind::HookTimeout)
+                                    || terminal_failure_source == Some(RunFailureSourceKind::HookExecutionFailed)
+                                    || terminal_failure_source == Some(RunFailureSourceKind::HookConfigInvalid)
+                                {
+                                    TurnTerminalCauseKind::HookFailure
+                                } else {
+                                    if terminal_failure_source == Some(RunFailureSourceKind::Llm) {
+                                        TurnTerminalCauseKind::LlmFailure
+                                    } else {
+                                        if terminal_failure_source == Some(RunFailureSourceKind::ToolError)
+                                            || terminal_failure_source == Some(RunFailureSourceKind::InvalidToolAccess)
+                                        {
+                                            TurnTerminalCauseKind::ToolFailure
+                                        } else {
+                                            if terminal_failure_source == Some(RunFailureSourceKind::StructuredOutputValidationFailed)
+                                                || terminal_failure_source == Some(RunFailureSourceKind::InvalidOutputSchema)
+                                            {
+                                                TurnTerminalCauseKind::StructuredOutputValidationFailed
+                                            } else {
+                                                if terminal_failure_source == Some(RunFailureSourceKind::TokenBudgetExceeded)
+                                                    || terminal_failure_source == Some(RunFailureSourceKind::ToolCallBudgetExceeded)
+                                                {
+                                                    TurnTerminalCauseKind::BudgetExhausted
+                                                } else {
+                                                    if terminal_failure_source == Some(RunFailureSourceKind::TimeBudgetExceeded) {
+                                                        TurnTerminalCauseKind::TimeBudgetExceeded
+                                                    } else {
+                                                        if terminal_failure_source == Some(RunFailureSourceKind::LlmRetryExhausted) {
+                                                            TurnTerminalCauseKind::RetryExhausted
+                                                        } else {
+                                                            if terminal_failure_source == Some(RunFailureSourceKind::MaxTurnsReached) {
+                                                                TurnTerminalCauseKind::TurnLimitReached
+                                                            } else {
+                                                                TurnTerminalCauseKind::FatalFailure
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    );
+                }
                 self.last_runtime_apply_failure_cause = runtime_apply_failure_cause;
                 self.last_runtime_apply_failure_message = runtime_apply_failure_message;
+                self.runtime_completion_result_run_id = Some(run_id);
             }
             to Running
+            emit TurnRunFailed {
+                run_id: run_id,
+                terminal_cause_kind: self.terminal_cause_kind.get("value"),
+                error: error
+            }
+            emit PostAdmissionSignal { signal: PostAdmissionSignalKind::WakeLoop }
         }
 
         transition RunCancelled {
@@ -5983,10 +13280,19 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.turn_phase = TurnPhase::Cancelled;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
+                self.runtime_completion_result_run_id = Some(run_id);
             }
             to Running
         }
 
+        transition SurfaceRegisterIdle {
+            on input SurfaceRegister { surface_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            update {
+                self.known_surfaces.insert(surface_id);
+            }
+            to Idle
+        }
         transition SurfaceRegisterAttached {
             on input SurfaceRegister { surface_id }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -6004,6 +13310,19 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
         }
 
+        transition SurfaceStageAddIdle {
+            on input SurfaceStageAdd { surface_id, now_ms }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.surface_staged_op.insert(surface_id, SurfaceStagedOp::Add);
+                self.reload_staged_surfaces.remove(surface_id);
+                self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
+                self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
+            }
+            to Idle
+        }
         transition SurfaceStageAddAttached {
             on input SurfaceStageAdd { surface_id, now_ms }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -6031,6 +13350,19 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
         }
 
+        transition SurfaceStageRemoveIdle {
+            on input SurfaceStageRemove { surface_id, now_ms }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.surface_staged_op.insert(surface_id, SurfaceStagedOp::Remove);
+                self.reload_staged_surfaces.remove(surface_id);
+                self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
+                self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
+            }
+            to Idle
+        }
         transition SurfaceStageRemoveAttached {
             on input SurfaceStageRemove { surface_id, now_ms }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -6058,6 +13390,48 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
         }
 
+        transition SurfaceSetRemovalTimeoutIdle {
+            on input SurfaceSetRemovalTimeout { timeout_ms }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
+            update {
+                self.removal_timeout_ms = timeout_ms;
+            }
+            to Idle
+        }
+        transition SurfaceSetRemovalTimeoutAttached {
+            on input SurfaceSetRemovalTimeout { timeout_ms }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
+            update {
+                self.removal_timeout_ms = timeout_ms;
+            }
+            to Attached
+        }
+        transition SurfaceSetRemovalTimeoutRunning {
+            on input SurfaceSetRemovalTimeout { timeout_ms }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
+            update {
+                self.removal_timeout_ms = timeout_ms;
+            }
+            to Running
+        }
+
+        transition SurfaceStageReloadIdle {
+            on input SurfaceStageReload { surface_id, now_ms }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
+            guard "surface_active" { self.active_surfaces.contains(surface_id) }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.surface_staged_op.insert(surface_id, SurfaceStagedOp::Reload);
+                self.reload_staged_surfaces.insert(surface_id);
+                self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
+                self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
+            }
+            to Idle
+        }
         transition SurfaceStageReloadAttached {
             on input SurfaceStageReload { surface_id, now_ms }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -6087,6 +13461,50 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
         }
 
+        transition SurfaceApplyBoundaryAddIdle {
+            on input SurfaceApplyBoundary { surface_id, now_ms, staged_intent_sequence, applied_at_turn }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
+            guard "staged_add" { self.surface_staged_op.contains_key(surface_id) && self.surface_staged_op.get(surface_id).get("value") == SurfaceStagedOp::Add }
+            guard "staged_sequence_matches" { self.surface_staged_intent_sequence.contains_key(surface_id) && self.surface_staged_intent_sequence.get(surface_id).get("value") == staged_intent_sequence }
+            guard "no_pending_surface_op" {
+                !self.surface_pending_op.contains_key(surface_id)
+                || self.surface_pending_op.get(surface_id).get("value") == SurfacePendingOp::None
+            }
+            guard "base_accepts_add" {
+                !self.surface_base_state.contains_key(surface_id)
+                || self.surface_base_state.get(surface_id).get("value") == ExternalToolSurfaceBaseState::Absent
+                || self.surface_base_state.get(surface_id).get("value") == ExternalToolSurfaceBaseState::Active
+                || self.surface_base_state.get(surface_id).get("value") == ExternalToolSurfaceBaseState::Removed
+            }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.next_pending_task_sequence = self.next_pending_task_sequence + 1;
+                self.surface_pending_op.insert(surface_id, SurfacePendingOp::Add);
+                self.surface_pending_task_sequence.insert(surface_id, self.next_pending_task_sequence);
+                self.surface_pending_lineage_sequence.insert(surface_id, staged_intent_sequence);
+                self.surface_staged_op.remove(surface_id);
+                self.surface_staged_intent_sequence.remove(surface_id);
+                self.reload_staged_surfaces.remove(surface_id);
+                self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Add);
+                self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Pending);
+                self.snapshot_epoch = self.snapshot_epoch + 1;
+            }
+            to Idle
+            emit ScheduleSurfaceCompletion {
+                surface_id: surface_id,
+                operation: ExternalToolSurfaceDeltaOperation::Add,
+                pending_task_sequence: self.next_pending_task_sequence,
+                staged_intent_sequence: staged_intent_sequence,
+                applied_at_turn: applied_at_turn,
+            }
+            emit EmitExternalToolDelta {
+                surface_id: surface_id,
+                operation: ExternalToolSurfaceDeltaOperation::Add,
+                phase: ExternalToolSurfaceDeltaPhase::Pending,
+                cause: None,
+            }
+        }
         transition SurfaceApplyBoundaryAddAttached {
             on input SurfaceApplyBoundary { surface_id, now_ms, staged_intent_sequence, applied_at_turn }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -6175,6 +13593,46 @@ macro_rules! meerkat_catalog_machine_dsl {
                 cause: None,
             }
         }
+        transition SurfaceApplyBoundaryReloadIdle {
+            on input SurfaceApplyBoundary { surface_id, now_ms, staged_intent_sequence, applied_at_turn }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
+            guard "staged_reload" { self.surface_staged_op.contains_key(surface_id) && self.surface_staged_op.get(surface_id).get("value") == SurfaceStagedOp::Reload }
+            guard "staged_sequence_matches" { self.surface_staged_intent_sequence.contains_key(surface_id) && self.surface_staged_intent_sequence.get(surface_id).get("value") == staged_intent_sequence }
+            guard "surface_active" { self.active_surfaces.contains(surface_id) }
+            guard "base_active" { self.surface_base_state.contains_key(surface_id) && self.surface_base_state.get(surface_id).get("value") == ExternalToolSurfaceBaseState::Active }
+            guard "no_pending_surface_op" {
+                !self.surface_pending_op.contains_key(surface_id)
+                || self.surface_pending_op.get(surface_id).get("value") == SurfacePendingOp::None
+            }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.next_pending_task_sequence = self.next_pending_task_sequence + 1;
+                self.surface_pending_op.insert(surface_id, SurfacePendingOp::Reload);
+                self.surface_pending_task_sequence.insert(surface_id, self.next_pending_task_sequence);
+                self.surface_pending_lineage_sequence.insert(surface_id, staged_intent_sequence);
+                self.surface_staged_op.remove(surface_id);
+                self.surface_staged_intent_sequence.remove(surface_id);
+                self.reload_staged_surfaces.remove(surface_id);
+                self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Reload);
+                self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Pending);
+                self.snapshot_epoch = self.snapshot_epoch + 1;
+            }
+            to Idle
+            emit ScheduleSurfaceCompletion {
+                surface_id: surface_id,
+                operation: ExternalToolSurfaceDeltaOperation::Reload,
+                pending_task_sequence: self.next_pending_task_sequence,
+                staged_intent_sequence: staged_intent_sequence,
+                applied_at_turn: applied_at_turn,
+            }
+            emit EmitExternalToolDelta {
+                surface_id: surface_id,
+                operation: ExternalToolSurfaceDeltaOperation::Reload,
+                phase: ExternalToolSurfaceDeltaPhase::Pending,
+                cause: None,
+            }
+        }
         transition SurfaceApplyBoundaryReloadAttached {
             on input SurfaceApplyBoundary { surface_id, now_ms, staged_intent_sequence, applied_at_turn }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -6255,6 +13713,51 @@ macro_rules! meerkat_catalog_machine_dsl {
                 cause: None,
             }
         }
+        transition SurfaceApplyBoundaryRemoveDrainingIdle {
+            on input SurfaceApplyBoundary { surface_id, now_ms, staged_intent_sequence, applied_at_turn }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
+            guard "staged_remove" { self.surface_staged_op.contains_key(surface_id) && self.surface_staged_op.get(surface_id).get("value") == SurfaceStagedOp::Remove }
+            guard "staged_sequence_matches" { self.surface_staged_intent_sequence.contains_key(surface_id) && self.surface_staged_intent_sequence.get(surface_id).get("value") == staged_intent_sequence }
+            guard "base_active" { self.surface_base_state.contains_key(surface_id) && self.surface_base_state.get(surface_id).get("value") == ExternalToolSurfaceBaseState::Active }
+            guard "no_pending_surface_op" {
+                !self.surface_pending_op.contains_key(surface_id)
+                || self.surface_pending_op.get(surface_id).get("value") == SurfacePendingOp::None
+            }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
+                self.surface_pending_task_sequence.insert(surface_id, 0);
+                self.surface_pending_lineage_sequence.insert(surface_id, 0);
+                self.surface_staged_op.remove(surface_id);
+                self.surface_staged_intent_sequence.remove(surface_id);
+                self.reload_staged_surfaces.remove(surface_id);
+                self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Removing);
+                self.active_surfaces.remove(surface_id);
+                self.visible_surfaces.remove(surface_id);
+                self.surface_draining_since_ms.insert(surface_id, now_ms);
+                self.surface_removal_timeout_at_ms.insert(
+                    surface_id,
+                    if self.removal_timeout_ms > u64::MAX - now_ms {
+                        u64::MAX
+                    } else {
+                        now_ms + self.removal_timeout_ms
+                    }
+                );
+                self.surface_removal_applied_at_turn.insert(surface_id, applied_at_turn);
+                self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Remove);
+                self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Draining);
+                self.snapshot_epoch = self.snapshot_epoch + 1;
+            }
+            to Idle
+            emit RefreshVisibleSurfaceSet { snapshot_epoch: self.snapshot_epoch }
+            emit EmitExternalToolDelta {
+                surface_id: surface_id,
+                operation: ExternalToolSurfaceDeltaOperation::Remove,
+                phase: ExternalToolSurfaceDeltaPhase::Draining,
+                cause: None,
+            }
+        }
         transition SurfaceApplyBoundaryRemoveDrainingAttached {
             on input SurfaceApplyBoundary { surface_id, now_ms, staged_intent_sequence, applied_at_turn }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -6278,7 +13781,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.active_surfaces.remove(surface_id);
                 self.visible_surfaces.remove(surface_id);
                 self.surface_draining_since_ms.insert(surface_id, now_ms);
-                self.surface_removal_timeout_at_ms.insert(surface_id, now_ms + self.removal_timeout_ms);
+                self.surface_removal_timeout_at_ms.insert(
+                    surface_id,
+                    if self.removal_timeout_ms > u64::MAX - now_ms {
+                        u64::MAX
+                    } else {
+                        now_ms + self.removal_timeout_ms
+                    }
+                );
                 self.surface_removal_applied_at_turn.insert(surface_id, applied_at_turn);
                 self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Remove);
                 self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Draining);
@@ -6316,7 +13826,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.active_surfaces.remove(surface_id);
                 self.visible_surfaces.remove(surface_id);
                 self.surface_draining_since_ms.insert(surface_id, now_ms);
-                self.surface_removal_timeout_at_ms.insert(surface_id, now_ms + self.removal_timeout_ms);
+                self.surface_removal_timeout_at_ms.insert(
+                    surface_id,
+                    if self.removal_timeout_ms > u64::MAX - now_ms {
+                        u64::MAX
+                    } else {
+                        now_ms + self.removal_timeout_ms
+                    }
+                );
                 self.surface_removal_applied_at_turn.insert(surface_id, applied_at_turn);
                 self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Remove);
                 self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Draining);
@@ -6330,6 +13847,31 @@ macro_rules! meerkat_catalog_machine_dsl {
                 phase: ExternalToolSurfaceDeltaPhase::Draining,
                 cause: None,
             }
+        }
+        transition SurfaceApplyBoundaryRemoveNoopIdle {
+            on input SurfaceApplyBoundary { surface_id, now_ms, staged_intent_sequence, applied_at_turn }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
+            guard "staged_remove" { self.surface_staged_op.contains_key(surface_id) && self.surface_staged_op.get(surface_id).get("value") == SurfaceStagedOp::Remove }
+            guard "staged_sequence_matches" { self.surface_staged_intent_sequence.contains_key(surface_id) && self.surface_staged_intent_sequence.get(surface_id).get("value") == staged_intent_sequence }
+            guard "base_not_active" {
+                !self.surface_base_state.contains_key(surface_id)
+                || self.surface_base_state.get(surface_id).get("value") != ExternalToolSurfaceBaseState::Active
+            }
+            guard "no_pending_surface_op" {
+                !self.surface_pending_op.contains_key(surface_id)
+                || self.surface_pending_op.get(surface_id).get("value") == SurfacePendingOp::None
+            }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
+                self.surface_pending_task_sequence.insert(surface_id, 0);
+                self.surface_pending_lineage_sequence.insert(surface_id, 0);
+                self.surface_staged_op.remove(surface_id);
+                self.surface_staged_intent_sequence.remove(surface_id);
+                self.reload_staged_surfaces.remove(surface_id);
+            }
+            to Idle
         }
         transition SurfaceApplyBoundaryRemoveNoopAttached {
             on input SurfaceApplyBoundary { surface_id, now_ms, staged_intent_sequence, applied_at_turn }
@@ -6382,6 +13924,33 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
         }
 
+        transition SurfaceMarkPendingSucceededAddIdle {
+            on input SurfaceMarkPendingSucceeded { surface_id, pending_task_sequence, staged_intent_sequence }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "pending_add" { self.surface_pending_op.contains_key(surface_id) && self.surface_pending_op.get(surface_id).get("value") == SurfacePendingOp::Add }
+            guard "pending_sequence_matches" { self.surface_pending_task_sequence.contains_key(surface_id) && self.surface_pending_task_sequence.get(surface_id).get("value") == pending_task_sequence }
+            guard "pending_lineage_matches" { self.surface_pending_lineage_sequence.contains_key(surface_id) && self.surface_pending_lineage_sequence.get(surface_id).get("value") == staged_intent_sequence }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
+                self.surface_pending_task_sequence.insert(surface_id, 0);
+                self.surface_pending_lineage_sequence.insert(surface_id, 0);
+                self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Active);
+                self.active_surfaces.insert(surface_id);
+                self.visible_surfaces.insert(surface_id);
+                self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Add);
+                self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Applied);
+                self.snapshot_epoch = self.snapshot_epoch + 1;
+            }
+            to Idle
+            emit RefreshVisibleSurfaceSet { snapshot_epoch: self.snapshot_epoch }
+            emit EmitExternalToolDelta {
+                surface_id: surface_id,
+                operation: ExternalToolSurfaceDeltaOperation::Add,
+                phase: ExternalToolSurfaceDeltaPhase::Applied,
+                cause: None,
+            }
+        }
         transition SurfaceMarkPendingSucceededAddAttached {
             on input SurfaceMarkPendingSucceeded { surface_id, pending_task_sequence, staged_intent_sequence }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -6432,6 +14001,33 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EmitExternalToolDelta {
                 surface_id: surface_id,
                 operation: ExternalToolSurfaceDeltaOperation::Add,
+                phase: ExternalToolSurfaceDeltaPhase::Applied,
+                cause: None,
+            }
+        }
+        transition SurfaceMarkPendingSucceededReloadIdle {
+            on input SurfaceMarkPendingSucceeded { surface_id, pending_task_sequence, staged_intent_sequence }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "pending_reload" { self.surface_pending_op.contains_key(surface_id) && self.surface_pending_op.get(surface_id).get("value") == SurfacePendingOp::Reload }
+            guard "pending_sequence_matches" { self.surface_pending_task_sequence.contains_key(surface_id) && self.surface_pending_task_sequence.get(surface_id).get("value") == pending_task_sequence }
+            guard "pending_lineage_matches" { self.surface_pending_lineage_sequence.contains_key(surface_id) && self.surface_pending_lineage_sequence.get(surface_id).get("value") == staged_intent_sequence }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
+                self.surface_pending_task_sequence.insert(surface_id, 0);
+                self.surface_pending_lineage_sequence.insert(surface_id, 0);
+                self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Active);
+                self.active_surfaces.insert(surface_id);
+                self.visible_surfaces.insert(surface_id);
+                self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Reload);
+                self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Applied);
+                self.snapshot_epoch = self.snapshot_epoch + 1;
+            }
+            to Idle
+            emit RefreshVisibleSurfaceSet { snapshot_epoch: self.snapshot_epoch }
+            emit EmitExternalToolDelta {
+                surface_id: surface_id,
+                operation: ExternalToolSurfaceDeltaOperation::Reload,
                 phase: ExternalToolSurfaceDeltaPhase::Applied,
                 cause: None,
             }
@@ -6491,6 +14087,25 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        transition SurfaceMarkPendingFailedIdle {
+            on input SurfaceMarkPendingFailed { surface_id, pending_task_sequence, staged_intent_sequence, cause }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "pending_sequence_matches" { self.surface_pending_task_sequence.contains_key(surface_id) && self.surface_pending_task_sequence.get(surface_id).get("value") == pending_task_sequence }
+            guard "pending_lineage_matches" { self.surface_pending_lineage_sequence.contains_key(surface_id) && self.surface_pending_lineage_sequence.get(surface_id).get("value") == staged_intent_sequence }
+            update {
+                self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
+                self.surface_pending_task_sequence.insert(surface_id, 0);
+                self.surface_pending_lineage_sequence.insert(surface_id, 0);
+                self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Failed);
+            }
+            to Idle
+            emit EmitExternalToolDelta {
+                surface_id: surface_id,
+                operation: self.surface_last_delta_operation.get(surface_id).get("value"),
+                phase: ExternalToolSurfaceDeltaPhase::Failed,
+                cause: Some(cause),
+            }
+        }
         transition SurfaceMarkPendingFailedAttached {
             on input SurfaceMarkPendingFailed { surface_id, pending_task_sequence, staged_intent_sequence, cause }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -6626,6 +14241,38 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
         }
 
+        transition SurfaceFinalizeRemovalCleanIdle {
+            on input SurfaceFinalizeRemovalClean { surface_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "surface_removing" { self.surface_base_state.contains_key(surface_id) && self.surface_base_state.get(surface_id).get("value") == ExternalToolSurfaceBaseState::Removing }
+            guard "no_inflight_calls_remain" {
+                !self.surface_inflight_calls.contains_key(surface_id)
+                || self.surface_inflight_calls.get(surface_id).get("value") == 0
+            }
+            update {
+                self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Removed);
+                self.active_surfaces.remove(surface_id);
+                self.visible_surfaces.remove(surface_id);
+                self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
+                self.surface_pending_task_sequence.insert(surface_id, 0);
+                self.surface_pending_lineage_sequence.insert(surface_id, 0);
+                self.surface_draining_since_ms.remove(surface_id);
+                self.surface_removal_timeout_at_ms.remove(surface_id);
+                self.surface_removal_applied_at_turn.remove(surface_id);
+                self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Remove);
+                self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Applied);
+                self.snapshot_epoch = self.snapshot_epoch + 1;
+            }
+            to Idle
+            emit CloseSurfaceConnection { surface_id: surface_id }
+            emit RefreshVisibleSurfaceSet { snapshot_epoch: self.snapshot_epoch }
+            emit EmitExternalToolDelta {
+                surface_id: surface_id,
+                operation: ExternalToolSurfaceDeltaOperation::Remove,
+                phase: ExternalToolSurfaceDeltaPhase::Applied,
+                cause: None,
+            }
+        }
         transition SurfaceFinalizeRemovalCleanAttached {
             on input SurfaceFinalizeRemovalClean { surface_id }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -6691,6 +14338,35 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        transition SurfaceFinalizeRemovalForcedIdle {
+            on input SurfaceFinalizeRemovalForced { surface_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "surface_removing" { self.surface_base_state.contains_key(surface_id) && self.surface_base_state.get(surface_id).get("value") == ExternalToolSurfaceBaseState::Removing }
+            update {
+                self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Removed);
+                self.active_surfaces.remove(surface_id);
+                self.visible_surfaces.remove(surface_id);
+                self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
+                self.surface_pending_task_sequence.insert(surface_id, 0);
+                self.surface_pending_lineage_sequence.insert(surface_id, 0);
+                self.surface_inflight_calls.insert(surface_id, 0);
+                self.surface_draining_since_ms.remove(surface_id);
+                self.surface_removal_timeout_at_ms.remove(surface_id);
+                self.surface_removal_applied_at_turn.remove(surface_id);
+                self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Remove);
+                self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Forced);
+                self.snapshot_epoch = self.snapshot_epoch + 1;
+            }
+            to Idle
+            emit CloseSurfaceConnection { surface_id: surface_id }
+            emit RefreshVisibleSurfaceSet { snapshot_epoch: self.snapshot_epoch }
+            emit EmitExternalToolDelta {
+                surface_id: surface_id,
+                operation: ExternalToolSurfaceDeltaOperation::Remove,
+                phase: ExternalToolSurfaceDeltaPhase::Forced,
+                cause: None,
+            }
+        }
         transition SurfaceFinalizeRemovalForcedAttached {
             on input SurfaceFinalizeRemovalForced { surface_id }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -6750,6 +14426,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        transition SurfaceSnapshotAlignedIdle {
+            on input SurfaceSnapshotAligned { epoch }
+            guard { self.lifecycle_phase == Phase::Idle }
+            update {
+                self.snapshot_aligned_epoch = epoch;
+            }
+            to Idle
+        }
         transition SurfaceSnapshotAlignedAttached {
             on input SurfaceSnapshotAligned { epoch }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -6767,6 +14451,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
         }
 
+        transition SurfaceShutdownIdle {
+            on input SurfaceShutdown
+            guard { self.lifecycle_phase == Phase::Idle }
+            update {
+                self.surface_phase = SurfacePhase::Shutdown;
+            }
+            to Idle
+        }
         transition SurfaceShutdownAttached {
             on input SurfaceShutdown
             guard { self.lifecycle_phase == Phase::Attached }
@@ -6971,7 +14663,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "session_registered" { self.session_id != None }
             update {
+                self.active_runtime_id = None;
                 self.active_fence_token = None;
+                self.active_runtime_generation = None;
+                self.active_runtime_epoch_id = None;
                 self.current_run_id = None;
             }
             to Idle
@@ -6982,7 +14677,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             update {
+                self.active_runtime_id = None;
                 self.active_fence_token = None;
+                self.active_runtime_generation = None;
+                self.active_runtime_epoch_id = None;
                 self.current_run_id = None;
             }
             to Attached
@@ -6992,6 +14690,44 @@ macro_rules! meerkat_catalog_machine_dsl {
         // =====================================================================
         // Absorbed substate transitions — Input Lifecycle
         // =====================================================================
+
+        // RecoverAdmittedInput: accept or reject the recovered admission
+        // witness before shell recovery may re-materialize admission metadata.
+        // This is the coherence check for persisted input kind, lane, and
+        // runtime semantics stamps. The lane witness is the persisted
+        // machine-owned recovery lane, not a policy mirror.
+        transition RecoverAdmittedInput {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecoverAdmittedInput {
+                input_id,
+                input_kind,
+                runtime_boundary,
+                runtime_execution_kind,
+                runtime_peer_response_terminal_apply_intent,
+                lane
+            }
+            guard "recovered_execution_kind_matches_input" {
+                (input_kind == RecoveredInputKind::Continuation
+                    && runtime_execution_kind == RecoveredRuntimeExecutionKind::ResumePending)
+                || (input_kind != RecoveredInputKind::Continuation
+                    && runtime_execution_kind == RecoveredRuntimeExecutionKind::ContentTurn)
+            }
+            guard "recovered_terminal_intent_matches_input" {
+                (input_kind == RecoveredInputKind::PeerResponseTerminal
+                    && runtime_peer_response_terminal_apply_intent == Some(RecoveredPeerResponseTerminalApplyIntent::AppendContextAndRun))
+                || (input_kind != RecoveredInputKind::PeerResponseTerminal
+                    && runtime_peer_response_terminal_apply_intent == None)
+            }
+            guard "recovered_immediate_boundary_uses_steer_lane" {
+                runtime_boundary != RecoveredRunApplyBoundary::Immediate
+                || lane == InputLane::Steer
+            }
+            update {
+                self.recovered_admitted_inputs.insert(input_id);
+                self.recovered_admitted_lanes.insert(input_id, lane);
+            }
+            to Idle
+        }
 
         // RecoverInputLifecycle: restore persisted input lifecycle facts
         // through machine authority. Store recovery may present an input at
@@ -7011,7 +14747,105 @@ macro_rules! meerkat_catalog_machine_dsl {
                 attempt_count,
                 run_id,
                 boundary_sequence,
+                admission_sequence,
+                admission_sequence_recovery,
+                recovery_lane,
                 lane
+            }
+            guard "recovered_lifecycle_has_admission_witness" {
+                phase == InputPhase::Consumed
+                || phase == InputPhase::Superseded
+                || phase == InputPhase::Coalesced
+                || phase == InputPhase::Abandoned
+                || self.recovered_admitted_inputs.contains(input_id)
+            }
+            guard "recovered_recovery_lane_matches_witness" {
+                (
+                    (phase == InputPhase::Consumed
+                        || phase == InputPhase::Superseded
+                        || phase == InputPhase::Coalesced
+                        || phase == InputPhase::Abandoned)
+                    && recovery_lane == None
+                )
+                || (
+                    phase != InputPhase::Consumed
+                    && phase != InputPhase::Superseded
+                    && phase != InputPhase::Coalesced
+                    && phase != InputPhase::Abandoned
+                    && self.recovered_admitted_lanes.contains_key(input_id)
+                    && recovery_lane == Some(self.recovered_admitted_lanes.get_cloned(input_id).get("value"))
+                )
+            }
+            guard "recovered_current_lane_matches_phase" {
+                (phase != InputPhase::Queued && lane == None)
+                || (phase == InputPhase::Queued
+                    && self.recovered_admitted_lanes.contains_key(input_id)
+                    && lane == Some(self.recovered_admitted_lanes.get_cloned(input_id).get("value"))
+                    && lane == recovery_lane)
+            }
+            guard "recovered_queued_order_has_witness" {
+                phase != InputPhase::Queued
+                || admission_sequence != None
+                || (
+                    admission_sequence_recovery != None
+                    && (
+                        admission_sequence_recovery.get("value") == RecoveredInputNormalizationReasonKind::QueueAccepted
+                        || admission_sequence_recovery.get("value") == RecoveredInputNormalizationReasonKind::RollbackStaged
+                        || admission_sequence_recovery.get("value") == RecoveredInputNormalizationReasonKind::MissingBoundaryReceipt
+                    )
+                )
+            }
+            guard "recovered_order_recovery_matches_missing_sequence" {
+                admission_sequence_recovery == None
+                || (phase == InputPhase::Queued && admission_sequence == None)
+            }
+            guard "recovered_terminal_payload_matches_phase" {
+                (
+                    phase == InputPhase::Consumed
+                    && terminal_kind == Some(InputTerminalKind::Consumed)
+                    && superseded_by == None
+                    && aggregate_id == None
+                    && abandon_reason == None
+                )
+                || (
+                    phase == InputPhase::Superseded
+                    && terminal_kind == Some(InputTerminalKind::Superseded)
+                    && superseded_by != None
+                    && aggregate_id == None
+                    && abandon_reason == None
+                )
+                || (
+                    phase == InputPhase::Coalesced
+                    && terminal_kind == Some(InputTerminalKind::Coalesced)
+                    && superseded_by == None
+                    && aggregate_id != None
+                    && abandon_reason == None
+                )
+                || (
+                    phase == InputPhase::Abandoned
+                    && terminal_kind == Some(InputTerminalKind::Abandoned)
+                    && superseded_by == None
+                    && aggregate_id == None
+                    && abandon_reason != None
+                )
+                || (
+                    phase != InputPhase::Consumed
+                    && phase != InputPhase::Superseded
+                    && phase != InputPhase::Coalesced
+                    && phase != InputPhase::Abandoned
+                    && terminal_kind == None
+                    && superseded_by == None
+                    && aggregate_id == None
+                    && abandon_reason == None
+                )
+            }
+            guard "recovered_max_attempts_reason_matches_count" {
+                abandon_reason != Some(InputAbandonReason::MaxAttemptsExhausted)
+                || abandon_attempt_count == attempt_count
+            }
+            guard "recovered_max_attempts_reason_matches_policy" {
+                abandon_reason != Some(InputAbandonReason::MaxAttemptsExhausted)
+                || attempt_count >= self.max_stage_attempts
             }
             update {
                 self.input_phases.insert(input_id, phase);
@@ -7056,15 +14890,30 @@ macro_rules! meerkat_catalog_machine_dsl {
                     self.input_boundary_sequences.remove(input_id);
                 }
 
-                if !self.input_admission_seq.contains_key(input_id) {
-                    self.input_admission_seq.insert(input_id, self.next_admission_seq);
-                    self.next_admission_seq += 1;
+                if admission_sequence != None {
+                    self.input_admission_seq.insert(input_id, admission_sequence.get("value"));
+                    if self.next_admission_seq <= admission_sequence.get("value") {
+                        self.next_admission_seq = admission_sequence.get("value") + 1;
+                    }
+                } else {
+                    if admission_sequence_recovery != None {
+                        self.input_admission_seq.insert(input_id, self.next_admission_seq);
+                        self.next_admission_seq += 1;
+                    } else {
+                        self.input_admission_seq.remove(input_id);
+                    }
                 }
 
                 if lane != None {
                     self.input_lane.insert(input_id, lane.get("value"));
                 } else {
                     self.input_lane.remove(input_id);
+                }
+
+                if recovery_lane != None {
+                    self.input_recovery_lanes.insert(input_id, recovery_lane.get("value"));
+                } else {
+                    self.input_recovery_lanes.remove(input_id);
                 }
             }
             to Idle
@@ -7076,9 +14925,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input QueueAccepted { input_id }
             guard "not_already_tracked" { !self.input_phases.contains_key(input_id) }
+            guard "live_admission_authorized_queue_lane" {
+                self.admission_authorized_lanes.contains_key(input_id)
+                && self.admission_authorized_lanes.get_cloned(input_id).get("value") == InputLane::Queue
+            }
             update {
                 self.input_phases.insert(input_id, InputPhase::Queued);
                 self.input_lane.insert(input_id, InputLane::Queue);
+                self.input_recovery_lanes.insert(input_id, InputLane::Queue);
                 self.input_admission_seq.insert(input_id, self.next_admission_seq);
                 self.next_admission_seq += 1;
             }
@@ -7094,9 +14948,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input SteerAccepted { input_id }
             guard "not_already_tracked" { !self.input_phases.contains_key(input_id) }
+            guard "live_admission_authorized_steer_lane" {
+                self.admission_authorized_lanes.contains_key(input_id)
+                && self.admission_authorized_lanes.get_cloned(input_id).get("value") == InputLane::Steer
+            }
             update {
                 self.input_phases.insert(input_id, InputPhase::Queued);
                 self.input_lane.insert(input_id, InputLane::Steer);
+                self.input_recovery_lanes.insert(input_id, InputLane::Steer);
                 self.input_admission_seq.insert(input_id, self.next_admission_seq);
                 self.next_admission_seq += 1;
             }
@@ -7114,6 +14973,37 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             update {
                 self.input_lane.insert(input_id, new_lane);
+                self.input_recovery_lanes.insert(input_id, new_lane);
+            }
+            to Idle
+        }
+
+        // PrioritizeInput: assign a machine-owned front-of-backlog order token.
+        // The shell may only observe the generated order when rebuilding its
+        // queue projection.
+        transition PrioritizeInput {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input PrioritizeInput { input_id }
+            guard "input_queued" { self.input_lane.contains_key(input_id) }
+            guard "priority_sequence_available" { self.next_priority_admission_seq > 0 }
+            update {
+                self.input_admission_seq.insert(input_id, self.next_priority_admission_seq);
+                self.next_priority_admission_seq -= 1;
+            }
+            to Idle
+        }
+
+        // DeferInputBehindBacklog: reassign a queued input to the back of the
+        // current admission order using the machine's monotonic admission
+        // sequence. Used after an apply failure so other queued work can run
+        // before retrying the failed batch.
+        transition DeferInputBehindBacklog {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input DeferInputBehindBacklog { input_id }
+            guard "input_queued" { self.input_lane.contains_key(input_id) }
+            update {
+                self.input_admission_seq.insert(input_id, self.next_admission_seq);
+                self.next_admission_seq += 1;
             }
             to Idle
         }
@@ -7158,9 +15048,75 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_phases.insert(input_id, InputPhase::Queued);
                 self.input_run_associations.remove(input_id);
                 self.input_lane.insert(input_id, lane);
+                self.input_recovery_lanes.insert(input_id, lane);
             }
             to Idle
             emit InputLifecycleNotice
+        }
+
+        // ResolveStagedRollback: machine-owned retry policy for failed
+        // staged-input attempts. The shell supplies only the generated
+        // recovery lane witness; MeerkatMachine decides whether the staged
+        // input re-enters its lane or terminalizes as max-attempts exhausted.
+        transition ResolveStagedRollbackQueued {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveStagedRollback { input_id, lane }
+            guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "input_staged" {
+                self.input_phases.get(input_id).get("value") == InputPhase::Staged
+            }
+            guard "attempt_count_tracked" {
+                self.input_attempt_counts.contains_key(input_id)
+            }
+            guard "recovery_lane_matches" {
+                self.input_recovery_lanes.contains_key(input_id)
+                && self.input_recovery_lanes.get(input_id).get("value") == lane
+            }
+            guard "stage_attempts_remaining" {
+                self.input_attempt_counts.get(input_id).get("value") < self.max_stage_attempts
+            }
+            update {
+                self.input_phases.insert(input_id, InputPhase::Queued);
+                self.input_run_associations.remove(input_id);
+                self.input_lane.insert(input_id, lane);
+                self.input_recovery_lanes.insert(input_id, lane);
+            }
+            to Idle
+            emit InputLifecycleNotice
+        }
+
+        transition ResolveStagedRollbackMaxAttemptsExhausted {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveStagedRollback { input_id, lane }
+            guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "input_staged" {
+                self.input_phases.get(input_id).get("value") == InputPhase::Staged
+            }
+            guard "attempt_count_tracked" {
+                self.input_attempt_counts.contains_key(input_id)
+            }
+            guard "recovery_lane_matches" {
+                self.input_recovery_lanes.contains_key(input_id)
+                && self.input_recovery_lanes.get(input_id).get("value") == lane
+            }
+            guard "stage_attempts_exhausted" {
+                self.input_attempt_counts.get(input_id).get("value") >= self.max_stage_attempts
+            }
+            update {
+                self.input_phases.insert(input_id, InputPhase::Abandoned);
+                self.input_lane.remove(input_id);
+                self.input_recovery_lanes.remove(input_id);
+                self.input_terminal_kind.insert(input_id, InputTerminalKind::Abandoned);
+                self.input_abandon_reason.insert(input_id, InputAbandonReason::MaxAttemptsExhausted);
+                self.input_abandon_attempt_count.insert(
+                    input_id,
+                    self.input_attempt_counts.get(input_id).get("value")
+                );
+                self.input_superseded_by.remove(input_id);
+                self.input_aggregate_id.remove(input_id);
+            }
+            to Idle
+            emit RecordTerminalOutcome
         }
 
         // MarkApplied: mark an input as applied
@@ -7187,14 +15143,54 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit InputLifecycleNotice
         }
 
+        // ResolveLiveBoundaryContextReceipt: mint durable receipt facts for
+        // runtime-owned context staged at a cooperative active-turn boundary.
+        transition ResolveLiveBoundaryContextReceipt {
+            per_phase [Running]
+            on input ResolveLiveBoundaryContextReceipt { run_id, input_id }
+            guard "current_run_matches" {
+                self.current_run_id != None
+                && self.current_run_id.get("value") == run_id
+            }
+            guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            update {
+                if self.live_boundary_context_sequence_by_run.contains_key(run_id) {
+                    self.live_boundary_context_sequence_by_run.insert(
+                        run_id,
+                        self.live_boundary_context_sequence_by_run.get_cloned(run_id).get("value") + 1
+                    );
+                } else {
+                    self.live_boundary_context_sequence_by_run.insert(run_id, 1);
+                }
+                self.runtime_completion_result_run_id = Some(run_id);
+            }
+            to Running
+            emit LiveBoundaryContextReceiptResolved {
+                run_id: run_id,
+                input_id: input_id,
+                boundary: AdmissionRunApplyBoundary::RunCheckpoint,
+                boundary_sequence: self.live_boundary_context_sequence_by_run.get_cloned(run_id).get("value")
+            }
+        }
+
         // ConsumeOnAccept: direct Accepted → Consumed (skip queue)
         transition ConsumeOnAccept {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ConsumeOnAccept { input_id }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "live_admission_authorized_consume_on_accept" {
+                self.admission_authorized_plans.contains_key(input_id)
+                && self.admission_authorized_plans.get_cloned(input_id).get("value") == AdmissionPlanKind::ConsumedOnAccept
+            }
             update {
                 self.input_phases.insert(input_id, InputPhase::Consumed);
                 self.input_lane.remove(input_id);
+                self.input_recovery_lanes.remove(input_id);
+                self.input_terminal_kind.insert(input_id, InputTerminalKind::Consumed);
+                self.input_superseded_by.remove(input_id);
+                self.input_aggregate_id.remove(input_id);
+                self.input_abandon_reason.remove(input_id);
+                self.input_abandon_attempt_count.remove(input_id);
             }
             to Idle
             emit RecordTerminalOutcome
@@ -7220,6 +15216,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.input_phases.insert(input_id, InputPhase::Consumed);
                 self.input_lane.remove(input_id);
+                self.input_recovery_lanes.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Consumed);
                 self.input_superseded_by.remove(input_id);
                 self.input_aggregate_id.remove(input_id);
@@ -7237,14 +15234,23 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input SupersedeInput { input_id, superseded_by }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "live_admission_authorized_supersede_target" {
+                self.admission_authorized_existing_actions.contains_key(superseded_by)
+                && self.admission_authorized_existing_actions.get_cloned(superseded_by).get("value") == AdmissionExistingQueuedActionKind::Supersede
+                && self.admission_authorized_existing_targets.contains_key(superseded_by)
+                && self.admission_authorized_existing_targets.get_cloned(superseded_by).get("value") == input_id
+            }
             update {
                 self.input_phases.insert(input_id, InputPhase::Superseded);
                 self.input_lane.remove(input_id);
+                self.input_recovery_lanes.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Superseded);
                 self.input_superseded_by.insert(input_id, superseded_by);
                 self.input_aggregate_id.remove(input_id);
                 self.input_abandon_reason.remove(input_id);
                 self.input_abandon_attempt_count.remove(input_id);
+                self.admission_authorized_existing_actions.remove(superseded_by);
+                self.admission_authorized_existing_targets.remove(superseded_by);
             }
             to Idle
             emit RecordTerminalOutcome
@@ -7256,14 +15262,23 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input CoalesceInput { input_id, aggregate_id }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "live_admission_authorized_coalesce_target" {
+                self.admission_authorized_existing_actions.contains_key(aggregate_id)
+                && self.admission_authorized_existing_actions.get_cloned(aggregate_id).get("value") == AdmissionExistingQueuedActionKind::Coalesce
+                && self.admission_authorized_existing_targets.contains_key(aggregate_id)
+                && self.admission_authorized_existing_targets.get_cloned(aggregate_id).get("value") == input_id
+            }
             update {
                 self.input_phases.insert(input_id, InputPhase::Coalesced);
                 self.input_lane.remove(input_id);
+                self.input_recovery_lanes.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Coalesced);
                 self.input_aggregate_id.insert(input_id, aggregate_id);
                 self.input_superseded_by.remove(input_id);
                 self.input_abandon_reason.remove(input_id);
                 self.input_abandon_attempt_count.remove(input_id);
+                self.admission_authorized_existing_actions.remove(aggregate_id);
+                self.admission_authorized_existing_targets.remove(aggregate_id);
             }
             to Idle
             emit RecordTerminalOutcome
@@ -7277,6 +15292,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.input_phases.insert(input_id, InputPhase::Abandoned);
                 self.input_lane.remove(input_id);
+                self.input_recovery_lanes.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Abandoned);
                 self.input_abandon_reason.insert(input_id, reason);
                 self.input_abandon_attempt_count.insert(input_id, attempt_count);
@@ -7291,20 +15307,150 @@ macro_rules! meerkat_catalog_machine_dsl {
         // Absorbed substate transitions — Ops Lifecycle
         // =====================================================================
 
-        // RegisterOp: register a new operation as Provisioning
-        transition RegisterOp {
+        // RegisterOp: generated registration admission/result authority plus
+        // success mutation. Duplicate and capacity rejection are no-op
+        // transitions that emit typed feedback instead of relying on shell
+        // prechecks or guard-error classification.
+        transition RegisterOpAlreadyRegisteredRejected {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input RegisterOp { operation_id, kind }
+            on input RegisterOp { operation_id, kind, source, max_concurrent }
+            guard "already_registered" { self.op_statuses.contains_key(operation_id) }
+            update {}
+            to Idle
+            emit OpRegistrationAdmissionResolved {
+                operation_id: operation_id,
+                result: OpRegistrationAdmissionResultKind::Reject,
+                reject_reason: Some(OpRegistrationRejectReasonKind::AlreadyRegistered),
+                max_concurrent_limit: max_concurrent,
+                active_op_count: self.active_op_count
+            }
+        }
+
+        transition RegisterOpMaxConcurrentRejected {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RegisterOp { operation_id, kind, source, max_concurrent }
             guard "not_already_registered" { !self.op_statuses.contains_key(operation_id) }
+            guard "operation_source_valid" { operation_source_valid(source) }
+            guard "max_concurrent_present" { max_concurrent != None }
+            guard "max_concurrent_exceeded" { self.active_op_count >= max_concurrent.get("value") }
+            update {}
+            to Idle
+            emit OpRegistrationAdmissionResolved {
+                operation_id: operation_id,
+                result: OpRegistrationAdmissionResultKind::Reject,
+                reject_reason: Some(OpRegistrationRejectReasonKind::MaxConcurrentExceeded),
+                max_concurrent_limit: max_concurrent,
+                active_op_count: self.active_op_count
+            }
+        }
+
+        transition RegisterOpAccepted {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RegisterOp { operation_id, kind, source, max_concurrent }
+            guard "not_already_registered" { !self.op_statuses.contains_key(operation_id) }
+            guard "operation_source_valid" { operation_source_valid(source) }
+            guard "capacity_available" {
+                max_concurrent == None || self.active_op_count < max_concurrent.get("value")
+            }
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Provisioning);
                 self.op_kinds.insert(operation_id, kind);
+                if source != None {
+                    self.op_sources.insert(operation_id, source.get("value"));
+                }
                 self.op_peer_ready.insert(operation_id, false);
                 self.op_progress_counts.insert(operation_id, 0);
                 self.active_op_count += 1;
             }
             to Idle
+            emit OpRegistrationAdmissionResolved {
+                operation_id: operation_id,
+                result: OpRegistrationAdmissionResultKind::Accept,
+                reject_reason: None,
+                max_concurrent_limit: max_concurrent,
+                active_op_count: self.active_op_count
+            }
             emit SubmitOpEvent { operation_id: operation_id }
+        }
+
+        // ResolveOpLifecycleTransitionRejection: generated typed feedback for
+        // expected public rejection classes after a mutating op transition's
+        // generated guards reject.
+        transition ResolveOpLifecycleTransitionNotFoundRejected {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveOpLifecycleTransitionRejection { operation_id, action }
+            guard "op_not_registered" { !self.op_statuses.contains_key(operation_id) }
+            update {}
+            to Idle
+            emit OpLifecycleTransitionRejected {
+                operation_id: operation_id,
+                action: action,
+                reason: OpLifecycleRejectReasonKind::OperationNotFound,
+                status: None
+            }
+        }
+
+        transition ResolveOpLifecycleTransitionPeerNotExpectedRejected {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveOpLifecycleTransitionRejection { operation_id, action }
+            guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            guard "action_peer_ready" { action == OpLifecycleActionKind::PeerReady }
+            guard "kind_not_mob_member_child" {
+                self.op_kinds.get_copied(operation_id) != Some(OperationKind::MobMemberChild)
+            }
+            update {}
+            to Idle
+            emit OpLifecycleTransitionRejected {
+                operation_id: operation_id,
+                action: action,
+                reason: OpLifecycleRejectReasonKind::PeerNotExpected,
+                status: Some(self.op_statuses.get_copied(operation_id).get("value"))
+            }
+        }
+
+        transition ResolveOpLifecycleTransitionAlreadyPeerReadyRejected {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveOpLifecycleTransitionRejection { operation_id, action }
+            guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            guard "action_peer_ready" { action == OpLifecycleActionKind::PeerReady }
+            guard "kind_is_mob_member_child" {
+                self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild)
+            }
+            guard "already_peer_ready" {
+                self.op_peer_ready.get_copied(operation_id) == Some(true)
+            }
+            update {}
+            to Idle
+            emit OpLifecycleTransitionRejected {
+                operation_id: operation_id,
+                action: action,
+                reason: OpLifecycleRejectReasonKind::AlreadyPeerReady,
+                status: Some(self.op_statuses.get_copied(operation_id).get("value"))
+            }
+        }
+
+        transition ResolveOpLifecycleTransitionInvalidRejected {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveOpLifecycleTransitionRejection { operation_id, action }
+            guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            guard "peer_ready_special_rejections_absent" {
+                action != OpLifecycleActionKind::PeerReady
+                || (self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild)
+                    && self.op_peer_ready.get_copied(operation_id) != Some(true))
+            }
+            guard "from_status_invalid" {
+                !op_lifecycle_action_status_valid(
+                    action,
+                    self.op_statuses.get_copied(operation_id).get("value"))
+            }
+            update {}
+            to Idle
+            emit OpLifecycleTransitionRejected {
+                operation_id: operation_id,
+                action: action,
+                reason: OpLifecycleRejectReasonKind::InvalidTransition,
+                status: Some(self.op_statuses.get_copied(operation_id).get("value"))
+            }
         }
 
         // StartOp: Provisioning -> Running.
@@ -7336,8 +15482,19 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.op_terminal_outcomes.insert(operation_id, outcome);
                 self.op_terminal_payload.insert(operation_id, payload);
                 self.active_op_count -= 1;
-                self.op_completion_seq.insert(operation_id, self.next_completion_seq);
                 self.next_completion_seq += 1;
+                self.op_completion_seq.insert(operation_id, self.next_completion_seq);
+                self.completion_sequence_claims.insert(self.next_completion_seq);
+                if self.op_kinds.get_copied(operation_id) == Some(OperationKind::BackgroundToolOp)
+                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild) {
+                    self.completion_feed_sequences.insert(operation_id, self.next_completion_seq);
+                    self.completion_feed_kinds.insert(
+                        operation_id,
+                        self.op_kinds.get_copied(operation_id).get("value")
+                    );
+                    self.completion_feed_terminal_outcomes.insert(operation_id, outcome);
+                    self.completion_feed_terminal_payload.insert(operation_id, payload);
+                }
             }
             to Idle
             emit SubmitOpEvent { operation_id: operation_id }
@@ -7363,6 +15520,19 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.op_terminal_outcomes.insert(operation_id, outcome);
                 self.op_terminal_payload.insert(operation_id, payload);
                 self.active_op_count -= 1;
+                self.next_completion_seq += 1;
+                self.op_completion_seq.insert(operation_id, self.next_completion_seq);
+                self.completion_sequence_claims.insert(self.next_completion_seq);
+                if self.op_kinds.get_copied(operation_id) == Some(OperationKind::BackgroundToolOp)
+                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild) {
+                    self.completion_feed_sequences.insert(operation_id, self.next_completion_seq);
+                    self.completion_feed_kinds.insert(
+                        operation_id,
+                        self.op_kinds.get_copied(operation_id).get("value")
+                    );
+                    self.completion_feed_terminal_outcomes.insert(operation_id, outcome);
+                    self.completion_feed_terminal_payload.insert(operation_id, payload);
+                }
             }
             to Idle
             emit SubmitOpEvent { operation_id: operation_id }
@@ -7384,6 +15554,19 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.op_terminal_outcomes.insert(operation_id, outcome);
                 self.op_terminal_payload.insert(operation_id, payload);
                 self.active_op_count -= 1;
+                self.next_completion_seq += 1;
+                self.op_completion_seq.insert(operation_id, self.next_completion_seq);
+                self.completion_sequence_claims.insert(self.next_completion_seq);
+                if self.op_kinds.get_copied(operation_id) == Some(OperationKind::BackgroundToolOp)
+                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild) {
+                    self.completion_feed_sequences.insert(operation_id, self.next_completion_seq);
+                    self.completion_feed_kinds.insert(
+                        operation_id,
+                        self.op_kinds.get_copied(operation_id).get("value")
+                    );
+                    self.completion_feed_terminal_outcomes.insert(operation_id, outcome);
+                    self.completion_feed_terminal_payload.insert(operation_id, payload);
+                }
             }
             to Idle
             emit SubmitOpEvent { operation_id: operation_id }
@@ -7406,6 +15589,19 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.op_terminal_outcomes.insert(operation_id, outcome);
                 self.op_terminal_payload.insert(operation_id, payload);
                 self.active_op_count -= 1;
+                self.next_completion_seq += 1;
+                self.op_completion_seq.insert(operation_id, self.next_completion_seq);
+                self.completion_sequence_claims.insert(self.next_completion_seq);
+                if self.op_kinds.get_copied(operation_id) == Some(OperationKind::BackgroundToolOp)
+                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild) {
+                    self.completion_feed_sequences.insert(operation_id, self.next_completion_seq);
+                    self.completion_feed_kinds.insert(
+                        operation_id,
+                        self.op_kinds.get_copied(operation_id).get("value")
+                    );
+                    self.completion_feed_terminal_outcomes.insert(operation_id, outcome);
+                    self.completion_feed_terminal_payload.insert(operation_id, payload);
+                }
             }
             to Idle
             emit SubmitOpEvent { operation_id: operation_id }
@@ -7416,11 +15612,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         //
         // The "only MobMemberChild ops expose a peer handoff" and
         // "only once per op" decisions live in the DSL as guards, not in
-        // the shell. The shell classifies a guard rejection on
-        // `kind_is_mob_member_child` back into
-        // `OpsLifecycleError::PeerNotExpected`, and a rejection on
-        // `not_already_peer_ready` into `OpsLifecycleError::AlreadyPeerReady`
-        // via `classify_peer_ready_rejection`.
+        // the shell. Guard rejection result classes are emitted by
+        // `ResolveOpLifecycleTransitionRejection`.
         transition PeerReadyOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input PeerReadyOp { operation_id }
@@ -7487,6 +15680,19 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.op_terminal_outcomes.insert(operation_id, outcome);
                 self.op_terminal_payload.insert(operation_id, payload);
                 self.active_op_count -= 1;
+                self.next_completion_seq += 1;
+                self.op_completion_seq.insert(operation_id, self.next_completion_seq);
+                self.completion_sequence_claims.insert(self.next_completion_seq);
+                if self.op_kinds.get_copied(operation_id) == Some(OperationKind::BackgroundToolOp)
+                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild) {
+                    self.completion_feed_sequences.insert(operation_id, self.next_completion_seq);
+                    self.completion_feed_kinds.insert(
+                        operation_id,
+                        self.op_kinds.get_copied(operation_id).get("value")
+                    );
+                    self.completion_feed_terminal_outcomes.insert(operation_id, outcome);
+                    self.completion_feed_terminal_payload.insert(operation_id, payload);
+                }
             }
             to Idle
             emit SubmitOpEvent { operation_id: operation_id }
@@ -7497,8 +15703,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         // Shell loops across non-terminal ops (mechanical cursor) and issues
         // one TerminateOp per op; the session lock provides cascade atomicity.
         // The "is this op terminal-able?" decision lives in the DSL guard —
-        // terminal-state TerminateOp is a guard rejection, surfaced to the
-        // caller via `classify_op_rejection` as `InvalidTransition`.
+        // terminal-state TerminateOp is a guard rejection resolved by
+        // generated `ResolveOpLifecycleTransitionRejection` feedback.
         transition TerminateOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input TerminateOp { operation_id, outcome, payload }
@@ -7513,22 +15719,2095 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.op_terminal_outcomes.insert(operation_id, outcome);
                 self.op_terminal_payload.insert(operation_id, payload);
                 self.active_op_count -= 1;
+                self.next_completion_seq += 1;
+                self.op_completion_seq.insert(operation_id, self.next_completion_seq);
+                self.completion_sequence_claims.insert(self.next_completion_seq);
+                if self.op_kinds.get_copied(operation_id) == Some(OperationKind::BackgroundToolOp)
+                    || self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild) {
+                    self.completion_feed_sequences.insert(operation_id, self.next_completion_seq);
+                    self.completion_feed_kinds.insert(
+                        operation_id,
+                        self.op_kinds.get_copied(operation_id).get("value")
+                    );
+                    self.completion_feed_terminal_outcomes.insert(operation_id, outcome);
+                    self.completion_feed_terminal_payload.insert(operation_id, payload);
+                }
             }
             to Idle
             emit SubmitOpEvent { operation_id: operation_id }
             emit NotifyOpWatcher { operation_id: operation_id }
         }
 
+        // RecoverOpRecord: restore a persisted terminal async operation via
+        // generated authority. Non-terminal operations and terminal rows
+        // missing outcome/sequence witnesses are rejected, so shell recovery
+        // cannot reconstruct canonical op truth by writing maps directly.
+        transition RecoverOpRecord {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecoverOpRecord {
+                operation_id,
+                status,
+                kind,
+                source,
+                peer_ready,
+                progress_count,
+                terminal_outcome,
+                terminal_payload,
+                completion_sequence
+            }
+            guard "not_already_registered" { !self.op_statuses.contains_key(operation_id) }
+            guard "recovered_status_terminal" {
+                status == OperationStatus::Completed
+                || status == OperationStatus::Failed
+                || status == OperationStatus::Aborted
+                || status == OperationStatus::Cancelled
+                || status == OperationStatus::Retired
+                || status == OperationStatus::Terminated
+            }
+            guard "terminal_outcome_present" { terminal_outcome != None }
+            guard "terminal_payload_present" { terminal_payload != None }
+            guard "completion_sequence_present" { completion_sequence != None }
+            guard "operation_source_valid" { operation_source_valid(source) }
+            guard "completion_sequence_unclaimed" {
+                !self.completion_sequence_claims.contains(completion_sequence.get("value"))
+            }
+            guard "terminal_outcome_matches_status" {
+                (status == OperationStatus::Completed
+                    && terminal_outcome == Some(OperationTerminalOutcomeKind::Completed))
+                || (status == OperationStatus::Failed
+                    && terminal_outcome == Some(OperationTerminalOutcomeKind::Failed))
+                || (status == OperationStatus::Aborted
+                    && terminal_outcome == Some(OperationTerminalOutcomeKind::Aborted))
+                || (status == OperationStatus::Cancelled
+                    && terminal_outcome == Some(OperationTerminalOutcomeKind::Cancelled))
+                || (status == OperationStatus::Retired
+                    && terminal_outcome == Some(OperationTerminalOutcomeKind::Retired))
+                || (status == OperationStatus::Terminated
+                    && terminal_outcome == Some(OperationTerminalOutcomeKind::Terminated))
+            }
+            update {
+                self.op_statuses.insert(operation_id, status);
+                self.op_kinds.insert(operation_id, kind);
+                if source != None {
+                    self.op_sources.insert(operation_id, source.get("value"));
+                }
+                self.op_peer_ready.insert(operation_id, peer_ready);
+                self.op_progress_counts.insert(operation_id, progress_count);
+                self.op_terminal_outcomes.insert(operation_id, terminal_outcome.get("value"));
+                self.op_terminal_payload.insert(operation_id, terminal_payload.get("value"));
+                self.op_completion_seq.insert(operation_id, completion_sequence.get("value"));
+                self.completion_sequence_claims.insert(completion_sequence.get("value"));
+                if kind == OperationKind::BackgroundToolOp
+                    || kind == OperationKind::MobMemberChild {
+                    self.completion_feed_sequences.insert(
+                        operation_id,
+                        completion_sequence.get("value")
+                    );
+                    self.completion_feed_kinds.insert(operation_id, kind);
+                    self.completion_feed_terminal_outcomes.insert(
+                        operation_id,
+                        terminal_outcome.get("value")
+                    );
+                    self.completion_feed_terminal_payload.insert(
+                        operation_id,
+                        terminal_payload.get("value")
+                    );
+                }
+                if self.next_completion_seq < completion_sequence.get("value") {
+                    self.next_completion_seq = completion_sequence.get("value");
+                }
+            }
+            to Idle
+            emit RetainTerminalRecord { operation_id: operation_id }
+        }
+
+        transition ClassifyOperationTerminalityTerminal {
+            per_phase [Idle]
+            on input ClassifyOperationTerminality { operation_id, status }
+            guard "status_terminal" {
+                status == OperationStatus::Completed
+                || status == OperationStatus::Failed
+                || status == OperationStatus::Aborted
+                || status == OperationStatus::Cancelled
+                || status == OperationStatus::Retired
+                || status == OperationStatus::Terminated
+            }
+            update {}
+            to Idle
+            emit OperationTerminal { operation_id: operation_id }
+        }
+
+        transition ClassifyOperationTerminalityNonTerminal {
+            per_phase [Idle]
+            on input ClassifyOperationTerminality { operation_id, status }
+            guard "status_non_terminal" {
+                status == OperationStatus::Absent
+                || status == OperationStatus::Provisioning
+                || status == OperationStatus::Running
+                || status == OperationStatus::Retiring
+            }
+            update {}
+            to Idle
+            emit OperationNonTerminal { operation_id: operation_id }
+        }
+
+        transition ClassifyOperationPublicResultMissingAuthority {
+            per_phase [Idle]
+            on input ClassifyOperationPublicResult { operation_id, status }
+            guard "status_missing_authority" { status == OperationStatus::Absent }
+            update {}
+            to Idle
+            emit OperationPublicResultClassified {
+                operation_id: operation_id,
+                result: OperationPublicResultClass::MissingAuthority
+            }
+        }
+
+        transition ClassifyOperationPublicResultRunning {
+            per_phase [Idle]
+            on input ClassifyOperationPublicResult { operation_id, status }
+            guard "status_running" {
+                status == OperationStatus::Provisioning
+                || status == OperationStatus::Running
+                || status == OperationStatus::Retiring
+            }
+            update {}
+            to Idle
+            emit OperationPublicResultClassified {
+                operation_id: operation_id,
+                result: OperationPublicResultClass::Running
+            }
+        }
+
+        transition ClassifyOperationPublicResultCompleted {
+            per_phase [Idle]
+            on input ClassifyOperationPublicResult { operation_id, status }
+            guard "status_completed" { status == OperationStatus::Completed }
+            update {}
+            to Idle
+            emit OperationPublicResultClassified {
+                operation_id: operation_id,
+                result: OperationPublicResultClass::Completed
+            }
+        }
+
+        transition ClassifyOperationPublicResultFailed {
+            per_phase [Idle]
+            on input ClassifyOperationPublicResult { operation_id, status }
+            guard "status_failed" {
+                status == OperationStatus::Failed
+                || status == OperationStatus::Terminated
+            }
+            update {}
+            to Idle
+            emit OperationPublicResultClassified {
+                operation_id: operation_id,
+                result: OperationPublicResultClass::Failed
+            }
+        }
+
+        transition ClassifyOperationPublicResultCancelled {
+            per_phase [Idle]
+            on input ClassifyOperationPublicResult { operation_id, status }
+            guard "status_cancelled" {
+                status == OperationStatus::Aborted
+                || status == OperationStatus::Cancelled
+                || status == OperationStatus::Retired
+            }
+            update {}
+            to Idle
+            emit OperationPublicResultClassified {
+                operation_id: operation_id,
+                result: OperationPublicResultClass::Cancelled
+            }
+        }
+
+        transition ClassifyOperationTransitionIdempotentSuccess {
+            per_phase [Idle]
+            on input ClassifyOperationTransitionIdempotence { operation_id, action, status }
+            guard "transition_idempotent" {
+                op_lifecycle_transition_rejection_idempotent(action, status)
+            }
+            update {}
+            to Idle
+            emit OperationTransitionIdempotentSuccess {
+                operation_id: operation_id,
+                action: action,
+                status: status
+            }
+        }
+
+        transition ClassifyOperationTransitionNotIdempotent {
+            per_phase [Idle]
+            on input ClassifyOperationTransitionIdempotence { operation_id, action, status }
+            guard "transition_not_idempotent" {
+                !op_lifecycle_transition_rejection_idempotent(action, status)
+            }
+            update {}
+            to Idle
+            emit OperationTransitionNotIdempotent {
+                operation_id: operation_id,
+                action: action,
+                status: status
+            }
+        }
+
+        transition ClassifyOperationCompletionFeedSuppress {
+            per_phase [Idle]
+            on input ClassifyOperationCompletionFeed { operation_id, kind }
+            guard "capacity_slot" {
+                kind == OperationKind::BackgroundToolCapacitySlot
+            }
+            update {}
+            to Idle
+            emit OperationCompletionFeedClassified {
+                operation_id: operation_id,
+                result: OperationCompletionFeedClass::Suppress
+            }
+        }
+
+        transition ClassifyOperationCompletionFeedEmit {
+            per_phase [Idle]
+            on input ClassifyOperationCompletionFeed { operation_id, kind }
+            guard "public_completion_kind" {
+                kind == OperationKind::BackgroundToolOp
+                || kind == OperationKind::MobMemberChild
+            }
+            update {}
+            to Idle
+            emit OperationCompletionFeedClassified {
+                operation_id: operation_id,
+                result: OperationCompletionFeedClass::Emit
+            }
+        }
+
+        transition ClassifyOperationCompletionWakeWake {
+            per_phase [Idle]
+            on input ClassifyOperationCompletionWake { operation_id, kind }
+            guard "background_tool_completion" {
+                kind == OperationKind::BackgroundToolOp
+            }
+            update {}
+            to Idle
+            emit OperationCompletionWakeClassified {
+                operation_id: operation_id,
+                result: OperationCompletionWakeClass::Wake
+            }
+        }
+
+        transition ClassifyOperationCompletionWakeIgnore {
+            per_phase [Idle]
+            on input ClassifyOperationCompletionWake { operation_id, kind }
+            guard "non_wake_completion" {
+                kind == OperationKind::MobMemberChild
+                || kind == OperationKind::BackgroundToolCapacitySlot
+            }
+            update {}
+            to Idle
+            emit OperationCompletionWakeClassified {
+                operation_id: operation_id,
+                result: OperationCompletionWakeClass::Ignore
+            }
+        }
+
+        transition ClassifyOperationDurabilityDiscard {
+            per_phase [Idle]
+            on input ClassifyOperationDurability { operation_id, kind }
+            guard "capacity_slot" {
+                kind == OperationKind::BackgroundToolCapacitySlot
+            }
+            update {}
+            to Idle
+            emit OperationDurabilityClassified {
+                operation_id: operation_id,
+                result: OperationDurabilityClass::Discard
+            }
+        }
+
+        transition ClassifyOperationDurabilityRetain {
+            per_phase [Idle]
+            on input ClassifyOperationDurability { operation_id, kind }
+            guard "durable_kind" {
+                kind == OperationKind::BackgroundToolOp
+                || kind == OperationKind::MobMemberChild
+            }
+            update {}
+            to Idle
+            emit OperationDurabilityClassified {
+                operation_id: operation_id,
+                result: OperationDurabilityClass::Retain
+            }
+        }
+
+        transition ClassifyRecoveredOperationRecordCapacitySlotDiscard {
+            per_phase [Idle]
+            on input ClassifyRecoveredOperationRecord {
+                operation_id,
+                status,
+                kind,
+                terminal_outcome_present,
+                terminal_payload_present,
+                completion_sequence_present
+            }
+            guard "capacity_slot" {
+                kind == OperationKind::BackgroundToolCapacitySlot
+            }
+            update {}
+            to Idle
+            emit DiscardRecoveredOperationRecord { operation_id: operation_id }
+        }
+
+        transition ClassifyRecoveredOperationRecordRetain {
+            per_phase [Idle]
+            on input ClassifyRecoveredOperationRecord {
+                operation_id,
+                status,
+                kind,
+                terminal_outcome_present,
+                terminal_payload_present,
+                completion_sequence_present
+            }
+            guard "durable_kind" {
+                kind == OperationKind::BackgroundToolOp
+                || kind == OperationKind::MobMemberChild
+            }
+            guard "status_terminal" {
+                status == OperationStatus::Completed
+                || status == OperationStatus::Failed
+                || status == OperationStatus::Aborted
+                || status == OperationStatus::Cancelled
+                || status == OperationStatus::Retired
+                || status == OperationStatus::Terminated
+            }
+            guard "terminal_witnesses_present" {
+                terminal_outcome_present == true
+                && terminal_payload_present == true
+                && completion_sequence_present == true
+            }
+            update {}
+            to Idle
+            emit RetainTerminalRecord { operation_id: operation_id }
+        }
+
+        transition ClassifyRecoveredOperationRecordDiscard {
+            per_phase [Idle]
+            on input ClassifyRecoveredOperationRecord {
+                operation_id,
+                status,
+                kind,
+                terminal_outcome_present,
+                terminal_payload_present,
+                completion_sequence_present
+            }
+            guard "status_non_terminal" {
+                status == OperationStatus::Absent
+                || status == OperationStatus::Provisioning
+                || status == OperationStatus::Running
+                || status == OperationStatus::Retiring
+            }
+            guard "no_terminal_witnesses" {
+                terminal_outcome_present == false
+                && terminal_payload_present == false
+                && completion_sequence_present == false
+            }
+            update {}
+            to Idle
+            emit DiscardRecoveredOperationRecord { operation_id: operation_id }
+        }
+
+        // RecoverCompletionFeedEntry: restore generated-owned public
+        // completion feed authority for rows whose retained operation record
+        // may have since been evicted. The shell provides a row captured
+        // from the generated feed journal, not from the projection buffer.
+        // The transition fails closed on sequence drift and never advances
+        // the canonical completion cursor from feed projection.
+        transition RecoverCompletionFeedEntry {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecoverCompletionFeedEntry {
+                operation_id,
+                kind,
+                terminal_outcome,
+                terminal_payload,
+                completion_sequence
+            }
+            guard "public_completion_kind" {
+                kind == OperationKind::BackgroundToolOp
+                || kind == OperationKind::MobMemberChild
+            }
+            guard "completion_sequence_nonzero" { completion_sequence > 0 }
+            guard "completion_sequence_within_recovered_cursor" {
+                completion_sequence <= self.next_completion_seq
+            }
+            guard "completion_sequence_unclaimed" {
+                !self.completion_sequence_claims.contains(completion_sequence)
+            }
+            guard "feed_entry_absent" {
+                !self.completion_feed_sequences.contains_key(operation_id)
+            }
+            update {
+                self.completion_sequence_claims.insert(completion_sequence);
+                self.completion_feed_sequences.insert(operation_id, completion_sequence);
+                self.completion_feed_kinds.insert(operation_id, kind);
+                self.completion_feed_terminal_outcomes.insert(operation_id, terminal_outcome);
+                self.completion_feed_terminal_payload.insert(operation_id, terminal_payload);
+            }
+            to Idle
+            emit CompletionFeedEntryRecovered {
+                operation_id: operation_id,
+                seq: completion_sequence,
+                kind: kind,
+                terminal_outcome: terminal_outcome,
+                terminal_payload: terminal_payload
+            }
+        }
+
+        // RecoverOpsCompletionCursor: restore the persisted completion-feed
+        // cursor through generated authority. Monotonic guard shape prevents
+        // recovery records from being downgraded by a stale cursor witness.
+        transition RecoverOpsCompletionCursor {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecoverOpsCompletionCursor { next_completion_seq }
+            update {
+                if self.next_completion_seq < next_completion_seq {
+                    self.next_completion_seq = next_completion_seq;
+                }
+            }
+            to Idle
+        }
+
+        // RecoverCompletionConsumerCursors: restore completion-consumer
+        // delivery cursors through generated authority before shell
+        // projections are rehydrated. These cursors decide async completion
+        // replay/suppression, so persisted values must be accepted here before
+        // any epoch-local cache observes them.
+        transition RecoverCompletionConsumerCursors {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecoverCompletionConsumerCursors {
+                agent_applied_cursor,
+                runtime_observed_cursor,
+                runtime_injected_cursor
+            }
+            update {
+                if self.completion_agent_applied_cursor < agent_applied_cursor {
+                    self.completion_agent_applied_cursor = agent_applied_cursor;
+                }
+                if self.completion_runtime_observed_cursor < runtime_observed_cursor {
+                    self.completion_runtime_observed_cursor = runtime_observed_cursor;
+                }
+                if self.completion_runtime_injected_cursor < runtime_injected_cursor {
+                    self.completion_runtime_injected_cursor = runtime_injected_cursor;
+                }
+            }
+            to Idle
+            emit AgentCompletionCursorAdvanced {
+                cursor: self.completion_agent_applied_cursor
+            }
+            emit RuntimeObservedCompletionCursorAdvanced {
+                cursor: self.completion_runtime_observed_cursor
+            }
+            emit RuntimeInjectedCompletionCursorAdvanced {
+                cursor: self.completion_runtime_injected_cursor
+            }
+        }
+
+        transition AdvanceAgentCompletionCursor {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input AdvanceAgentCompletionCursor { cursor }
+            update {
+                if self.completion_agent_applied_cursor < cursor {
+                    self.completion_agent_applied_cursor = cursor;
+                }
+            }
+            to Idle
+            emit AgentCompletionCursorAdvanced {
+                cursor: self.completion_agent_applied_cursor
+            }
+        }
+
+        transition AdvanceRuntimeObservedCompletionCursor {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input AdvanceRuntimeObservedCompletionCursor { cursor }
+            update {
+                if self.completion_runtime_observed_cursor < cursor {
+                    self.completion_runtime_observed_cursor = cursor;
+                }
+            }
+            to Idle
+            emit RuntimeObservedCompletionCursorAdvanced {
+                cursor: self.completion_runtime_observed_cursor
+            }
+        }
+
+        transition AdvanceRuntimeInjectedCompletionCursor {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input AdvanceRuntimeInjectedCompletionCursor { cursor }
+            update {
+                if self.completion_runtime_injected_cursor < cursor {
+                    self.completion_runtime_injected_cursor = cursor;
+                }
+            }
+            to Idle
+            emit RuntimeInjectedCompletionCursorAdvanced {
+                cursor: self.completion_runtime_injected_cursor
+            }
+        }
+
+        transition EvictCompletedOp {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input EvictCompletedOp { operation_id }
+            guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            guard "op_terminal" {
+                self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Completed)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Failed)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Aborted)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Cancelled)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retired)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Terminated)
+            }
+            update {
+                self.op_statuses.remove(operation_id);
+                self.op_kinds.remove(operation_id);
+                self.op_peer_ready.remove(operation_id);
+                self.op_progress_counts.remove(operation_id);
+                self.op_terminal_outcomes.remove(operation_id);
+                self.op_terminal_payload.remove(operation_id);
+                self.op_completion_seq.remove(operation_id);
+            }
+            to Idle
+            emit EvictCompletedRecord { operation_id: operation_id }
+        }
+
+        transition CollectCompletedOp {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input CollectCompletedOp { operation_id }
+            guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            guard "op_terminal" {
+                self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Completed)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Failed)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Aborted)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Cancelled)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retired)
+                || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Terminated)
+            }
+            update {
+                self.op_statuses.remove(operation_id);
+                self.op_kinds.remove(operation_id);
+                self.op_peer_ready.remove(operation_id);
+                self.op_progress_counts.remove(operation_id);
+                self.op_terminal_outcomes.remove(operation_id);
+                self.op_terminal_payload.remove(operation_id);
+                self.op_completion_seq.remove(operation_id);
+            }
+            to Idle
+            emit CollectCompletedResult
+        }
+
+        // Surface request lifecycle authority. The surface executor owns
+        // only transport mechanics; this generated substate owns admission,
+        // cancellation, publication, completion, and terminal classification.
+        // These transitions intentionally run on a standalone Initializing
+        // MeerkatMachine authority used only by SurfaceRequestExecutor, so
+        // they cannot rewrite a real session runtime phase.
+        transition AdmitSurfaceRequestAccepted {
+            per_phase [Initializing]
+            on input AdmitSurfaceRequest { request_key, terminal_policy }
+            guard "request_not_tracked" { !self.surface_request_phases.contains_key(request_key) }
+            update {
+                self.surface_request_phases.insert(request_key, SurfaceRequestPhase::Pending);
+                self.surface_request_terminal_policies.insert(request_key, terminal_policy);
+            }
+            to Initializing
+            emit SurfaceRequestAdmissionAccepted { request_key: request_key }
+        }
+
+        transition AdmitSurfaceRequestDuplicate {
+            per_phase [Initializing]
+            on input AdmitSurfaceRequest { request_key, terminal_policy }
+            guard "request_already_tracked" { self.surface_request_phases.contains_key(request_key) }
+            update {}
+            to Initializing
+            emit SurfaceRequestAdmissionDuplicate { request_key: request_key }
+        }
+
+        transition ClassifySurfaceRequestTerminalMissing {
+            per_phase [Initializing]
+            on input ClassifySurfaceRequestTerminal { request_key, success }
+            guard "request_not_tracked" { !self.surface_request_phases.contains_key(request_key) }
+            update {}
+            to Initializing
+            emit SurfaceRequestNotFound { request_key: request_key }
+        }
+
+        transition ClassifySurfaceRequestTerminalPublish {
+            per_phase [Initializing]
+            on input ClassifySurfaceRequestTerminal { request_key, success }
+            guard "request_tracked" { self.surface_request_phases.contains_key(request_key) }
+            guard "terminal_success" { success == true }
+            guard "publish_policy" {
+                self.surface_request_terminal_policies.get_copied(request_key)
+                    == Some(SurfaceRequestTerminalPolicy::PublishOnSuccess)
+            }
+            update {}
+            to Initializing
+            emit SurfaceRequestTerminalPublish { request_key: request_key }
+        }
+
+        transition ClassifySurfaceRequestTerminalFailed {
+            per_phase [Initializing]
+            on input ClassifySurfaceRequestTerminal { request_key, success }
+            guard "request_tracked" { self.surface_request_phases.contains_key(request_key) }
+            guard "terminal_failed" { success == false }
+            update {}
+            to Initializing
+            emit SurfaceRequestTerminalRespondWithoutPublish { request_key: request_key }
+        }
+
+        transition ClassifySurfaceRequestTerminalObservation {
+            per_phase [Initializing]
+            on input ClassifySurfaceRequestTerminal { request_key, success }
+            guard "request_tracked" { self.surface_request_phases.contains_key(request_key) }
+            guard "terminal_success" { success == true }
+            guard "observation_policy" {
+                self.surface_request_terminal_policies.get_copied(request_key)
+                    == Some(SurfaceRequestTerminalPolicy::RespondWithoutPublish)
+            }
+            update {}
+            to Initializing
+            emit SurfaceRequestTerminalRespondWithoutPublish { request_key: request_key }
+        }
+
+        transition CancelSurfaceRequestMissing {
+            per_phase [Initializing]
+            on input CancelSurfaceRequest { request_key }
+            guard "request_not_tracked" { !self.surface_request_phases.contains_key(request_key) }
+            update {}
+            to Initializing
+            emit SurfaceRequestNotFound { request_key: request_key }
+        }
+
+        transition CancelSurfaceRequestPending {
+            per_phase [Initializing]
+            on input CancelSurfaceRequest { request_key }
+            guard "request_pending" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Pending)
+            }
+            update {
+                self.surface_request_phases.insert(request_key, SurfaceRequestPhase::Cancelled);
+            }
+            to Initializing
+            emit SurfaceRequestCancelled { request_key: request_key }
+        }
+
+        transition CancelSurfaceRequestAlreadyCancelled {
+            per_phase [Initializing]
+            on input CancelSurfaceRequest { request_key }
+            guard "request_cancelled" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Cancelled)
+            }
+            update {}
+            to Initializing
+            emit SurfaceRequestAlreadyCancelled { request_key: request_key }
+        }
+
+        transition CancelSurfaceRequestAlreadyPublished {
+            per_phase [Initializing]
+            on input CancelSurfaceRequest { request_key }
+            guard "request_published" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Published)
+            }
+            update {}
+            to Initializing
+            emit SurfaceRequestAlreadyPublished { request_key: request_key }
+        }
+
+        transition CancelSurfaceRequestAlreadyCompleted {
+            per_phase [Initializing]
+            on input CancelSurfaceRequest { request_key }
+            guard "request_completed" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Completed)
+            }
+            update {}
+            to Initializing
+            emit SurfaceRequestAlreadyCompleted { request_key: request_key }
+        }
+
+        transition PublishSurfaceRequestMissing {
+            per_phase [Initializing]
+            on input PublishSurfaceRequest { request_key }
+            guard "request_not_tracked" { !self.surface_request_phases.contains_key(request_key) }
+            update {}
+            to Initializing
+            emit SurfaceRequestNotFound { request_key: request_key }
+        }
+
+        transition PublishSurfaceRequestPending {
+            per_phase [Initializing]
+            on input PublishSurfaceRequest { request_key }
+            guard "request_pending" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Pending)
+            }
+            update {
+                self.surface_request_phases.remove(request_key);
+                self.surface_request_terminal_policies.remove(request_key);
+            }
+            to Initializing
+            emit SurfaceRequestPublished { request_key: request_key }
+        }
+
+        transition PublishSurfaceRequestAlreadyTerminal {
+            per_phase [Initializing]
+            on input PublishSurfaceRequest { request_key }
+            guard "request_terminal" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Published)
+                || self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Cancelled)
+                || self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Completed)
+            }
+            update {}
+            to Initializing
+            emit SurfaceRequestAlreadyTerminal {
+                request_key: request_key,
+                current: self.surface_request_phases.get_copied(request_key).get("value")
+            }
+        }
+
+        transition PublishOrCancelSurfaceRequestMissing {
+            per_phase [Initializing]
+            on input PublishOrCancelSurfaceRequest { request_key }
+            guard "request_not_tracked" { !self.surface_request_phases.contains_key(request_key) }
+            update {}
+            to Initializing
+            emit SurfaceRequestNotFound { request_key: request_key }
+        }
+
+        transition PublishOrCancelSurfaceRequestPending {
+            per_phase [Initializing]
+            on input PublishOrCancelSurfaceRequest { request_key }
+            guard "request_pending" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Pending)
+            }
+            update {
+                self.surface_request_phases.remove(request_key);
+                self.surface_request_terminal_policies.remove(request_key);
+            }
+            to Initializing
+            emit SurfaceRequestPublished { request_key: request_key }
+        }
+
+        transition PublishOrCancelSurfaceRequestCancelled {
+            per_phase [Initializing]
+            on input PublishOrCancelSurfaceRequest { request_key }
+            guard "request_cancelled" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Cancelled)
+            }
+            update {
+                self.surface_request_phases.remove(request_key);
+                self.surface_request_terminal_policies.remove(request_key);
+            }
+            to Initializing
+            emit SurfaceRequestCancelledBeforePublish { request_key: request_key }
+        }
+
+        transition PublishOrCancelSurfaceRequestAlreadyTerminal {
+            per_phase [Initializing]
+            on input PublishOrCancelSurfaceRequest { request_key }
+            guard "request_terminal" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Published)
+                || self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Completed)
+            }
+            update {}
+            to Initializing
+            emit SurfaceRequestAlreadyTerminal {
+                request_key: request_key,
+                current: self.surface_request_phases.get_copied(request_key).get("value")
+            }
+        }
+
+        transition FinishSurfaceRequestUnpublishedMissing {
+            per_phase [Initializing]
+            on input FinishSurfaceRequestUnpublished { request_key }
+            guard "request_not_tracked" { !self.surface_request_phases.contains_key(request_key) }
+            update {}
+            to Initializing
+            emit SurfaceRequestCompleted { request_key: request_key }
+        }
+
+        transition FinishSurfaceRequestUnpublishedPending {
+            per_phase [Initializing]
+            on input FinishSurfaceRequestUnpublished { request_key }
+            guard "request_pending" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Pending)
+            }
+            update {
+                self.surface_request_phases.remove(request_key);
+                self.surface_request_terminal_policies.remove(request_key);
+            }
+            to Initializing
+            emit SurfaceRequestCompleted { request_key: request_key }
+        }
+
+        transition FinishSurfaceRequestUnpublishedCancelled {
+            per_phase [Initializing]
+            on input FinishSurfaceRequestUnpublished { request_key }
+            guard "request_cancelled" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Cancelled)
+            }
+            update {
+                self.surface_request_phases.remove(request_key);
+                self.surface_request_terminal_policies.remove(request_key);
+            }
+            to Initializing
+            emit SurfaceRequestSupersededByCancel { request_key: request_key }
+        }
+
+        transition FinishSurfaceRequestUnpublishedTerminal {
+            per_phase [Initializing]
+            on input FinishSurfaceRequestUnpublished { request_key }
+            guard "request_terminal" {
+                self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Published)
+                || self.surface_request_phases.get_copied(request_key) == Some(SurfaceRequestPhase::Completed)
+            }
+            update {
+                self.surface_request_phases.remove(request_key);
+                self.surface_request_terminal_policies.remove(request_key);
+            }
+            to Initializing
+            emit SurfaceRequestCompleted { request_key: request_key }
+        }
+
+        // ResolveLiveOpenAdmission: generated lifecycle/admission authority
+        // for `live/open`. The host may allocate transport resources only
+        // after this transition emits an admitted handoff; duplicate-session
+        // and duplicate-channel rejection are generated facts, not host map
+        // policy. The LLM identity that the channel is bound to is recorded
+        // here as generated behavior authority for later config propagation.
+        transition ResolveLiveOpenAdmissionAccepted {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveLiveOpenAdmission { session_id, channel_id, llm_identity }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "session_not_active" { !self.live_active_channel_by_session.contains_key(session_id) }
+            guard "channel_not_bound" { !self.live_channel_session_by_channel.contains_key(channel_id) }
+            update {
+                self.live_open_admission_sequence += 1;
+                self.live_active_channel_by_session.insert(session_id, channel_id);
+                self.live_channel_session_by_channel.insert(channel_id, session_id);
+                self.live_channel_identity_by_channel.insert(channel_id, llm_identity);
+            }
+            to Idle
+            emit LiveOpenAdmissionResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                bound_llm_identity: Some(llm_identity),
+                admitted: true,
+                rejection: None,
+                sequence: self.live_open_admission_sequence
+            }
+        }
+
+        transition ResolveLiveOpenAdmissionSessionAlreadyBound {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveLiveOpenAdmission { session_id, channel_id, llm_identity }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "session_active" { self.live_active_channel_by_session.contains_key(session_id) }
+            update {
+                self.live_open_admission_sequence += 1;
+            }
+            to Idle
+            emit LiveOpenAdmissionResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                bound_llm_identity: None,
+                admitted: false,
+                rejection: Some(LiveOpenAdmissionRejection::AlreadyBound),
+                sequence: self.live_open_admission_sequence
+            }
+        }
+
+        transition ResolveLiveOpenAdmissionChannelAlreadyBound {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveLiveOpenAdmission { session_id, channel_id, llm_identity }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "session_not_active" { !self.live_active_channel_by_session.contains_key(session_id) }
+            guard "channel_bound" { self.live_channel_session_by_channel.contains_key(channel_id) }
+            update {
+                self.live_open_admission_sequence += 1;
+            }
+            to Idle
+            emit LiveOpenAdmissionResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                bound_llm_identity: None,
+                admitted: false,
+                rejection: Some(LiveOpenAdmissionRejection::ChannelAlreadyBound),
+                sequence: self.live_open_admission_sequence
+            }
+        }
+
+        transition AbandonLiveOpenAdmission {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input AbandonLiveOpenAdmission { session_id, channel_id }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "session_binding_matches" {
+                self.live_active_channel_by_session.get_cloned(session_id) == Some(channel_id)
+            }
+            guard "channel_binding_matches" {
+                self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+            }
+            update {
+                self.live_open_admission_sequence += 1;
+                self.live_active_channel_by_session.remove(session_id);
+                self.live_channel_session_by_channel.remove(channel_id);
+                self.live_channel_identity_by_channel.remove(channel_id);
+            }
+            to Idle
+            emit LiveOpenAdmissionAbandoned {
+                session_id: session_id,
+                channel_id: channel_id,
+                sequence: self.live_open_admission_sequence
+            }
+        }
+
+        // RecordLiveRefreshQueued: generated public-result authority for
+        // `live/refresh` once the adapter command queue has accepted the
+        // refresh handoff. The shell observes queue acceptance but cannot
+        // construct `status: queued` or the compatibility
+        // `refresh_enqueued` fact without this generated effect.
+        transition RecordLiveRefreshQueued {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordLiveRefreshQueued { channel_id, queue_acceptance_sequence }
+            guard "channel_id_present" { channel_id != "" }
+            guard "queue_acceptance_sequence_present" { queue_acceptance_sequence > 0 }
+            guard "queue_acceptance_sequence_advances" {
+                !self.live_refresh_queue_acceptance_sequence_by_channel.contains_key(channel_id)
+                || queue_acceptance_sequence > self.live_refresh_queue_acceptance_sequence_by_channel.get_copied(channel_id).get("value")
+            }
+            update {
+                self.live_refresh_result_sequence += 1;
+                self.live_refresh_queue_acceptance_sequence_by_channel.insert(
+                    channel_id,
+                    queue_acceptance_sequence
+                );
+                self.live_refresh_status_by_channel.insert(
+                    channel_id,
+                    LiveRefreshPublicStatus::Queued
+                );
+            }
+            to Idle
+            emit LiveRefreshResultResolved {
+                channel_id: channel_id,
+                status: LiveRefreshPublicStatus::Queued,
+                refresh_enqueued: true,
+                sequence: self.live_refresh_result_sequence,
+                queue_acceptance_sequence: queue_acceptance_sequence
+            }
+        }
+
+        // RecordLiveCloseClosed: generated public-result authority for
+        // `live/close` once the live host has accepted the close handoff and
+        // supplied typed observation evidence. The host may close transport
+        // resources, but it cannot construct the public `closed` result
+        // class without this generated effect.
+        transition RecordLiveCloseClosed {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordLiveCloseClosed { session_id, channel_id, close_observation_sequence }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "close_observation_sequence_present" { close_observation_sequence > 0 }
+            guard "session_binding_matches_if_present" {
+                !self.live_active_channel_by_session.contains_key(session_id)
+                || self.live_active_channel_by_session.get_cloned(session_id) == Some(channel_id)
+            }
+            guard "channel_binding_matches_if_present" {
+                !self.live_channel_session_by_channel.contains_key(channel_id)
+                || self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+            }
+            guard "close_observation_sequence_advances" {
+                !self.live_close_observation_sequence_by_channel.contains_key(channel_id)
+                || close_observation_sequence > self.live_close_observation_sequence_by_channel.get_copied(channel_id).get("value")
+            }
+            update {
+                self.live_close_result_sequence += 1;
+                self.live_close_observation_sequence_by_channel.insert(
+                    channel_id,
+                    close_observation_sequence
+                );
+                self.live_close_status_by_channel.insert(
+                    channel_id,
+                    LiveClosePublicStatus::Closed
+                );
+                self.live_active_channel_by_session.remove(session_id);
+                self.live_channel_session_by_channel.remove(channel_id);
+                self.live_channel_identity_by_channel.remove(channel_id);
+            }
+            to Idle
+            emit LiveCloseResultResolved {
+                channel_id: channel_id,
+                status: LiveClosePublicStatus::Closed,
+                closed: true,
+                sequence: self.live_close_result_sequence,
+                close_observation_sequence: close_observation_sequence
+            }
+        }
+
+        // RecordLiveCommandAccepted: generated public-result authority for
+        // live adapter commands whose success response means the host has
+        // accepted a handoff onto the adapter queue. The shell observes queue
+        // acceptance, but it cannot construct `sent`, `committed`,
+        // `interrupted`, or `truncated` public truth without this generated
+        // effect.
+        transition RecordLiveCommandAccepted {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordLiveCommandAccepted {
+                channel_id,
+                command,
+                command_acceptance_sequence
+            }
+            guard "channel_id_present" { channel_id != "" }
+            guard "command_acceptance_sequence_present" { command_acceptance_sequence > 0 }
+            guard "command_acceptance_sequence_advances" {
+                !self.live_command_acceptance_sequence_by_channel.contains_key(channel_id)
+                || command_acceptance_sequence > self.live_command_acceptance_sequence_by_channel.get_copied(channel_id).get("value")
+            }
+            update {
+                self.live_command_result_sequence += 1;
+                self.live_command_acceptance_sequence_by_channel.insert(
+                    channel_id,
+                    command_acceptance_sequence
+                );
+                self.live_command_kind_by_channel.insert(channel_id, command);
+            }
+            to Idle
+            emit LiveCommandResultResolved {
+                channel_id: channel_id,
+                command: command,
+                accepted: true,
+                sequence: self.live_command_result_sequence,
+                command_acceptance_sequence: command_acceptance_sequence
+            }
+        }
+
+        // RecordLiveCommandRejected: generated public-result authority for
+        // live adapter commands whose handoff was rejected by host/adapter
+        // mechanics. The shell observes the rejection reason, but it cannot
+        // choose the public JSON-RPC error class without this generated
+        // effect.
+        transition RecordLiveCommandRejected {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordLiveCommandRejected {
+                channel_id,
+                command,
+                rejection
+            }
+            guard "channel_id_present" { channel_id != "" }
+            update {
+                self.live_command_rejection_sequence += 1;
+                self.live_command_rejection_reason_by_channel.insert(
+                    channel_id,
+                    rejection
+                );
+                self.live_command_rejection_public_error_class_by_channel.insert(
+                    channel_id,
+                    if rejection == LiveCommandRejectionReason::ChannelNotFound || rejection == LiveCommandRejectionReason::NoAdapter { LiveCommandRejectionPublicErrorClass::InvalidParams } else { LiveCommandRejectionPublicErrorClass::InternalError }
+                );
+            }
+            to Idle
+            emit LiveCommandRejectionResolved {
+                channel_id: channel_id,
+                command: command,
+                rejection: rejection,
+                public_error_class: if rejection == LiveCommandRejectionReason::ChannelNotFound || rejection == LiveCommandRejectionReason::NoAdapter { LiveCommandRejectionPublicErrorClass::InvalidParams } else { LiveCommandRejectionPublicErrorClass::InternalError },
+                sequence: self.live_command_rejection_sequence
+            }
+        }
+
+        // RecordLiveChannelRequestRejected: generated public-error authority
+        // for live/status, live/close, live/refresh, and live/webrtc/answer
+        // control requests. The shell observes host/cache/transport failures,
+        // but the public JSON-RPC error class is emitted here.
+        transition RecordLiveChannelRequestRejected {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordLiveChannelRequestRejected {
+                channel_id,
+                request,
+                rejection
+            }
+            guard "channel_id_present" { channel_id != "" }
+            update {
+                self.live_channel_request_rejection_sequence += 1;
+                self.live_channel_request_rejection_reason_by_channel.insert(
+                    channel_id,
+                    rejection
+                );
+                self.live_channel_request_rejection_public_error_class_by_channel.insert(
+                    channel_id,
+                    if rejection == LiveChannelRequestRejectionReason::ChannelNotFound || rejection == LiveChannelRequestRejectionReason::NoAdapter || rejection == LiveChannelRequestRejectionReason::InvalidToken || rejection == LiveChannelRequestRejectionReason::InvalidPayload || rejection == LiveChannelRequestRejectionReason::WebrtcAnswerError { LiveChannelRequestRejectionPublicErrorClass::InvalidParams } else { LiveChannelRequestRejectionPublicErrorClass::InternalError }
+                );
+            }
+            to Idle
+            emit LiveChannelRequestRejectionResolved {
+                channel_id: channel_id,
+                request: request,
+                rejection: rejection,
+                public_error_class: if rejection == LiveChannelRequestRejectionReason::ChannelNotFound || rejection == LiveChannelRequestRejectionReason::NoAdapter || rejection == LiveChannelRequestRejectionReason::InvalidToken || rejection == LiveChannelRequestRejectionReason::InvalidPayload || rejection == LiveChannelRequestRejectionReason::WebrtcAnswerError { LiveChannelRequestRejectionPublicErrorClass::InvalidParams } else { LiveChannelRequestRejectionPublicErrorClass::InternalError },
+                sequence: self.live_channel_request_rejection_sequence
+            }
+        }
+
+        // RecordLiveWebrtcTokenIssued: generated token binding authority for
+        // `live/webrtc/answer`. The shell may mint random bearer material,
+        // but channel binding, expiry, and single-use state are recorded here
+        // before the token can be returned to callers.
+        transition RecordLiveWebrtcTokenIssued {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordLiveWebrtcTokenIssued {
+                session_id,
+                channel_id,
+                token,
+                issued_at_ms,
+                ttl_ms
+            }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "token_present" { token != "" }
+            guard "issued_at_present" { issued_at_ms > 0 }
+            guard "ttl_present" { ttl_ms > 0 }
+            guard "session_binding_matches" {
+                self.live_active_channel_by_session.get_cloned(session_id) == Some(channel_id)
+            }
+            guard "channel_binding_matches" {
+                self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+            }
+            guard "token_not_issued" {
+                !self.live_webrtc_token_channel_by_token.contains_key(token)
+                && !self.live_webrtc_consumed_tokens.contains(token)
+            }
+            update {
+                self.live_webrtc_token_issue_sequence += 1;
+                self.live_webrtc_token_channel_by_token.insert(token, channel_id);
+                self.live_webrtc_token_expires_at_ms_by_token.insert(token, issued_at_ms + ttl_ms);
+            }
+            to Idle
+            emit LiveWebrtcTokenIssued {
+                session_id: session_id,
+                channel_id: channel_id,
+                token: token,
+                expires_at_ms: issued_at_ms + ttl_ms,
+                sequence: self.live_webrtc_token_issue_sequence
+            }
+        }
+
+        // ResolveLiveWebrtcAnswerAdmission: generated admission authority for
+        // WebRTC answer bearer tokens. The transport cannot decide token
+        // existence, expiry, channel binding, single-use consumption, or the
+        // public error class; it submits the presented token and observed time
+        // to this transition family and acts only on the emitted result.
+        transition ResolveLiveWebrtcAnswerAdmissionAccepted {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveLiveWebrtcAnswerAdmission {
+                session_id,
+                channel_id,
+                token,
+                observed_at_ms
+            }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "token_present" { token != "" }
+            guard "observed_at_present" { observed_at_ms > 0 }
+            guard "session_binding_matches" {
+                self.live_active_channel_by_session.get_cloned(session_id) == Some(channel_id)
+            }
+            guard "channel_binding_matches" {
+                self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+            }
+            guard "token_known" { self.live_webrtc_token_channel_by_token.contains_key(token) }
+            guard "token_not_consumed" { !self.live_webrtc_consumed_tokens.contains(token) }
+            guard "token_channel_matches" {
+                self.live_webrtc_token_channel_by_token.get_cloned(token) == Some(channel_id)
+            }
+            guard "token_not_expired" {
+                observed_at_ms <= self.live_webrtc_token_expires_at_ms_by_token.get_copied(token).get("value")
+            }
+            update {
+                self.live_webrtc_answer_admission_sequence += 1;
+                self.live_webrtc_consumed_tokens.insert(token);
+            }
+            to Idle
+            emit LiveWebrtcAnswerAdmissionResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                token: token,
+                admitted: true,
+                rejection: None,
+                public_error_class: None,
+                sequence: self.live_webrtc_answer_admission_sequence
+            }
+        }
+
+        transition ResolveLiveWebrtcAnswerAdmissionChannelNotBound {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveLiveWebrtcAnswerAdmission {
+                session_id,
+                channel_id,
+                token,
+                observed_at_ms
+            }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "observed_at_present" { observed_at_ms > 0 }
+            guard "binding_missing_or_mismatch" {
+                !(self.live_active_channel_by_session.get_cloned(session_id) == Some(channel_id)
+                && self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id))
+            }
+            guard "no_token_state_rejection_pending" {
+                !self.live_webrtc_token_channel_by_token.contains_key(token)
+                || (
+                    self.live_webrtc_token_channel_by_token.get_cloned(token) == Some(channel_id)
+                    && !self.live_webrtc_consumed_tokens.contains(token)
+                    && observed_at_ms <= self.live_webrtc_token_expires_at_ms_by_token.get_copied(token).get("value")
+                )
+            }
+            update {
+                self.live_webrtc_answer_admission_sequence += 1;
+            }
+            to Idle
+            emit LiveWebrtcAnswerAdmissionResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                token: token,
+                admitted: false,
+                rejection: Some(LiveWebrtcAnswerAdmissionRejection::ChannelNotBound),
+                public_error_class: Some(LiveChannelRequestRejectionPublicErrorClass::InvalidParams),
+                sequence: self.live_webrtc_answer_admission_sequence
+            }
+        }
+
+        transition ResolveLiveWebrtcAnswerAdmissionTokenNotFound {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveLiveWebrtcAnswerAdmission {
+                session_id,
+                channel_id,
+                token,
+                observed_at_ms
+            }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "observed_at_present" { observed_at_ms > 0 }
+            guard "session_binding_matches" {
+                self.live_active_channel_by_session.get_cloned(session_id) == Some(channel_id)
+            }
+            guard "channel_binding_matches" {
+                self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+            }
+            guard "token_unknown" { !self.live_webrtc_token_channel_by_token.contains_key(token) }
+            update {
+                self.live_webrtc_answer_admission_sequence += 1;
+            }
+            to Idle
+            emit LiveWebrtcAnswerAdmissionResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                token: token,
+                admitted: false,
+                rejection: Some(LiveWebrtcAnswerAdmissionRejection::TokenNotFound),
+                public_error_class: Some(LiveChannelRequestRejectionPublicErrorClass::InvalidParams),
+                sequence: self.live_webrtc_answer_admission_sequence
+            }
+        }
+
+        transition ResolveLiveWebrtcAnswerAdmissionTokenAlreadyConsumed {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveLiveWebrtcAnswerAdmission {
+                session_id,
+                channel_id,
+                token,
+                observed_at_ms
+            }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "token_present" { token != "" }
+            guard "observed_at_present" { observed_at_ms > 0 }
+            guard "token_consumed" { self.live_webrtc_consumed_tokens.contains(token) }
+            update {
+                self.live_webrtc_answer_admission_sequence += 1;
+            }
+            to Idle
+            emit LiveWebrtcAnswerAdmissionResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                token: token,
+                admitted: false,
+                rejection: Some(LiveWebrtcAnswerAdmissionRejection::TokenAlreadyConsumed),
+                public_error_class: Some(LiveChannelRequestRejectionPublicErrorClass::InvalidParams),
+                sequence: self.live_webrtc_answer_admission_sequence
+            }
+        }
+
+        transition ResolveLiveWebrtcAnswerAdmissionTokenChannelMismatch {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveLiveWebrtcAnswerAdmission {
+                session_id,
+                channel_id,
+                token,
+                observed_at_ms
+            }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "token_present" { token != "" }
+            guard "observed_at_present" { observed_at_ms > 0 }
+            guard "token_known" { self.live_webrtc_token_channel_by_token.contains_key(token) }
+            guard "token_not_consumed" { !self.live_webrtc_consumed_tokens.contains(token) }
+            guard "token_channel_mismatch" {
+                self.live_webrtc_token_channel_by_token.get_cloned(token) != Some(channel_id)
+            }
+            update {
+                self.live_webrtc_answer_admission_sequence += 1;
+                self.live_webrtc_consumed_tokens.insert(token);
+            }
+            to Idle
+            emit LiveWebrtcAnswerAdmissionResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                token: token,
+                admitted: false,
+                rejection: Some(LiveWebrtcAnswerAdmissionRejection::TokenChannelMismatch),
+                public_error_class: Some(LiveChannelRequestRejectionPublicErrorClass::InvalidParams),
+                sequence: self.live_webrtc_answer_admission_sequence
+            }
+        }
+
+        transition ResolveLiveWebrtcAnswerAdmissionTokenExpired {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveLiveWebrtcAnswerAdmission {
+                session_id,
+                channel_id,
+                token,
+                observed_at_ms
+            }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "token_present" { token != "" }
+            guard "observed_at_present" { observed_at_ms > 0 }
+            guard "token_known" { self.live_webrtc_token_channel_by_token.contains_key(token) }
+            guard "token_not_consumed" { !self.live_webrtc_consumed_tokens.contains(token) }
+            guard "token_channel_matches" {
+                self.live_webrtc_token_channel_by_token.get_cloned(token) == Some(channel_id)
+            }
+            guard "token_expired" {
+                observed_at_ms > self.live_webrtc_token_expires_at_ms_by_token.get_copied(token).get("value")
+            }
+            update {
+                self.live_webrtc_answer_admission_sequence += 1;
+                self.live_webrtc_consumed_tokens.insert(token);
+            }
+            to Idle
+            emit LiveWebrtcAnswerAdmissionResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                token: token,
+                admitted: false,
+                rejection: Some(LiveWebrtcAnswerAdmissionRejection::TokenExpired),
+                public_error_class: Some(LiveChannelRequestRejectionPublicErrorClass::InvalidParams),
+                sequence: self.live_webrtc_answer_admission_sequence
+            }
+        }
+
+        // RecordLiveWebrtcAnswerAccepted: generated public-result authority
+        // for a successfully materialized WebRTC answer. SDP bytes remain
+        // transport material; the public success class is emitted here after
+        // the transport submits monotonic answer-observation evidence.
+        transition RecordLiveWebrtcAnswerAccepted {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordLiveWebrtcAnswerAccepted {
+                session_id,
+                channel_id,
+                answer_observation_sequence
+            }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "answer_observation_sequence_present" { answer_observation_sequence > 0 }
+            guard "session_binding_matches" {
+                self.live_active_channel_by_session.get_cloned(session_id) == Some(channel_id)
+            }
+            guard "channel_binding_matches" {
+                self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+            }
+            guard "answer_observation_sequence_advances" {
+                !self.live_webrtc_answer_observation_sequence_by_channel.contains_key(channel_id)
+                || answer_observation_sequence > self.live_webrtc_answer_observation_sequence_by_channel.get_copied(channel_id).get("value")
+            }
+            update {
+                self.live_webrtc_answer_result_sequence += 1;
+                self.live_webrtc_answer_observation_sequence_by_channel.insert(
+                    channel_id,
+                    answer_observation_sequence
+                );
+                self.live_webrtc_answer_status_by_channel.insert(
+                    channel_id,
+                    LiveWebrtcAnswerPublicStatus::Answered
+                );
+            }
+            to Idle
+            emit LiveWebrtcAnswerResultResolved {
+                channel_id: channel_id,
+                status: LiveWebrtcAnswerPublicStatus::Answered,
+                answered: true,
+                sequence: self.live_webrtc_answer_result_sequence,
+                answer_observation_sequence: answer_observation_sequence
+            }
+        }
+
+        // RecordLiveWebsocketTokenIssued: generated token binding authority
+        // for live WebSocket upgrades. The transport may mint random bearer
+        // material, but the token is not returned until MeerkatMachine records
+        // channel binding and expiry.
+        transition RecordLiveWebsocketTokenIssued {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordLiveWebsocketTokenIssued {
+                session_id,
+                channel_id,
+                token,
+                issued_at_ms,
+                ttl_ms
+            }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "token_present" { token != "" }
+            guard "issued_at_present" { issued_at_ms > 0 }
+            guard "ttl_present" { ttl_ms > 0 }
+            guard "session_binding_matches" {
+                self.live_active_channel_by_session.get_cloned(session_id) == Some(channel_id)
+            }
+            guard "channel_binding_matches" {
+                self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+            }
+            guard "token_not_issued" {
+                !self.live_websocket_token_channel_by_token.contains_key(token)
+                && !self.live_websocket_consumed_tokens.contains(token)
+            }
+            update {
+                self.live_websocket_token_issue_sequence += 1;
+                self.live_websocket_token_channel_by_token.insert(token, channel_id);
+                self.live_websocket_token_expires_at_ms_by_token.insert(token, issued_at_ms + ttl_ms);
+            }
+            to Idle
+            emit LiveWebsocketTokenIssued {
+                session_id: session_id,
+                channel_id: channel_id,
+                token: token,
+                expires_at_ms: issued_at_ms + ttl_ms,
+                sequence: self.live_websocket_token_issue_sequence
+            }
+        }
+
+        // ResolveLiveWebsocketTokenAdmission: generated admission authority
+        // for WebSocket upgrade bearer tokens. The transport cannot decide
+        // token existence, expiry, channel binding, single-use consumption, or
+        // public rejection class; it submits the presented token here and acts
+        // only on the emitted result.
+        transition ResolveLiveWebsocketTokenAdmissionAccepted {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveLiveWebsocketTokenAdmission {
+                session_id,
+                channel_id,
+                token,
+                observed_at_ms
+            }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "token_present" { token != "" }
+            guard "observed_at_present" { observed_at_ms > 0 }
+            guard "session_binding_matches" {
+                self.live_active_channel_by_session.get_cloned(session_id) == Some(channel_id)
+            }
+            guard "channel_binding_matches" {
+                self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+            }
+            guard "token_known" { self.live_websocket_token_channel_by_token.contains_key(token) }
+            guard "token_not_consumed" { !self.live_websocket_consumed_tokens.contains(token) }
+            guard "token_channel_matches" {
+                self.live_websocket_token_channel_by_token.get_cloned(token) == Some(channel_id)
+            }
+            guard "token_not_expired" {
+                observed_at_ms <= self.live_websocket_token_expires_at_ms_by_token.get_copied(token).get("value")
+            }
+            update {
+                self.live_websocket_token_admission_sequence += 1;
+                self.live_websocket_consumed_tokens.insert(token);
+            }
+            to Idle
+            emit LiveWebsocketTokenAdmissionResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                token: token,
+                admitted: true,
+                rejection: None,
+                public_error_class: None,
+                sequence: self.live_websocket_token_admission_sequence
+            }
+        }
+
+        transition ResolveLiveWebsocketTokenAdmissionChannelNotBound {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveLiveWebsocketTokenAdmission {
+                session_id,
+                channel_id,
+                token,
+                observed_at_ms
+            }
+            guard "channel_id_present" { channel_id != "" }
+            guard "observed_at_present" { observed_at_ms > 0 }
+            guard "binding_missing_or_mismatch" {
+                !(self.live_active_channel_by_session.get_cloned(session_id) == Some(channel_id)
+                && self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id))
+            }
+            guard "no_token_state_rejection_pending" {
+                !self.live_websocket_token_channel_by_token.contains_key(token)
+                || (
+                    self.live_websocket_token_channel_by_token.get_cloned(token) == Some(channel_id)
+                    && !self.live_websocket_consumed_tokens.contains(token)
+                    && observed_at_ms <= self.live_websocket_token_expires_at_ms_by_token.get_copied(token).get("value")
+                )
+            }
+            update {
+                self.live_websocket_token_admission_sequence += 1;
+            }
+            to Idle
+            emit LiveWebsocketTokenAdmissionResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                token: token,
+                admitted: false,
+                rejection: Some(LiveWebsocketTokenAdmissionRejection::ChannelNotBound),
+                public_error_class: Some(LiveWebsocketTokenAdmissionPublicErrorClass::InvalidToken),
+                sequence: self.live_websocket_token_admission_sequence
+            }
+        }
+
+        transition ResolveLiveWebsocketTokenAdmissionTokenNotFound {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveLiveWebsocketTokenAdmission {
+                session_id,
+                channel_id,
+                token,
+                observed_at_ms
+            }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "observed_at_present" { observed_at_ms > 0 }
+            guard "session_binding_matches" {
+                self.live_active_channel_by_session.get_cloned(session_id) == Some(channel_id)
+            }
+            guard "channel_binding_matches" {
+                self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+            }
+            guard "token_unknown" { !self.live_websocket_token_channel_by_token.contains_key(token) }
+            update {
+                self.live_websocket_token_admission_sequence += 1;
+            }
+            to Idle
+            emit LiveWebsocketTokenAdmissionResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                token: token,
+                admitted: false,
+                rejection: Some(LiveWebsocketTokenAdmissionRejection::TokenNotFound),
+                public_error_class: Some(LiveWebsocketTokenAdmissionPublicErrorClass::InvalidToken),
+                sequence: self.live_websocket_token_admission_sequence
+            }
+        }
+
+        transition ResolveLiveWebsocketTokenAdmissionTokenAlreadyConsumed {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveLiveWebsocketTokenAdmission {
+                session_id,
+                channel_id,
+                token,
+                observed_at_ms
+            }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "token_present" { token != "" }
+            guard "observed_at_present" { observed_at_ms > 0 }
+            guard "token_consumed" { self.live_websocket_consumed_tokens.contains(token) }
+            update {
+                self.live_websocket_token_admission_sequence += 1;
+            }
+            to Idle
+            emit LiveWebsocketTokenAdmissionResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                token: token,
+                admitted: false,
+                rejection: Some(LiveWebsocketTokenAdmissionRejection::TokenAlreadyConsumed),
+                public_error_class: Some(LiveWebsocketTokenAdmissionPublicErrorClass::InvalidToken),
+                sequence: self.live_websocket_token_admission_sequence
+            }
+        }
+
+        transition ResolveLiveWebsocketTokenAdmissionTokenChannelMismatch {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveLiveWebsocketTokenAdmission {
+                session_id,
+                channel_id,
+                token,
+                observed_at_ms
+            }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "token_present" { token != "" }
+            guard "observed_at_present" { observed_at_ms > 0 }
+            guard "token_known" { self.live_websocket_token_channel_by_token.contains_key(token) }
+            guard "token_not_consumed" { !self.live_websocket_consumed_tokens.contains(token) }
+            guard "token_channel_mismatch" {
+                self.live_websocket_token_channel_by_token.get_cloned(token) != Some(channel_id)
+            }
+            update {
+                self.live_websocket_token_admission_sequence += 1;
+                self.live_websocket_consumed_tokens.insert(token);
+            }
+            to Idle
+            emit LiveWebsocketTokenAdmissionResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                token: token,
+                admitted: false,
+                rejection: Some(LiveWebsocketTokenAdmissionRejection::TokenChannelMismatch),
+                public_error_class: Some(LiveWebsocketTokenAdmissionPublicErrorClass::InvalidToken),
+                sequence: self.live_websocket_token_admission_sequence
+            }
+        }
+
+        transition ResolveLiveWebsocketTokenAdmissionTokenExpired {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveLiveWebsocketTokenAdmission {
+                session_id,
+                channel_id,
+                token,
+                observed_at_ms
+            }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "token_present" { token != "" }
+            guard "observed_at_present" { observed_at_ms > 0 }
+            guard "token_known" { self.live_websocket_token_channel_by_token.contains_key(token) }
+            guard "token_not_consumed" { !self.live_websocket_consumed_tokens.contains(token) }
+            guard "token_channel_matches" {
+                self.live_websocket_token_channel_by_token.get_cloned(token) == Some(channel_id)
+            }
+            guard "token_expired" {
+                observed_at_ms > self.live_websocket_token_expires_at_ms_by_token.get_copied(token).get("value")
+            }
+            update {
+                self.live_websocket_token_admission_sequence += 1;
+                self.live_websocket_consumed_tokens.insert(token);
+            }
+            to Idle
+            emit LiveWebsocketTokenAdmissionResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                token: token,
+                admitted: false,
+                rejection: Some(LiveWebsocketTokenAdmissionRejection::TokenExpired),
+                public_error_class: Some(LiveWebsocketTokenAdmissionPublicErrorClass::InvalidToken),
+                sequence: self.live_websocket_token_admission_sequence
+            }
+        }
+
+        // RPC event-stream authority: the router may own async tasks and
+        // subscription handles, but open/terminal/close public result classes
+        // are generated here so stale side maps cannot decide wire truth.
+        transition RecordSessionEventStreamOpened {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordSessionEventStreamOpened { stream_id, session_id }
+            guard "stream_id_present" { stream_id != "" }
+            guard "session_id_present" { session_id != "" }
+            guard "stream_not_active" { !self.active_session_event_streams.contains(stream_id) }
+            guard "stream_not_closed" { !self.closed_session_event_streams.contains(stream_id) }
+            update {
+                self.session_event_stream_open_result_sequence += 1;
+                self.active_session_event_streams.insert(stream_id);
+                self.session_event_stream_session_ids.insert(stream_id, session_id);
+            }
+            to Idle
+            emit SessionEventStreamOpenResolved {
+                stream_id: stream_id,
+                session_id: session_id,
+                opened: true,
+                sequence: self.session_event_stream_open_result_sequence
+            }
+        }
+
+        transition RecordSessionEventStreamTerminated {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordSessionEventStreamTerminated { stream_id, observation, detail }
+            guard "stream_id_present" { stream_id != "" }
+            guard "stream_active" { self.active_session_event_streams.contains(stream_id) }
+            guard "session_binding_recorded" {
+                self.session_event_stream_session_ids.contains_key(stream_id)
+            }
+            guard "terminal_detail_matches_observation" {
+                (observation == RpcEventStreamTerminalObservationKind::TransportEnded
+                    && detail == None)
+                || (observation != RpcEventStreamTerminalObservationKind::TransportEnded
+                    && detail != None)
+            }
+            update {
+                self.session_event_stream_terminal_sequence += 1;
+                self.active_session_event_streams.remove(stream_id);
+                self.closed_session_event_streams.insert(stream_id);
+            }
+            to Idle
+            emit SessionEventStreamTerminalResolved {
+                stream_id: stream_id,
+                session_id: self.session_event_stream_session_ids.get_cloned(stream_id).get("value"),
+                reason: if observation == RpcEventStreamTerminalObservationKind::TransportEnded { RpcEventStreamTerminalReason::RemoteEnd } else { RpcEventStreamTerminalReason::TerminalError },
+                error_code: if observation == RpcEventStreamTerminalObservationKind::NotificationQueueOverflow { Some(RpcEventStreamTerminalErrorCode::StreamQueueOverflow) } else { if observation == RpcEventStreamTerminalObservationKind::NotificationReceiverGone { Some(RpcEventStreamTerminalErrorCode::StreamReceiverGone) } else { None } },
+                detail: detail,
+                sequence: self.session_event_stream_terminal_sequence
+            }
+        }
+
+        transition ResolveSessionEventStreamCloseActive {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveSessionEventStreamClose { stream_id }
+            guard "stream_id_present" { stream_id != "" }
+            guard "stream_active" { self.active_session_event_streams.contains(stream_id) }
+            guard "session_binding_recorded" {
+                self.session_event_stream_session_ids.contains_key(stream_id)
+            }
+            update {
+                self.session_event_stream_close_result_sequence += 1;
+                self.session_event_stream_terminal_sequence += 1;
+                self.active_session_event_streams.remove(stream_id);
+                self.closed_session_event_streams.insert(stream_id);
+            }
+            to Idle
+            emit SessionEventStreamCloseResolved {
+                stream_id: stream_id,
+                closed: true,
+                already_closed: false,
+                sequence: self.session_event_stream_close_result_sequence
+            }
+            emit SessionEventStreamTerminalResolved {
+                stream_id: stream_id,
+                session_id: self.session_event_stream_session_ids.get_cloned(stream_id).get("value"),
+                reason: RpcEventStreamTerminalReason::ExplicitClose,
+                error_code: None,
+                detail: None,
+                sequence: self.session_event_stream_terminal_sequence
+            }
+        }
+
+        transition ResolveSessionEventStreamCloseAlreadyClosed {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveSessionEventStreamClose { stream_id }
+            guard "stream_id_present" { stream_id != "" }
+            guard "stream_not_active" { !self.active_session_event_streams.contains(stream_id) }
+            guard "stream_closed" { self.closed_session_event_streams.contains(stream_id) }
+            update {
+                self.session_event_stream_close_result_sequence += 1;
+            }
+            to Idle
+            emit SessionEventStreamCloseResolved {
+                stream_id: stream_id,
+                closed: true,
+                already_closed: true,
+                sequence: self.session_event_stream_close_result_sequence
+            }
+        }
+
+        transition RecordMobEventStreamOpened {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordMobEventStreamOpened { stream_id }
+            guard "stream_id_present" { stream_id != "" }
+            guard "stream_not_active" { !self.active_mob_event_streams.contains(stream_id) }
+            guard "stream_not_closed" { !self.closed_mob_event_streams.contains(stream_id) }
+            update {
+                self.mob_event_stream_open_result_sequence += 1;
+                self.active_mob_event_streams.insert(stream_id);
+            }
+            to Idle
+            emit MobEventStreamOpenResolved {
+                stream_id: stream_id,
+                opened: true,
+                sequence: self.mob_event_stream_open_result_sequence
+            }
+        }
+
+        transition RecordMobEventStreamTerminated {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordMobEventStreamTerminated { stream_id, observation, detail }
+            guard "stream_id_present" { stream_id != "" }
+            guard "stream_active" { self.active_mob_event_streams.contains(stream_id) }
+            guard "terminal_detail_matches_observation" {
+                (observation == RpcEventStreamTerminalObservationKind::TransportEnded
+                    && detail == None)
+                || (observation != RpcEventStreamTerminalObservationKind::TransportEnded
+                    && detail != None)
+            }
+            update {
+                self.mob_event_stream_terminal_sequence += 1;
+                self.active_mob_event_streams.remove(stream_id);
+                self.closed_mob_event_streams.insert(stream_id);
+            }
+            to Idle
+            emit MobEventStreamTerminalResolved {
+                stream_id: stream_id,
+                reason: if observation == RpcEventStreamTerminalObservationKind::TransportEnded { RpcEventStreamTerminalReason::RemoteEnd } else { RpcEventStreamTerminalReason::TerminalError },
+                error_code: if observation == RpcEventStreamTerminalObservationKind::NotificationQueueOverflow { Some(RpcEventStreamTerminalErrorCode::StreamQueueOverflow) } else { if observation == RpcEventStreamTerminalObservationKind::NotificationReceiverGone { Some(RpcEventStreamTerminalErrorCode::StreamReceiverGone) } else { None } },
+                detail: detail,
+                sequence: self.mob_event_stream_terminal_sequence
+            }
+        }
+
+        transition ResolveMobEventStreamCloseActive {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveMobEventStreamClose { stream_id }
+            guard "stream_id_present" { stream_id != "" }
+            guard "stream_active" { self.active_mob_event_streams.contains(stream_id) }
+            update {
+                self.mob_event_stream_close_result_sequence += 1;
+                self.mob_event_stream_terminal_sequence += 1;
+                self.active_mob_event_streams.remove(stream_id);
+                self.closed_mob_event_streams.insert(stream_id);
+            }
+            to Idle
+            emit MobEventStreamCloseResolved {
+                stream_id: stream_id,
+                closed: true,
+                already_closed: false,
+                sequence: self.mob_event_stream_close_result_sequence
+            }
+            emit MobEventStreamTerminalResolved {
+                stream_id: stream_id,
+                reason: RpcEventStreamTerminalReason::ExplicitClose,
+                error_code: None,
+                detail: None,
+                sequence: self.mob_event_stream_terminal_sequence
+            }
+        }
+
+        transition ResolveMobEventStreamCloseAlreadyClosed {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveMobEventStreamClose { stream_id }
+            guard "stream_id_present" { stream_id != "" }
+            guard "stream_not_active" { !self.active_mob_event_streams.contains(stream_id) }
+            guard "stream_closed" { self.closed_mob_event_streams.contains(stream_id) }
+            update {
+                self.mob_event_stream_close_result_sequence += 1;
+            }
+            to Idle
+            emit MobEventStreamCloseResolved {
+                stream_id: stream_id,
+                closed: true,
+                already_closed: true,
+                sequence: self.mob_event_stream_close_result_sequence
+            }
+        }
+
+        // RecordLiveChannelStatus: generated public-result authority for
+        // `live/status` once the live host has supplied typed transport-status
+        // observation evidence. The shell observes adapter health but cannot
+        // construct the public status discriminator or degradation reason
+        // without this generated effect.
+        transition RecordLiveChannelStatus {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordLiveChannelStatus {
+                channel_id,
+                status,
+                status_observation_sequence,
+                degradation_reason,
+                degradation_detail
+            }
+            guard "channel_id_present" { channel_id != "" }
+            guard "status_observation_sequence_present" { status_observation_sequence > 0 }
+            guard "status_observation_sequence_advances" {
+                !self.live_channel_status_observation_sequence_by_channel.contains_key(channel_id)
+                || status_observation_sequence > self.live_channel_status_observation_sequence_by_channel.get_copied(channel_id).get("value")
+            }
+            guard "degradation_fields_match_status" {
+                (status == LiveChannelPublicStatus::Degraded && degradation_reason != None)
+                || (status != LiveChannelPublicStatus::Degraded
+                    && degradation_reason == None
+                    && degradation_detail == None)
+            }
+            update {
+                self.live_channel_status_result_sequence += 1;
+                self.live_channel_status_observation_sequence_by_channel.insert(
+                    channel_id,
+                    status_observation_sequence
+                );
+                self.live_channel_status_by_channel.insert(channel_id, status);
+            }
+            to Idle
+            emit LiveChannelStatusResolved {
+                channel_id: channel_id,
+                status: status,
+                sequence: self.live_channel_status_result_sequence,
+                status_observation_sequence: status_observation_sequence,
+                degradation_reason: degradation_reason,
+                degradation_detail: degradation_detail
+            }
+        }
+
+        // ResolveWaitAllAdmission: generated wait-all admission/result-class
+        // authority. The shell supplies raw request shape plus candidate detail
+        // IDs; the machine reads canonical operation and wait state, then emits
+        // the typed public result class.
+        transition ResolveWaitAllAdmissionDuplicateRejected {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveWaitAllAdmission {
+                wait_request_id,
+                operation_id_sequence,
+                operation_ids,
+                operation_id_tokens,
+                operation_token_by_id,
+                operation_id_by_token,
+                duplicate_operation_id,
+                not_found_operation_id
+            }
+            guard "duplicate_observed" { operation_id_sequence.len() > operation_ids.len() }
+            guard "duplicate_witness_present" { duplicate_operation_id != None }
+            guard "duplicate_witness_requested" { operation_id_sequence.contains(duplicate_operation_id.get("value")) }
+            guard "duplicate_witness_repeated" {
+                operation_id_sequence.count(duplicate_operation_id.get("value")) > 1
+            }
+            update {}
+            to Idle
+            emit WaitAllAdmissionResolved {
+                wait_request_id: wait_request_id,
+                result: WaitAllAdmissionResultKind::Reject,
+                reject_reason: Some(WaitAllRejectReasonKind::DuplicateOperation),
+                rejected_operation_id: duplicate_operation_id
+            }
+        }
+
+        transition ResolveWaitAllAdmissionActiveRejected {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveWaitAllAdmission {
+                wait_request_id,
+                operation_id_sequence,
+                operation_ids,
+                operation_id_tokens,
+                operation_token_by_id,
+                operation_id_by_token,
+                duplicate_operation_id,
+                not_found_operation_id
+            }
+            guard "no_duplicate_observed" { operation_id_sequence.len() == operation_ids.len() }
+            guard "wait_already_active" { self.wait_active == true }
+            update {}
+            to Idle
+            emit WaitAllAdmissionResolved {
+                wait_request_id: wait_request_id,
+                result: WaitAllAdmissionResultKind::Reject,
+                reject_reason: Some(WaitAllRejectReasonKind::WaitAlreadyActive),
+                rejected_operation_id: None
+            }
+        }
+
+        transition ResolveWaitAllAdmissionNotFoundRejected {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveWaitAllAdmission {
+                wait_request_id,
+                operation_id_sequence,
+                operation_ids,
+                operation_id_tokens,
+                operation_token_by_id,
+                operation_id_by_token,
+                duplicate_operation_id,
+                not_found_operation_id
+            }
+            guard "no_duplicate_observed" { operation_id_sequence.len() == operation_ids.len() }
+            guard "wait_inactive" { self.wait_active == false }
+            guard "operation_missing" {
+                for_all(operation_id in operation_ids,
+                    self.op_statuses.contains_key(operation_id)) == false
+            }
+            guard "not_found_witness_present" { not_found_operation_id != None }
+            guard "not_found_witness_requested" { operation_ids.contains(not_found_operation_id.get("value")) }
+            guard "not_found_witness_missing" { !self.op_statuses.contains_key(not_found_operation_id.get("value")) }
+            update {}
+            to Idle
+            emit WaitAllAdmissionResolved {
+                wait_request_id: wait_request_id,
+                result: WaitAllAdmissionResultKind::Reject,
+                reject_reason: Some(WaitAllRejectReasonKind::OperationNotFound),
+                rejected_operation_id: not_found_operation_id
+            }
+        }
+
+        transition ResolveWaitAllAdmissionAccepted {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveWaitAllAdmission {
+                wait_request_id,
+                operation_id_sequence,
+                operation_ids,
+                operation_id_tokens,
+                operation_token_by_id,
+                operation_id_by_token,
+                duplicate_operation_id,
+                not_found_operation_id
+            }
+            guard "no_duplicate_observed" { operation_id_sequence.len() == operation_ids.len() }
+            guard "wait_inactive" { self.wait_active == false }
+            guard "operations_tracked" {
+                for_all(operation_id in operation_ids,
+                    self.op_statuses.contains_key(operation_id))
+            }
+            guard "operation_token_witness_valid" {
+                wait_operation_token_witness_valid(
+                    operation_ids,
+                    operation_id_tokens,
+                    operation_token_by_id,
+                    operation_id_by_token)
+            }
+            update {}
+            to Idle
+            emit WaitAllAdmissionResolved {
+                wait_request_id: wait_request_id,
+                result: WaitAllAdmissionResultKind::Accept,
+                reject_reason: None,
+                rejected_operation_id: None
+            }
+        }
+
         // RequestWaitAll: activate wait-all barrier with explicit membership.
         // `wait_request_id`, `wait_operation_ids`, and the typed
         // `wait_operation_id_tokens` handoff payload are DSL-owned; shell must
-        // not mirror them as canonical truth.
+        // not mirror them as canonical truth. The token/key bijection is
+        // generated-validated before either representation is stored.
         transition RequestWaitAll {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input RequestWaitAll { wait_request_id, operation_ids, operation_id_tokens }
+            on input RequestWaitAll {
+                run_id,
+                wait_request_id,
+                operation_id_sequence,
+                operation_ids,
+                operation_id_tokens,
+                operation_token_by_id,
+                operation_id_by_token
+            }
+            guard "no_duplicate_observed" { operation_id_sequence.len() == operation_ids.len() }
+            guard "wait_inactive" { self.wait_active == false }
+            guard "operations_tracked" {
+                for_all(operation_id in operation_ids,
+                    self.op_statuses.contains_key(operation_id))
+            }
+            guard "operation_token_witness_valid" {
+                wait_operation_token_witness_valid(
+                    operation_ids,
+                    operation_id_tokens,
+                    operation_token_by_id,
+                    operation_id_by_token)
+            }
             update {
                 self.wait_active = true;
                 self.wait_request_id = Some(wait_request_id);
+                self.wait_run_id = Some(run_id);
                 self.wait_operation_ids = operation_ids;
                 self.wait_operation_id_tokens = operation_id_tokens;
             }
@@ -7545,9 +17824,10 @@ macro_rules! meerkat_catalog_machine_dsl {
         // each op terminalization; the guard serves as the fixed point.
         transition SatisfyWaitAll {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input SatisfyWaitAll { wait_request_id, operation_id_tokens }
+            on input SatisfyWaitAll { wait_request_id, run_id, operation_id_tokens }
             guard "wait_is_active" { self.wait_active == true }
             guard "wait_request_matches" { self.wait_request_id == Some(wait_request_id) }
+            guard "wait_run_matches" { self.wait_run_id == Some(run_id) }
             guard "operation_tokens_match" { self.wait_operation_id_tokens == operation_id_tokens }
             guard "all_members_terminal" {
                 for_all(member_id in self.wait_operation_ids,
@@ -7561,12 +17841,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.wait_active = false;
                 self.wait_request_id = None;
+                self.wait_run_id = None;
                 self.wait_operation_ids = EmptySet;
                 self.wait_operation_id_tokens = EmptySet;
             }
             to Idle
             emit WaitAllSatisfied {
                 wait_request_id: wait_request_id,
+                run_id: run_id,
                 operation_ids: operation_id_tokens
             }
         }
@@ -7582,6 +17864,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.wait_active = false;
                 self.wait_request_id = None;
+                self.wait_run_id = None;
                 self.wait_operation_ids = EmptySet;
                 self.wait_operation_id_tokens = EmptySet;
             }
@@ -7616,27 +17899,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
         }
 
-        // DrainExitedClean: drain exited cleanly, reset to inactive
-        transition DrainExitedClean {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input DrainExitedClean
-            update {
-                self.drain_phase = DrainPhase::Inactive;
-                self.drain_mode = None;
-            }
-            to Idle
-        }
-
-        // DrainExitedRespawnable: drain exited but can be respawned
-        transition DrainExitedRespawnable {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input DrainExitedRespawnable
-            update {
-                self.drain_phase = DrainPhase::ExitedRespawnable;
-            }
-            to Idle
-        }
-
         // =====================================================================
         // Absorbed substate transitions — Visibility
         // =====================================================================
@@ -7648,20 +17910,81 @@ macro_rules! meerkat_catalog_machine_dsl {
         // `MeerkatMachine::stage_session_dsl_input_with_minted_revision`.
         transition StageVisibilityFilter {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input StageVisibilityFilter { filter }
+            on input StageVisibilityFilter { filter, witnesses }
+            guard "filter_witnesses_match_machine_catalog" {
+                meerkat_tool_visibility_filter_witnesses_are_catalog_backed(
+                    witnesses, self.filter_visibility_authority_catalog)
+            }
+            guard "active_filter_has_machine_catalog_witnesses" {
+                meerkat_tool_visibility_filter_has_catalog_witnesses(
+                    self.active_filter, witnesses, self.filter_visibility_authority_catalog)
+            }
+            guard "staged_filter_has_machine_catalog_witnesses" {
+                meerkat_tool_visibility_filter_has_catalog_witnesses(
+                    filter, witnesses, self.filter_visibility_authority_catalog)
+            }
             update {
                 self.next_staged_visibility_revision = self.next_staged_visibility_revision + 1;
                 self.staged_filter = filter;
+                self.filter_visibility_witnesses = witnesses;
                 self.staged_visibility_revision = self.next_staged_visibility_revision;
             }
             to Idle
             emit RefreshVisibleSurfaceSet { snapshot_epoch: self.snapshot_epoch }
         }
 
+        transition ReplaceFilterToolAuthorityCatalog {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ReplaceFilterToolAuthorityCatalog { catalog }
+            guard "session_registered" { self.session_id != None }
+            guard "filter_authority_catalog_has_identity" {
+                deferred_authorities_have_identity(catalog.keys(), catalog)
+            }
+            guard "capability_base_filter_matches_generated_llm_surface" {
+                meerkat_session_llm_capability_base_filter_replacement_matches(
+                    self.current_session_capability_surface,
+                    self.current_session_capability_surface_status,
+                    self.current_session_capability_base_filter,
+                    self.current_session_capability_base_filter) == true
+            }
+            guard "inherited_filter_matches_replacement_catalog" {
+                meerkat_tool_visibility_filter_has_catalog_witnesses(
+                    self.inherited_base_filter, catalog, catalog)
+            }
+            guard "active_filter_matches_replacement_catalog" {
+                meerkat_tool_visibility_filter_has_catalog_witnesses(
+                    self.active_filter, catalog, catalog)
+            }
+            guard "staged_filter_matches_replacement_catalog" {
+                meerkat_tool_visibility_filter_has_catalog_witnesses(
+                    self.staged_filter, catalog, catalog)
+            }
+            guard "turn_overlay_allow_matches_replacement_catalog" {
+                meerkat_tool_visibility_names_are_catalog_backed(
+                    self.turn_tool_overlay_allow_names, catalog)
+            }
+            guard "turn_overlay_deny_matches_replacement_catalog" {
+                meerkat_tool_visibility_names_are_catalog_backed(
+                    self.turn_tool_overlay_deny_names, catalog)
+            }
+            update {
+                self.filter_visibility_authority_catalog = catalog;
+            }
+            to Idle
+        }
+
         // CommitVisibilityFilter: promote staged filter to active
         transition CommitVisibilityFilter {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input CommitVisibilityFilter { filter, revision }
+            guard "filter_matches_machine_staged_filter" { filter == self.staged_filter }
+            guard "revision_matches_machine_staged_revision" { revision == self.staged_visibility_revision }
+            guard "staged_filter_witnesses_match_machine_catalog" {
+                meerkat_tool_visibility_filter_witnesses_are_catalog_backed(
+                    self.filter_visibility_witnesses, self.filter_visibility_authority_catalog)
+                && meerkat_tool_visibility_filter_has_catalog_witnesses(
+                    self.staged_filter, self.filter_visibility_witnesses, self.filter_visibility_authority_catalog)
+            }
             update {
                 self.active_filter = filter;
                 self.active_visibility_revision = revision;
@@ -7680,6 +18003,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.next_staged_visibility_revision = self.next_staged_visibility_revision + 1;
                 self.staged_deferred_names = names;
+                if self.active_deferred_names == EmptySet {
+                    self.requested_visibility_witnesses = EmptyMap;
+                }
                 self.staged_deferred_authorities = EmptyMap;
                 self.staged_visibility_revision = self.next_staged_visibility_revision;
             }
@@ -7687,12 +18013,51 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit RefreshVisibleSurfaceSet { snapshot_epoch: self.snapshot_epoch }
         }
 
+        transition ReplaceDeferredToolAuthorityCatalog {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ReplaceDeferredToolAuthorityCatalog { catalog }
+            guard "session_registered" { self.session_id != None }
+            guard "deferred_authority_catalog_has_identity" {
+                deferred_authorities_have_identity(catalog.keys(), catalog)
+            }
+            guard "active_deferred_authorities_match_replacement_catalog" {
+                meerkat_tool_visibility_authorities_are_catalog_backed(
+                    self.active_deferred_authorities, catalog)
+            }
+            guard "staged_deferred_authorities_match_replacement_catalog" {
+                meerkat_tool_visibility_authorities_are_catalog_backed(
+                    self.staged_deferred_authorities, catalog)
+            }
+            guard "requested_witnesses_match_live_replacement_catalog" {
+                for_all(name in self.requested_visibility_witnesses.keys(),
+                    (self.active_deferred_names.contains(name) == false
+                        && self.staged_deferred_names.contains(name) == false)
+                    || (catalog.contains_key(name)
+                        && self.requested_visibility_witnesses.get_cloned(name).get("value") == catalog.get_cloned(name).get("value")
+                        && deferred_authority_has_identity(self.requested_visibility_witnesses.get_cloned(name).get("value"))))
+            }
+            update {
+                self.deferred_visibility_authority_catalog = catalog;
+            }
+            to Idle
+        }
+
         // CommitDeferredNames: promote staged deferred authority to active
         transition CommitDeferredNames {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input CommitDeferredNames { authorities }
+            guard "authorities_match_machine_staged_authorities" {
+                authorities == self.staged_deferred_authorities
+            }
+            guard "authority_names_match_machine_staged_names" {
+                authorities.keys() == self.staged_deferred_names
+            }
             guard "deferred_authorities_have_identity" {
                 deferred_authorities_have_identity(authorities.keys(), authorities)
+            }
+            guard "deferred_authorities_match_machine_catalog" {
+                meerkat_tool_visibility_authorities_are_catalog_backed(
+                    authorities, self.deferred_visibility_authority_catalog)
             }
             update {
                 self.active_deferred_names = authorities.keys();
@@ -7702,31 +18067,83 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit RefreshVisibleSurfaceSet { snapshot_epoch: self.snapshot_epoch }
         }
 
-        // SyncVisibilityRevisions: external-install water-mark reconciliation.
-        // Fired by the shell whenever an external durable visibility state is
-        // installed (recovery, cross-session hot-swap, LLM reconfigure). Keeps
-        // the DSL monotonic counter honest against externally-minted revisions
-        // so subsequent `StageVisibilityFilter` / `StageDeferredNames` mints
-        // continue advancing from the high-water mark rather than the DSL's
-        // local 0.
-        //
-        // Typed idempotence via guard: the transition fires only when at
-        // least one of the installed revisions exceeds the counter. When
-        // both revisions are at or below the counter (e.g., fresh-build
-        // with default-zero visibility state on a never-advanced counter,
-        // or recovery replay of a state the DSL already reflects), the
-        // guard rejects and the caller sees `Ok(false)` — no shell-side
-        // input-value pre-check, no silent no-op update.
+        // SetTurnToolOverlay: generated authority for ephemeral per-turn
+        // provider-visible tool policy. The shell may project the accepted
+        // allow/deny sets into `ToolScope`, but it cannot decide capability
+        // legality or mutate provider-visible facts without this transition.
+        transition SetTurnToolOverlay {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input SetTurnToolOverlay { allow_active, allow_names, deny_names }
+            guard "session_registered" { self.session_id != None }
+            guard "inactive_allow_carries_no_names" {
+                allow_active == true || allow_names == EmptySet
+            }
+            guard "allow_names_match_filter_authority_catalog" {
+                meerkat_tool_visibility_names_are_catalog_backed(
+                    allow_names, self.filter_visibility_authority_catalog)
+            }
+            guard "deny_names_match_filter_authority_catalog" {
+                meerkat_tool_visibility_names_are_catalog_backed(
+                    deny_names, self.filter_visibility_authority_catalog)
+            }
+            update {
+                self.turn_tool_overlay_allow_active = allow_active;
+                self.turn_tool_overlay_allow_names = allow_names;
+                self.turn_tool_overlay_deny_names = deny_names;
+            }
+            to Idle
+        }
+
+        transition ClearTurnToolOverlay {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ClearTurnToolOverlay
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.turn_tool_overlay_allow_active = false;
+                self.turn_tool_overlay_allow_names = EmptySet;
+                self.turn_tool_overlay_deny_names = EmptySet;
+            }
+            to Idle
+        }
+
+        // SyncVisibilityRevisions: generated authority for full visibility
+        // replacement. The transition name is retained for compatibility, but
+        // it now admits filters, witnesses, deferred authority maps, and
+        // revision high-water marks before shell visibility projections are
+        // overwritten.
         transition SyncVisibilityRevisions {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input SyncVisibilityRevisions {
+                capability_base_filter, inherited_base_filter,
+                active_filter, staged_filter,
                 active_revision, staged_revision,
                 active_deferred_names, staged_deferred_names,
+                requested_witnesses, filter_witnesses,
                 active_deferred_authorities, staged_deferred_authorities
             }
-            guard "counter_advances" {
-                active_revision > self.next_staged_visibility_revision
-                || staged_revision > self.next_staged_visibility_revision
+            guard "session_registered" { self.session_id != None }
+            guard "visibility_state_replacement_matches_fields" {
+                meerkat_tool_visibility_state_replacement_matches(
+                    inherited_base_filter, active_filter, staged_filter,
+                    active_deferred_names, staged_deferred_names,
+                    requested_witnesses, filter_witnesses,
+                    active_deferred_authorities, staged_deferred_authorities,
+                    self.deferred_visibility_authority_catalog,
+                    self.filter_visibility_authority_catalog,
+                    active_revision, staged_revision) == true
+            }
+            guard "capability_base_filter_matches_current_surface" {
+                meerkat_session_llm_capability_base_filter_replacement_matches(
+                    self.current_session_capability_surface,
+                    self.current_session_capability_surface_status,
+                    self.current_session_capability_base_filter,
+                    capability_base_filter) == true
+            }
+            guard "equal_revision_requires_equal_active_and_staged_input" {
+                active_revision != staged_revision
+                || (active_filter == staged_filter
+                    && active_deferred_names == staged_deferred_names
+                    && active_deferred_authorities == staged_deferred_authorities)
             }
             guard "active_deferred_authorities_cover_names" {
                 for_all(requested_name in active_deferred_names, active_deferred_authorities.contains_key(requested_name))
@@ -7747,10 +18164,18 @@ macro_rules! meerkat_catalog_machine_dsl {
                 deferred_authorities_have_identity(staged_deferred_names, staged_deferred_authorities)
             }
             update {
+                self.current_session_capability_base_filter = capability_base_filter;
+                self.inherited_base_filter = inherited_base_filter;
+                self.active_filter = active_filter;
+                self.staged_filter = staged_filter;
                 self.active_deferred_names = active_deferred_names;
                 self.staged_deferred_names = staged_deferred_names;
+                self.requested_visibility_witnesses = requested_witnesses;
+                self.filter_visibility_witnesses = filter_witnesses;
                 self.active_deferred_authorities = active_deferred_authorities;
                 self.staged_deferred_authorities = staged_deferred_authorities;
+                self.active_visibility_revision = active_revision;
+                self.staged_visibility_revision = staged_revision;
                 if active_revision > self.next_staged_visibility_revision {
                     self.next_staged_visibility_revision = active_revision;
                 }
@@ -7893,6 +18318,18 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit PeerInteractionCleanup { corr_id: corr_id }
         }
 
+        transition PeerResponseRejected {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input PeerResponseRejected { corr_id }
+            guard "pending_exists" { self.pending_peer_requests.contains_key(corr_id) }
+            update {
+                self.pending_peer_requests.remove(corr_id);
+            }
+            to Idle
+            emit PeerInteractionStateChanged { corr_id: corr_id, new_state: OutboundPeerRequestState::Failed }
+            emit PeerInteractionCleanup { corr_id: corr_id }
+        }
+
         transition PeerRequestTimedOut {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input PeerRequestTimedOut { corr_id }
@@ -7907,10 +18344,11 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition PeerRequestReceived {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input PeerRequestReceived { corr_id }
+            on input PeerRequestReceived { corr_id, handling_mode }
             guard "not_already_inbound" { !self.inbound_peer_requests.contains_key(corr_id) }
             update {
                 self.inbound_peer_requests.insert(corr_id, InboundPeerRequestState::Received);
+                self.inbound_peer_request_lanes.insert(corr_id, handling_mode);
             }
             to Idle
             emit InboundPeerInteractionStateChanged { corr_id: corr_id, new_state: InboundPeerRequestState::Received }
@@ -7922,6 +18360,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "inbound_exists" { self.inbound_peer_requests.contains_key(corr_id) }
             update {
                 self.inbound_peer_requests.remove(corr_id);
+                self.inbound_peer_request_lanes.remove(corr_id);
             }
             to Idle
             emit InboundPeerInteractionStateChanged { corr_id: corr_id, new_state: InboundPeerRequestState::Replied }
@@ -8097,14 +18536,370 @@ macro_rules! meerkat_catalog_machine_dsl {
         // Supervisor-bridge authorization (Wave 3 D Row 21)
         // =====================================================================
 
-        // BindSupervisor: only valid from `Unbound`. The shell-side
-        // bootstrap gate (`validate_bind_request`) validates
-        // sender-authentication and bootstrap token before firing this
-        // input; the DSL owns the transition that flips the kind to
-        // `Bound` and records the canonical identity + epoch.
+        // ResolveSupervisorBindAdmission: generated authority for
+        // `BindMember` admission. The shell may still validate transport
+        // facts such as bootstrap token and local endpoint identity, but the
+        // binding-state result class (bootstrap, idempotent ack, already
+        // bound, sender mismatch) is emitted here from canonical supervisor
+        // state.
+        transition ResolveSupervisorBindAdmissionBootstrap {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorBindAdmission { supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard "supervisor_unbound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Unbound
+            }
+            update {}
+            to Idle
+            emit SupervisorBindAdmissionResolved {
+                result: SupervisorBindAdmissionResultKind::Bootstrap,
+                rejection: None
+            }
+        }
+
+        transition ResolveSupervisorBindAdmissionIdempotentAck {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorBindAdmission { supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "supervisor_peer_id_matches_current" {
+                self.supervisor_bound_peer_id == Some(supervisor_peer_id)
+            }
+            guard "supervisor_epoch_matches_current" {
+                self.supervisor_bound_epoch == Some(supervisor_epoch)
+            }
+            guard "sender_peer_id_matches_current" {
+                sender_peer_id == self.supervisor_bound_peer_id
+            }
+            update {}
+            to Idle
+            emit SupervisorBindAdmissionResolved {
+                result: SupervisorBindAdmissionResultKind::IdempotentAck,
+                rejection: None
+            }
+        }
+
+        transition ResolveSupervisorBindAdmissionSenderMismatch {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorBindAdmission { supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "supervisor_peer_id_matches_current" {
+                self.supervisor_bound_peer_id == Some(supervisor_peer_id)
+            }
+            guard "supervisor_epoch_matches_current" {
+                self.supervisor_bound_epoch == Some(supervisor_epoch)
+            }
+            guard "sender_peer_id_mismatch" {
+                sender_peer_id != self.supervisor_bound_peer_id
+            }
+            update {}
+            to Idle
+            emit SupervisorBindAdmissionResolved {
+                result: SupervisorBindAdmissionResultKind::Reject,
+                rejection: Some(SupervisorBindRejectionKind::SenderMismatch)
+            }
+        }
+
+        transition ResolveSupervisorBindAdmissionAlreadyBound {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorBindAdmission { supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "supervisor_binding_mismatch" {
+                self.supervisor_bound_peer_id != Some(supervisor_peer_id)
+                || self.supervisor_bound_epoch != Some(supervisor_epoch)
+            }
+            update {}
+            to Idle
+            emit SupervisorBindAdmissionResolved {
+                result: SupervisorBindAdmissionResultKind::Reject,
+                rejection: Some(SupervisorBindRejectionKind::AlreadyBound)
+            }
+        }
+
+        // ResolveSupervisorBindMaterialAdmission: generated authority for the
+        // material `BindMember` transport/identity verdict the shell formerly
+        // decided inline. The shell computes four pure boolean observations
+        // (advertised-address match, raw supervisor-peer sender match, expected
+        // runtime peer-id match, bootstrap-token match) and mirrors the verdict
+        // emitted here. The precedence is encoded structurally so the FIRST
+        // failing check wins, matching the shell's short-circuit order:
+        // address → sender → expected peer-id → bootstrap token, else accept.
+        // Idle self-loops: pure classification of input booleans, no state read.
+        transition ResolveSupervisorBindMaterialAdmissionAddressMismatch {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorBindMaterialAdmission { address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches }
+            guard "address_mismatch" { address_matches == false }
+            update {}
+            to Idle
+            emit SupervisorBindMaterialAdmissionResolved {
+                verdict: SupervisorBindMaterialAdmissionKind::AddressMismatch
+            }
+        }
+
+        transition ResolveSupervisorBindMaterialAdmissionSenderMismatch {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorBindMaterialAdmission { address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches }
+            guard "address_matches" { address_matches == true }
+            guard "sender_mismatch" { sender_matches_supervisor == false }
+            update {}
+            to Idle
+            emit SupervisorBindMaterialAdmissionResolved {
+                verdict: SupervisorBindMaterialAdmissionKind::SenderMismatch
+            }
+        }
+
+        transition ResolveSupervisorBindMaterialAdmissionInvalidPeerSpec {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorBindMaterialAdmission { address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches }
+            guard "address_matches" { address_matches == true }
+            guard "sender_matches" { sender_matches_supervisor == true }
+            guard "expected_peer_id_mismatch" { expected_peer_id_matches == false }
+            update {}
+            to Idle
+            emit SupervisorBindMaterialAdmissionResolved {
+                verdict: SupervisorBindMaterialAdmissionKind::InvalidPeerSpec
+            }
+        }
+
+        transition ResolveSupervisorBindMaterialAdmissionInvalidBootstrapToken {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorBindMaterialAdmission { address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches }
+            guard "address_matches" { address_matches == true }
+            guard "sender_matches" { sender_matches_supervisor == true }
+            guard "expected_peer_id_matches" { expected_peer_id_matches == true }
+            guard "bootstrap_token_mismatch" { bootstrap_token_matches == false }
+            update {}
+            to Idle
+            emit SupervisorBindMaterialAdmissionResolved {
+                verdict: SupervisorBindMaterialAdmissionKind::InvalidBootstrapToken
+            }
+        }
+
+        transition ResolveSupervisorBindMaterialAdmissionAccept {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorBindMaterialAdmission { address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches }
+            guard "address_matches" { address_matches == true }
+            guard "sender_matches" { sender_matches_supervisor == true }
+            guard "expected_peer_id_matches" { expected_peer_id_matches == true }
+            guard "bootstrap_token_matches" { bootstrap_token_matches == true }
+            update {}
+            to Idle
+            emit SupervisorBindMaterialAdmissionResolved {
+                verdict: SupervisorBindMaterialAdmissionKind::Accept
+            }
+        }
+
+        // ResolveTranscriptEditAdmission: generated authority for the
+        // session-liveness `SESSION_BUSY` verdict an attempted transcript edit
+        // (fork / rewrite / restore) formerly decided inline in the shell. The
+        // shell supplies the two pure boolean observations it already computes
+        // (`runtime_running`, `has_active_inputs`) and mirrors the emitted
+        // verdict. The disjunction policy is encoded directly:
+        // `runtime_running || has_active_inputs` => DeniedBusy, else Admissible.
+        // This is a phase-preserving self-loop classifier — it never mutates
+        // lifecycle state — so it is modeled per observable phase (Idle /
+        // Attached / Running) the session authority may hold when a transcript
+        // edit is attempted, landing back on its own phase.
+        transition ResolveTranscriptEditAdmissionIdleBusy {
+            on input ResolveTranscriptEditAdmission { runtime_running, has_active_inputs }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "busy_disjunction" { runtime_running || has_active_inputs }
+            update {}
+            to Idle
+            emit TranscriptEditAdmissionResolved {
+                verdict: TranscriptEditAdmissionKind::DeniedBusy
+            }
+        }
+        transition ResolveTranscriptEditAdmissionIdleAdmissible {
+            on input ResolveTranscriptEditAdmission { runtime_running, has_active_inputs }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "idle_no_active" { !runtime_running && !has_active_inputs }
+            update {}
+            to Idle
+            emit TranscriptEditAdmissionResolved {
+                verdict: TranscriptEditAdmissionKind::Admissible
+            }
+        }
+        transition ResolveTranscriptEditAdmissionAttachedBusy {
+            on input ResolveTranscriptEditAdmission { runtime_running, has_active_inputs }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "busy_disjunction" { runtime_running || has_active_inputs }
+            update {}
+            to Attached
+            emit TranscriptEditAdmissionResolved {
+                verdict: TranscriptEditAdmissionKind::DeniedBusy
+            }
+        }
+        transition ResolveTranscriptEditAdmissionAttachedAdmissible {
+            on input ResolveTranscriptEditAdmission { runtime_running, has_active_inputs }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "attached_no_active" { !runtime_running && !has_active_inputs }
+            update {}
+            to Attached
+            emit TranscriptEditAdmissionResolved {
+                verdict: TranscriptEditAdmissionKind::Admissible
+            }
+        }
+        transition ResolveTranscriptEditAdmissionRunningBusy {
+            on input ResolveTranscriptEditAdmission { runtime_running, has_active_inputs }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "busy_disjunction" { runtime_running || has_active_inputs }
+            update {}
+            to Running
+            emit TranscriptEditAdmissionResolved {
+                verdict: TranscriptEditAdmissionKind::DeniedBusy
+            }
+        }
+        transition ResolveTranscriptEditAdmissionRunningAdmissible {
+            on input ResolveTranscriptEditAdmission { runtime_running, has_active_inputs }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "running_no_active" { !runtime_running && !has_active_inputs }
+            update {}
+            to Running
+            emit TranscriptEditAdmissionResolved {
+                verdict: TranscriptEditAdmissionKind::Admissible
+            }
+        }
+
+        // ResolveSupervisorAuthorizeAdmission: generated authority for
+        // `AuthorizeSupervisor` admission. Accepted rotations carry the
+        // previous binding in the local feedback so rollback and revoke
+        // staging consume generated facts instead of a shell-classified
+        // snapshot.
+        transition ResolveSupervisorAuthorizeAdmissionNotBound {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorAuthorizeAdmission { supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard "supervisor_not_bound" {
+                self.supervisor_binding_kind != SupervisorBindingKind::Bound
+            }
+            update {}
+            to Idle
+            emit SupervisorAuthorizeAdmissionResolved {
+                result: SupervisorAuthorizeAdmissionResultKind::Reject,
+                rejection: Some(SupervisorAuthorizeRejectionKind::NotBound),
+                previous_name: None,
+                previous_peer_id: None,
+                previous_address: None,
+                previous_signing_public_key: None,
+                previous_epoch: None
+            }
+        }
+
+        transition ResolveSupervisorAuthorizeAdmissionStaleSupervisor {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorAuthorizeAdmission { supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "stale_supervisor_epoch" {
+                supervisor_epoch < self.supervisor_bound_epoch.get("value")
+            }
+            update {}
+            to Idle
+            emit SupervisorAuthorizeAdmissionResolved {
+                result: SupervisorAuthorizeAdmissionResultKind::Reject,
+                rejection: Some(SupervisorAuthorizeRejectionKind::StaleSupervisor),
+                previous_name: None,
+                previous_peer_id: None,
+                previous_address: None,
+                previous_signing_public_key: None,
+                previous_epoch: None
+            }
+        }
+
+        transition ResolveSupervisorAuthorizeAdmissionSenderMismatch {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorAuthorizeAdmission { supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "supervisor_epoch_not_stale" {
+                supervisor_epoch >= self.supervisor_bound_epoch.get("value")
+            }
+            guard "sender_peer_id_mismatch" {
+                sender_peer_id != self.supervisor_bound_peer_id
+            }
+            update {}
+            to Idle
+            emit SupervisorAuthorizeAdmissionResolved {
+                result: SupervisorAuthorizeAdmissionResultKind::Reject,
+                rejection: Some(SupervisorAuthorizeRejectionKind::SenderMismatch),
+                previous_name: None,
+                previous_peer_id: None,
+                previous_address: None,
+                previous_signing_public_key: None,
+                previous_epoch: None
+            }
+        }
+
+        transition ResolveSupervisorAuthorizeAdmissionIdempotentAck {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorAuthorizeAdmission { supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "supervisor_peer_id_matches_current" {
+                self.supervisor_bound_peer_id == Some(supervisor_peer_id)
+            }
+            guard "supervisor_epoch_matches_current" {
+                self.supervisor_bound_epoch == Some(supervisor_epoch)
+            }
+            guard "sender_peer_id_matches_current" {
+                sender_peer_id == self.supervisor_bound_peer_id
+            }
+            update {}
+            to Idle
+            emit SupervisorAuthorizeAdmissionResolved {
+                result: SupervisorAuthorizeAdmissionResultKind::IdempotentAck,
+                rejection: None,
+                previous_name: None,
+                previous_peer_id: None,
+                previous_address: None,
+                previous_signing_public_key: None,
+                previous_epoch: None
+            }
+        }
+
+        transition ResolveSupervisorAuthorizeAdmissionProceed {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorAuthorizeAdmission { supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "supervisor_epoch_not_stale" {
+                supervisor_epoch >= self.supervisor_bound_epoch.get("value")
+            }
+            guard "sender_peer_id_matches_current" {
+                sender_peer_id == self.supervisor_bound_peer_id
+            }
+            guard "not_idempotent" {
+                self.supervisor_bound_peer_id != Some(supervisor_peer_id)
+                || self.supervisor_bound_epoch != Some(supervisor_epoch)
+            }
+            update {}
+            to Idle
+            emit SupervisorAuthorizeAdmissionResolved {
+                result: SupervisorAuthorizeAdmissionResultKind::Proceed,
+                rejection: None,
+                previous_name: Some(self.supervisor_bound_name.get("value")),
+                previous_peer_id: Some(self.supervisor_bound_peer_id.get("value")),
+                previous_address: Some(self.supervisor_bound_address.get("value")),
+                previous_signing_public_key: Some(self.supervisor_bound_signing_public_key.get("value")),
+                previous_epoch: Some(self.supervisor_bound_epoch.get("value"))
+            }
+        }
+
+        // BindSupervisor: only valid from `Unbound`. The bootstrap shell
+        // validation checks transport facts after generated admission emits
+        // `Bootstrap`; this transition owns the mutation that flips the kind
+        // to `Bound` and records the canonical identity + epoch.
         transition BindSupervisor {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input BindSupervisor { name, peer_id, address, epoch }
+            on input BindSupervisor { name, peer_id, address, signing_public_key, epoch }
             guard "supervisor_unbound" {
                 self.supervisor_binding_kind == SupervisorBindingKind::Unbound
             }
@@ -8113,26 +18908,36 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.supervisor_bound_name = Some(name);
                 self.supervisor_bound_peer_id = Some(peer_id);
                 self.supervisor_bound_address = Some(address);
+                self.supervisor_bound_signing_public_key = Some(signing_public_key);
                 self.supervisor_bound_epoch = Some(epoch);
+                self.supervisor_publish_pending_name = Some(self.supervisor_bound_name.get("value"));
+                self.supervisor_publish_pending_peer_id = Some(self.supervisor_bound_peer_id.get("value"));
+                self.supervisor_publish_pending_address = Some(self.supervisor_bound_address.get("value"));
+                self.supervisor_publish_pending_signing_public_key = Some(self.supervisor_bound_signing_public_key.get("value"));
+                self.supervisor_publish_pending_epoch = Some(self.supervisor_bound_epoch.get("value"));
+                self.supervisor_revoke_pending_name = None;
+                self.supervisor_revoke_pending_peer_id = None;
+                self.supervisor_revoke_pending_address = None;
+                self.supervisor_revoke_pending_signing_public_key = None;
+                self.supervisor_revoke_pending_epoch = None;
             }
             to Idle
             emit PublishSupervisorTrustEdge {
+                local_endpoint: self.local_endpoint,
                 peer_id: self.supervisor_bound_peer_id.get("value"),
                 name: self.supervisor_bound_name.get("value"),
                 address: self.supervisor_bound_address.get("value"),
-                signing_public_key: None,
+                signing_public_key: Some(self.supervisor_bound_signing_public_key.get("value")),
                 epoch: self.supervisor_bound_epoch.get("value")
             }
         }
 
-        // AuthorizeSupervisor: only valid from `Bound`. Rotates the
-        // current binding to a new supervisor + epoch. The shell-side
-        // gate (`validate_authorize_supervisor_request`) enforces that
-        // the rotation request is authenticated by the *current*
-        // supervisor before firing this input.
+        // AuthorizeSupervisor: only valid from `Bound`. Generated
+        // `ResolveSupervisorAuthorizeAdmission` accepts the rotation before
+        // the shell fires this mutation input.
         transition AuthorizeSupervisor {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input AuthorizeSupervisor { name, peer_id, address, epoch }
+            on input AuthorizeSupervisor { name, peer_id, address, signing_public_key, epoch }
             guard "supervisor_bound" {
                 self.supervisor_binding_kind == SupervisorBindingKind::Bound
             }
@@ -8140,15 +18945,70 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.supervisor_bound_name = Some(name);
                 self.supervisor_bound_peer_id = Some(peer_id);
                 self.supervisor_bound_address = Some(address);
+                self.supervisor_bound_signing_public_key = Some(signing_public_key);
                 self.supervisor_bound_epoch = Some(epoch);
+                self.supervisor_publish_pending_name = Some(self.supervisor_bound_name.get("value"));
+                self.supervisor_publish_pending_peer_id = Some(self.supervisor_bound_peer_id.get("value"));
+                self.supervisor_publish_pending_address = Some(self.supervisor_bound_address.get("value"));
+                self.supervisor_publish_pending_signing_public_key = Some(self.supervisor_bound_signing_public_key.get("value"));
+                self.supervisor_publish_pending_epoch = Some(self.supervisor_bound_epoch.get("value"));
+                self.supervisor_revoke_pending_name = None;
+                self.supervisor_revoke_pending_peer_id = None;
+                self.supervisor_revoke_pending_address = None;
+                self.supervisor_revoke_pending_signing_public_key = None;
+                self.supervisor_revoke_pending_epoch = None;
             }
             to Idle
             emit PublishSupervisorTrustEdge {
+                local_endpoint: self.local_endpoint,
                 peer_id: self.supervisor_bound_peer_id.get("value"),
                 name: self.supervisor_bound_name.get("value"),
                 address: self.supervisor_bound_address.get("value"),
-                signing_public_key: None,
+                signing_public_key: Some(self.supervisor_bound_signing_public_key.get("value")),
                 epoch: self.supervisor_bound_epoch.get("value")
+            }
+        }
+
+        // RequestSupervisorTrustPublish: valid only as an exact restatement
+        // of the current binding. Used by repair/idempotence paths that need
+        // a fresh generated publish obligation without changing the
+        // supervisor identity.
+        transition RequestSupervisorTrustPublish {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RequestSupervisorTrustPublish { name, peer_id, address, signing_public_key, epoch }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "name_matches_current" {
+                self.supervisor_bound_name == Some(name)
+            }
+            guard "peer_id_matches_current" {
+                self.supervisor_bound_peer_id == Some(peer_id)
+            }
+            guard "address_matches_current" {
+                self.supervisor_bound_address == Some(address)
+            }
+            guard "signing_public_key_matches_current" {
+                self.supervisor_bound_signing_public_key == Some(signing_public_key)
+            }
+            guard "epoch_matches_current" {
+                self.supervisor_bound_epoch == Some(epoch)
+            }
+            update {
+                self.supervisor_publish_pending_name = Some(name);
+                self.supervisor_publish_pending_peer_id = Some(peer_id);
+                self.supervisor_publish_pending_address = Some(address);
+                self.supervisor_publish_pending_signing_public_key = Some(signing_public_key);
+                self.supervisor_publish_pending_epoch = Some(epoch);
+            }
+            to Idle
+            emit PublishSupervisorTrustEdge {
+                local_endpoint: self.local_endpoint,
+                peer_id: self.supervisor_publish_pending_peer_id.get("value"),
+                name: self.supervisor_publish_pending_name.get("value"),
+                address: self.supervisor_publish_pending_address.get("value"),
+                signing_public_key: Some(self.supervisor_publish_pending_signing_public_key.get("value")),
+                epoch: self.supervisor_publish_pending_epoch.get("value")
             }
         }
 
@@ -8169,14 +19029,29 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.supervisor_bound_epoch == Some(epoch)
             }
             update {
+                self.supervisor_revoke_pending_name = Some(self.supervisor_bound_name.get("value"));
+                self.supervisor_revoke_pending_peer_id = Some(peer_id);
+                self.supervisor_revoke_pending_address = Some(self.supervisor_bound_address.get("value"));
+                self.supervisor_revoke_pending_signing_public_key = Some(self.supervisor_bound_signing_public_key.get("value"));
+                self.supervisor_revoke_pending_epoch = Some(epoch);
                 self.supervisor_binding_kind = SupervisorBindingKind::Unbound;
                 self.supervisor_bound_name = None;
                 self.supervisor_bound_peer_id = None;
                 self.supervisor_bound_address = None;
+                self.supervisor_bound_signing_public_key = None;
                 self.supervisor_bound_epoch = None;
+                self.supervisor_publish_pending_name = None;
+                self.supervisor_publish_pending_peer_id = None;
+                self.supervisor_publish_pending_address = None;
+                self.supervisor_publish_pending_signing_public_key = None;
+                self.supervisor_publish_pending_epoch = None;
             }
             to Idle
-            emit RevokeSupervisorTrustEdge { peer_id: peer_id, epoch: epoch }
+            emit RevokeSupervisorTrustEdge {
+                local_endpoint: self.local_endpoint,
+                peer_id: peer_id,
+                epoch: epoch
+            }
         }
 
         // Supervisor-trust-edge feedback transitions (C-F2 / wave-d D-d).
@@ -8198,7 +19073,19 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "epoch_matches_current" {
                 self.supervisor_bound_epoch == Some(epoch)
             }
-            update {}
+            guard "peer_id_matches_pending_publish" {
+                self.supervisor_publish_pending_peer_id == Some(peer_id)
+            }
+            guard "epoch_matches_pending_publish" {
+                self.supervisor_publish_pending_epoch == Some(epoch)
+            }
+            update {
+                self.supervisor_publish_pending_name = None;
+                self.supervisor_publish_pending_peer_id = None;
+                self.supervisor_publish_pending_address = None;
+                self.supervisor_publish_pending_signing_public_key = None;
+                self.supervisor_publish_pending_epoch = None;
+            }
             to Idle
         }
 
@@ -8214,39 +19101,69 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "epoch_matches_current" {
                 self.supervisor_bound_epoch == Some(epoch)
             }
-            update {}
+            guard "peer_id_matches_pending_publish" {
+                self.supervisor_publish_pending_peer_id == Some(peer_id)
+            }
+            guard "epoch_matches_pending_publish" {
+                self.supervisor_publish_pending_epoch == Some(epoch)
+            }
+            update {
+                self.supervisor_publish_pending_name = None;
+                self.supervisor_publish_pending_peer_id = None;
+                self.supervisor_publish_pending_address = None;
+                self.supervisor_publish_pending_signing_public_key = None;
+                self.supervisor_publish_pending_epoch = None;
+            }
             to Idle
         }
 
         transition SupervisorTrustEdgeRevoked {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input SupervisorTrustEdgeRevoked { peer_id, epoch }
-            guard "supervisor_bound" {
-                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            guard "supervisor_unbound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Unbound
             }
-            guard "peer_id_matches_current" {
-                self.supervisor_bound_peer_id == Some(peer_id)
+            guard "peer_id_matches_pending_revoke" {
+                self.supervisor_revoke_pending_peer_id == Some(peer_id)
             }
-            guard "epoch_matches_current" {
-                self.supervisor_bound_epoch == Some(epoch)
+            guard "epoch_matches_pending_revoke" {
+                self.supervisor_revoke_pending_epoch == Some(epoch)
             }
-            update {}
+            update {
+                self.supervisor_revoke_pending_name = None;
+                self.supervisor_revoke_pending_peer_id = None;
+                self.supervisor_revoke_pending_address = None;
+                self.supervisor_revoke_pending_signing_public_key = None;
+                self.supervisor_revoke_pending_epoch = None;
+            }
             to Idle
         }
 
         transition SupervisorTrustEdgeRevokeFailed {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input SupervisorTrustEdgeRevokeFailed { peer_id, epoch, reason }
-            guard "supervisor_bound" {
-                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            guard "supervisor_unbound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Unbound
             }
-            guard "peer_id_matches_current" {
-                self.supervisor_bound_peer_id == Some(peer_id)
+            guard "peer_id_matches_pending_revoke" {
+                self.supervisor_revoke_pending_peer_id == Some(peer_id)
             }
-            guard "epoch_matches_current" {
-                self.supervisor_bound_epoch == Some(epoch)
+            guard "epoch_matches_pending_revoke" {
+                self.supervisor_revoke_pending_epoch == Some(epoch)
             }
-            update {}
+            update {
+                self.supervisor_binding_kind = SupervisorBindingKind::Bound;
+                self.supervisor_bound_name = Some(self.supervisor_revoke_pending_name.get("value"));
+                self.supervisor_bound_peer_id = Some(self.supervisor_revoke_pending_peer_id.get("value"));
+                self.supervisor_bound_address = Some(self.supervisor_revoke_pending_address.get("value"));
+                self.supervisor_bound_signing_public_key = Some(self.supervisor_revoke_pending_signing_public_key.get("value"));
+                self.supervisor_bound_epoch = Some(self.supervisor_revoke_pending_epoch.get("value"));
+                self.supervisor_revoke_pending_name = None;
+                self.supervisor_revoke_pending_peer_id = None;
+                self.supervisor_revoke_pending_address = None;
+                self.supervisor_revoke_pending_signing_public_key = None;
+                self.supervisor_revoke_pending_epoch = None;
+            }
             to Idle
         }
 
@@ -8292,7 +19209,16 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit PeerProjectionChanged { peer_projection_epoch: self.peer_projection_epoch }
-            emit CommsTrustReconcileRequested { peer_projection_epoch: self.peer_projection_epoch }
+            emit CommsTrustReconcileRequested { local_endpoint: self.local_endpoint, peer_projection_epoch: self.peer_projection_epoch, direct_peer_endpoints: self.direct_peer_endpoints, mob_overlay_peer_endpoints: self.mob_overlay_peer_endpoints }
+        }
+
+        transition RepairAddDirectPeerEndpoint {
+            per_phase [Idle, Attached, Running]
+            on input AddDirectPeerEndpoint { endpoint }
+            guard "endpoint_already_direct" { self.direct_peer_endpoints.contains(endpoint) == true }
+            update {}
+            to Idle
+            emit CommsTrustReconcileRequested { local_endpoint: self.local_endpoint, peer_projection_epoch: self.peer_projection_epoch, direct_peer_endpoints: self.direct_peer_endpoints, mob_overlay_peer_endpoints: self.mob_overlay_peer_endpoints }
         }
 
         transition RemoveDirectPeerEndpoint {
@@ -8305,7 +19231,142 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit PeerProjectionChanged { peer_projection_epoch: self.peer_projection_epoch }
-            emit CommsTrustReconcileRequested { peer_projection_epoch: self.peer_projection_epoch }
+            emit CommsTrustReconcileRequested { local_endpoint: self.local_endpoint, peer_projection_epoch: self.peer_projection_epoch, direct_peer_endpoints: self.direct_peer_endpoints, mob_overlay_peer_endpoints: self.mob_overlay_peer_endpoints }
+        }
+
+        transition RepairRemoveDirectPeerEndpoint {
+            per_phase [Idle, Attached, Running]
+            on input RemoveDirectPeerEndpoint { endpoint }
+            guard "endpoint_absent_from_direct" { self.direct_peer_endpoints.contains(endpoint) == false }
+            update {}
+            to Idle
+            emit CommsTrustReconcileRequested { local_endpoint: self.local_endpoint, peer_projection_epoch: self.peer_projection_epoch, direct_peer_endpoints: self.direct_peer_endpoints, mob_overlay_peer_endpoints: self.mob_overlay_peer_endpoints }
+        }
+
+        transition ResolveSupervisorBridgeCommandAdmissionAccepted {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorBridgeCommandAdmission { supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard "supervisor_bound" { self.supervisor_binding_kind == SupervisorBindingKind::Bound }
+            guard "supervisor_peer_id_matches_current" { self.supervisor_bound_peer_id == Some(supervisor_peer_id) }
+            guard "supervisor_epoch_matches_current" { self.supervisor_bound_epoch == Some(supervisor_epoch) }
+            guard "sender_peer_id_matches_current" { sender_peer_id == self.supervisor_bound_peer_id }
+            update {}
+            to Idle
+            emit SupervisorBridgeCommandAdmissionResolved {
+                result: SupervisorBridgeCommandAdmissionResultKind::Accept,
+                rejection: None
+            }
+        }
+
+        transition ResolveSupervisorBridgeCommandAdmissionNotBound {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorBridgeCommandAdmission { supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard "supervisor_not_bound" { self.supervisor_binding_kind != SupervisorBindingKind::Bound }
+            update {}
+            to Idle
+            emit SupervisorBridgeCommandAdmissionResolved {
+                result: SupervisorBridgeCommandAdmissionResultKind::Reject,
+                rejection: Some(SupervisorBridgeCommandRejectionKind::NotBound)
+            }
+        }
+
+        transition ResolveSupervisorBridgeCommandAdmissionStaleSupervisor {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorBridgeCommandAdmission { supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard "supervisor_bound" { self.supervisor_binding_kind == SupervisorBindingKind::Bound }
+            guard "supervisor_binding_mismatch" {
+                self.supervisor_bound_peer_id != Some(supervisor_peer_id)
+                || self.supervisor_bound_epoch != Some(supervisor_epoch)
+            }
+            update {}
+            to Idle
+            emit SupervisorBridgeCommandAdmissionResolved {
+                result: SupervisorBridgeCommandAdmissionResultKind::Reject,
+                rejection: Some(SupervisorBridgeCommandRejectionKind::StaleSupervisor)
+            }
+        }
+
+        transition ResolveSupervisorBridgeCommandAdmissionSenderMismatch {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorBridgeCommandAdmission { supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard "supervisor_bound" { self.supervisor_binding_kind == SupervisorBindingKind::Bound }
+            guard "supervisor_peer_id_matches_current" { self.supervisor_bound_peer_id == Some(supervisor_peer_id) }
+            guard "supervisor_epoch_matches_current" { self.supervisor_bound_epoch == Some(supervisor_epoch) }
+            guard "sender_peer_id_mismatch" { sender_peer_id != self.supervisor_bound_peer_id }
+            update {}
+            to Idle
+            emit SupervisorBridgeCommandAdmissionResolved {
+                result: SupervisorBridgeCommandAdmissionResultKind::Reject,
+                rejection: Some(SupervisorBridgeCommandRejectionKind::SenderMismatch)
+            }
+        }
+
+        transition AuthorizeSupervisorMobPeerOverlay {
+            per_phase [Idle, Attached, Running]
+            on input AuthorizeSupervisorMobPeerOverlay {
+                supervisor_peer_id,
+                supervisor_epoch,
+                recipient_peer_id,
+                overlay_epoch,
+                endpoints,
+                endpoint_count,
+                command_peer_id,
+                command_endpoint,
+                command_kind
+            }
+            guard "supervisor_bound" { self.supervisor_binding_kind == SupervisorBindingKind::Bound }
+            guard "supervisor_peer_id_matches_current" { self.supervisor_bound_peer_id == Some(supervisor_peer_id) }
+            guard "supervisor_epoch_matches_current" { self.supervisor_bound_epoch == Some(supervisor_epoch) }
+            guard "local_endpoint_published" { self.local_endpoint != None }
+            guard "recipient_matches_local_peer" { meerkat_peer_endpoint_option_peer_id_matches(self.local_endpoint, recipient_peer_id) == true }
+            guard "overlay_endpoint_count_matches" { meerkat_peer_endpoint_set_cardinality_matches(endpoints, endpoint_count) == true }
+            guard "overlay_peer_ids_unique" { meerkat_peer_endpoint_set_peer_ids_unique(endpoints) == true }
+            guard "command_peer_id_matches_endpoint" { meerkat_peer_endpoint_peer_id_matches(command_endpoint, command_peer_id) == true }
+            guard "command_peer_membership_matches_kind" {
+                (command_kind == MobPeerOverlayCommandKind::Wire && endpoints.contains(command_endpoint) == true)
+                || (command_kind == MobPeerOverlayCommandKind::Unwire && meerkat_peer_endpoint_set_contains_peer_id(endpoints, command_peer_id) == false)
+            }
+            guard "stale_overlay_epoch" { overlay_epoch > self.mob_overlay_epoch }
+            update {
+                self.mob_overlay_peer_endpoints = endpoints;
+                self.mob_overlay_epoch = overlay_epoch;
+                self.peer_projection_epoch += 1;
+            }
+            to Idle
+            emit PeerProjectionChanged { peer_projection_epoch: self.peer_projection_epoch }
+            emit CommsTrustReconcileRequested { local_endpoint: self.local_endpoint, peer_projection_epoch: self.peer_projection_epoch, direct_peer_endpoints: self.direct_peer_endpoints, mob_overlay_peer_endpoints: self.mob_overlay_peer_endpoints }
+        }
+
+        transition RepairSupervisorMobPeerOverlay {
+            per_phase [Idle, Attached, Running]
+            on input AuthorizeSupervisorMobPeerOverlay {
+                supervisor_peer_id,
+                supervisor_epoch,
+                recipient_peer_id,
+                overlay_epoch,
+                endpoints,
+                endpoint_count,
+                command_peer_id,
+                command_endpoint,
+                command_kind
+            }
+            guard "supervisor_bound" { self.supervisor_binding_kind == SupervisorBindingKind::Bound }
+            guard "supervisor_peer_id_matches_current" { self.supervisor_bound_peer_id == Some(supervisor_peer_id) }
+            guard "supervisor_epoch_matches_current" { self.supervisor_bound_epoch == Some(supervisor_epoch) }
+            guard "local_endpoint_published" { self.local_endpoint != None }
+            guard "recipient_matches_local_peer" { meerkat_peer_endpoint_option_peer_id_matches(self.local_endpoint, recipient_peer_id) == true }
+            guard "overlay_endpoint_count_matches" { meerkat_peer_endpoint_set_cardinality_matches(endpoints, endpoint_count) == true }
+            guard "overlay_peer_ids_unique" { meerkat_peer_endpoint_set_peer_ids_unique(endpoints) == true }
+            guard "command_peer_id_matches_endpoint" { meerkat_peer_endpoint_peer_id_matches(command_endpoint, command_peer_id) == true }
+            guard "command_peer_membership_matches_kind" {
+                (command_kind == MobPeerOverlayCommandKind::Wire && endpoints.contains(command_endpoint) == true)
+                || (command_kind == MobPeerOverlayCommandKind::Unwire && meerkat_peer_endpoint_set_contains_peer_id(endpoints, command_peer_id) == false)
+            }
+            guard "overlay_epoch_current" { overlay_epoch == self.mob_overlay_epoch }
+            guard "overlay_endpoints_match" { endpoints == self.mob_overlay_peer_endpoints }
+            update {}
+            to Idle
+            emit CommsTrustReconcileRequested { local_endpoint: self.local_endpoint, peer_projection_epoch: self.peer_projection_epoch, direct_peer_endpoints: self.direct_peer_endpoints, mob_overlay_peer_endpoints: self.mob_overlay_peer_endpoints }
         }
 
         transition ApplyMobPeerOverlay {
@@ -8319,11 +19380,386 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit PeerProjectionChanged { peer_projection_epoch: self.peer_projection_epoch }
-            emit CommsTrustReconcileRequested { peer_projection_epoch: self.peer_projection_epoch }
+            emit CommsTrustReconcileRequested { local_endpoint: self.local_endpoint, peer_projection_epoch: self.peer_projection_epoch, direct_peer_endpoints: self.direct_peer_endpoints, mob_overlay_peer_endpoints: self.mob_overlay_peer_endpoints }
+        }
+
+        transition RepairMobPeerOverlay {
+            per_phase [Idle, Attached, Running]
+            on input ApplyMobPeerOverlay { epoch, endpoints }
+            guard "overlay_epoch_current" { epoch == self.mob_overlay_epoch }
+            guard "overlay_endpoints_match" { endpoints == self.mob_overlay_peer_endpoints }
+            update {}
+            to Idle
+            emit CommsTrustReconcileRequested { local_endpoint: self.local_endpoint, peer_projection_epoch: self.peer_projection_epoch, direct_peer_endpoints: self.direct_peer_endpoints, mob_overlay_peer_endpoints: self.mob_overlay_peer_endpoints }
+        }
+
+        // ClassifyTurnTerminalCauseClass: generated normalization of the closed
+        // turn-terminal cause enum (plus the absent `None` cause) onto the
+        // coarser `TerminalCauseClass`. The `terminal_surface_mapping` codegen
+        // derives the `classify_cause` projection mechanically from these
+        // transitions. Idle self-loops: pure classification, no state mutation.
+        transition ClassifyTurnTerminalCauseClassMissing {
+            per_phase [Idle]
+            on input ClassifyTurnTerminalCauseClass { cause_kind }
+            guard "cause_missing" { cause_kind == None }
+            update {}
+            to Idle
+            emit TurnTerminalCauseClassResolved { cause_kind: cause_kind, cause_class: TerminalCauseClass::Missing }
+        }
+
+        transition ClassifyTurnTerminalCauseClassUnknown {
+            per_phase [Idle]
+            on input ClassifyTurnTerminalCauseClass { cause_kind }
+            guard "cause_unknown" { cause_kind == Some(TurnTerminalCauseKind::Unknown) }
+            update {}
+            to Idle
+            emit TurnTerminalCauseClassResolved { cause_kind: cause_kind, cause_class: TerminalCauseClass::Unknown }
+        }
+
+        transition ClassifyTurnTerminalCauseClassBudgetExhausted {
+            per_phase [Idle]
+            on input ClassifyTurnTerminalCauseClass { cause_kind }
+            guard "cause_budget_exhausted" { cause_kind == Some(TurnTerminalCauseKind::BudgetExhausted) }
+            update {}
+            to Idle
+            emit TurnTerminalCauseClassResolved { cause_kind: cause_kind, cause_class: TerminalCauseClass::BudgetExhausted }
+        }
+
+        transition ClassifyTurnTerminalCauseClassTimeBudgetExceeded {
+            per_phase [Idle]
+            on input ClassifyTurnTerminalCauseClass { cause_kind }
+            guard "cause_time_budget_exceeded" { cause_kind == Some(TurnTerminalCauseKind::TimeBudgetExceeded) }
+            update {}
+            to Idle
+            emit TurnTerminalCauseClassResolved { cause_kind: cause_kind, cause_class: TerminalCauseClass::TimeBudgetExceeded }
+        }
+
+        transition ClassifyTurnTerminalCauseClassRetryExhausted {
+            per_phase [Idle]
+            on input ClassifyTurnTerminalCauseClass { cause_kind }
+            guard "cause_retry_exhausted" { cause_kind == Some(TurnTerminalCauseKind::RetryExhausted) }
+            update {}
+            to Idle
+            emit TurnTerminalCauseClassResolved { cause_kind: cause_kind, cause_class: TerminalCauseClass::RetryExhausted }
+        }
+
+        transition ClassifyTurnTerminalCauseClassStructuredOutputValidationFailed {
+            per_phase [Idle]
+            on input ClassifyTurnTerminalCauseClass { cause_kind }
+            guard "cause_structured_output_validation_failed" { cause_kind == Some(TurnTerminalCauseKind::StructuredOutputValidationFailed) }
+            update {}
+            to Idle
+            emit TurnTerminalCauseClassResolved { cause_kind: cause_kind, cause_class: TerminalCauseClass::StructuredOutputValidationFailed }
+        }
+
+        transition ClassifyTurnTerminalCauseClassOtherFailure {
+            per_phase [Idle]
+            on input ClassifyTurnTerminalCauseClass { cause_kind }
+            guard "cause_other_failure" {
+                cause_kind == Some(TurnTerminalCauseKind::HookDenied)
+                || cause_kind == Some(TurnTerminalCauseKind::HookFailure)
+                || cause_kind == Some(TurnTerminalCauseKind::LlmFailure)
+                || cause_kind == Some(TurnTerminalCauseKind::ToolFailure)
+                || cause_kind == Some(TurnTerminalCauseKind::TurnLimitReached)
+                || cause_kind == Some(TurnTerminalCauseKind::RuntimeApplyFailure)
+                || cause_kind == Some(TurnTerminalCauseKind::FatalFailure)
+            }
+            update {}
+            to Idle
+            emit TurnTerminalCauseClassResolved { cause_kind: cause_kind, cause_class: TerminalCauseClass::OtherFailure }
+        }
+
+        // ClassifyTurnTerminality: this machine owns the turn_phase field and the
+        // turn-terminality verdict (which turn phases are terminal). The shell
+        // extracts no fact — it drives this input over the recovered machine state
+        // and mirrors the emitted TurnTerminalityClassified.terminal, failing
+        // closed. The terminal turn-phase set is {Completed, Failed, Cancelled};
+        // every other turn phase is non-terminal. Self-loops in the machine phase
+        // (pure classification, no state mutation).
+        transition ClassifyTurnTerminalityTerminal {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyTurnTerminality {}
+            guard "turn_phase_terminal" {
+                self.turn_phase == TurnPhase::Completed
+                || self.turn_phase == TurnPhase::Failed
+                || self.turn_phase == TurnPhase::Cancelled
+            }
+            update {}
+            to Idle
+            emit TurnTerminalityClassified { terminal: true }
+        }
+
+        transition ClassifyTurnTerminalityNonTerminal {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyTurnTerminality {}
+            guard "turn_phase_non_terminal" {
+                self.turn_phase == TurnPhase::Ready
+                || self.turn_phase == TurnPhase::ApplyingPrimitive
+                || self.turn_phase == TurnPhase::CallingLlm
+                || self.turn_phase == TurnPhase::WaitingForOps
+                || self.turn_phase == TurnPhase::DrainingBoundary
+                || self.turn_phase == TurnPhase::Extracting
+                || self.turn_phase == TurnPhase::ErrorRecovery
+                || self.turn_phase == TurnPhase::Cancelling
+            }
+            update {}
+            to Idle
+            emit TurnTerminalityClassified { terminal: false }
+        }
+
+        // P0 Dogma Invariant 1: ClassifyLlmFailureRecovery — MeerkatMachine owns
+        // the recoverable-vs-fatal AND exhaustion verdict for an LLM failure.
+        // The shell extracts the typed `failure_kind` (absent when the
+        // `AgentError` yields no recoverable kind) and the one-based
+        // `retry_attempt` / `max_retries`, then mirrors the emitted verdict.
+        // Reproduces the former shell decision EXACTLY: a recoverable
+        // `failure_kind` with `retry_attempt <= max_retries` -> `Recover`
+        // (the `should_retry` + `from_agent_error` Some path); a recoverable
+        // kind past `max_retries` -> `Exhausted`; an absent or non-recoverable
+        // kind -> `Fatal`. The recoverability set is the single
+        // `llm_failure_kind_recoverable` authority shared with the
+        // `RecoverableFailure` guard. Idle self-loops: pure classification.
+        transition ClassifyLlmFailureRecoveryRecover {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyLlmFailureRecovery { failure_kind, retry_attempt, max_retries }
+            guard "failure_kind_recoverable_with_retries" {
+                failure_kind != None
+                && llm_failure_kind_recoverable(failure_kind.get("value"))
+                && retry_attempt <= max_retries
+            }
+            update {}
+            to Idle
+            emit LlmFailureRecoveryClassified { recovery: LlmFailureRecoveryKind::Recover }
+        }
+
+        transition ClassifyLlmFailureRecoveryExhausted {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyLlmFailureRecovery { failure_kind, retry_attempt, max_retries }
+            guard "failure_kind_recoverable_retries_exhausted" {
+                failure_kind != None
+                && llm_failure_kind_recoverable(failure_kind.get("value"))
+                && retry_attempt > max_retries
+            }
+            update {}
+            to Idle
+            emit LlmFailureRecoveryClassified { recovery: LlmFailureRecoveryKind::Exhausted }
+        }
+
+        transition ClassifyLlmFailureRecoveryFatal {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyLlmFailureRecovery { failure_kind, retry_attempt, max_retries }
+            guard "failure_kind_not_recoverable" {
+                failure_kind == None
+                || llm_failure_kind_recoverable(failure_kind.get("value")) == false
+            }
+            update {}
+            to Idle
+            emit LlmFailureRecoveryClassified { recovery: LlmFailureRecoveryKind::Fatal }
+        }
+
+        // ResolveTurnSurfaceResult: generated surface-result classification
+        // authority. Owns the `(terminal outcome, terminal cause class)` ->
+        // public surface-result class policy. The `terminal_surface_mapping`
+        // codegen derives the exhaustive `classify_terminal` table mechanically
+        // from these transitions; each `cause_class` arm is enumerated so the
+        // covered `(outcome, class)` set is read structurally, not by negation.
+        // Idle self-loops: pure classification, no state mutation.
+        transition ResolveTurnSurfaceResultNoneMissingTerminal {
+            per_phase [Idle]
+            on input ResolveTurnSurfaceResult { outcome, cause_class }
+            guard "outcome_none" { outcome == TurnTerminalOutcome::None }
+            update {}
+            to Idle
+            emit TurnSurfaceResultResolved { outcome: outcome, cause_class: cause_class, surface_class: SurfaceResultClass::MissingTerminal }
+        }
+
+        transition ResolveTurnSurfaceResultCompletedSuccess {
+            per_phase [Idle]
+            on input ResolveTurnSurfaceResult { outcome, cause_class }
+            guard "outcome_completed" { outcome == TurnTerminalOutcome::Completed }
+            guard "cause_absent_or_unknown" {
+                cause_class == TerminalCauseClass::Missing
+                || cause_class == TerminalCauseClass::Unknown
+            }
+            update {}
+            to Idle
+            emit TurnSurfaceResultResolved { outcome: outcome, cause_class: cause_class, surface_class: SurfaceResultClass::Success }
+        }
+
+        transition ResolveTurnSurfaceResultCompletedFailure {
+            per_phase [Idle]
+            on input ResolveTurnSurfaceResult { outcome, cause_class }
+            guard "outcome_completed" { outcome == TurnTerminalOutcome::Completed }
+            guard "cause_specific_failure" {
+                cause_class == TerminalCauseClass::BudgetExhausted
+                || cause_class == TerminalCauseClass::TimeBudgetExceeded
+                || cause_class == TerminalCauseClass::RetryExhausted
+                || cause_class == TerminalCauseClass::StructuredOutputValidationFailed
+                || cause_class == TerminalCauseClass::OtherFailure
+            }
+            update {}
+            to Idle
+            emit TurnSurfaceResultResolved { outcome: outcome, cause_class: cause_class, surface_class: SurfaceResultClass::HardFailure }
+        }
+
+        transition ResolveTurnSurfaceResultFailedHardFailure {
+            per_phase [Idle]
+            on input ResolveTurnSurfaceResult { outcome, cause_class }
+            guard "outcome_failed" { outcome == TurnTerminalOutcome::Failed }
+            guard "cause_any" {
+                cause_class == TerminalCauseClass::Missing
+                || cause_class == TerminalCauseClass::Unknown
+                || cause_class == TerminalCauseClass::BudgetExhausted
+                || cause_class == TerminalCauseClass::TimeBudgetExceeded
+                || cause_class == TerminalCauseClass::RetryExhausted
+                || cause_class == TerminalCauseClass::StructuredOutputValidationFailed
+                || cause_class == TerminalCauseClass::OtherFailure
+            }
+            update {}
+            to Idle
+            emit TurnSurfaceResultResolved { outcome: outcome, cause_class: cause_class, surface_class: SurfaceResultClass::HardFailure }
+        }
+
+        transition ResolveTurnSurfaceResultCancelledCancelled {
+            per_phase [Idle]
+            on input ResolveTurnSurfaceResult { outcome, cause_class }
+            guard "outcome_cancelled" { outcome == TurnTerminalOutcome::Cancelled }
+            guard "cause_absent_or_unknown" {
+                cause_class == TerminalCauseClass::Missing
+                || cause_class == TerminalCauseClass::Unknown
+            }
+            update {}
+            to Idle
+            emit TurnSurfaceResultResolved { outcome: outcome, cause_class: cause_class, surface_class: SurfaceResultClass::Cancelled }
+        }
+
+        transition ResolveTurnSurfaceResultCancelledFailure {
+            per_phase [Idle]
+            on input ResolveTurnSurfaceResult { outcome, cause_class }
+            guard "outcome_cancelled" { outcome == TurnTerminalOutcome::Cancelled }
+            guard "cause_specific_failure" {
+                cause_class == TerminalCauseClass::BudgetExhausted
+                || cause_class == TerminalCauseClass::TimeBudgetExceeded
+                || cause_class == TerminalCauseClass::RetryExhausted
+                || cause_class == TerminalCauseClass::StructuredOutputValidationFailed
+                || cause_class == TerminalCauseClass::OtherFailure
+            }
+            update {}
+            to Idle
+            emit TurnSurfaceResultResolved { outcome: outcome, cause_class: cause_class, surface_class: SurfaceResultClass::HardFailure }
+        }
+
+        transition ResolveTurnSurfaceResultBudgetExhaustedSuccess {
+            per_phase [Idle]
+            on input ResolveTurnSurfaceResult { outcome, cause_class }
+            guard "outcome_budget_exhausted" { outcome == TurnTerminalOutcome::BudgetExhausted }
+            guard "cause_budget_exhausted" { cause_class == TerminalCauseClass::BudgetExhausted }
+            update {}
+            to Idle
+            emit TurnSurfaceResultResolved { outcome: outcome, cause_class: cause_class, surface_class: SurfaceResultClass::Success }
+        }
+
+        transition ResolveTurnSurfaceResultBudgetExhaustedFailure {
+            per_phase [Idle]
+            on input ResolveTurnSurfaceResult { outcome, cause_class }
+            guard "outcome_budget_exhausted" { outcome == TurnTerminalOutcome::BudgetExhausted }
+            guard "cause_not_budget_exhausted" {
+                cause_class == TerminalCauseClass::Missing
+                || cause_class == TerminalCauseClass::Unknown
+                || cause_class == TerminalCauseClass::TimeBudgetExceeded
+                || cause_class == TerminalCauseClass::RetryExhausted
+                || cause_class == TerminalCauseClass::StructuredOutputValidationFailed
+                || cause_class == TerminalCauseClass::OtherFailure
+            }
+            update {}
+            to Idle
+            emit TurnSurfaceResultResolved { outcome: outcome, cause_class: cause_class, surface_class: SurfaceResultClass::HardFailure }
+        }
+
+        transition ResolveTurnSurfaceResultTimeBudgetExceededHardFailure {
+            per_phase [Idle]
+            on input ResolveTurnSurfaceResult { outcome, cause_class }
+            guard "outcome_time_budget_exceeded" { outcome == TurnTerminalOutcome::TimeBudgetExceeded }
+            guard "cause_any" {
+                cause_class == TerminalCauseClass::Missing
+                || cause_class == TerminalCauseClass::Unknown
+                || cause_class == TerminalCauseClass::BudgetExhausted
+                || cause_class == TerminalCauseClass::TimeBudgetExceeded
+                || cause_class == TerminalCauseClass::RetryExhausted
+                || cause_class == TerminalCauseClass::StructuredOutputValidationFailed
+                || cause_class == TerminalCauseClass::OtherFailure
+            }
+            update {}
+            to Idle
+            emit TurnSurfaceResultResolved { outcome: outcome, cause_class: cause_class, surface_class: SurfaceResultClass::HardFailure }
+        }
+
+        transition ResolveTurnSurfaceResultStructuredOutputValidationFailedHardFailure {
+            per_phase [Idle]
+            on input ResolveTurnSurfaceResult { outcome, cause_class }
+            guard "outcome_structured_output_validation_failed" { outcome == TurnTerminalOutcome::StructuredOutputValidationFailed }
+            guard "cause_any" {
+                cause_class == TerminalCauseClass::Missing
+                || cause_class == TerminalCauseClass::Unknown
+                || cause_class == TerminalCauseClass::BudgetExhausted
+                || cause_class == TerminalCauseClass::TimeBudgetExceeded
+                || cause_class == TerminalCauseClass::RetryExhausted
+                || cause_class == TerminalCauseClass::StructuredOutputValidationFailed
+                || cause_class == TerminalCauseClass::OtherFailure
+            }
+            update {}
+            to Idle
+            emit TurnSurfaceResultResolved { outcome: outcome, cause_class: cause_class, surface_class: SurfaceResultClass::HardFailure }
         }
     }
-}
+        }
+
+        impl MeerkatMachineAuthority {
+        fn meerkat_peer_endpoint_set_cardinality_matches(
+            endpoints: &std::collections::BTreeSet<PeerEndpoint>,
+            endpoint_count: &u64,
+        ) -> bool {
+            u64::try_from(endpoints.len()).ok() == Some(*endpoint_count)
+        }
+
+        fn meerkat_peer_endpoint_set_contains_peer_id(
+            endpoints: &std::collections::BTreeSet<PeerEndpoint>,
+            peer_id: &str,
+        ) -> bool {
+            endpoints
+                .iter()
+                .any(|endpoint| endpoint.peer_id.0.as_str() == peer_id)
+        }
+
+        fn meerkat_peer_endpoint_option_peer_id_matches(
+            endpoint: &Option<PeerEndpoint>,
+            peer_id: &str,
+        ) -> bool {
+            endpoint
+                .as_ref()
+                .is_some_and(|endpoint| endpoint.peer_id.0.as_str() == peer_id)
+        }
+
+        fn meerkat_peer_endpoint_peer_id_matches(
+            endpoint: &PeerEndpoint,
+            peer_id: &str,
+        ) -> bool {
+            endpoint.peer_id.0.as_str() == peer_id
+        }
+
+        fn meerkat_peer_endpoint_set_peer_ids_unique(
+            endpoints: &std::collections::BTreeSet<PeerEndpoint>,
+        ) -> bool {
+            let mut peer_ids = std::collections::BTreeSet::new();
+            endpoints
+                .iter()
+                .all(|endpoint| peer_ids.insert(endpoint.peer_id.0.clone()))
+        }
+    }
     };
 }
 
 crate::meerkat_catalog_machine_dsl!("self", "catalog::dsl::meerkat_machine");
+
+pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;
+pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;

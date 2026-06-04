@@ -1,6 +1,11 @@
-//! §10 Durability validation — enforce durability rules on inputs.
+//! §10 Durability diagnostics.
 //!
-//! Rules:
+//! Admission validity is emitted by the generated MeerkatMachine
+//! `ResolveAdmissionValidation` transitions. This module is only the
+//! compatibility/display mirror used to explain a generated durability
+//! rejection.
+//!
+//! Diagnostic rules mirrored here:
 //! - Derived is FORBIDDEN for: PromptInput, PeerInput(Message/Request/ResponseTerminal), FlowStepInput
 //! - External ingress cannot submit Derived durability
 
@@ -19,8 +24,12 @@ pub enum DurabilityError {
     ExternalDerivedForbidden,
 }
 
-/// Validate the durability of an input.
-pub fn validate_durability(input: &Input) -> Result<(), DurabilityError> {
+/// Human-readable detail for a generated durability rejection.
+pub(crate) fn durability_rejection_detail(input: &Input) -> Option<String> {
+    durability_diagnostic_error(input).map(|error| error.to_string())
+}
+
+fn durability_diagnostic_error(input: &Input) -> Option<DurabilityError> {
     let durability = input.header().durability;
 
     // Check external ingress cannot submit Derived
@@ -29,7 +38,7 @@ pub fn validate_durability(input: &Input) -> Result<(), DurabilityError> {
             crate::input::InputOrigin::Operator
             | crate::input::InputOrigin::Peer { .. }
             | crate::input::InputOrigin::External { .. } => {
-                return Err(DurabilityError::ExternalDerivedForbidden);
+                return Some(DurabilityError::ExternalDerivedForbidden);
             }
             // System and Flow sources CAN submit Derived
             crate::input::InputOrigin::System | crate::input::InputOrigin::Flow { .. } => {}
@@ -40,7 +49,7 @@ pub fn validate_durability(input: &Input) -> Result<(), DurabilityError> {
     if durability == InputDurability::Derived {
         match input {
             Input::Prompt(_) => {
-                return Err(DurabilityError::DerivedForbidden {
+                return Some(DurabilityError::DerivedForbidden {
                     kind: "prompt".into(),
                 });
             }
@@ -51,7 +60,7 @@ pub fn validate_durability(input: &Input) -> Result<(), DurabilityError> {
                         | PeerConvention::Request { .. }
                         | PeerConvention::ResponseTerminal { .. },
                     ) => {
-                        return Err(DurabilityError::DerivedForbidden {
+                        return Some(DurabilityError::DerivedForbidden {
                             kind: format!("peer_{}", input.kind().as_str()),
                         });
                     }
@@ -60,7 +69,7 @@ pub fn validate_durability(input: &Input) -> Result<(), DurabilityError> {
                 }
             }
             Input::FlowStep(_) => {
-                return Err(DurabilityError::DerivedForbidden {
+                return Some(DurabilityError::DerivedForbidden {
                     kind: "flow_step".into(),
                 });
             }
@@ -70,7 +79,7 @@ pub fn validate_durability(input: &Input) -> Result<(), DurabilityError> {
         }
     }
 
-    Ok(())
+    None
 }
 
 #[cfg(test)]
@@ -104,7 +113,7 @@ mod tests {
             typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });
-        assert!(validate_durability(&input).is_err());
+        assert!(durability_rejection_detail(&input).is_some());
     }
 
     #[test]
@@ -116,7 +125,7 @@ mod tests {
             typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });
-        assert!(validate_durability(&input).is_ok());
+        assert!(durability_rejection_detail(&input).is_none());
     }
 
     #[test]
@@ -128,7 +137,7 @@ mod tests {
             typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });
-        assert!(validate_durability(&input).is_ok());
+        assert!(durability_rejection_detail(&input).is_none());
     }
 
     #[test]
@@ -141,7 +150,7 @@ mod tests {
             blocks: None,
             handling_mode: None,
         });
-        assert!(validate_durability(&input).is_err());
+        assert!(durability_rejection_detail(&input).is_some());
     }
 
     #[test]
@@ -157,7 +166,7 @@ mod tests {
             blocks: None,
             handling_mode: None,
         });
-        assert!(validate_durability(&input).is_err());
+        assert!(durability_rejection_detail(&input).is_some());
     }
 
     #[test]
@@ -173,7 +182,7 @@ mod tests {
             blocks: None,
             handling_mode: None,
         });
-        assert!(validate_durability(&input).is_err());
+        assert!(durability_rejection_detail(&input).is_some());
     }
 
     #[test]
@@ -189,7 +198,7 @@ mod tests {
             blocks: None,
             handling_mode: None,
         });
-        assert!(validate_durability(&input).is_ok());
+        assert!(durability_rejection_detail(&input).is_none());
     }
 
     #[test]
@@ -201,7 +210,7 @@ mod tests {
             blocks: None,
             turn_metadata: None,
         });
-        assert!(validate_durability(&input).is_err());
+        assert!(durability_rejection_detail(&input).is_some());
     }
 
     #[test]
@@ -214,7 +223,7 @@ mod tests {
             handling_mode: HandlingMode::Queue,
             render_metadata: None,
         });
-        assert!(validate_durability(&input).is_ok());
+        assert!(durability_rejection_detail(&input).is_none());
     }
 
     #[test]
@@ -232,7 +241,7 @@ mod tests {
             handling_mode: HandlingMode::Queue,
             render_metadata: None,
         });
-        assert!(validate_durability(&input).is_err());
+        assert!(durability_rejection_detail(&input).is_some());
     }
 
     #[test]
@@ -240,13 +249,14 @@ mod tests {
         let input = Input::Continuation(ContinuationInput {
             header: make_header(InputDurability::Derived, InputOrigin::Operator),
             reason: "test".into(),
+            continuation_kind: crate::input::ContinuationKind::Ordinary,
             handling_mode: meerkat_core::types::HandlingMode::Steer,
             request_id: None,
             flow_tool_overlay: None,
             context_append: None,
             turn_append: None,
         });
-        assert!(validate_durability(&input).is_err());
+        assert!(durability_rejection_detail(&input).is_some());
     }
 
     #[test]
@@ -258,6 +268,6 @@ mod tests {
                 id: meerkat_core::ops::OperationId::new(),
             },
         });
-        assert!(validate_durability(&input).is_ok());
+        assert!(durability_rejection_detail(&input).is_none());
     }
 }

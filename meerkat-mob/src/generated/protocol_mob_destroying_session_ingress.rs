@@ -10,8 +10,18 @@ use crate::machines::mob_machine::{
 
 #[derive(Debug, Clone)]
 pub struct MobDestroyingSessionIngressObligation {
-    pub mob_id: MobId,
-    pub agent_runtime_id: AgentRuntimeId,
+    mob_id: MobId,
+    agent_runtime_id: AgentRuntimeId,
+}
+
+impl MobDestroyingSessionIngressObligation {
+    pub fn mob_id(&self) -> &MobId {
+        &self.mob_id
+    }
+
+    pub fn agent_runtime_id(&self) -> &AgentRuntimeId {
+        &self.agent_runtime_id
+    }
 }
 
 #[macro_export]
@@ -23,9 +33,10 @@ macro_rules! mob_destroying_session_ingress_feedback_input_patterns {
 }
 
 pub fn extract_obligations(
-    effects: &[MobMachineEffect],
+    transition: &MobMachineTransition,
 ) -> Vec<MobDestroyingSessionIngressObligation> {
-    effects
+    transition
+        .effects()
         .iter()
         .filter_map(|effect| match effect {
             MobMachineEffect::RequestSessionIngressDetachForMobDestroy {

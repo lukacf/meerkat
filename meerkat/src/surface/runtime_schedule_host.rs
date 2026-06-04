@@ -5,9 +5,11 @@ use async_trait::async_trait;
 #[cfg(feature = "comms")]
 use super::configure_peer_ingress;
 use super::{
-    NoopScheduleMobHost, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
-    SurfaceScheduleMobHost, SurfaceScheduleSessionHost, default_persistent_executor,
-    materialize_session, schedule_host_supported, spawn_schedule_host,
+    AcceptedScheduledInput, NoopScheduleMobHost, ScheduledPromptDispatch,
+    SharedScheduleTargetAdapter, SurfaceScheduleMobHost, SurfaceScheduleSessionHost,
+    build_dispatch_from_accepted, default_persistent_executor, immediate_delivery_failure,
+    materialize_session, schedule_attempt_idempotency_key, schedule_host_supported,
+    spawn_schedule_host,
 };
 use crate::{
     Config, CreateSessionRequest, FactoryAgentBuilder, PersistentSessionService,
@@ -17,6 +19,7 @@ use crate::{
 use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
 use meerkat_core::types::{ContentInput, SessionId};
 use meerkat_runtime::MeerkatMachine;
+use meerkat_schedule::DeliveryFailureReason;
 
 pub fn spawn_runtime_backed_schedule_host(
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
@@ -102,6 +105,73 @@ fn materialized_build_options(
     build
 }
 
+fn accepted_scheduled_input_from_runtime_handle(
+    correlation_id: Option<String>,
+    handle: Option<meerkat_runtime::CompletionHandle>,
+) -> AcceptedScheduledInput {
+    match handle {
+        Some(handle) => AcceptedScheduledInput::with_runtime_handle(correlation_id, handle),
+        None => AcceptedScheduledInput::with_authority_unavailable(
+            correlation_id,
+            "runtime completion handle missing after accepted dispatch",
+        ),
+    }
+}
+
+fn runtime_delivery_dispatch(
+    occurrence: &crate::Occurrence,
+    outcome: meerkat_runtime::accept::AcceptOutcome,
+    handle: Option<meerkat_runtime::CompletionHandle>,
+    materialized_session_id: Option<SessionId>,
+) -> Result<crate::DeliveryDispatch, ScheduleDomainError> {
+    match outcome {
+        meerkat_runtime::accept::AcceptOutcome::Accepted { input_id, .. } => {
+            let accepted =
+                accepted_scheduled_input_from_runtime_handle(Some(input_id.to_string()), handle);
+            Ok(build_dispatch_from_accepted(
+                occurrence,
+                accepted,
+                materialized_session_id,
+            ))
+        }
+        meerkat_runtime::accept::AcceptOutcome::Deduplicated { existing_id, .. } => {
+            let accepted = match handle {
+                Some(handle) => AcceptedScheduledInput::with_runtime_handle(
+                    Some(existing_id.to_string()),
+                    handle,
+                ),
+                None => AcceptedScheduledInput::with_authority_unavailable(
+                    Some(existing_id.to_string()),
+                    format!(
+                        "runtime completion authority unavailable for terminal deduplicated input {existing_id}"
+                    ),
+                ),
+            };
+            Ok(build_dispatch_from_accepted(
+                occurrence,
+                accepted,
+                materialized_session_id,
+            ))
+        }
+        meerkat_runtime::accept::AcceptOutcome::Rejected { reason } => {
+            Ok(immediate_delivery_failure(
+                occurrence,
+                reason.to_string(),
+                DeliveryFailureReason::RuntimeRejected,
+                None,
+                materialized_session_id,
+            ))
+        }
+        _ => Ok(immediate_delivery_failure(
+            occurrence,
+            "runtime returned an unknown admission outcome".to_string(),
+            DeliveryFailureReason::RuntimeRejected,
+            None,
+            materialized_session_id,
+        )),
+    }
+}
+
 impl RuntimeBackedScheduleSessionHost {
     fn new(
         service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
@@ -119,17 +189,7 @@ impl RuntimeBackedScheduleSessionHost {
         &self,
         session_id: &SessionId,
     ) -> Result<(), ScheduleDomainError> {
-        // `service.read()` is the single authoritative liveness check.
-        // It returns `Ok` only for sessions that are materialized in
-        // the service (present and not archived). Archived and
-        // genuinely-missing sessions both fail to read — both map to
-        // "session not found" here, which matches the scheduler
-        // contract.
-        if self.service.read(session_id).await.is_err() {
-            return Err(ScheduleDomainError::InvalidSchedule(format!(
-                "session not found: {session_id}"
-            )));
-        }
+        self.ensure_session_target_exists(session_id).await?;
 
         self.runtime_adapter
             .ensure_session_with_executor(
@@ -140,27 +200,55 @@ impl RuntimeBackedScheduleSessionHost {
                     session_id.clone(),
                 ),
             )
-            .await;
-        self.update_peer_ingress_context(session_id).await;
+            .await
+            .map_err(schedule_internal)?;
+        self.update_peer_ingress_context(session_id).await?;
         Ok(())
     }
 
-    async fn update_peer_ingress_context(&self, session_id: &SessionId) {
+    async fn update_peer_ingress_context(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), ScheduleDomainError> {
         #[cfg(feature = "comms")]
         {
-            // Post-wave-c the raw `load_persisted` escape hatch is
-            // gone. `SessionInfo` (returned by `service.read()`) does
-            // not currently surface `keep_alive`, so we default to
-            // `false` — matches the pre-retype `.unwrap_or(false)`
-            // fallback. Sessions that legitimately need
-            // comms-driven keep-alive configure it through the
-            // canonical `SessionBuildOptions.keep_alive` on create.
-            let keep_alive = false;
+            let session = self
+                .service
+                .load_authoritative_session(session_id)
+                .await
+                .map_err(schedule_internal)?
+                .ok_or_else(|| {
+                    ScheduleDomainError::InvalidSchedule(format!("session not found: {session_id}"))
+                })?;
+            let keep_alive = session
+                .session_metadata()
+                .ok_or_else(|| {
+                    ScheduleDomainError::Internal(format!(
+                        "session {session_id} is missing session metadata"
+                    ))
+                })?
+                .keep_alive;
             configure_peer_ingress(&self.runtime_adapter, &self.service, session_id, keep_alive)
                 .await;
         }
         #[cfg(not(feature = "comms"))]
         let _ = session_id;
+        Ok(())
+    }
+
+    async fn ensure_session_target_exists(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), ScheduleDomainError> {
+        match self.service.read(session_id).await {
+            Ok(_) => Ok(()),
+            Err(meerkat_core::service::SessionError::NotFound { .. }) => Err(
+                ScheduleDomainError::InvalidSchedule(format!("session not found: {session_id}")),
+            ),
+            Err(error) => Err(ScheduleDomainError::Internal(format!(
+                "failed to read session target {session_id}: {error}"
+            ))),
+        }
     }
 
     fn build_materialized_request(
@@ -198,19 +286,22 @@ impl SurfaceScheduleSessionHost for RuntimeBackedScheduleSessionHost {
             return Ok(TargetProbeOutcome::Ready);
         };
 
-        // `service.read()` is the single authoritative liveness+presence
-        // check post-wave-c. Archived sessions and genuinely-missing
-        // sessions both fail to read; the scheduler treats both as
-        // `Missing`, which matches the pre-retype archive-metadata
-        // outcome for this probe.
+        // `service.read()` is the authoritative liveness+presence check.
+        // Only a typed NotFound can become scheduler Missing; other read
+        // failures are authority failures and must not become lifecycle facts.
         match self.service.read(session_id).await {
             Ok(view) if view.state.is_active => Ok(TargetProbeOutcome::Busy {
                 detail: Some(format!("session still running: {session_id}")),
             }),
             Ok(_) => Ok(TargetProbeOutcome::Ready),
-            Err(_) => Ok(TargetProbeOutcome::Missing {
-                detail: Some(format!("session not found: {session_id}")),
-            }),
+            Err(meerkat_core::service::SessionError::NotFound { .. }) => {
+                Ok(TargetProbeOutcome::Missing {
+                    detail: Some(format!("session not found: {session_id}")),
+                })
+            }
+            Err(error) => Err(ScheduleDomainError::Internal(format!(
+                "failed to read session target {session_id}: {error}"
+            ))),
         }
     }
 
@@ -250,28 +341,112 @@ impl SurfaceScheduleSessionHost for RuntimeBackedScheduleSessionHost {
     async fn deliver_prompt(
         &self,
         session_id: &SessionId,
-        _occurrence: &crate::Occurrence,
-        _dispatch: ScheduledPromptDispatch,
+        occurrence: &crate::Occurrence,
+        dispatch: ScheduledPromptDispatch,
     ) -> Result<crate::DeliveryDispatch, ScheduleDomainError> {
         self.ensure_runtime_session_registered(session_id).await?;
-        Err(ScheduleDomainError::Internal(
-            "runtime-backed deliver_prompt no longer reinterprets runtime terminal classes into schedule-local failure classes; the schedule surface must consume the runtime's typed CompletionOutcome directly".to_string(),
-        ))
+
+        let turn_metadata = Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                handling_mode: None,
+                keep_alive: None,
+                skill_references: (!dispatch.skill_refs.is_empty()).then(|| {
+                    dispatch
+                        .skill_refs
+                        .iter()
+                        .map(|skill_ref| skill_ref.key().clone())
+                        .collect()
+                }),
+                flow_tool_overlay: None,
+                additional_instructions: (!dispatch.additional_instructions.is_empty()).then(
+                    || {
+                        dispatch
+                            .additional_instructions
+                            .iter()
+                            .map(|body| {
+                                meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                                    kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::Host,
+                                    body: body.clone(),
+                                }
+                            })
+                            .collect()
+                    },
+                ),
+                model: None,
+                provider: None,
+                provider_params: None,
+                render_metadata: dispatch.render_metadata.clone(),
+                execution_kind: None,
+                peer_response_terminal_apply_intent: None,
+                auth_binding: None,
+            },
+        );
+        let mut prompt_input =
+            meerkat_runtime::PromptInput::from_content_input(dispatch.prompt, turn_metadata);
+        prompt_input.header.source = meerkat_runtime::InputOrigin::System;
+        prompt_input.header.idempotency_key = Some(meerkat_runtime::IdempotencyKey::new(
+            schedule_attempt_idempotency_key(occurrence),
+        ));
+        prompt_input.header.correlation_id = Some(meerkat_runtime::CorrelationId::from_uuid(
+            occurrence.occurrence_id.0,
+        ));
+
+        let (outcome, handle) = self
+            .runtime_adapter
+            .accept_input_with_completion(session_id, meerkat_runtime::Input::Prompt(prompt_input))
+            .await
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+
+        runtime_delivery_dispatch(
+            occurrence,
+            outcome,
+            handle,
+            dispatch.materialized_session_id,
+        )
     }
 
     async fn deliver_event(
         &self,
         session_id: &SessionId,
-        _occurrence: &crate::Occurrence,
-        _event_type: String,
-        _payload: serde_json::Value,
-        _render_metadata: Option<meerkat_core::types::RenderMetadata>,
-        _materialized_session_id: Option<SessionId>,
+        occurrence: &crate::Occurrence,
+        event_type: String,
+        payload: serde_json::Value,
+        render_metadata: Option<meerkat_core::types::RenderMetadata>,
+        materialized_session_id: Option<SessionId>,
     ) -> Result<crate::DeliveryDispatch, ScheduleDomainError> {
         self.ensure_runtime_session_registered(session_id).await?;
-        Err(ScheduleDomainError::Internal(
-            "runtime-backed deliver_event no longer reinterprets runtime terminal classes into schedule-local failure classes; the schedule surface must consume the runtime's typed CompletionOutcome directly".to_string(),
-        ))
+
+        let input = meerkat_runtime::Input::ExternalEvent(meerkat_runtime::ExternalEventInput {
+            header: meerkat_runtime::input::InputHeader {
+                id: meerkat_core::lifecycle::InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: meerkat_runtime::InputOrigin::External {
+                    source_name: format!("schedule:{}", occurrence.schedule_id),
+                },
+                durability: meerkat_runtime::input::InputDurability::Durable,
+                visibility: meerkat_runtime::input::InputVisibility::default(),
+                idempotency_key: Some(meerkat_runtime::IdempotencyKey::new(
+                    schedule_attempt_idempotency_key(occurrence),
+                )),
+                supersession_key: None,
+                correlation_id: Some(meerkat_runtime::CorrelationId::from_uuid(
+                    occurrence.occurrence_id.0,
+                )),
+            },
+            event_type,
+            payload,
+            blocks: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata,
+        });
+
+        let (outcome, handle) = self
+            .runtime_adapter
+            .accept_input_with_completion(session_id, input)
+            .await
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+
+        runtime_delivery_dispatch(occurrence, outcome, handle, materialized_session_id)
     }
 }
 

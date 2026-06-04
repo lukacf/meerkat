@@ -8,8 +8,8 @@ use meerkat_core::lifecycle::run_primitive::{GeminiProviderTag, ProviderTag};
 use meerkat_core::schema::{CompiledSchema, SchemaCompat, SchemaError, SchemaWarning};
 use meerkat_core::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, GeminiImageMetadata, ImageData,
-    ImageGenerationIntent, ImageOperationTerminalClass, Message, OutputSchema, Provider,
-    ProviderImageMetadata, ProviderTextDisposition, StopReason, SystemNoticeBlock,
+    ImageGenerationIntent, ImageProviderErrorCode, ImageProviderTerminalObservation, Message,
+    OutputSchema, Provider, ProviderImageMetadata, StopReason, SystemNoticeBlock,
     SystemNoticeMessage, ToolResult, Usage, UserMessage,
 };
 use meerkat_llm_core::LlmError;
@@ -227,6 +227,7 @@ fn project_gemini_replay_messages(messages: &[Message]) -> Result<Vec<Message>, 
             Message::User(user) => Some(Message::User(UserMessage {
                 content: project_gemini_content_blocks(&user.content),
                 render_metadata: user.render_metadata.clone(),
+                transcript_role: user.transcript_role,
                 created_at: user.created_at,
             })),
             Message::Assistant(assistant) => {
@@ -798,30 +799,31 @@ impl GeminiClient {
         Ok(body)
     }
 
-    fn gemini_error_terminal(status_code: u16, text: &str) -> ImageOperationTerminalClass {
-        if status_code == 408 || status_code == 504 {
-            ImageOperationTerminalClass::Timeout
-        } else if let Ok(value) = serde_json::from_str::<Value>(text) {
-            Self::gemini_structured_error_terminal(&value)
-                .unwrap_or(ImageOperationTerminalClass::Failed)
+    fn gemini_error_observation(status_code: u16, text: &str) -> ImageProviderTerminalObservation {
+        let code = if let Ok(value) = serde_json::from_str::<Value>(text) {
+            Self::gemini_structured_error_code(&value).unwrap_or(ImageProviderErrorCode::Unknown)
         } else {
-            ImageOperationTerminalClass::Failed
+            ImageProviderErrorCode::Unknown
+        };
+        ImageProviderTerminalObservation::ProviderHttpError {
+            status_code: Some(status_code),
+            code,
         }
     }
 
-    fn gemini_structured_error_terminal(value: &Value) -> Option<ImageOperationTerminalClass> {
+    fn gemini_structured_error_code(value: &Value) -> Option<ImageProviderErrorCode> {
         let error = value.get("error").unwrap_or(value);
         if let Some(terminal) = error
             .get("status")
             .and_then(Value::as_str)
-            .and_then(Self::gemini_structured_error_code_terminal)
+            .and_then(Self::gemini_structured_error_code_observation)
         {
             return Some(terminal);
         }
         if let Some(terminal) = error
             .get("reason")
             .and_then(Value::as_str)
-            .and_then(Self::gemini_structured_error_code_terminal)
+            .and_then(Self::gemini_structured_error_code_observation)
         {
             return Some(terminal);
         }
@@ -834,17 +836,17 @@ impl GeminiClient {
                         .get("reason")
                         .and_then(Value::as_str)
                         .or_else(|| detail.get("status").and_then(Value::as_str))
-                        .and_then(Self::gemini_structured_error_code_terminal)
+                        .and_then(Self::gemini_structured_error_code_observation)
                 })
             })
     }
 
-    fn gemini_structured_error_code_terminal(code: &str) -> Option<ImageOperationTerminalClass> {
+    fn gemini_structured_error_code_observation(code: &str) -> Option<ImageProviderErrorCode> {
         match code {
             "BLOCKLIST" | "IMAGE_SAFETY" | "PROHIBITED_CONTENT" | "RECITATION" | "SAFETY"
-            | "SPII" => Some(ImageOperationTerminalClass::SafetyFiltered),
-            "MODEL_REFUSAL" => Some(ImageOperationTerminalClass::RefusedByProvider),
-            "DEADLINE_EXCEEDED" => Some(ImageOperationTerminalClass::Timeout),
+            | "SPII" => Some(ImageProviderErrorCode::GeminiSafety),
+            "MODEL_REFUSAL" => Some(ImageProviderErrorCode::GeminiModelRefusal),
+            "DEADLINE_EXCEEDED" => Some(ImageProviderErrorCode::GeminiDeadlineExceeded),
             _ => None,
         }
     }
@@ -865,7 +867,7 @@ impl GeminiClient {
         if !(200..=299).contains(&status_code) {
             return Ok(ProviderImageGenerationOutput {
                 operation_id: request.operation_id,
-                terminal: Self::gemini_error_terminal(status_code, &text),
+                terminal_observation: Self::gemini_error_observation(status_code, &text),
                 images: Vec::new(),
                 provider_text: None,
                 revised_prompt: meerkat_core::RevisedPromptDisposition::UnsupportedByBackend,
@@ -911,28 +913,22 @@ impl GeminiClient {
                 }
             }
         }
-        let terminal = if images.is_empty() {
+        let terminal_observation = if images.is_empty() {
             let prompt_block_reason = parsed
                 .prompt_feedback
                 .as_ref()
                 .and_then(|feedback| feedback.block_reason.as_deref());
             match finish_reason
                 .as_deref()
-                .and_then(Self::gemini_structured_error_code_terminal)
+                .and_then(Self::gemini_structured_error_code_observation)
                 .or_else(|| {
-                    prompt_block_reason.and_then(Self::gemini_structured_error_code_terminal)
+                    prompt_block_reason.and_then(Self::gemini_structured_error_code_observation)
                 }) {
-                Some(terminal) => terminal,
-                None => ImageOperationTerminalClass::EmptyResult {
-                    provider_text: if provider_text.is_empty() {
-                        ProviderTextDisposition::NotEmitted
-                    } else {
-                        ProviderTextDisposition::EmittedButNotStored
-                    },
-                },
+                Some(code) => ImageProviderTerminalObservation::ProviderNativeError { code },
+                None => ImageProviderTerminalObservation::EmptyResult,
             }
         } else {
-            ImageOperationTerminalClass::Generated
+            ImageProviderTerminalObservation::Generated
         };
         let warnings = if let Some(returned) = std::num::NonZeroU32::new(images.len() as u32) {
             if returned < request.generate_request.count {
@@ -950,7 +946,7 @@ impl GeminiClient {
         };
         Ok(ProviderImageGenerationOutput {
             operation_id: request.operation_id,
-            terminal,
+            terminal_observation,
             images,
             provider_text: if provider_text.is_empty() {
                 None
@@ -2166,7 +2162,7 @@ mod tests {
     }
 
     #[test]
-    fn gemini_image_error_terminal_uses_structured_error_reason() {
+    fn gemini_image_error_observation_uses_structured_error_reason() {
         let safety = serde_json::json!({
             "error": {
                 "code": 400,
@@ -2180,8 +2176,11 @@ mod tests {
         });
 
         assert_eq!(
-            GeminiClient::gemini_error_terminal(400, &safety.to_string()),
-            ImageOperationTerminalClass::SafetyFiltered
+            GeminiClient::gemini_error_observation(400, &safety.to_string()),
+            ImageProviderTerminalObservation::ProviderHttpError {
+                status_code: Some(400),
+                code: ImageProviderErrorCode::GeminiSafety,
+            }
         );
 
         let refusal = serde_json::json!({
@@ -2197,13 +2196,16 @@ mod tests {
         });
 
         assert_eq!(
-            GeminiClient::gemini_error_terminal(400, &refusal.to_string()),
-            ImageOperationTerminalClass::RefusedByProvider
+            GeminiClient::gemini_error_observation(400, &refusal.to_string()),
+            ImageProviderTerminalObservation::ProviderHttpError {
+                status_code: Some(400),
+                code: ImageProviderErrorCode::GeminiModelRefusal,
+            }
         );
     }
 
     #[test]
-    fn gemini_image_error_terminal_does_not_parse_message_text() {
+    fn gemini_image_error_observation_does_not_parse_message_text() {
         let message_only = serde_json::json!({
             "error": {
                 "code": 400,
@@ -2213,27 +2215,39 @@ mod tests {
         });
 
         assert_eq!(
-            GeminiClient::gemini_error_terminal(400, &message_only.to_string()),
-            ImageOperationTerminalClass::Failed
+            GeminiClient::gemini_error_observation(400, &message_only.to_string()),
+            ImageProviderTerminalObservation::ProviderHttpError {
+                status_code: Some(400),
+                code: ImageProviderErrorCode::Unknown,
+            }
         );
         assert_eq!(
-            GeminiClient::gemini_error_terminal(
+            GeminiClient::gemini_error_observation(
                 503,
                 r#"{"error":{"status":"UNAVAILABLE","message":"safety backend unavailable"}}"#
             ),
-            ImageOperationTerminalClass::Failed
+            ImageProviderTerminalObservation::ProviderHttpError {
+                status_code: Some(503),
+                code: ImageProviderErrorCode::Unknown,
+            }
         );
     }
 
     #[test]
-    fn gemini_image_error_terminal_uses_transport_status_for_timeout() {
+    fn gemini_image_error_observation_keeps_transport_status() {
         assert_eq!(
-            GeminiClient::gemini_error_terminal(408, "request timed out"),
-            ImageOperationTerminalClass::Timeout
+            GeminiClient::gemini_error_observation(408, "request timed out"),
+            ImageProviderTerminalObservation::ProviderHttpError {
+                status_code: Some(408),
+                code: ImageProviderErrorCode::Unknown,
+            }
         );
         assert_eq!(
-            GeminiClient::gemini_error_terminal(504, "gateway timeout"),
-            ImageOperationTerminalClass::Timeout
+            GeminiClient::gemini_error_observation(504, "gateway timeout"),
+            ImageProviderTerminalObservation::ProviderHttpError {
+                status_code: Some(504),
+                code: ImageProviderErrorCode::Unknown,
+            }
         );
     }
 
@@ -2266,8 +2280,8 @@ mod tests {
             .await?;
 
         assert!(matches!(
-            output.terminal,
-            ImageOperationTerminalClass::Generated
+            output.terminal_observation,
+            ImageProviderTerminalObservation::Generated
         ));
         assert_eq!(output.images.len(), 1);
         assert_eq!(output.images[0].base64_data, "aGVsbG8=");
@@ -2326,7 +2340,12 @@ mod tests {
             .execute_image_generation(gemini_image_executor_request_json())
             .await?;
 
-        assert_eq!(output.terminal, ImageOperationTerminalClass::SafetyFiltered);
+        assert_eq!(
+            output.terminal_observation,
+            ImageProviderTerminalObservation::ProviderNativeError {
+                code: ImageProviderErrorCode::GeminiSafety,
+            }
+        );
         assert!(output.images.is_empty());
 
         handle.abort();
@@ -2366,8 +2385,8 @@ mod tests {
 
         let output = client.execute_image_generation(request).await?;
         assert!(matches!(
-            output.terminal,
-            ImageOperationTerminalClass::Generated
+            output.terminal_observation,
+            ImageProviderTerminalObservation::Generated
         ));
 
         let bodies = seen.lock().expect("seen mutex");

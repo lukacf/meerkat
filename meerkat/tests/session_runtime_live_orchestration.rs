@@ -79,8 +79,7 @@ fn live_channel_close_on_model_swap() {
         ..prev.clone()
     };
     assert!(live_channel_requires_close_for_identity_change(
-        Some(&prev),
-        &next
+        &prev, &next
     ));
 }
 
@@ -98,8 +97,7 @@ fn live_channel_close_on_provider_swap() {
         ..prev.clone()
     };
     assert!(live_channel_requires_close_for_identity_change(
-        Some(&prev),
-        &next
+        &prev, &next
     ));
 }
 
@@ -113,22 +111,7 @@ fn live_channel_in_place_refresh_when_identity_unchanged() {
         auth_binding: None,
     };
     assert!(!live_channel_requires_close_for_identity_change(
-        Some(&identity),
-        &identity
-    ));
-}
-
-#[test]
-fn live_channel_no_close_when_no_bound_identity() {
-    let next = SessionLlmIdentity {
-        model: "gpt-realtime-2".into(),
-        provider: Provider::OpenAI,
-        self_hosted_server_id: None,
-        provider_params: None,
-        auth_binding: None,
-    };
-    assert!(!live_channel_requires_close_for_identity_change(
-        None, &next
+        &identity, &identity
     ));
 }
 
@@ -338,76 +321,18 @@ mod orchestrator_e2e {
     use meerkat::surface::build_runtime_backed_service_with_capacities;
     use meerkat::{
         AgentBuildConfig, AgentFactory, Config, FactoryAgentBuilder, PersistenceBundle,
-        StagedPhase, StagedSessionRegistry, StagedSlot,
+        StagedSessionRegistry, StagedSlot,
     };
     use meerkat_core::SessionLlmIdentity;
     use meerkat_core::types::SessionId;
-    use meerkat_runtime::{
-        HydratedSessionLlmState, MeerkatMachine, ResolvedSessionLlmReconfigure, RuntimeDriverError,
-        SessionLlmReconfigureHost, SessionLlmReconfigureRequest,
-    };
+    use meerkat_runtime::MeerkatMachine;
     use meerkat_store::MemoryBlobStore;
-
-    /// Smallest possible reconfigure host: every operation is rejected
-    /// with `RuntimeDriverError::Internal`. Used by the orchestrator
-    /// `propagate_config_to_live_channels` no-op test where no live
-    /// channels exist, so the host is never queried.
-    struct UnusedReconfigureHost;
-
-    #[async_trait::async_trait]
-    impl SessionLlmReconfigureHost for UnusedReconfigureHost {
-        async fn hydrate_session_llm_state(
-            &self,
-            _session_id: &SessionId,
-        ) -> Result<HydratedSessionLlmState, RuntimeDriverError> {
-            Err(RuntimeDriverError::Internal("UnusedReconfigureHost".into()))
-        }
-
-        async fn resolve_target_session_llm_identity(
-            &self,
-            _request: &SessionLlmReconfigureRequest,
-            _current: &SessionLlmIdentity,
-        ) -> Result<ResolvedSessionLlmReconfigure, RuntimeDriverError> {
-            Err(RuntimeDriverError::Internal("UnusedReconfigureHost".into()))
-        }
-
-        async fn apply_live_session_llm_identity(
-            &self,
-            _session_id: &SessionId,
-            _identity: &SessionLlmIdentity,
-        ) -> Result<(), RuntimeDriverError> {
-            Err(RuntimeDriverError::Internal("UnusedReconfigureHost".into()))
-        }
-
-        async fn apply_live_session_tool_visibility_state(
-            &self,
-            _session_id: &SessionId,
-            _state: Option<meerkat_core::SessionToolVisibilityState>,
-        ) -> Result<(), RuntimeDriverError> {
-            Err(RuntimeDriverError::Internal("UnusedReconfigureHost".into()))
-        }
-
-        async fn persist_live_session(
-            &self,
-            _session_id: &SessionId,
-        ) -> Result<(), RuntimeDriverError> {
-            Err(RuntimeDriverError::Internal("UnusedReconfigureHost".into()))
-        }
-
-        async fn discard_live_session(
-            &self,
-            _session_id: &SessionId,
-        ) -> Result<(), RuntimeDriverError> {
-            Err(RuntimeDriverError::Internal("UnusedReconfigureHost".into()))
-        }
-    }
 
     struct Fixture {
         service: Arc<meerkat_session::PersistentSessionService<FactoryAgentBuilder>>,
         staged_sessions: Arc<StagedSessionRegistry>,
         staged_capacity_admissions: StagedCapacityAdmissions,
         archive_runtime_cleanup: ArchiveRuntimeCleanup,
-        reconfigure_host: UnusedReconfigureHost,
         runtime_adapter: Arc<MeerkatMachine>,
         _temp: tempfile::TempDir,
     }
@@ -436,7 +361,6 @@ mod orchestrator_e2e {
             staged_sessions,
             staged_capacity_admissions,
             archive_runtime_cleanup,
-            reconfigure_host: UnusedReconfigureHost,
             runtime_adapter,
             _temp: temp,
         }
@@ -454,7 +378,6 @@ mod orchestrator_e2e {
             agent_llm_client_decorator: None,
             external_tools: None,
             archive_runtime_cleanup: fx.archive_runtime_cleanup.clone(),
-            llm_reconfigure_host: &fx.reconfigure_host,
             realm_id: None,
             instance_id: None,
             backend: None,
@@ -472,23 +395,23 @@ mod orchestrator_e2e {
         let mut build_config = AgentBuildConfig::new(model.to_string());
         build_config.provider = Some(provider);
         let now = now_secs();
-        StagedSlot {
-            phase: StagedPhase::Staged {
-                build_config: Box::new(build_config),
-            },
-            effective_llm_identity: SessionLlmIdentity {
+        StagedSlot::new_staged(
+            &SessionId::new(),
+            build_config,
+            SessionLlmIdentity {
                 model: model.to_string(),
                 provider,
                 self_hosted_server_id: None,
                 provider_params: None,
                 auth_binding: None,
             },
-            labels: None,
-            deferred_prompt: None,
-            created_at_secs: now,
-            updated_at_secs: now,
-            machine_archived_resume_authorized: false,
-        }
+            None,
+            None,
+            now,
+            now,
+            false,
+        )
+        .expect("staged slot fixture must satisfy generated staged-session authority")
     }
 
     /// `propagate_config_to_live_channels` must short-circuit when no

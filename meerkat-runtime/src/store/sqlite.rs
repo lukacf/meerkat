@@ -9,11 +9,10 @@ mod inner {
     use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
     use crate::identifiers::LogicalRuntimeId;
-    use crate::input_state::StoredInputState;
-    use crate::runtime_state::RuntimeState;
+    use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
     use crate::store::{
-        AuthOAuthFlowSnapshotUpdate, MachineLifecycleCommit, RuntimeStore, RuntimeStoreError,
-        SessionDelta,
+        AuthOAuthFlowSnapshotUpdate, MachineLifecycleCommit, MachineLifecycleSnapshot,
+        MachineLifecycleStoreRecord, RuntimeStore, RuntimeStoreError, SessionDelta,
     };
 
     const CREATE_RUNTIME_SCHEMA_SQL: &str = r"
@@ -68,6 +67,14 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
 
     fn runtime_id_text(runtime_id: &LogicalRuntimeId) -> &str {
         &runtime_id.0
+    }
+
+    fn is_runtime_placeholder_session(session: &meerkat_core::Session) -> bool {
+        session.transcript_history_state().ok().flatten().is_none()
+            && matches!(
+                session.messages(),
+                [] | [meerkat_core::types::Message::System(_)]
+            )
     }
 
     const AUTH_OAUTH_FLOW_STATE_ID: &str = "auth_oauth_flow_state";
@@ -137,13 +144,12 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
         Ok(())
     }
 
-    fn upsert_runtime_state(
+    fn upsert_machine_lifecycle_snapshot(
         tx: &Transaction<'_>,
         runtime_id: &LogicalRuntimeId,
-        runtime_state: &RuntimeState,
+        snapshot: &MachineLifecycleSnapshot,
     ) -> Result<(), RuntimeStoreError> {
-        let state_json = serde_json::to_vec(runtime_state)
-            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+        let state_json = MachineLifecycleStoreRecord::from_snapshot(snapshot).encode()?;
         tx.execute(
             r"
             INSERT INTO runtime_states (runtime_id, runtime_state_json)
@@ -257,11 +263,29 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             tokio::task::spawn_blocking(move || {
-                let _: meerkat_core::Session =
+                let incoming =
                     serde_json::from_slice(&session_delta.session_snapshot)
                         .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
+                let previous = tx
+                    .query_row(
+                        "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
+                        params![runtime_id_text(&runtime_id)],
+                        |row| row.get::<_, Vec<u8>>(0),
+                    )
+                    .optional()
+                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
+                    .map(|bytes| {
+                        serde_json::from_slice::<meerkat_core::Session>(&bytes)
+                            .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+                    })
+                    .transpose()?;
+                meerkat_core::session_store::run_boundary_snapshot_save_guard(
+                    &incoming,
+                    previous.as_ref(),
+                )
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 upsert_runtime_snapshot(&tx, &runtime_id, &session_delta.session_snapshot)?;
                 tx.commit()
                     .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
@@ -325,11 +349,15 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             runtime_id: &LogicalRuntimeId,
             session_delta: Option<SessionDelta>,
             receipt: RunBoundaryReceipt,
-            input_updates: Vec<StoredInputState>,
+            input_updates: Vec<InputStatePersistenceRecord>,
             session_store_key: Option<meerkat_core::types::SessionId>,
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
+            let input_updates = input_updates
+                .into_iter()
+                .map(InputStatePersistenceRecord::into_stored)
+                .collect::<Vec<_>>();
             tokio::task::spawn_blocking(move || {
                 let session_snapshot = session_delta
                     .as_ref()
@@ -352,6 +380,7 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                 let tx = begin_runtime_transaction(&mut conn)?;
 
                 if let Some(session) = session_snapshot.as_ref() {
+                    let mut persist_session_snapshot = true;
                     let previous = tx
                         .query_row(
                             "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
@@ -363,12 +392,27 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                         .map(|bytes| serde_json::from_slice::<meerkat_core::Session>(&bytes))
                         .transpose()
                         .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
-                    meerkat_core::session_store::run_boundary_snapshot_save_guard(
+                    if let Err(err) = meerkat_core::session_store::run_boundary_snapshot_save_guard(
                         session,
                         previous.as_ref(),
-                    )
-                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
-                    if let Some(delta) = session_delta.as_ref() {
+                    ) {
+                        if previous.as_ref().is_some_and(is_runtime_placeholder_session) {
+                            persist_session_snapshot = true;
+                        } else if previous.as_ref().is_some_and(|previous| {
+                            meerkat_core::session_store::run_boundary_snapshot_save_guard(
+                                previous,
+                                Some(session),
+                            )
+                            .is_ok()
+                        }) {
+                            persist_session_snapshot = false;
+                        } else {
+                            return Err(RuntimeStoreError::WriteFailed(err.to_string()));
+                        }
+                    }
+                    if persist_session_snapshot
+                        && let Some(delta) = session_delta.as_ref()
+                    {
                         upsert_runtime_snapshot(&tx, &runtime_id, &delta.session_snapshot)?;
                     }
                 }
@@ -568,11 +612,11 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
         async fn persist_input_state(
             &self,
             runtime_id: &LogicalRuntimeId,
-            state: &StoredInputState,
+            state: &InputStatePersistenceRecord,
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            let state = state.clone();
+            let state = state.clone_stored();
             tokio::task::spawn_blocking(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
@@ -616,10 +660,10 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
         }
 
-        async fn load_runtime_state(
+        async fn load_machine_lifecycle_record(
             &self,
             runtime_id: &LogicalRuntimeId,
-        ) -> Result<Option<RuntimeState>, RuntimeStoreError> {
+        ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             tokio::task::spawn_blocking(move || {
@@ -630,12 +674,7 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                     |row| row.get::<_, Vec<u8>>(0),
                 )
                 .optional()
-                .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
-                .map(|bytes| {
-                    serde_json::from_slice(&bytes)
-                        .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
-                })
-                .transpose()
+                .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
             })
             .await
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
@@ -645,16 +684,19 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             &self,
             runtime_id: &LogicalRuntimeId,
             commit: MachineLifecycleCommit,
-            input_states: &[StoredInputState],
+            input_states: &[InputStatePersistenceRecord],
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            let runtime_state = commit.runtime_state();
-            let input_states = input_states.to_vec();
+            let snapshot = commit.into_snapshot();
+            let input_states = input_states
+                .iter()
+                .map(InputStatePersistenceRecord::clone_stored)
+                .collect::<Vec<_>>();
             tokio::task::spawn_blocking(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
-                upsert_runtime_state(&tx, &runtime_id, &runtime_state)?;
+                upsert_machine_lifecycle_snapshot(&tx, &runtime_id, &snapshot)?;
                 upsert_input_states(&tx, &runtime_id, &input_states)?;
                 tx.commit()
                     .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
@@ -718,6 +760,28 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             .await
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
         }
+
+        async fn delete_ops_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<(), RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                tx.execute(
+                    "DELETE FROM runtime_ops_lifecycle WHERE runtime_id = ?1",
+                    params![runtime_id_text(&runtime_id)],
+                )
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                tx.commit()
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                Ok(())
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
     }
 
     #[cfg(test)]
@@ -727,7 +791,7 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
 
         use super::*;
         use crate::identifiers::LogicalRuntimeId;
-        use crate::input_state::StoredInputState;
+        use crate::runtime_state::RuntimeState;
         use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
         use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
         use meerkat_core::session_store::SessionStore as _;
@@ -746,8 +810,11 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             LogicalRuntimeId("runtime-1".to_string())
         }
 
-        fn input_state() -> StoredInputState {
-            StoredInputState::new_accepted(InputId::new())
+        fn input_state() -> InputStatePersistenceRecord {
+            InputStatePersistenceRecord::from_machine_snapshot(StoredInputState::new_accepted(
+                InputId::new(),
+            ))
+            .expect("accepted test input state seed must be machine-authorized")
         }
 
         fn session_with_one_turn() -> Session {
@@ -760,6 +827,12 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                 usage: meerkat_core::types::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }));
+            session
+        }
+
+        fn session_with_user(content: &str) -> Session {
+            let mut session = Session::new();
+            session.push(Message::User(UserMessage::text(content.to_string())));
             session
         }
 
@@ -874,6 +947,262 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                     .await
                     .unwrap()
                     .is_some()
+            );
+        }
+
+        #[tokio::test]
+        async fn commit_session_snapshot_rejects_stale_runtime_parent() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let accepted = session_with_user("accepted runtime turn");
+            let mut stale = Session::with_id(accepted.id().clone());
+            stale.push(Message::User(UserMessage::text(
+                "stale runtime turn".to_string(),
+            )));
+            let accepted_snapshot = serde_json::to_vec(&accepted).unwrap();
+
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: accepted_snapshot.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+
+            let err = store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: serde_json::to_vec(&stale).unwrap(),
+                    },
+                )
+                .await
+                .expect_err("stale non-continuation must not overwrite runtime snapshot");
+
+            assert!(matches!(err, RuntimeStoreError::WriteFailed(_)));
+            assert_eq!(
+                store.load_session_snapshot(&runtime_id).await.unwrap(),
+                Some(accepted_snapshot)
+            );
+        }
+
+        #[tokio::test]
+        async fn atomic_apply_keeps_current_snapshot_when_incoming_is_superseded() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let incoming = session_with_user("turn input");
+            let mut current = incoming.clone();
+            current.push(Message::Assistant(AssistantMessage {
+                content: "peer response already applied".to_string(),
+                tool_calls: Vec::new(),
+                stop_reason: StopReason::EndTurn,
+                usage: meerkat_core::types::Usage::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
+            }));
+            let current_snapshot = serde_json::to_vec(&current).unwrap();
+            let receipt = RunBoundaryReceipt {
+                run_id: RunId(uuid::Uuid::new_v4()),
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: vec![],
+                conversation_digest: Some("machine-owned-digest".to_string()),
+                message_count: 2,
+                sequence: 11,
+            };
+
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: current_snapshot.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+
+            store
+                .atomic_apply(
+                    &runtime_id,
+                    Some(SessionDelta {
+                        session_snapshot: serde_json::to_vec(&incoming).unwrap(),
+                    }),
+                    receipt.clone(),
+                    vec![],
+                    Some(incoming.id().clone()),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                store.load_session_snapshot(&runtime_id).await.unwrap(),
+                Some(current_snapshot)
+            );
+            assert_eq!(
+                store
+                    .load_boundary_receipt(&runtime_id, &receipt.run_id, receipt.sequence)
+                    .await
+                    .unwrap(),
+                Some(receipt)
+            );
+        }
+
+        #[tokio::test]
+        async fn atomic_apply_allows_first_generated_snapshot_after_placeholder() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let mut placeholder = Session::new();
+            placeholder.set_system_prompt("base system".to_string());
+            let mut incoming = Session::with_id(placeholder.id().clone());
+            incoming.set_system_prompt("base system".to_string());
+            incoming.push(Message::User(UserMessage::text(
+                "verbose first turn".to_string(),
+            )));
+            let parent_revision = incoming.transcript_revision().unwrap();
+            incoming
+                .commit_transcript_rewrite(
+                    TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                    vec![Message::User(UserMessage::compaction_summary(
+                        "[Context compacted] first turn",
+                    ))],
+                    TranscriptRewriteReason::new("compaction"),
+                    Some("meerkat-core".to_string()),
+                    Some(parent_revision),
+                )
+                .unwrap();
+            let incoming_snapshot = serde_json::to_vec(&incoming).unwrap();
+            let receipt = RunBoundaryReceipt {
+                run_id: RunId(uuid::Uuid::new_v4()),
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: vec![],
+                conversation_digest: Some("machine-owned-digest".to_string()),
+                message_count: incoming.messages().len(),
+                sequence: 12,
+            };
+
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: serde_json::to_vec(&placeholder).unwrap(),
+                    },
+                )
+                .await
+                .unwrap();
+
+            store
+                .atomic_apply(
+                    &runtime_id,
+                    Some(SessionDelta {
+                        session_snapshot: incoming_snapshot.clone(),
+                    }),
+                    receipt.clone(),
+                    vec![],
+                    Some(incoming.id().clone()),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                store.load_session_snapshot(&runtime_id).await.unwrap(),
+                Some(incoming_snapshot)
+            );
+            assert_eq!(
+                store
+                    .load_boundary_receipt(&runtime_id, &receipt.run_id, receipt.sequence)
+                    .await
+                    .unwrap(),
+                Some(receipt)
+            );
+        }
+
+        #[tokio::test]
+        async fn atomic_apply_allows_generated_compaction_before_retained_tail() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let mut previous = Session::new();
+            previous.set_system_prompt("runtime system before context refresh".to_string());
+            previous.push(Message::User(UserMessage::text(
+                "Turn 1 request".to_string(),
+            )));
+            previous.push(Message::Assistant(AssistantMessage {
+                content: "Turn 1 answer".to_string(),
+                tool_calls: Vec::new(),
+                stop_reason: StopReason::EndTurn,
+                usage: meerkat_core::types::Usage::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
+            }));
+
+            let mut incoming = Session::with_id(previous.id().clone());
+            incoming.set_system_prompt("runtime system after context refresh".to_string());
+            incoming.push(Message::User(UserMessage::text(
+                "Verbose context that will be compacted".to_string(),
+            )));
+            for message in previous.messages()[1..].iter().cloned() {
+                incoming.push(message);
+            }
+            incoming.push(Message::Assistant(AssistantMessage {
+                content: "Turn 2 generated answer".to_string(),
+                tool_calls: Vec::new(),
+                stop_reason: StopReason::EndTurn,
+                usage: meerkat_core::types::Usage::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
+            }));
+            let parent_revision = incoming.transcript_revision().unwrap();
+            incoming
+                .commit_transcript_rewrite(
+                    TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                    vec![Message::User(UserMessage::compaction_summary(
+                        "[Context compacted] Earlier runtime context".to_string(),
+                    ))],
+                    TranscriptRewriteReason::new("compaction"),
+                    Some("meerkat-core".to_string()),
+                    Some(parent_revision),
+                )
+                .unwrap();
+            let incoming_snapshot = serde_json::to_vec(&incoming).unwrap();
+            let receipt = RunBoundaryReceipt {
+                run_id: RunId(uuid::Uuid::new_v4()),
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: vec![],
+                conversation_digest: Some("machine-owned-digest".to_string()),
+                message_count: incoming.messages().len(),
+                sequence: 13,
+            };
+
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: serde_json::to_vec(&previous).unwrap(),
+                    },
+                )
+                .await
+                .unwrap();
+
+            store
+                .atomic_apply(
+                    &runtime_id,
+                    Some(SessionDelta {
+                        session_snapshot: incoming_snapshot.clone(),
+                    }),
+                    receipt.clone(),
+                    vec![],
+                    Some(incoming.id().clone()),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                store.load_session_snapshot(&runtime_id).await.unwrap(),
+                Some(incoming_snapshot)
+            );
+            assert_eq!(
+                store
+                    .load_boundary_receipt(&runtime_id, &receipt.run_id, receipt.sequence)
+                    .await
+                    .unwrap(),
+                Some(receipt)
             );
         }
 
@@ -1053,23 +1382,94 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             let (_dir, store) = temp_store();
             let runtime_id = runtime_id();
             let runtime_state = RuntimeState::Stopped;
+            let binding = crate::store::MachineLifecycleBindingFacts::new(
+                Some("rt:session:sqlite".to_string()),
+                Some(11),
+                None,
+                Some("epoch-sqlite".to_string()),
+            );
             store
                 .commit_machine_lifecycle(
                     &runtime_id,
-                    MachineLifecycleCommit::new(runtime_state),
+                    MachineLifecycleCommit::new_with_binding(runtime_state, binding.clone()),
                     &[input_state()],
                 )
                 .await
                 .unwrap();
 
             assert!(
-                store
-                    .load_runtime_state(&runtime_id)
+                crate::store::load_runtime_state(&store, &runtime_id)
                     .await
                     .unwrap()
                     .is_some()
             );
+            let lifecycle = crate::store::load_machine_lifecycle(&store, &runtime_id)
+                .await
+                .unwrap()
+                .expect("machine lifecycle snapshot");
+            assert_eq!(lifecycle.runtime_state(), runtime_state);
+            assert_eq!(lifecycle.binding(), &binding);
             assert_eq!(store.load_input_states(&runtime_id).await.unwrap().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn legacy_runtime_state_row_is_not_lifecycle_authority() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let legacy_state_json = serde_json::to_vec(&RuntimeState::Retired).unwrap();
+            let conn = open_runtime_connection(&store.path).unwrap();
+            conn.execute(
+                r"
+                INSERT INTO runtime_states (runtime_id, runtime_state_json)
+                VALUES (?1, ?2)
+                ",
+                params![runtime_id_text(&runtime_id), legacy_state_json],
+            )
+            .unwrap();
+
+            assert!(matches!(
+                crate::store::load_runtime_state(&store, &runtime_id).await,
+                Err(RuntimeStoreError::ReadFailed(_))
+            ));
+            assert!(matches!(
+                crate::store::load_machine_lifecycle(&store, &runtime_id).await,
+                Err(RuntimeStoreError::ReadFailed(_))
+            ));
+        }
+
+        #[tokio::test]
+        async fn legacy_machine_lifecycle_snapshot_row_is_not_lifecycle_authority() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let runtime_state = RuntimeState::Retired;
+            let legacy_snapshot_json = serde_json::to_vec(&serde_json::json!({
+                "runtime_state": runtime_state,
+                "binding": {
+                    "agent_runtime_id": "rt:session:legacy",
+                    "fence_token": 23,
+                    "runtime_generation": 7,
+                    "runtime_epoch_id": "epoch-legacy"
+                }
+            }))
+            .unwrap();
+            let conn = open_runtime_connection(&store.path).unwrap();
+            conn.execute(
+                r"
+                INSERT INTO runtime_states (runtime_id, runtime_state_json)
+                VALUES (?1, ?2)
+                ",
+                params![runtime_id_text(&runtime_id), legacy_snapshot_json],
+            )
+            .unwrap();
+
+            assert!(matches!(
+                crate::store::load_runtime_state(&store, &runtime_id).await,
+                Err(RuntimeStoreError::ReadFailed(_))
+            ));
+            assert!(matches!(
+                crate::store::load_machine_lifecycle(&store, &runtime_id).await,
+                Err(RuntimeStoreError::ReadFailed(_))
+            ));
         }
     }
 }

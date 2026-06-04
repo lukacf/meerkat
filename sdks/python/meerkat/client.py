@@ -42,6 +42,8 @@ from .generated.types import (
     AttentionListResult,
     GoalStatusRequest,
     GoalStatusResult,
+    LiveCloseResult,
+    LiveCloseStatus,
     LiveRefreshResult,
     LiveRefreshStatus,
     McpServerConfig,
@@ -2759,9 +2761,22 @@ class MeerkatClient:
         """
         return await self._request("live/status", {"channel_id": channel_id})
 
-    async def live_close(self, channel_id: str) -> dict[str, Any]:
+    async def live_close(self, channel_id: str) -> LiveCloseResult:
         """Close a live channel. Wraps `live/close`."""
-        return await self._request("live/close", {"channel_id": channel_id})
+        raw = await self._request("live/close", {"channel_id": channel_id})
+        context = "Invalid live/close response"
+        raw = self._require_dict(raw, "result", context)
+        closed = self._require_bool_field(raw, "closed", context)
+        status = self._require_string_field(raw, "status", context)
+        if status != "closed":
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unsupported status {status!r}",
+            )
+        return LiveCloseResult(
+            closed=closed,
+            status=cast("LiveCloseStatus", status),
+        )
 
     async def live_send_input_text(
         self, channel_id: str, text: str
@@ -2932,22 +2947,32 @@ class MeerkatClient:
 
         R4-5 (P3): the result is a typed
         :class:`meerkat.generated.types.LiveRefreshResult` carrying both the
-        typed ``status`` discriminator (today: always ``"queued"``; the
-        wire enum is open so future variants like ``applied_sync`` can land
-        without breaking the shape) and the legacy ``refresh_enqueued: True``
-        back-compat boolean. Refresh completion is asynchronous (the adapter
-        pump applies the ``session.update`` after the host accepts the
-        queued command); the realtime stream is the source of truth for the
-        actual outcome (failures surface as
+        generated-authority ``status`` discriminator (today: ``"queued"``)
+        and the legacy ``refresh_enqueued: True`` back-compat boolean. This
+        SDK build accepts the generated status set it was built with and
+        rejects missing or unknown status values until regenerated for a newer
+        contract. Refresh completion is asynchronous (the adapter pump applies
+        the ``session.update`` after the host accepts the queued command); the
+        realtime stream is the source of truth for the actual outcome (failures
+        surface as
         :class:`meerkat.types.WireLiveAdapterObservation` ``error``).
         """
         raw = await self._request(
             "live/refresh",
             {"channel_id": channel_id},
         )
+        context = "Invalid live/refresh response"
+        raw = self._require_dict(raw, "result", context)
+        refresh_enqueued = self._require_bool_field(raw, "refresh_enqueued", context)
+        status = self._require_string_field(raw, "status", context)
+        if status != "queued":
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unsupported status {status!r}",
+            )
         return LiveRefreshResult(
-            refresh_enqueued=bool(raw.get("refresh_enqueued", False)),
-            status=cast("LiveRefreshStatus", raw.get("status", "queued")),
+            refresh_enqueued=refresh_enqueued,
+            status=cast("LiveRefreshStatus", status),
         )
 
     @staticmethod
@@ -3774,14 +3799,25 @@ class MeerkatClient:
     ) -> ResolvedModelCapabilities | None:
         if not isinstance(raw, dict):
             return None
+        required = [
+            "vision",
+            "image_input",
+            "image_tool_results",
+            "inline_video",
+            "realtime",
+            "web_search",
+            "image_generation",
+        ]
+        if any(not isinstance(raw.get(field), bool) for field in required):
+            return None
         return {
-            "vision": bool(raw.get("vision", False)),
-            "image_input": bool(raw.get("image_input", False)),
-            "image_tool_results": bool(raw.get("image_tool_results", False)),
-            "inline_video": bool(raw.get("inline_video", False)),
-            "realtime": bool(raw.get("realtime", False)),
-            "web_search": bool(raw.get("web_search", False)),
-            "image_generation": bool(raw.get("image_generation", False)),
+            "vision": raw["vision"],
+            "image_input": raw["image_input"],
+            "image_tool_results": raw["image_tool_results"],
+            "inline_video": raw["inline_video"],
+            "realtime": raw["realtime"],
+            "web_search": raw["web_search"],
+            "image_generation": raw["image_generation"],
         }
 
     @staticmethod
@@ -3792,26 +3828,48 @@ class MeerkatClient:
             for provider in providers_raw:
                 if isinstance(provider, dict):
                     providers.append(provider)
-        contract_version_raw = data.get("contract_version")
-        if isinstance(contract_version_raw, dict):
-            contract_version = {
-                "major": MeerkatClient._parse_int(contract_version_raw.get("major"), 0),
-                "minor": MeerkatClient._parse_int(contract_version_raw.get("minor"), 0),
-                "patch": MeerkatClient._parse_int(contract_version_raw.get("patch"), 0),
-            }
-        elif isinstance(contract_version_raw, str):
-            try:
-                major, minor, patch = contract_version_raw.split(".", 2)
-                contract_version = {
-                    "major": MeerkatClient._parse_int(major, 0),
-                    "minor": MeerkatClient._parse_int(minor, 0),
-                    "patch": MeerkatClient._parse_int(patch, 0),
-                }
-            except ValueError:
-                contract_version = {"major": 0, "minor": 0, "patch": 0}
-        else:
-            contract_version = {"major": 0, "minor": 0, "patch": 0}
+        contract_version = MeerkatClient._parse_contract_version(
+            data.get("contract_version"),
+            "Invalid models/catalog response",
+        )
         return {
             "contract_version": contract_version,
             "providers": providers,
         }
+
+    @staticmethod
+    def _parse_contract_version(raw: Any, context: str) -> dict[str, int]:
+        def parse_component(value: Any, field: str) -> int:
+            message = f"{context}: contract_version.{field} must be non-negative integer"
+            if isinstance(value, bool):
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    message,
+                )
+            if isinstance(value, int) and value >= 0:
+                return value
+            if isinstance(value, str) and value.isdigit():
+                return int(value)
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                message,
+            )
+
+        if isinstance(raw, dict):
+            return {
+                "major": parse_component(raw.get("major"), "major"),
+                "minor": parse_component(raw.get("minor"), "minor"),
+                "patch": parse_component(raw.get("patch"), "patch"),
+            }
+        if isinstance(raw, str):
+            parts = raw.split(".")
+            if len(parts) == 3:
+                return {
+                    "major": parse_component(parts[0], "major"),
+                    "minor": parse_component(parts[1], "minor"),
+                    "patch": parse_component(parts[2], "patch"),
+                }
+        raise MeerkatError(
+            "INVALID_RESPONSE",
+            f"{context}: missing contract_version",
+        )

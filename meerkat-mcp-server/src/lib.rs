@@ -534,7 +534,6 @@ impl MeerkatMcpState {
             runtime_ingress::McpRuntimeIngressResources {
                 service: Arc::clone(&self.service),
                 runtime_adapter: Arc::clone(&self.runtime_adapter),
-                workgraph_service: self.workgraph_service.clone(),
                 config_runtime: Arc::clone(&self.config_runtime),
                 realm_id: self.realm_id.clone(),
                 instance_id: self.instance_id.clone(),
@@ -1223,7 +1222,7 @@ impl From<TurnToolOverlayInput> for meerkat_core::service::TurnToolOverlay {
         Self {
             allowed_tools: value.allowed_tools,
             blocked_tools: value.blocked_tools,
-            dispatch_context: Default::default(),
+            ..Default::default()
         }
     }
 }
@@ -2067,8 +2066,12 @@ fn map_workgraph_tool_error(error: meerkat::WorkGraphToolError) -> ToolCallError
     let code = match error.code.as_str() {
         meerkat::WORKGRAPH_TOOL_INVALID_ARGUMENTS => -32602,
         meerkat::WORKGRAPH_TOOL_NOT_FOUND => -32601,
-        "capability_unavailable" => {
+        meerkat::WORKGRAPH_TOOL_CONFLICT | meerkat::WORKGRAPH_TOOL_INVALID_TRANSITION => -32602,
+        meerkat::WORKGRAPH_TOOL_CAPABILITY_UNAVAILABLE => {
             meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
+        }
+        meerkat::WORKGRAPH_TOOL_STORE_ERROR | meerkat::WORKGRAPH_TOOL_INTERNAL_ERROR => {
+            meerkat_contracts::ErrorCode::InternalError.jsonrpc_code()
         }
         _ => -32603,
     };
@@ -2289,10 +2292,18 @@ async fn cleanup_unpublished_prepared_session(
     session_id: &meerkat::SessionId,
 ) -> Result<(), SessionError> {
     let runtime_was_registered = runtime_adapter.contains_session(session_id).await;
-    match archive_with_mcp_machine_authority(service, runtime_adapter, session_id).await {
-        Ok(()) => {}
-        Err(SessionError::NotFound { .. }) if runtime_was_registered => {}
-        Err(error) => return Err(error),
+    if service
+        .load_authoritative_session(session_id)
+        .await?
+        .is_some()
+    {
+        match archive_with_mcp_machine_authority(service, runtime_adapter, session_id).await {
+            Ok(()) => {}
+            Err(SessionError::NotFound { .. }) if runtime_was_registered => {}
+            Err(error) => return Err(error),
+        }
+    } else if runtime_was_registered {
+        runtime_adapter.unregister_session(session_id).await;
     }
     ingress.clear_session(session_id).await;
     Ok(())
@@ -2333,11 +2344,6 @@ async fn archive_session_with_runtime_cleanup(
             }
         }
 
-        #[cfg(feature = "mob")]
-        let had_cleanup_anchor = cleanup
-            .mob_state
-            .has_bridge_session_scoped_mobs(&session_id.to_string())
-            .await;
         let result = archive_with_mcp_machine_authority(
             service.as_ref(),
             runtime_adapter.as_ref(),
@@ -2350,12 +2356,6 @@ async fn archive_session_with_runtime_cleanup(
             let _ = result_tx.send(Err(error));
             return;
         }
-        #[cfg(feature = "mob")]
-        let result = if had_cleanup_anchor && matches!(result, Err(SessionError::NotFound { .. })) {
-            Ok(())
-        } else {
-            result
-        };
         let _ = result_tx.send(result);
     });
     result_rx.await.map_err(|_| {
@@ -2863,9 +2863,7 @@ fn normalize_mcp_comms_send_error(
                 "reason": "offline_or_no_ack",
             })),
         ),
-        meerkat_core::comms::SendError::Internal(details)
-            if peer_name.is_some() && is_transport_internal(details) =>
-        {
+        meerkat_core::comms::SendError::Transport(details) if peer_name.is_some() => {
             ToolCallError::new(
                 -32603,
                 format!(
@@ -2889,11 +2887,6 @@ fn normalize_mcp_comms_send_error(
             })),
         ),
     }
-}
-
-#[cfg(feature = "comms")]
-fn is_transport_internal(message: &str) -> bool {
-    message.starts_with("Transport error:") || message.starts_with("IO error:")
 }
 
 fn help_provider_to_mcp_provider(
@@ -3123,20 +3116,10 @@ async fn handle_meerkat_run(
     });
 
     let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
-    let llm_binding = meerkat_core::session_recovery::resolve_resume_llm_binding(
-        session
-            .session_metadata()
-            .map(|meta| meta.provider)
-            .unwrap_or(meerkat_core::Provider::Other),
-        session
-            .session_metadata()
-            .and_then(|meta| meta.self_hosted_server_id),
-        input.model.as_deref(),
-        input.provider.map(ProviderInput::to_provider),
-    );
+    let create_provider = input.provider.map(ProviderInput::to_provider);
     let mut build = SessionBuildOptions {
-        provider: llm_binding.provider,
-        self_hosted_server_id: llm_binding.self_hosted_server_id,
+        provider: create_provider,
+        self_hosted_server_id: None,
         output_schema,
         structured_output_retries: input
             .structured_output_retries
@@ -3184,7 +3167,7 @@ async fn handle_meerkat_run(
         initial_metadata_entries: std::collections::BTreeMap::new(),
         shell_env: input.shell_env.clone(),
         resume_override_mask: ResumeOverrideMask {
-            provider: llm_binding.provider_overridden,
+            provider: input.provider.is_some() || input.model.is_some(),
             max_tokens: input.max_tokens.is_some(),
             structured_output_retries: input.structured_output_retries.is_some(),
             provider_params: input.provider_params.is_some(),
@@ -3248,12 +3231,42 @@ async fn handle_meerkat_run(
         tracing::warn!("event task panicked: {e}");
     }
 
-    let session_exists = state.service.read(&session_id).await.is_ok();
+    let session_exists = match state.service.load_authoritative_session(&session_id).await {
+        Ok(Some(session)) => {
+            match state
+                .service
+                .session_archived_by_authority(&session_id, &session)
+                .await
+            {
+                Ok(true) => {
+                    state.cleanup_archived_session_runtime(&session_id).await;
+                    false
+                }
+                Ok(false) => true,
+                Err(error) => {
+                    return Err(ToolCallError::internal(format!(
+                        "failed to load session archive state for {session_id}: {error}"
+                    )));
+                }
+            }
+        }
+        Ok(None) => false,
+        Err(error) => {
+            return Err(ToolCallError::internal(format!(
+                "failed to load authoritative session {session_id}: {error}"
+            )));
+        }
+    };
     if session_exists {
         state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
         ingress
             .configure_session(&session_id, callback_tools, false)
-            .await;
+            .await
+            .map_err(|error| {
+                ToolCallError::internal(format!(
+                    "failed to attach MCP runtime executor for {session_id}: {error}"
+                ))
+            })?;
     }
 
     // Manage comms drain lifecycle for the new session.
@@ -3356,8 +3369,13 @@ async fn handle_meerkat_resume(
         session.push(Message::tool_results(results));
     }
 
-    // Resolve settings from stored metadata, falling back to input overrides
-    let stored_metadata = session.session_metadata();
+    // Resolve settings from stored metadata, failing closed when the durable
+    // session identity is absent.
+    let stored_metadata = session.session_metadata().ok_or_else(|| {
+        ToolCallError::internal(format!(
+            "persisted session {session_id} is missing session metadata"
+        ))
+    })?;
 
     let enable_builtins_override = input.enable_builtins;
     let enable_shell_override = input
@@ -3370,13 +3388,12 @@ async fn handle_meerkat_resume(
         resolve_keep_alive(input.keep_alive).map_err(ToolCallError::invalid_params)?;
     let keep_alive = match keep_alive_override {
         Some(val) => val,
-        None => stored_metadata.as_ref().is_some_and(|meta| meta.keep_alive),
+        None => stored_metadata.keep_alive,
     };
-    let comms_name = input.comms_name.clone().or_else(|| {
-        stored_metadata
-            .as_ref()
-            .and_then(|meta| meta.comms_name.clone())
-    });
+    let comms_name = input
+        .comms_name
+        .clone()
+        .or_else(|| stored_metadata.comms_name.clone());
     if keep_alive
         && comms_name
             .as_ref()
@@ -3389,15 +3406,9 @@ async fn handle_meerkat_resume(
     let model = input
         .model
         .clone()
-        .or_else(|| stored_metadata.as_ref().map(|meta| meta.model.clone()))
-        .unwrap_or_else(|| config.agent.model.clone());
-    let max_tokens = input
-        .max_tokens
-        .or_else(|| stored_metadata.as_ref().map(|meta| meta.max_tokens));
-    let provider = input
-        .provider
-        .map(ProviderInput::to_provider)
-        .or_else(|| stored_metadata.as_ref().map(|meta| meta.provider));
+        .unwrap_or_else(|| stored_metadata.model.clone());
+    let max_tokens = input.max_tokens.or(Some(stored_metadata.max_tokens));
+    let provider = input.provider.map(ProviderInput::to_provider);
     if keep_alive_override.is_some()
         && keep_alive
         && state.service.comms_runtime(&session_id).await.is_none()
@@ -3425,11 +3436,16 @@ async fn handle_meerkat_resume(
 
     // Decide the branch before moving any owned request fields.
     let needs_rebuild = existing_adapter.is_none() || mcp_resume_requires_rebuild(&input);
-    let live_session_existed = state
-        .service
-        .has_live_session(&session_id)
-        .await
-        .unwrap_or(false);
+    let live_session_existed =
+        state
+            .service
+            .has_live_session(&session_id)
+            .await
+            .map_err(|err| {
+                ToolCallError::internal(format!(
+                    "failed to read live-session authority for {session_id}: {err}"
+                ))
+            })?;
     let create_requires_materialization = needs_rebuild || !live_session_existed;
     let mut resume_admission = if create_requires_materialization {
         Some(
@@ -3496,16 +3512,12 @@ async fn handle_meerkat_resume(
         None => None,
     };
     let llm_binding = meerkat_core::session_recovery::resolve_resume_llm_binding(
-        stored_metadata
-            .as_ref()
-            .map(|m| m.provider)
-            .unwrap_or(meerkat_core::Provider::Other),
-        stored_metadata
-            .as_ref()
-            .and_then(|m| m.self_hosted_server_id.clone()),
+        stored_metadata.provider,
+        stored_metadata.self_hosted_server_id.clone(),
         input.model.as_deref(),
         provider,
-    );
+    )
+    .map_err(|error| ToolCallError::invalid_params(error.to_string()))?;
     let build_session_options = |runtime_bindings, external_tools| {
         let mut build = SessionBuildOptions {
             provider: llm_binding.provider,
@@ -3543,16 +3555,16 @@ async fn handle_meerkat_resume(
             preload_skills: preload_skills.clone(),
             peer_meta: input.peer_meta.clone(),
             realm_id: stored_metadata
-                .as_ref()
-                .and_then(|m| m.realm_id.clone())
+                .realm_id
+                .clone()
                 .or_else(|| Some(state.realm_id.to_string())),
             instance_id: stored_metadata
-                .as_ref()
-                .and_then(|m| m.instance_id.clone())
+                .instance_id
+                .clone()
                 .or_else(|| state.instance_id.clone()),
             backend: stored_metadata
-                .as_ref()
-                .and_then(|m| m.backend.clone())
+                .backend
+                .clone()
                 .or_else(|| Some(state.backend.clone())),
             config_generation: current_generation,
             auth_binding: None,
@@ -3706,22 +3718,9 @@ async fn handle_meerkat_resume(
                     .await
                     .map_err(|err| ToolCallError::internal(format!("Agent error: {err}")))?,
             );
-            if let Err(e) = state
-                .service
-                .apply_runtime_session_keep_alive(&session_id, keep_alive)
-                .await
-            {
-                ingress
-                    .clear_session_if_new_locked(
-                        &session_id,
-                        runtime_was_registered,
-                        runtime_state_existed,
-                    )
-                    .await;
-                return Err(ToolCallError::internal(format!(
-                    "failed to persist keep_alive: {e}"
-                )));
-            }
+            // RuntimeTurnMetadata carries the keep_alive mutation; the
+            // session service applies it only after generated turn-admission
+            // feedback. The surface may refresh machine-owned peer ingress.
             state
                 .runtime_adapter
                 .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
@@ -3730,6 +3729,16 @@ async fn handle_meerkat_resume(
         // Live MCP resumes still use the runtime/machine service-turn receipt
         // path; the persistent service only owns the live mutation and post-
         // receipt projection, not lifecycle truth.
+        let turn_keep_alive_metadata =
+            keep_alive.then(
+                || meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    keep_alive: Some(meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
+                        ttl: std::time::Duration::from_secs(30),
+                        policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
+                    }),
+                    ..Default::default()
+                },
+            );
         let turn_req = StartTurnRequest {
             prompt: prompt.clone().into(),
             system_prompt: None,
@@ -3740,7 +3749,9 @@ async fn handle_meerkat_resume(
                 skill_references.clone(),
                 input.flow_tool_overlay.clone().map(Into::into),
                 Vec::new(),
-                Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(None)),
+                Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(
+                    turn_keep_alive_metadata,
+                )),
             ),
         };
         let admission = match live_turn_admission.take() {
@@ -3888,7 +3899,9 @@ async fn handle_meerkat_resume(
                     error = %err,
                     "failed to load machine archive state during MCP session existence check"
                 );
-                false
+                return Err(ToolCallError::internal(format!(
+                    "failed to load machine archive state during MCP session existence check for {session_id}: {err}"
+                )));
             }
         },
         Ok(None) => false,
@@ -3898,15 +3911,24 @@ async fn handle_meerkat_resume(
                 error = %err,
                 "failed to load authoritative session after MCP resume attempt"
             );
-            state.service.read(&session_id).await.is_ok()
+            return Err(ToolCallError::internal(format!(
+                "failed to load authoritative session after MCP resume attempt for {session_id}: {err}"
+            )));
         }
     };
-    let live_session_exists = session_exists
-        && state
+    let live_session_exists = if session_exists {
+        state
             .service
             .has_live_session(&session_id)
             .await
-            .unwrap_or(false);
+            .map_err(|err| {
+                ToolCallError::internal(format!(
+                    "failed to read live-session authority for {session_id}: {err}"
+                ))
+            })?
+    } else {
+        false
+    };
     if result.is_err() {
         if !session_exists {
             ingress.clear_session(&session_id).await;
@@ -3939,11 +3961,20 @@ async fn handle_meerkat_resume(
             state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
         }
         if input.tools.is_empty() {
-            ingress.ensure_session(&session_id).await;
+            ingress.ensure_session(&session_id).await.map_err(|error| {
+                ToolCallError::internal(format!(
+                    "failed to attach MCP runtime executor for {session_id}: {error}"
+                ))
+            })?;
         } else {
             ingress
                 .configure_session(&session_id, callback_tools, false)
-                .await;
+                .await
+                .map_err(|error| {
+                    ToolCallError::internal(format!(
+                        "failed to attach MCP runtime executor for {session_id}: {error}"
+                    ))
+                })?;
         }
     }
 
@@ -4143,96 +4174,40 @@ mod tests {
     async fn state_with_persisted_session() -> (MeerkatMcpState, String) {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let state = MeerkatMcpState::new_with_store(store.clone()).await;
-        let session = Session::new();
+        let mut session = Session::new();
         let session_id = session.id().to_string();
+        session
+            .set_session_metadata(meerkat::SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: "claude-opus-4-6".to_string(),
+                max_tokens: 4096,
+                structured_output_retries: 2,
+                provider: Provider::Other,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: meerkat_core::SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: Some(state.realm_id.to_string()),
+                instance_id: state.instance_id.clone(),
+                backend: Some(state.backend.clone()),
+                config_generation: None,
+                auth_binding: None,
+            })
+            .expect("session metadata should serialize");
         store.save(&session).await.expect("persisted session");
         (state, session_id)
-    }
-
-    #[cfg(feature = "mob")]
-    struct McpFailClearEventStore {
-        inner: meerkat_mob::store::InMemoryMobEventStore,
-        fail_clear: AtomicBool,
-    }
-
-    #[cfg(feature = "mob")]
-    impl McpFailClearEventStore {
-        fn new() -> Self {
-            Self {
-                inner: meerkat_mob::store::InMemoryMobEventStore::new(),
-                fail_clear: AtomicBool::new(true),
-            }
-        }
-
-        fn allow_clear(&self) {
-            self.fail_clear.store(false, Ordering::SeqCst);
-        }
-    }
-
-    #[cfg(feature = "mob")]
-    #[async_trait]
-    impl meerkat_mob::store::MobEventStore for McpFailClearEventStore {
-        async fn append(
-            &self,
-            event: meerkat_mob::NewMobEvent,
-        ) -> Result<meerkat_mob::MobEvent, meerkat_mob::store::MobStoreError> {
-            self.inner.append(event).await
-        }
-
-        async fn append_terminal_event_if_absent(
-            &self,
-            event: meerkat_mob::NewMobEvent,
-        ) -> Result<Option<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
-            self.inner.append_terminal_event_if_absent(event).await
-        }
-
-        async fn append_batch(
-            &self,
-            events: Vec<meerkat_mob::NewMobEvent>,
-        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
-            self.inner.append_batch(events).await
-        }
-
-        async fn poll(
-            &self,
-            after_cursor: u64,
-            limit: usize,
-        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
-            self.inner.poll(after_cursor, limit).await
-        }
-
-        async fn replay_all(
-            &self,
-        ) -> Result<Vec<meerkat_mob::MobEvent>, meerkat_mob::store::MobStoreError> {
-            self.inner.replay_all().await
-        }
-
-        async fn latest_cursor(&self) -> Result<u64, meerkat_mob::store::MobStoreError> {
-            self.inner.latest_cursor().await
-        }
-
-        fn subscribe(
-            &self,
-        ) -> Result<meerkat_mob::store::MobEventReceiver, meerkat_mob::store::MobStoreError>
-        {
-            self.inner.subscribe()
-        }
-
-        async fn clear(&self) -> Result<(), meerkat_mob::store::MobStoreError> {
-            if !self.fail_clear.load(Ordering::SeqCst) {
-                return self.inner.clear().await;
-            }
-            Err(meerkat_mob::store::MobStoreError::Internal(
-                "forced MCP archive mob destroy clear failure".to_string(),
-            ))
-        }
     }
 
     #[cfg(feature = "mob")]
     async fn insert_mcp_archive_partial_destroy_mob(
         state: &MeerkatMcpState,
         owner_session_id: &str,
-    ) -> (meerkat_mob::MobId, Arc<McpFailClearEventStore>) {
+    ) -> (
+        meerkat_mob::MobId,
+        Arc<meerkat_mob::store::InMemoryMobEventStore>,
+    ) {
         let mob_id = meerkat_mob::MobId::from("mcp-session-archive-partial-destroy");
         let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
         definition.profiles.insert(
@@ -4250,10 +4225,13 @@ mod tests {
                 provider_params: None,
             }),
         );
-        definition.mark_owner_bridge_session_indexed(owner_session_id);
-        let events = Arc::new(McpFailClearEventStore::new());
+        let owner_session_id =
+            meerkat::SessionId::parse(owner_session_id).expect("valid owner bridge session id");
+        let events = Arc::new(meerkat_mob::store::InMemoryMobEventStore::new());
+        events.fail_clear_until_allowed();
         let storage = meerkat_mob::MobStorage::with_events(events.clone());
         let handle = meerkat_mob::MobBuilder::new(definition, storage)
+            .with_owner_bridge_session_create_authority(owner_session_id, true, false)
             .with_session_service(state.mob_state.session_service())
             .allow_ephemeral_sessions(true)
             .create()
@@ -4458,8 +4436,6 @@ mod tests {
             ],
             capabilities: meerkat_core::comms::PeerCapabilitySet::default()
                 .with_extension("vendor.echo", serde_json::json!({ "enabled": true })),
-            reachability: meerkat_core::comms::PeerReachability::Reachable,
-            last_unreachable_reason: None,
             meta: meerkat_core::PeerMeta::default(),
         }
     }
@@ -4492,6 +4468,36 @@ mod tests {
         assert_eq!(data["type"], "generation_conflict");
         assert_eq!(data["expected_generation"], 2);
         assert_eq!(data["current_generation"], 5);
+    }
+
+    #[test]
+    fn test_workgraph_tool_error_mapping_preserves_generated_classes() {
+        let cases = [
+            (meerkat::WORKGRAPH_TOOL_INVALID_ARGUMENTS, -32602),
+            (meerkat::WORKGRAPH_TOOL_NOT_FOUND, -32601),
+            (meerkat::WORKGRAPH_TOOL_CONFLICT, -32602),
+            (meerkat::WORKGRAPH_TOOL_INVALID_TRANSITION, -32602),
+            (
+                meerkat::WORKGRAPH_TOOL_CAPABILITY_UNAVAILABLE,
+                meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code(),
+            ),
+            (
+                meerkat::WORKGRAPH_TOOL_STORE_ERROR,
+                meerkat_contracts::ErrorCode::InternalError.jsonrpc_code(),
+            ),
+            (
+                meerkat::WORKGRAPH_TOOL_INTERNAL_ERROR,
+                meerkat_contracts::ErrorCode::InternalError.jsonrpc_code(),
+            ),
+        ];
+
+        for (tool_code, rpc_code) in cases {
+            let err = map_workgraph_tool_error(meerkat::WorkGraphToolError {
+                code: tool_code.to_string(),
+                message: format!("workgraph {tool_code}"),
+            });
+            assert_eq!(err.code, rpc_code, "tool code {tool_code}");
+        }
     }
 
     #[test]
@@ -5147,6 +5153,33 @@ mod tests {
     }
 
     #[cfg(feature = "comms")]
+    #[test]
+    fn test_normalize_mcp_comms_send_error_transport_maps_to_peer_unreachable() {
+        let err = normalize_mcp_comms_send_error(
+            Some("peer-a"),
+            &meerkat_core::comms::SendError::Transport(
+                "Transport error: connection refused".into(),
+            ),
+        );
+        assert_eq!(err.code, -32603);
+        assert!(err.message.starts_with("peer_unreachable:"));
+        let data = err.data.expect("structured error data");
+        assert_eq!(
+            data.get("code").and_then(Value::as_str),
+            Some("peer_unreachable")
+        );
+        assert_eq!(data.get("peer").and_then(Value::as_str), Some("peer-a"));
+        assert_eq!(
+            data.get("reason").and_then(Value::as_str),
+            Some("transport_error")
+        );
+        assert_eq!(
+            data.get("details").and_then(Value::as_str),
+            Some("Transport error: connection refused")
+        );
+    }
+
+    #[cfg(feature = "comms")]
     #[tokio::test]
     async fn test_handle_meerkat_run_keep_alive_requires_comms_name() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
@@ -5449,7 +5482,8 @@ mod tests {
         state
             .runtime_ingress_context()
             .ensure_session(&parsed)
-            .await;
+            .await
+            .expect("MCP runtime executor should attach");
         assert!(
             state.runtime_adapter.contains_session(&parsed).await,
             "test requires a pre-existing runtime registration"
@@ -5574,8 +5608,28 @@ mod tests {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let state =
             MeerkatMcpState::new_with_store_and_max_sessions(Arc::clone(&store), Some(1)).await;
-        let session = Session::new();
+        let mut session = Session::new();
         let session_id = session.id().clone();
+        session
+            .set_session_metadata(meerkat::SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: "claude-opus-4-6".to_string(),
+                max_tokens: 4096,
+                structured_output_retries: 2,
+                provider: Provider::Other,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: meerkat_core::SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: Some(state.realm_id.to_string()),
+                instance_id: state.instance_id.clone(),
+                backend: Some(state.backend.clone()),
+                config_generation: None,
+                auth_binding: None,
+            })
+            .expect("session metadata should serialize");
         store.save(&session).await.expect("persisted session");
 
         let blocker_session = Session::new();
@@ -6011,7 +6065,8 @@ mod tests {
         state
             .runtime_ingress_context()
             .ensure_session(&session_id)
-            .await;
+            .await
+            .expect("MCP runtime executor should attach");
         state
             .upsert_mcp_adapter(
                 &session_id,

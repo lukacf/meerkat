@@ -131,10 +131,6 @@ async fn archive_runtime_cleanup_dispatches_to_trait_hooks() {
             self.ran.store(true, Ordering::SeqCst);
             Ok(())
         }
-
-        async fn has_retained_cleanup(&self, _session_id: &SessionId) -> bool {
-            false
-        }
     }
 
     let mcp_ran = Arc::new(AtomicBool::new(false));

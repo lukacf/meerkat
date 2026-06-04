@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     AttentionContextProjection, AttentionProjectionRequest, CloseWorkItemRequest,
-    GoalRequestCloseRequest, WorkAttentionMode, WorkEdgeKind, WorkGraphService,
+    GoalRequestCloseRequest, ProjectedAttentionAuthority, WorkEdgeKind, WorkGraphService,
     handle_workgraph_tools_call, workgraph_tools_list,
 };
 
@@ -347,43 +347,66 @@ fn tool_defs_from_values(tools: Vec<Value>) -> Arc<[Arc<ToolDef>]> {
         .into()
 }
 
+/// Pure mechanical decoder from machine-emitted attention authority capability
+/// bits to the admitted workgraph tool-name set.
+///
+/// This holds NO per-mode policy: the complete `(mode, delegated_authority) ->
+/// capability` truth table is owned by the canonical
+/// `WorkAttentionLifecycleMachine`'s `ClassifyAttentionAuthority` verdict, which
+/// `WorkAttentionMachine::classify_authority` mirrors into
+/// `projection.authority`. Each entry below is a fixed, mechanical tool-name ->
+/// capability-bit mapping (an acceptable witness encoder). Enforcement of the
+/// resulting allow-set lives in `dispatch_with_context` (the mirror).
 fn allowed_tools_for_projection(projection: &AttentionContextProjection) -> BTreeSet<&'static str> {
-    let mut allowed = BTreeSet::from(["workgraph_get"]);
-    match projection.mode {
-        WorkAttentionMode::Observe => {}
-        WorkAttentionMode::Review | WorkAttentionMode::Falsify => {
-            allowed.insert("workgraph_add_evidence");
-            if projection.authority.can_close_own_review_item {
-                allowed.insert("workgraph_close");
-            }
-        }
-        WorkAttentionMode::Pursue => {
-            allowed.extend([
-                "workgraph_release",
-                "workgraph_update",
-                "workgraph_block",
-                "workgraph_add_evidence",
-            ]);
-            if projection.authority.can_close_if_policy_allows {
-                allowed.insert("workgraph_close");
-            }
-        }
-        WorkAttentionMode::Coordinate => {
-            allowed.extend([
-                "workgraph_create",
-                "workgraph_update",
-                "workgraph_link",
-                "workgraph_add_evidence",
-            ]);
-        }
-        WorkAttentionMode::Judge => {
-            allowed.insert("workgraph_add_evidence");
-            if projection.authority.can_close_if_policy_allows {
-                allowed.insert("workgraph_close");
-            }
-        }
+    let authority = &projection.authority;
+    let mut allowed = BTreeSet::new();
+    if authority.can_get {
+        allowed.insert("workgraph_get");
+    }
+    if authority.can_add_evidence {
+        allowed.insert("workgraph_add_evidence");
+    }
+    if authority.can_release {
+        allowed.insert("workgraph_release");
+    }
+    if authority.can_update {
+        allowed.insert("workgraph_update");
+    }
+    if authority.can_block {
+        allowed.insert("workgraph_block");
+    }
+    if authority.can_create {
+        allowed.insert("workgraph_create");
+    }
+    if authority.can_link {
+        allowed.insert("workgraph_link");
+    }
+    if authority.can_close_own_review_item || authority.can_close_if_policy_allows {
+        allowed.insert("workgraph_close");
     }
     allowed
+}
+
+/// Pure mechanical decoder from a parsed `WorkEdgeKind` to the machine-emitted
+/// per-kind link capability bit.
+///
+/// The admission policy ("which edge kinds may an attention-scoped link
+/// create") is owned by the canonical `WorkAttentionLifecycleMachine`'s
+/// `ClassifyAttentionAuthority` verdict, mirrored into `projection.authority` as
+/// typed `can_link_{parent,related,derived_from}` bits. This holds NO policy: it
+/// is a fixed `WorkEdgeKind -> capability-bit` mapping (an acceptable witness
+/// encoder). Edge kinds with no capability bit (`Blocks`, `Supersedes`) return
+/// `None`, which the caller treats as denied (fail closed).
+fn attention_link_kind_capability(
+    authority: &ProjectedAttentionAuthority,
+    kind: WorkEdgeKind,
+) -> Option<bool> {
+    match kind {
+        WorkEdgeKind::Parent => Some(authority.can_link_parent),
+        WorkEdgeKind::Related => Some(authority.can_link_related),
+        WorkEdgeKind::DerivedFrom => Some(authority.can_link_derived_from),
+        WorkEdgeKind::Blocks | WorkEdgeKind::Supersedes => None,
+    }
 }
 
 fn validate_attention_scoped_call(
@@ -402,19 +425,21 @@ fn validate_attention_scoped_call(
             | "workgraph_add_evidence"
     ) {
         if name == "workgraph_link" {
-            let safe_kind = args
+            // Which edge kinds an attention-scoped link may create is a
+            // WorkAttentionLifecycle-owned admission verdict. The shell is a
+            // pure mechanical `WorkEdgeKind -> capability-bit` decoder over the
+            // machine-emitted authority bits and fails closed: a kind that does
+            // not parse, or whose capability bit is false (or has no bit, i.e.
+            // Blocks/Supersedes), is denied.
+            let permitted = args
                 .get("kind")
                 .and_then(Value::as_str)
                 .and_then(|kind| {
                     serde_json::from_value::<WorkEdgeKind>(Value::String(kind.into())).ok()
                 })
-                .is_some_and(|kind| {
-                    matches!(
-                        kind,
-                        WorkEdgeKind::Parent | WorkEdgeKind::Related | WorkEdgeKind::DerivedFrom
-                    )
-                });
-            if !safe_kind {
+                .and_then(|kind| attention_link_kind_capability(&projection.authority, kind))
+                .unwrap_or(false);
+            if !permitted {
                 return Err(ToolError::ExecutionFailed {
                     message:
                         "attention-scoped workgraph_link only permits parent, related, or derived_from edges"
@@ -528,6 +553,216 @@ mod tests {
         GoalCreateRequest, MemoryWorkGraphStore, WorkAttentionMode, WorkCompletionPolicy,
         WorkGraphService, WorkNamespace,
     };
+
+    /// The per-mode allow-set is now decided by the canonical
+    /// `WorkAttentionLifecycleMachine`'s `ClassifyAttentionAuthority` verdict and
+    /// only mechanically decoded by `allowed_tools_for_projection`. This pins the
+    /// post-fold allow-set to the exact pre-fold behavior for every attention mode
+    /// across the relevant delegated-authority combinations, proving the ownership
+    /// move changed no policy.
+    #[tokio::test]
+    async fn per_mode_allow_set_matches_pre_fold_behavior() {
+        async fn allow_set_for(
+            mode: WorkAttentionMode,
+            delegated_authority: AttentionDelegatedAuthority,
+        ) -> BTreeSet<String> {
+            let service = WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new()));
+            let session_id = meerkat_core::SessionId::parse("019e63c2-0000-7000-8000-0000000000aa")
+                .expect("valid session id");
+            let goal = service
+                .create_goal(GoalCreateRequest {
+                    realm_id: None,
+                    namespace: None,
+                    title: "Parity item".to_string(),
+                    description: None,
+                    target: GoalAttentionTarget::Session { session_id },
+                    mode,
+                    completion_policy: WorkCompletionPolicy::SelfAttest,
+                    delegated_authority,
+                    projection_policy: AttentionProjectionPolicy::default(),
+                })
+                .await
+                .expect("create goal");
+            let projection = service
+                .attention_projection(crate::AttentionProjectionRequest {
+                    binding_id: goal.attention.binding_id,
+                    realm_id: None,
+                    namespace: None,
+                })
+                .await
+                .expect("projection")
+                .projection;
+            allowed_tools_for_projection(&projection)
+                .into_iter()
+                .map(ToOwned::to_owned)
+                .collect()
+        }
+
+        fn expect(names: &[&str]) -> BTreeSet<String> {
+            names.iter().map(|name| (*name).to_string()).collect()
+        }
+
+        use AttentionDelegatedAuthority::*;
+        use WorkAttentionMode::*;
+
+        // Observe: read-only.
+        assert_eq!(
+            allow_set_for(Observe, AddEvidence).await,
+            expect(&["workgraph_get"])
+        );
+
+        // Review / Falsify: get + add_evidence, plus close iff own-review close
+        // authority was delegated.
+        for mode in [Review, Falsify] {
+            assert_eq!(
+                allow_set_for(mode, AddEvidence).await,
+                expect(&["workgraph_get", "workgraph_add_evidence"]),
+                "{mode:?} without own-review close"
+            );
+            assert_eq!(
+                allow_set_for(mode, CloseOwnReviewItem).await,
+                expect(&["workgraph_get", "workgraph_add_evidence", "workgraph_close",]),
+                "{mode:?} with own-review close"
+            );
+        }
+
+        // Pursue: get + release + update + block + add_evidence, plus close iff
+        // close-if-policy-allows was delegated.
+        assert_eq!(
+            allow_set_for(Pursue, AddEvidence).await,
+            expect(&[
+                "workgraph_get",
+                "workgraph_release",
+                "workgraph_update",
+                "workgraph_block",
+                "workgraph_add_evidence",
+            ]),
+            "Pursue without close authority"
+        );
+        assert_eq!(
+            allow_set_for(Pursue, CloseIfPolicyAllows).await,
+            expect(&[
+                "workgraph_get",
+                "workgraph_release",
+                "workgraph_update",
+                "workgraph_block",
+                "workgraph_add_evidence",
+                "workgraph_close",
+            ]),
+            "Pursue with close-if-policy-allows"
+        );
+
+        // Coordinate: get + create + update + link + add_evidence (no close).
+        assert_eq!(
+            allow_set_for(Coordinate, AddEvidence).await,
+            expect(&[
+                "workgraph_get",
+                "workgraph_create",
+                "workgraph_update",
+                "workgraph_link",
+                "workgraph_add_evidence",
+            ])
+        );
+
+        // Judge: get + add_evidence, plus close iff close-if-policy-allows.
+        assert_eq!(
+            allow_set_for(Judge, AddEvidence).await,
+            expect(&["workgraph_get", "workgraph_add_evidence"]),
+            "Judge without close authority"
+        );
+        assert_eq!(
+            allow_set_for(Judge, CloseIfPolicyAllows).await,
+            expect(&["workgraph_get", "workgraph_add_evidence", "workgraph_close",]),
+            "Judge with close-if-policy-allows"
+        );
+    }
+
+    /// The set of edge kinds an attention-scoped `workgraph_link` may create is
+    /// now decided by the canonical `WorkAttentionLifecycleMachine`'s
+    /// `ClassifyAttentionAuthority` verdict (mirrored into
+    /// `projection.authority.can_link_{parent,related,derived_from}`); the shell
+    /// is a pure `WorkEdgeKind -> capability-bit` decoder that fails closed. This
+    /// pins the post-fold permitted/denied edge kinds to the exact pre-fold
+    /// fixed allow-list through the machine-backed projection.
+    #[tokio::test]
+    async fn attention_scoped_link_edge_kind_admission_matches_pre_fold_behavior() {
+        async fn projection_for(mode: WorkAttentionMode) -> AttentionContextProjection {
+            let service = WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new()));
+            let session_id = meerkat_core::SessionId::parse("019e63c2-0000-7000-8000-0000000000bb")
+                .expect("valid session id");
+            let goal = service
+                .create_goal(GoalCreateRequest {
+                    realm_id: None,
+                    namespace: None,
+                    title: "Link admission item".to_string(),
+                    description: None,
+                    target: GoalAttentionTarget::Session { session_id },
+                    mode,
+                    completion_policy: WorkCompletionPolicy::SelfAttest,
+                    delegated_authority: AttentionDelegatedAuthority::AddEvidence,
+                    projection_policy: AttentionProjectionPolicy::default(),
+                })
+                .await
+                .expect("create goal");
+            service
+                .attention_projection(crate::AttentionProjectionRequest {
+                    binding_id: goal.attention.binding_id,
+                    realm_id: None,
+                    namespace: None,
+                })
+                .await
+                .expect("projection")
+                .projection
+        }
+
+        fn link_call(projection: &AttentionContextProjection, kind: &str) -> Result<(), ToolError> {
+            let item_id = projection.work_ref.item_id.as_str();
+            validate_attention_scoped_call(
+                projection,
+                "workgraph_link",
+                &json!({
+                    "kind": kind,
+                    "from_id": item_id,
+                    "to_id": "some-other-item",
+                }),
+            )
+        }
+
+        // Coordinate is the only stance that owns graph wiring, so its machine
+        // verdict permits exactly parent/related/derived_from and denies the
+        // kinds with no capability bit (blocks/supersedes).
+        let coordinate = projection_for(WorkAttentionMode::Coordinate).await;
+        assert!(coordinate.authority.can_link, "Coordinate can link");
+        assert!(coordinate.authority.can_link_parent);
+        assert!(coordinate.authority.can_link_related);
+        assert!(coordinate.authority.can_link_derived_from);
+        for kind in ["parent", "related", "derived_from"] {
+            assert!(
+                link_call(&coordinate, kind).is_ok(),
+                "Coordinate must permit {kind} link"
+            );
+        }
+        for kind in ["blocks", "supersedes"] {
+            assert!(
+                link_call(&coordinate, kind).is_err(),
+                "Coordinate must deny {kind} link (no capability bit)"
+            );
+        }
+
+        // A stance that cannot link at all (Pursue) has every per-kind bit false,
+        // so even parent/related/derived_from are denied — fail closed.
+        let pursue = projection_for(WorkAttentionMode::Pursue).await;
+        assert!(!pursue.authority.can_link, "Pursue cannot link");
+        assert!(!pursue.authority.can_link_parent);
+        assert!(!pursue.authority.can_link_related);
+        assert!(!pursue.authority.can_link_derived_from);
+        for kind in ["parent", "related", "derived_from", "blocks", "supersedes"] {
+            assert!(
+                link_call(&pursue, kind).is_err(),
+                "Pursue must deny {kind} link"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn workgraph_tool_surface_dispatches_tools() {
@@ -643,7 +878,11 @@ mod tests {
             .expect("projection")
             .projection;
         assert!(projection.authority.can_close_own_review_item);
-        assert!(!projection.authority.can_close_parent);
+        // A Review stance carries no graph-mutation authority beyond evidence and
+        // its own-review close: it cannot create, link, update, release, or block.
+        assert!(!projection.authority.can_create);
+        assert!(!projection.authority.can_link);
+        assert!(!projection.authority.can_update);
         let surface = WorkGraphToolSurface::with_attention_projection(service, projection);
         let names = surface
             .tools()
@@ -978,6 +1217,8 @@ mod tests {
                     id: "acceptance-1".to_string(),
                     label: Some("accepted".to_string()),
                     summary: None,
+                    confirmation_kind: None,
+                    confirming_owner_key: None,
                 },
                 principal: None,
                 trusted_principal: None,

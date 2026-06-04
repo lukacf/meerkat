@@ -232,15 +232,22 @@ fn test_hard_cut_rejects_pre_v3_run() {
     );
 }
 
-/// REQ-13: A pre-v3 run in Pending state is accepted (not yet active).
+/// REQ-13: A pre-v3 run in Pending state is not hard-cut, but it still needs
+/// generated MobMachine authority evidence before recovery can trust it.
 #[test]
-fn test_pre_v3_pending_run_is_accepted() {
+fn test_pre_v3_pending_run_without_authority_projection_is_rejected() {
     let mut run = minimal_run_with_schema_v2();
     run.schema_version = 2;
     run.status = MobRunStatus::Pending;
 
     let result = reconcile_run_state(&mut run);
-    assert!(result.is_ok(), "Pending pre-v3 run should be accepted");
+    assert!(
+        matches!(
+            result,
+            Err(RestoreIncompatible::FlowAuthorityProjectionMismatch { .. })
+        ),
+        "pending pre-v3 run without generated authority should be rejected, got: {result:?}"
+    );
 }
 
 // ─── Recovery: pending_body_frame_loops reconciliation ─────────────────────

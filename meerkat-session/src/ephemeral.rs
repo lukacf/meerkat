@@ -6,6 +6,8 @@
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
+#[cfg(test)]
+use meerkat_core::SessionSystemContextState;
 use meerkat_core::error::AgentError;
 use meerkat_core::event::{AgentEvent, EventEnvelope, EventSourceIdentity};
 use meerkat_core::image_content::{MissingBlobBehavior, hydrate_deferred_turn_state};
@@ -23,10 +25,10 @@ use meerkat_core::service::{
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{ContentInput, RunResult, SessionId, ToolResult, Usage};
 use meerkat_core::{
-    DeferredFirstTurnPhase, InputId, PendingDeferredPrompt, PendingSystemContextAppend,
-    PendingToolResultsMessage, RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent,
-    RealtimeTranscriptMaterializedMessage, RunId, SessionDeferredTurnState, SessionLlmIdentity,
-    SessionSystemContextState, TurnPhase, TurnStateHandle, TurnStateSnapshot,
+    ConsumedDeferredTurnInputs, DeferredFirstTurnPhase, InputId, PendingSystemContextAppend,
+    RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent, RealtimeTranscriptMaterializedMessage,
+    RunId, SessionDeferredTurnState, SessionLlmIdentity, TurnPhase, TurnStateHandle,
+    TurnStateSnapshot,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -41,7 +43,11 @@ use crate::tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot,
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot, watch};
 
-use crate::turn_admission::{TurnAdmissionPhase, TurnAdmissionSlot};
+pub use crate::turn_admission::ObservedSessionTailKind;
+use crate::turn_admission::{
+    StartTurnDispatchAuthorization, StartTurnDisposition, StartTurnPublicTerminal,
+    TurnAdmissionPhase, TurnAdmissionProjection, TurnAdmissionSlot,
+};
 
 /// Capacity for the internal agent event channel.
 const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -53,15 +59,9 @@ const COMMAND_CHANNEL_CAPACITY: usize = 8;
 // Session state
 // ---------------------------------------------------------------------------
 
-/// Observable state of a session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionState {
-    Idle,
-    Admitted,
-    Running,
-    Completing,
-    ShuttingDown,
-}
+/// Observable state of a session, projected from generated turn-admission
+/// authority.
+type SessionState = TurnAdmissionProjection;
 
 /// Snapshot of session metadata for read/list operations.
 #[derive(Debug, Clone)]
@@ -103,6 +103,11 @@ enum SessionCommand {
         identity: SessionLlmIdentity,
         request_policy: meerkat_core::SessionLlmRequestPolicy,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
+    },
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    UpdateKeepAlive {
+        keep_alive: bool,
+        reply_tx: oneshot::Sender<()>,
     },
     StageToolFilter {
         filter: meerkat_core::ToolFilter,
@@ -172,11 +177,6 @@ enum SessionCommand {
             Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::error::AgentError>,
         >,
     },
-    /// Update the keep_alive flag in durable session metadata.
-    UpdateKeepAlive {
-        keep_alive: bool,
-        reply_tx: oneshot::Sender<()>,
-    },
     UpdateMobToolAuthority {
         authority_context: Option<MobToolAuthorityContext>,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
@@ -205,7 +205,7 @@ struct SessionHandle {
     state_rx: watch::Receiver<SessionState>,
     summary_rx: watch::Receiver<SessionSummaryCache>,
     llm_identity_rx: watch::Receiver<SessionLlmIdentity>,
-    /// Canonical owner for session turn admission lifecycle.
+    /// Mutexed shell around generated session turn-admission authority.
     turn_admission: Arc<std::sync::Mutex<TurnAdmissionSlot>>,
     created_at: SystemTime,
     /// Key-value labels attached at session creation.
@@ -218,7 +218,7 @@ struct SessionHandle {
     /// Optional comms runtime for keep-alive commands and stream attachment.
     comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     /// Shared runtime control state for system-context appends.
-    system_context_state: Arc<std::sync::Mutex<SessionSystemContextState>>,
+    system_context_state: meerkat_core::SystemContextStateHandle,
     /// Runtime-owned turn phase handle for active-boundary probes.
     turn_state_handle: Option<Arc<dyn TurnStateHandle>>,
     /// Shared control state for deferred first-turn prompt and staged tool results.
@@ -621,13 +621,12 @@ pub trait SessionAgent: Send {
         None
     }
 
-    /// Whether the session has a pending user/tool-results boundary.
+    /// Observe the session transcript tail.
     ///
-    /// Lightweight check used by the ResumePending no-op guard to avoid
-    /// calling `session_clone()` just to inspect the last message.
-    fn has_pending_boundary(&self) -> bool {
-        false // default: no pending boundary
-    }
+    /// This is deliberately a typed observation, not a pending-boundary
+    /// decision. Generated turn-admission authority owns which tail kinds can
+    /// admit pending continuation.
+    fn observed_session_tail(&self) -> ObservedSessionTailKind;
 
     /// Update the `keep_alive` flag in the session's durable metadata.
     ///
@@ -692,9 +691,7 @@ pub trait SessionAgent: Send {
     }
 
     /// Get shared runtime control state for system-context append requests.
-    fn system_context_state(
-        &self,
-    ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>;
+    fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle;
 
     /// Synchronize the shared system-context control state into the canonical session metadata.
     fn sync_system_context_state(&mut self) {}
@@ -704,16 +701,7 @@ pub trait SessionAgent: Send {
     fn discard_unapplied_active_turn_system_context(&mut self) -> usize {
         let discarded_count = {
             let state = self.system_context_state();
-            let mut guard = match state.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => {
-                    tracing::warn!(
-                        "system-context state lock poisoned while discarding active-turn context"
-                    );
-                    poisoned.into_inner()
-                }
-            };
-            guard.discard_unapplied_active_turn_pending().len()
+            state.discard_unapplied_active_turn_pending()
         };
         if discarded_count > 0 {
             self.sync_system_context_state();
@@ -945,6 +933,12 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         }
     }
 
+    fn missing_durable_llm_identity_error(context: &str) -> SessionError {
+        SessionError::Agent(AgentError::ConfigError(format!(
+            "{context} requires durable LLM identity from the session agent"
+        )))
+    }
+
     async fn validate_prompt_video_input(
         &self,
         prompt: &ContentInput,
@@ -976,29 +970,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             )));
         }
         Ok(())
-    }
-
-    fn fallback_llm_identity_from_create_request(req: &CreateSessionRequest) -> SessionLlmIdentity {
-        let provider = req
-            .build
-            .as_ref()
-            .and_then(|build| build.provider)
-            .or_else(|| meerkat_core::Provider::infer_from_model(&req.model))
-            .unwrap_or(meerkat_core::Provider::Other);
-        let provider_params = req
-            .build
-            .as_ref()
-            .and_then(|build| build.provider_params.clone());
-        SessionLlmIdentity {
-            model: req.model.clone(),
-            provider,
-            self_hosted_server_id: None,
-            provider_params,
-            auth_binding: req
-                .build
-                .as_ref()
-                .and_then(|build| build.auth_binding.clone()),
-        }
     }
 
     /// Create a new ephemeral session service.
@@ -1038,7 +1009,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         if let Some(permit) = take_staged_capacity_permit(&handle.staged_capacity_permit) {
             let restore_staged_capacity_on_drop = {
                 let state = lock_deferred_turn_state(&handle.deferred_turn_state);
-                matches!(state.first_turn_phase, DeferredFirstTurnPhase::Pending)
+                matches!(state.first_turn_phase(), DeferredFirstTurnPhase::Pending)
             };
             return Ok(acquire_active_capacity_lease(
                 Arc::clone(&handle.active_capacity_lease),
@@ -1125,7 +1096,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             (
                 handle.command_tx.clone(),
                 Arc::clone(&handle.deferred_turn_state),
-                Arc::clone(&handle.system_context_state),
+                handle.system_context_state.clone(),
             )
         };
 
@@ -1152,13 +1123,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             )))
         })?;
 
-        let system_context = match system_context_state.lock() {
-            Ok(guard) => guard.clone(),
-            Err(poisoned) => {
-                tracing::warn!("system-context state lock poisoned while exporting session");
-                poisoned.into_inner().clone()
-            }
-        };
+        let system_context = system_context_state.snapshot();
         session
             .set_system_context_state(system_context)
             .map_err(|err| {
@@ -1397,14 +1362,12 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
         drop(sessions);
         release_staged_capacity_permit(&handle.staged_capacity_permit);
-        let phase = {
+        let projection = {
             let mut slot = lock_turn_admission(&handle.turn_admission);
-            slot.request_shutdown().ok()
+            slot.request_shutdown().ok().map(|_| slot.projection())
         };
-        if let Some(phase) = phase {
-            handle
-                .state_tx
-                .send_replace(map_turn_phase_to_session_state(phase));
+        if let Some(projection) = projection {
+            handle.state_tx.send_replace(projection);
         }
         let _ = handle.command_tx.send(SessionCommand::Shutdown).await;
         Ok(())
@@ -1493,50 +1456,45 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .await
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
 
-        let mut guard = match state.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                tracing::warn!(
-                    session_id = %id,
-                    "system-context state lock poisoned while staging active-turn context"
-                );
-                poisoned.into_inner()
-            }
-        };
-
         let locked_token = Self::active_turn_boundary_staging_token(turn_state_handle.as_ref())
             .ok_or_else(|| SessionError::NotRunning { id: id.clone() })?;
         if locked_token != initial_token {
             return Err(SessionError::NotRunning { id: id.clone() });
         }
 
-        let mut candidate = guard.clone();
-        for append in appends {
-            let req = AppendSystemContextRequest {
-                text: append.text,
-                source: append.source,
-                idempotency_key: append.idempotency_key,
-            };
-            candidate
-                .stage_active_turn_append(&req, append.accepted_at)
-                .map_err(|err| {
-                    SessionError::Agent(AgentError::InternalError(
-                        err.into_control_error(id).to_string(),
-                    ))
-                })?;
-        }
+        let staged_appends = appends
+            .into_iter()
+            .map(|append| {
+                (
+                    AppendSystemContextRequest {
+                        text: append.text,
+                        source: append.source,
+                        idempotency_key: append.idempotency_key,
+                        source_kind: append.source_kind,
+                    },
+                    append.accepted_at,
+                )
+            })
+            .collect();
+        let (snapshot_state, staged_state) = state
+            .stage_active_turn_appends_with_snapshot(staged_appends)
+            .map_err(|err| {
+                SessionError::Agent(AgentError::InternalError(
+                    err.into_control_error(id).to_string(),
+                ))
+            })?;
         let staged_token = Self::active_turn_boundary_staging_token(turn_state_handle.as_ref())
             .ok_or_else(|| SessionError::NotRunning { id: id.clone() })?;
         if staged_token != initial_token {
+            let _ = state.replace_from_generated_restore_if_current(&staged_state, snapshot_state);
             return Err(SessionError::NotRunning { id: id.clone() });
         }
         tracing::debug!(
             session_id = %id,
-            pending_count = candidate.pending.len(),
-            active_turn_pending_count = candidate.active_turn_pending_keys.len(),
+            pending_count = staged_state.pending().len(),
+            active_turn_pending_count = staged_state.active_turn_pending_len(),
             "staged active-turn runtime system context"
         );
-        *guard = candidate;
 
         Ok(())
     }
@@ -1562,18 +1520,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .await
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
 
-        let mut guard = match state.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                tracing::warn!(
-                    session_id = %id,
-                    "system-context state lock poisoned while rolling back active-turn context"
-                );
-                poisoned.into_inner()
-            }
-        };
-
-        let discarded = guard.discard_active_turn_pending_by_keys(&idempotency_keys);
+        let discarded = state.discard_active_turn_pending_by_keys(&idempotency_keys);
         if !discarded.is_empty() {
             tracing::debug!(
                 session_id = %id,
@@ -1816,12 +1763,13 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 .await
             }
             Err(SessionError::Agent(meerkat_core::error::AgentError::NoPendingBoundary)) => {
+                let terminal = self.resolve_no_pending_boundary_terminal(id).await?;
                 self.build_runtime_output(
                     id,
                     run_id,
                     boundary,
                     contributing_input_ids,
-                    Some(CoreApplyTerminal::NoPendingBoundary),
+                    Some(terminal),
                 )
                 .await
             }
@@ -1839,6 +1787,28 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                     Err(error)
                 }
             }
+        }
+    }
+
+    pub(crate) async fn resolve_no_pending_boundary_terminal(
+        &self,
+        id: &SessionId,
+    ) -> Result<CoreApplyTerminal, SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let terminal = {
+            let mut slot = lock_turn_admission(&handle.turn_admission);
+            slot.resolve_last_start_turn_public_terminal()
+        }
+        .map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "generated turn authority did not confirm NoPendingBoundary terminal: {error}"
+            )))
+        })?;
+        match terminal {
+            StartTurnPublicTerminal::NoPendingBoundary => Ok(CoreApplyTerminal::NoPendingBoundary),
         }
     }
 
@@ -2183,11 +2153,11 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     pub async fn system_context_state(
         &self,
         session_id: &SessionId,
-    ) -> Option<Arc<std::sync::Mutex<SessionSystemContextState>>> {
+    ) -> Option<meerkat_core::SystemContextStateHandle> {
         let sessions = self.sessions.read().await;
         sessions
             .get(session_id)
-            .map(|h| Arc::clone(&h.system_context_state))
+            .map(|h| h.system_context_state.clone())
     }
 
     /// Get the current live durable LLM identity for a session.
@@ -2202,6 +2172,36 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 id: session_id.clone(),
             })?;
         Ok(handle.llm_identity_rx.borrow().clone())
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub(crate) async fn update_session_keep_alive(
+        &self,
+        id: &SessionId,
+        keep_alive: bool,
+    ) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::UpdateKeepAlive {
+                keep_alive,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx.await.map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "Session task dropped reply channel".to_string(),
+            ))
+        })
     }
 
     /// Get the comms runtime for a session, if available.
@@ -2228,14 +2228,12 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let mut sessions = self.sessions.write().await;
         for (_id, handle) in sessions.drain(..) {
             release_staged_capacity_permit(&handle.staged_capacity_permit);
-            let phase = {
+            let projection = {
                 let mut slot = lock_turn_admission(&handle.turn_admission);
-                slot.request_shutdown().ok()
+                slot.request_shutdown().ok().map(|_| slot.projection())
             };
-            if let Some(phase) = phase {
-                handle
-                    .state_tx
-                    .send_replace(map_turn_phase_to_session_state(phase));
+            if let Some(projection) = projection {
+                handle.state_tx.send_replace(projection);
             }
             let _ = handle.command_tx.send(SessionCommand::Shutdown).await;
         }
@@ -2317,40 +2315,32 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     }
 
     fn is_session_state_active(state: SessionState) -> bool {
-        matches!(
-            state,
-            SessionState::Admitted | SessionState::Running | SessionState::Completing
-        )
+        state.is_active
     }
 
     fn request_start_turn(id: &SessionId, handle: &SessionHandle) -> Result<(), SessionError> {
-        let phase = {
+        let projection = {
             let mut slot = lock_turn_admission(&handle.turn_admission);
-            let phase = slot
-                .claim()
+            slot.claim()
                 .map_err(|_| SessionError::Busy { id: id.clone() })?;
             clear_cancel_after_boundary_request(&handle.cancel_after_boundary_handle);
-            phase
+            slot.projection()
         };
-        handle
-            .state_tx
-            .send_replace(map_turn_phase_to_session_state(phase));
+        handle.state_tx.send_replace(projection);
         Ok(())
     }
 
     fn try_abort_admitted_turn(handle: &SessionHandle) {
-        let phase = {
+        let projection = {
             let mut slot = lock_turn_admission(&handle.turn_admission);
             let phase = slot.abort_claim().ok();
             if phase.is_some() {
                 clear_cancel_after_boundary_request(&handle.cancel_after_boundary_handle);
             }
-            phase
+            phase.map(|_| slot.projection())
         };
-        if let Some(phase) = phase {
-            handle
-                .state_tx
-                .send_replace(map_turn_phase_to_session_state(phase));
+        if let Some(projection) = projection {
+            handle.state_tx.send_replace(projection);
         }
     }
 }
@@ -2370,11 +2360,18 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .build
             .as_ref()
             .and_then(|build| build.resume_session.as_ref());
-        let mut deferred_turn_state = resumed_session
-            .and_then(meerkat_core::Session::deferred_turn_state)
-            .unwrap_or_default();
+        let resumed_deferred_turn_state = resumed_session
+            .map(meerkat_core::Session::try_deferred_turn_state)
+            .transpose()
+            .map_err(|err| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "generated deferred-turn authority rejected session creation restore: {err}"
+                )))
+            })?
+            .flatten();
+        let mut deferred_turn_state = resumed_deferred_turn_state.clone().unwrap_or_default();
         let resumed_session_is_deferred_template = resumed_session.is_some_and(|session| {
-            session.messages().is_empty() && session.deferred_turn_state().is_none()
+            session.messages().is_empty() && resumed_deferred_turn_state.is_none()
         });
         if let Some(blob_store) = req
             .build
@@ -2417,12 +2414,14 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .await?;
         let llm_identity = agent
             .durable_llm_identity()
-            .unwrap_or_else(|| Self::fallback_llm_identity_from_create_request(&req));
+            .ok_or_else(|| Self::missing_durable_llm_identity_error("session creation"))?;
         self.validate_prompt_video_input(&prompt, &llm_identity)
             .await?;
         let session_id = agent.session_id();
         let created_at = SystemTime::now();
-        let turn_admission = Arc::new(std::sync::Mutex::new(TurnAdmissionSlot::new()));
+        let turn_admission_slot = TurnAdmissionSlot::new();
+        let initial_session_state = turn_admission_slot.projection();
+        let turn_admission = Arc::new(std::sync::Mutex::new(turn_admission_slot));
         let staged_capacity_permit = Arc::new(std::sync::Mutex::new(None));
         let active_capacity_lease =
             Arc::new(std::sync::Mutex::new(SessionActiveCapacityLease::default()));
@@ -2450,7 +2449,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let session_context = agent.session_context_handle();
         // Create session task channels
         let (command_tx, command_rx) = mpsc::channel::<SessionCommand>(COMMAND_CHANNEL_CAPACITY);
-        let (state_tx, state_rx) = watch::channel(SessionState::Idle);
+        let (state_tx, state_rx) = watch::channel(initial_session_state);
         let state_tx_handle = state_tx.clone();
         let (summary_tx, summary_rx) = watch::channel(SessionSummaryCache {
             updated_at: created_at,
@@ -2798,14 +2797,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         };
 
         {
-            let slot = lock_turn_admission(&handle.turn_admission);
-            let phase = slot.phase();
-            if !matches!(
-                phase,
-                TurnAdmissionPhase::Admitted | TurnAdmissionPhase::Running
-            ) {
-                return Err(SessionError::NotRunning { id: id.clone() });
-            }
+            let mut slot = lock_turn_admission(&handle.turn_admission);
+            slot.authorize_cancel_after_boundary()
+                .map_err(|_| SessionError::NotRunning { id: id.clone() })?;
             cancel_after_boundary_handle.store(true, Ordering::SeqCst);
         }
         wake_interrupt_notify(&handle.interrupt_notify);
@@ -2833,6 +2827,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         // snapshots responsive on sync surfaces such as wasm exports.
         let state = *handle.state_rx.borrow();
         let summary = handle.summary_rx.borrow().clone();
+        let live_identity = handle.llm_identity_rx.borrow().clone();
         Ok(SessionView {
             state: SessionInfo {
                 session_id: id.clone(),
@@ -2840,8 +2835,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 updated_at: summary.updated_at,
                 message_count: summary.message_count,
                 is_active: Self::is_session_state_active(state),
-                model: handle.llm_identity_rx.borrow().model.clone(),
-                provider: handle.llm_identity_rx.borrow().provider,
+                model: live_identity.model,
+                provider: live_identity.provider,
                 last_assistant_text: summary.last_assistant_text,
                 labels: handle.labels.clone(),
             },
@@ -2911,46 +2906,15 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             .await
             .insert(id.clone(), archived_view);
 
-        let phase = {
+        let projection = {
             let mut slot = lock_turn_admission(&handle.turn_admission);
-            slot.request_shutdown().ok()
+            slot.request_shutdown().ok().map(|_| slot.projection())
         };
-        if let Some(phase) = phase {
-            handle
-                .state_tx
-                .send_replace(map_turn_phase_to_session_state(phase));
+        if let Some(projection) = projection {
+            handle.state_tx.send_replace(projection);
         }
         let _ = handle.command_tx.send(SessionCommand::Shutdown).await;
         Ok(())
-    }
-
-    async fn update_session_keep_alive(
-        &self,
-        id: &SessionId,
-        keep_alive: bool,
-    ) -> Result<(), SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
-            .send(SessionCommand::UpdateKeepAlive {
-                keep_alive,
-                reply_tx,
-            })
-            .await
-            .map_err(|_| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    "Session task has exited".to_string(),
-                ))
-            })?;
-        reply_rx.await.map_err(|_| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                "Session task dropped reply channel".to_string(),
-            ))
-        })
     }
 
     async fn update_session_mob_authority_context(
@@ -3006,21 +2970,9 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for EphemeralSes
             .await
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
 
-        let status = {
-            let mut guard = match state.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => {
-                    tracing::warn!(
-                        session_id = %id,
-                        "system-context state lock poisoned while staging append"
-                    );
-                    poisoned.into_inner()
-                }
-            };
-            guard
-                .stage_append(&req, SystemTime::now())
-                .map_err(|err| err.into_control_error(id))?
-        };
+        let (status, _, _) = state
+            .stage_append_with_snapshot(&req, SystemTime::now())
+            .map_err(|err| err.into_control_error(id))?;
 
         self.sync_system_context_state(id)
             .await
@@ -3374,16 +3326,6 @@ fn release_active_capacity_lease(
     }
 }
 
-fn map_turn_phase_to_session_state(phase: TurnAdmissionPhase) -> SessionState {
-    match phase {
-        TurnAdmissionPhase::Idle => SessionState::Idle,
-        TurnAdmissionPhase::Admitted => SessionState::Admitted,
-        TurnAdmissionPhase::Running => SessionState::Running,
-        TurnAdmissionPhase::Completing => SessionState::Completing,
-        TurnAdmissionPhase::ShuttingDown => SessionState::ShuttingDown,
-    }
-}
-
 fn lock_turn_admission(
     slot: &Arc<std::sync::Mutex<TurnAdmissionSlot>>,
 ) -> std::sync::MutexGuard<'_, TurnAdmissionSlot> {
@@ -3394,79 +3336,16 @@ fn lock_turn_admission(
 /// Roll an admitted turn back to `Idle` from within the session task when a
 /// preflight check fails before the run starts.
 fn abort_admitted_turn(control: &SessionTaskControl) {
-    let phase = {
+    let projection = {
         let mut slot = lock_turn_admission(&control.turn_admission);
         let phase = slot.abort_claim().ok();
         if phase.is_some() {
             clear_cancel_after_boundary_request(&control.cancel_after_boundary_handle);
         }
-        phase
+        phase.map(|_| slot.projection())
     };
-    if let Some(phase) = phase {
-        control
-            .state_tx
-            .send_replace(map_turn_phase_to_session_state(phase));
-    }
-}
-
-/// Canonical turn-admissibility disposition.
-///
-/// This is the single owner of the "can this turn request legally proceed?"
-/// decision. It reads both the live session state (has_pending_boundary)
-/// AND deferred staging state (has_staged_tool_results) to produce a typed
-/// outcome. No shell code should re-derive this from partial projections.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StartTurnDisposition {
-    /// Run a content turn (prompt → LLM).
-    RunContentTurn,
-    /// Resume a pending continuation boundary (ToolResults or User).
-    RunPending,
-    /// No pending boundary exists and no staged tool results will create one.
-    /// The caller should return NoPendingBoundary.
-    NoPendingBoundary,
-}
-
-/// Evaluate turn admissibility from the canonical inputs.
-///
-/// This function is the single source of truth for deciding how a StartTurn
-/// request should be dispatched. It considers:
-/// - `execution_kind`: typed intent from the runtime layer (or None for substrate-direct)
-/// - `prompt`: the content to send (for the None/substrate-direct fallback)
-/// - `session_has_pending_boundary`: whether the live session ends in User/ToolResults
-/// - `has_staged_tool_results`: whether deferred tool results will create a boundary
-fn evaluate_start_turn_disposition(
-    execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
-    prompt: &meerkat_core::types::ContentInput,
-    session_has_pending_boundary: bool,
-    has_staged_tool_results: bool,
-) -> StartTurnDisposition {
-    // A pending boundary exists if the live session has one OR if staged
-    // tool results will materialize one when applied.
-    let effective_pending_boundary = session_has_pending_boundary || has_staged_tool_results;
-
-    match execution_kind {
-        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn) => {
-            StartTurnDisposition::RunContentTurn
-        }
-        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending) => {
-            if effective_pending_boundary {
-                StartTurnDisposition::RunPending
-            } else {
-                StartTurnDisposition::NoPendingBoundary
-            }
-        }
-        None => {
-            // Non-runtime substrate-direct paths: infer from prompt content.
-            let has_prompt =
-                prompt.has_non_text_content() || !prompt.text_content().trim().is_empty();
-            if has_prompt {
-                StartTurnDisposition::RunContentTurn
-            } else if effective_pending_boundary {
-                StartTurnDisposition::RunPending
-            } else {
-                StartTurnDisposition::NoPendingBoundary
-            }
-        }
+    if let Some(projection) = projection {
+        control.state_tx.send_replace(projection);
     }
 }
 
@@ -3489,28 +3368,10 @@ fn merge_content_inputs(
 
 fn restore_deferred_turn_inputs(
     deferred_turn_state: &Arc<std::sync::Mutex<SessionDeferredTurnState>>,
-    restore_first_turn_pending: bool,
-    pending_initial_prompt: Option<PendingDeferredPrompt>,
-    pending_tool_results: Vec<PendingToolResultsMessage>,
+    consumed: ConsumedDeferredTurnInputs,
 ) {
-    if !restore_first_turn_pending
-        && pending_initial_prompt.is_none()
-        && pending_tool_results.is_empty()
-    {
-        return;
-    }
     let mut guard = lock_deferred_turn_state(deferred_turn_state);
-    if restore_first_turn_pending {
-        guard.restore_initial_turn_pending();
-    }
-    if guard.pending_initial_prompt.is_none() {
-        guard.pending_initial_prompt = pending_initial_prompt;
-    }
-    if !pending_tool_results.is_empty() {
-        let mut restored = pending_tool_results;
-        restored.extend(std::mem::take(&mut guard.pending_tool_results));
-        guard.pending_tool_results = restored;
-    }
+    guard.restore_consumed_turn_inputs(consumed);
 }
 
 async fn session_task<A: SessionAgent>(
@@ -3548,6 +3409,15 @@ async fn session_task<A: SessionAgent>(
                 let _ = reply_tx.send(result);
                 continue;
             }
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            SessionCommand::UpdateKeepAlive {
+                keep_alive,
+                reply_tx,
+            } => {
+                agent.update_keep_alive(keep_alive);
+                let _ = reply_tx.send(());
+                continue;
+            }
             SessionCommand::StageToolFilter { filter, reply_tx } => {
                 let _ = reply_tx.send(agent.stage_external_tool_filter(filter));
                 continue;
@@ -3564,7 +3434,26 @@ async fn session_task<A: SessionAgent>(
             }
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             SessionCommand::SyncSessionFromDurableSnapshot { session, reply_tx } => {
-                let result = agent.sync_session_from_durable_snapshot(session);
+                let durable_deferred_turn_state = session
+                    .try_deferred_turn_state()
+                    .map_err(|err| {
+                        meerkat_core::error::AgentError::InternalError(format!(
+                            "failed to restore durable deferred-turn state during live session sync: {err}"
+                        ))
+                    });
+                let result = match durable_deferred_turn_state {
+                    Ok(durable_deferred_turn_state) => {
+                        let result = agent.sync_session_from_durable_snapshot(session);
+                        if result.is_ok()
+                            && let Some(durable_deferred_turn_state) = durable_deferred_turn_state
+                        {
+                            *lock_deferred_turn_state(&deferred_turn_state) =
+                                durable_deferred_turn_state;
+                        }
+                        result
+                    }
+                    Err(err) => Err(err),
+                };
                 if result.is_ok() {
                     let snap = agent.snapshot();
                     control.publish_summary(SessionSummaryCache {
@@ -3604,6 +3493,10 @@ async fn session_task<A: SessionAgent>(
                     .as_ref()
                     .and_then(|metadata| metadata.flow_tool_overlay.clone())
                     .or(runtime.flow_tool_overlay);
+                let keep_alive_policy_present = metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.keep_alive)
+                    .is_some();
                 let pre_turn_context_appends = runtime.pre_turn_context_appends;
                 let typed_turn_appends = runtime.typed_turn_appends;
                 let prompt = if typed_turn_appends.is_empty() {
@@ -3617,57 +3510,133 @@ async fn session_task<A: SessionAgent>(
                     .as_ref()
                     .and_then(|metadata| metadata.execution_kind);
                 let mut active_admission = active_admission;
-                let current_phase = lock_turn_admission(&control.turn_admission).phase();
-                if current_phase == TurnAdmissionPhase::ShuttingDown {
-                    let _ = result_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
-                    continue;
+                let dispatch_authorization = {
+                    let mut slot = lock_turn_admission(&control.turn_admission);
+                    slot.authorize_start_turn_dispatch()
+                };
+                match dispatch_authorization {
+                    Ok(StartTurnDispatchAuthorization::Authorized) => {}
+                    Ok(StartTurnDispatchAuthorization::Cancelled) => {
+                        let _ = result_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
+                        continue;
+                    }
+                    Err(error) => {
+                        let _ =
+                            result_tx.send(Err(meerkat_core::error::AgentError::InternalError(
+                                format!("generated turn authority rejected dispatch: {error}"),
+                            )));
+                        continue;
+                    }
                 }
 
-                let (restore_first_turn_pending, pending_initial_prompt, pending_tool_results) = {
+                let consumed_deferred_inputs = {
                     let mut guard = lock_deferred_turn_state(&deferred_turn_state);
-                    (
-                        guard.mark_initial_turn_started(),
-                        guard.pending_initial_prompt.take(),
-                        std::mem::take(&mut guard.pending_tool_results),
-                    )
+                    guard.consume_for_started_turn()
                 };
-                let prompt = match pending_initial_prompt.as_ref() {
+                let prompt = match consumed_deferred_inputs.pending_initial_prompt() {
                     Some(staged_prompt) => {
                         merge_content_inputs(staged_prompt.prompt.clone(), prompt)
                     }
                     None => prompt,
                 };
-                let flattened_tool_results = pending_tool_results
+                let flattened_tool_results = consumed_deferred_inputs
+                    .pending_tool_results()
                     .iter()
                     .flat_map(|pending| pending.results.clone())
                     .collect::<Vec<_>>();
 
-                // Canonical turn-preflight: evaluate whether this turn request
-                // can legally proceed. This is the single owner of the
-                // admissibility decision — it reads both the live session state
-                // AND deferred staging state to produce a typed disposition.
-                let disposition = evaluate_start_turn_disposition(
-                    execution_kind,
-                    &prompt,
-                    agent.has_pending_boundary(),
-                    !flattened_tool_results.is_empty(),
-                );
+                let resolution = {
+                    let mut slot = lock_turn_admission(&control.turn_admission);
+                    slot.resolve_start_turn_disposition(
+                        execution_kind,
+                        &prompt,
+                        agent.observed_session_tail(),
+                        u64::try_from(flattened_tool_results.len()).unwrap_or(u64::MAX),
+                    )
+                };
+                let resolution = match resolution {
+                    Ok(resolution) => resolution,
+                    Err(error) => {
+                        restore_deferred_turn_inputs(
+                            &deferred_turn_state,
+                            consumed_deferred_inputs,
+                        );
+                        if restore_staged_capacity_on_pre_run_failure
+                            && let Some(admission) = active_admission.take()
+                        {
+                            admission.restore_staged_capacity();
+                        }
+                        abort_admitted_turn(&control);
+                        let _ =
+                            result_tx.send(Err(meerkat_core::error::AgentError::InternalError(
+                                format!("illegal start-turn disposition transition: {error}"),
+                            )));
+                        continue;
+                    }
+                };
+                let disposition = resolution.disposition;
                 if matches!(disposition, StartTurnDisposition::NoPendingBoundary) {
-                    restore_deferred_turn_inputs(
-                        &deferred_turn_state,
-                        restore_first_turn_pending,
-                        pending_initial_prompt,
-                        pending_tool_results,
-                    );
+                    let terminal = resolution.public_terminal;
+                    restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
                     if restore_staged_capacity_on_pre_run_failure
                         && let Some(admission) = active_admission.take()
                     {
                         admission.restore_staged_capacity();
                     }
                     abort_admitted_turn(&control);
-                    let _ = result_tx.send(Err(meerkat_core::error::AgentError::NoPendingBoundary));
+                    let result = if terminal == Some(StartTurnPublicTerminal::NoPendingBoundary) {
+                        Err(meerkat_core::error::AgentError::NoPendingBoundary)
+                    } else {
+                        Err(meerkat_core::error::AgentError::InternalError(
+                            "generated turn authority omitted NoPendingBoundary terminal witness"
+                                .to_string(),
+                        ))
+                    };
+                    let _ = result_tx.send(result);
                     continue;
                 }
+                if let Some(terminal) = resolution.public_terminal {
+                    restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
+                    if restore_staged_capacity_on_pre_run_failure
+                        && let Some(admission) = active_admission.take()
+                    {
+                        admission.restore_staged_capacity();
+                    }
+                    abort_admitted_turn(&control);
+                    let _ =
+                        result_tx.send(Err(meerkat_core::error::AgentError::InternalError(
+                            format!(
+                                "generated turn authority emitted terminal {terminal:?} for runnable disposition {disposition:?}"
+                            ),
+                        )));
+                    continue;
+                }
+
+                let persist_runtime_keep_alive = {
+                    let mut slot = lock_turn_admission(&control.turn_admission);
+                    slot.resolve_runtime_keep_alive(keep_alive_policy_present)
+                };
+                let persist_runtime_keep_alive = match persist_runtime_keep_alive {
+                    Ok(persist_runtime_keep_alive) => persist_runtime_keep_alive,
+                    Err(error) => {
+                        restore_deferred_turn_inputs(
+                            &deferred_turn_state,
+                            consumed_deferred_inputs,
+                        );
+                        if restore_staged_capacity_on_pre_run_failure
+                            && let Some(admission) = active_admission.take()
+                        {
+                            admission.restore_staged_capacity();
+                        }
+                        abort_admitted_turn(&control);
+                        let _ = result_tx.send(Err(
+                            meerkat_core::error::AgentError::InternalError(format!(
+                                "generated turn authority rejected keep_alive intent: {error}"
+                            )),
+                        ));
+                        continue;
+                    }
+                };
 
                 let discarded_stale_active_context =
                     agent.discard_unapplied_active_turn_system_context();
@@ -3680,12 +3649,7 @@ async fn session_task<A: SessionAgent>(
 
                 agent.set_skill_references(skill_references);
                 if let Err(error) = agent.set_flow_tool_overlay(flow_tool_overlay) {
-                    restore_deferred_turn_inputs(
-                        &deferred_turn_state,
-                        restore_first_turn_pending,
-                        pending_initial_prompt,
-                        pending_tool_results,
-                    );
+                    restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
                     if restore_staged_capacity_on_pre_run_failure
                         && let Some(admission) = active_admission.take()
                     {
@@ -3697,12 +3661,7 @@ async fn session_task<A: SessionAgent>(
                 }
                 if let Err(error) = agent.apply_pending_tool_results(flattened_tool_results) {
                     let _ = agent.set_flow_tool_overlay(None);
-                    restore_deferred_turn_inputs(
-                        &deferred_turn_state,
-                        restore_first_turn_pending,
-                        pending_initial_prompt,
-                        pending_tool_results,
-                    );
+                    restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
                     if restore_staged_capacity_on_pre_run_failure
                         && let Some(admission) = active_admission.take()
                     {
@@ -3712,23 +3671,22 @@ async fn session_task<A: SessionAgent>(
                     let _ = result_tx.send(Err(error));
                     continue;
                 }
+                if persist_runtime_keep_alive {
+                    agent.update_keep_alive(true);
+                }
                 let begin_phase = {
                     let mut slot = lock_turn_admission(&control.turn_admission);
-                    slot.begin()
+                    slot.begin().map(|_| slot.projection())
                 };
                 match begin_phase {
-                    Ok(phase) => {
-                        control
-                            .state_tx
-                            .send_replace(map_turn_phase_to_session_state(phase));
+                    Ok(projection) => {
+                        control.state_tx.send_replace(projection);
                     }
                     Err(error) => {
                         let _ = agent.set_flow_tool_overlay(None);
                         restore_deferred_turn_inputs(
                             &deferred_turn_state,
-                            restore_first_turn_pending,
-                            pending_initial_prompt,
-                            pending_tool_results,
+                            consumed_deferred_inputs,
                         );
                         if restore_staged_capacity_on_pre_run_failure
                             && let Some(admission) = active_admission.take()
@@ -3749,7 +3707,7 @@ async fn session_task<A: SessionAgent>(
 
                 // Scope the pinned future so its mutable borrow of `agent` is
                 // released before we call `agent.snapshot()`.
-                let (result, resolved_phase) = {
+                let (result, resolved_projection) = {
                     #[cfg(not(target_arch = "wasm32"))]
                     type RunFut<'a> = std::pin::Pin<
                         Box<
@@ -3791,7 +3749,7 @@ async fn session_task<A: SessionAgent>(
                     // run_fut is already Pin<Box<...>>, no tokio::pin! needed.
                     let mut run_fut = run_fut;
                     let mut interrupted = false;
-                    let mut resolved_phase = None;
+                    let mut resolved_projection = None;
 
                     let r = loop {
                         if lock_turn_admission(&control.turn_admission).interrupt_pending() {
@@ -3811,7 +3769,7 @@ async fn session_task<A: SessionAgent>(
                                     interrupted = true;
                                     break Err(meerkat_core::error::AgentError::Cancelled);
                                 }
-                                resolved_phase = slot.resolve().ok();
+                                resolved_projection = slot.resolve().ok().map(|_| slot.projection());
                                 break result;
                             }
                             () = &mut interrupt_wait => {
@@ -3855,7 +3813,7 @@ async fn session_task<A: SessionAgent>(
                         }
                     }
 
-                    (r, resolved_phase)
+                    (r, resolved_projection)
                 }; // run_fut dropped here
 
                 let discarded_active_context = agent.discard_unapplied_active_turn_system_context();
@@ -3866,14 +3824,12 @@ async fn session_task<A: SessionAgent>(
                     );
                 }
 
-                let resolve_phase = resolved_phase.or_else(|| {
+                let resolve_projection = resolved_projection.or_else(|| {
                     let mut slot = lock_turn_admission(&control.turn_admission);
-                    slot.resolve().ok()
+                    slot.resolve().ok().map(|_| slot.projection())
                 });
-                if let Some(phase) = resolve_phase {
-                    control
-                        .state_tx
-                        .send_replace(map_turn_phase_to_session_state(phase));
+                if let Some(projection) = resolve_projection {
+                    control.state_tx.send_replace(projection);
                 }
 
                 // Update cached summary
@@ -3903,13 +3859,11 @@ async fn session_task<A: SessionAgent>(
                     if finalize.is_ok() {
                         clear_cancel_after_boundary_request(&control.cancel_after_boundary_handle);
                     }
-                    finalize
+                    finalize.map(|outcome| (outcome, slot.projection()))
                 };
                 let shutting_down = match finalize {
-                    Ok(outcome) => {
-                        control
-                            .state_tx
-                            .send_replace(map_turn_phase_to_session_state(outcome.next_phase));
+                    Ok((outcome, projection)) => {
+                        control.state_tx.send_replace(projection);
                         outcome.next_phase == TurnAdmissionPhase::ShuttingDown
                     }
                     Err(error) => {
@@ -4094,13 +4048,6 @@ async fn session_task<A: SessionAgent>(
                 }
                 let _ = reply_tx.send(result);
             }
-            SessionCommand::UpdateKeepAlive {
-                keep_alive,
-                reply_tx,
-            } => {
-                agent.update_keep_alive(keep_alive);
-                let _ = reply_tx.send(());
-            }
             SessionCommand::UpdateMobToolAuthority {
                 authority_context,
                 reply_tx,
@@ -4114,24 +4061,16 @@ async fn session_task<A: SessionAgent>(
                 let _ = reply_tx.send(agent.update_system_prompt(system_prompt));
             }
             SessionCommand::Shutdown => {
-                let next_phase = {
+                let next_projection = {
                     let mut slot = lock_turn_admission(&control.turn_admission);
-                    if slot.phase() == TurnAdmissionPhase::ShuttingDown {
-                        None
-                    } else {
-                        let next_phase = slot.request_shutdown().ok();
-                        if matches!(next_phase, Some(TurnAdmissionPhase::ShuttingDown)) {
-                            clear_cancel_after_boundary_request(
-                                &control.cancel_after_boundary_handle,
-                            );
-                        }
-                        next_phase
+                    let next_phase = slot.request_shutdown().ok();
+                    if matches!(next_phase, Some(TurnAdmissionPhase::ShuttingDown)) {
+                        clear_cancel_after_boundary_request(&control.cancel_after_boundary_handle);
                     }
+                    next_phase.map(|_| slot.projection())
                 };
-                if let Some(phase) = next_phase {
-                    control
-                        .state_tx
-                        .send_replace(map_turn_phase_to_session_state(phase));
+                if let Some(projection) = next_projection {
+                    control.state_tx.send_replace(projection);
                 }
                 break;
             }
@@ -4153,7 +4092,18 @@ mod runtime_turn_metadata_tests {
     };
     use meerkat_core::skills::{SkillKey, SkillName};
     use meerkat_core::turn_execution_authority::{ContentShape, TurnPrimitiveKind};
+    use meerkat_runtime::handles::RuntimeTurnStateHandle;
     use std::sync::{Arc, Mutex};
+
+    fn test_llm_identity(model: &str) -> SessionLlmIdentity {
+        SessionLlmIdentity {
+            model: model.to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        }
+    }
 
     #[derive(Clone)]
     struct MetadataProbeBuilder {
@@ -4166,11 +4116,13 @@ mod runtime_turn_metadata_tests {
 
     struct MetadataProbeAgent {
         session_id: SessionId,
+        session: meerkat_core::Session,
+        identity: SessionLlmIdentity,
         observed_skill_references: Arc<Mutex<Vec<Option<Vec<SkillKey>>>>>,
         observed_context_texts: Arc<Mutex<Vec<String>>>,
         run_context_counts: Arc<Mutex<Vec<usize>>>,
         fail_flow_overlay_set: bool,
-        system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+        system_context_state: meerkat_core::SystemContextStateHandle,
         session_context_handle: Option<Arc<RecordingSessionContextHandle>>,
     }
 
@@ -4230,16 +4182,27 @@ mod runtime_turn_metadata_tests {
 
         async fn build_agent(
             &self,
-            _req: &CreateSessionRequest,
+            req: &CreateSessionRequest,
             _event_tx: mpsc::Sender<AgentEvent>,
         ) -> Result<Self::Agent, SessionError> {
+            let session = req
+                .build
+                .as_ref()
+                .and_then(|build| build.resume_session.clone())
+                .unwrap_or_default();
+            let session_id = session.id().clone();
             Ok(MetadataProbeAgent {
-                session_id: SessionId::new(),
+                session_id,
+                session,
+                identity: test_llm_identity(&req.model),
                 observed_skill_references: Arc::clone(&self.observed_skill_references),
                 observed_context_texts: Arc::clone(&self.observed_context_texts),
                 run_context_counts: Arc::clone(&self.run_context_counts),
                 fail_flow_overlay_set: self.fail_flow_overlay_set,
-                system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
+                system_context_state: meerkat_core::SystemContextStateHandle::new(
+                    Default::default(),
+                )
+                .expect("default system-context state should restore"),
                 session_context_handle: self.session_context_handle.clone(),
             })
         }
@@ -4322,7 +4285,15 @@ mod runtime_turn_metadata_tests {
         }
 
         fn session_clone(&self) -> meerkat_core::Session {
-            meerkat_core::Session::new()
+            self.session.clone()
+        }
+
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            ObservedSessionTailKind::Empty
+        }
+
+        fn durable_llm_identity(&self) -> Option<SessionLlmIdentity> {
+            Some(self.identity.clone())
         }
 
         fn apply_runtime_system_context(&mut self, appends: &[PendingSystemContextAppend]) {
@@ -4332,10 +4303,24 @@ mod runtime_turn_metadata_tests {
                 .extend(appends.iter().map(|append| append.text.clone()));
         }
 
-        fn system_context_state(
-            &self,
-        ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
-            Arc::clone(&self.system_context_state)
+        fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
+            self.system_context_state.clone()
+        }
+
+        #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+        fn sync_session_from_durable_snapshot(
+            &mut self,
+            session: meerkat_core::Session,
+        ) -> Result<(), AgentError> {
+            if session.id() != &self.session_id {
+                return Err(AgentError::InternalError(format!(
+                    "snapshot session id {} did not match live session {}",
+                    session.id(),
+                    self.session_id
+                )));
+            }
+            self.session = session;
+            Ok(())
         }
 
         fn session_context_handle(
@@ -4351,15 +4336,16 @@ mod runtime_turn_metadata_tests {
     struct BlockingBoundaryBuilder {
         started: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
-        turn_state: Option<Arc<meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle>>,
+        turn_state: Option<Arc<RuntimeTurnStateHandle>>,
     }
 
     struct BlockingBoundaryAgent {
         session_id: SessionId,
+        identity: SessionLlmIdentity,
         started: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
-        turn_state: Option<Arc<meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle>>,
-        system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+        turn_state: Option<Arc<RuntimeTurnStateHandle>>,
+        system_context_state: meerkat_core::SystemContextStateHandle,
     }
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -4369,15 +4355,19 @@ mod runtime_turn_metadata_tests {
 
         async fn build_agent(
             &self,
-            _req: &CreateSessionRequest,
+            req: &CreateSessionRequest,
             _event_tx: mpsc::Sender<AgentEvent>,
         ) -> Result<Self::Agent, SessionError> {
             Ok(BlockingBoundaryAgent {
                 session_id: SessionId::new(),
+                identity: test_llm_identity(&req.model),
                 started: Arc::clone(&self.started),
                 release: Arc::clone(&self.release),
                 turn_state: self.turn_state.clone(),
-                system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
+                system_context_state: meerkat_core::SystemContextStateHandle::new(
+                    Default::default(),
+                )
+                .expect("default system-context state should restore"),
             })
         }
     }
@@ -4390,10 +4380,11 @@ mod runtime_turn_metadata_tests {
             _prompt: ContentInput,
             _event_tx: mpsc::Sender<AgentEvent>,
         ) -> Result<RunResult, AgentError> {
+            let run_id = RunId::new();
             if let Some(turn_state) = self.turn_state.as_ref() {
                 turn_state
                     .start_conversation_run(
-                        RunId::new(),
+                        run_id.clone(),
                         TurnPrimitiveKind::ConversationTurn,
                         ContentShape::Conversation,
                         false,
@@ -4406,10 +4397,10 @@ mod runtime_turn_metadata_tests {
             self.release.notified().await;
             if let Some(turn_state) = self.turn_state.as_ref() {
                 turn_state
-                    .primitive_applied()
+                    .primitive_applied(run_id.clone())
                     .map_err(|err| AgentError::InternalError(err.to_string()))?;
                 turn_state
-                    .llm_returned_terminal()
+                    .llm_returned_terminal(run_id)
                     .map_err(|err| AgentError::InternalError(err.to_string()))?;
             }
             Ok(RunResult {
@@ -4463,25 +4454,27 @@ mod runtime_turn_metadata_tests {
 
         fn session_clone(&self) -> meerkat_core::Session {
             let mut session = meerkat_core::Session::new();
-            let state = self
-                .system_context_state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
             session
-                .set_system_context_state(state)
+                .set_system_context_state(self.system_context_state.snapshot())
                 .expect("test system context state should serialize");
             session
+        }
+
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            ObservedSessionTailKind::Empty
+        }
+
+        fn durable_llm_identity(&self) -> Option<SessionLlmIdentity> {
+            Some(self.identity.clone())
         }
 
         fn apply_runtime_system_context(&mut self, appends: &[PendingSystemContextAppend]) {
             let mut session = self.session_clone();
             session.append_system_context_blocks(appends);
             let state = session.system_context_state().unwrap_or_default();
-            *self
-                .system_context_state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = state;
+            self.system_context_state
+                .replace_from_generated_restore(state)
+                .expect("test system context state should restore");
         }
 
         fn turn_state_handle(&self) -> Option<Arc<dyn TurnStateHandle>> {
@@ -4490,22 +4483,21 @@ mod runtime_turn_metadata_tests {
                 .map(|turn_state| Arc::clone(turn_state) as Arc<dyn TurnStateHandle>)
         }
 
-        fn system_context_state(
-            &self,
-        ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
-            Arc::clone(&self.system_context_state)
+        fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
+            self.system_context_state.clone()
         }
     }
 
     #[derive(Clone)]
     struct BoundaryPhaseProbeBuilder {
-        turn_state: Arc<meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle>,
+        turn_state: Arc<RuntimeTurnStateHandle>,
     }
 
     struct BoundaryPhaseProbeAgent {
         session_id: SessionId,
-        turn_state: Arc<meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle>,
-        system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+        identity: SessionLlmIdentity,
+        turn_state: Arc<RuntimeTurnStateHandle>,
+        system_context_state: meerkat_core::SystemContextStateHandle,
     }
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -4515,13 +4507,17 @@ mod runtime_turn_metadata_tests {
 
         async fn build_agent(
             &self,
-            _req: &CreateSessionRequest,
+            req: &CreateSessionRequest,
             _event_tx: mpsc::Sender<AgentEvent>,
         ) -> Result<Self::Agent, SessionError> {
             Ok(BoundaryPhaseProbeAgent {
                 session_id: SessionId::new(),
+                identity: test_llm_identity(&req.model),
                 turn_state: Arc::clone(&self.turn_state),
-                system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
+                system_context_state: meerkat_core::SystemContextStateHandle::new(
+                    Default::default(),
+                )
+                .expect("default system-context state should restore"),
             })
         }
     }
@@ -4587,32 +4583,43 @@ mod runtime_turn_metadata_tests {
             meerkat_core::Session::with_id(self.session_id.clone())
         }
 
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            ObservedSessionTailKind::Empty
+        }
+
+        fn durable_llm_identity(&self) -> Option<SessionLlmIdentity> {
+            Some(self.identity.clone())
+        }
+
         fn turn_state_handle(&self) -> Option<Arc<dyn TurnStateHandle>> {
             let handle: Arc<dyn TurnStateHandle> = self.turn_state.clone();
             Some(handle)
         }
 
         fn apply_runtime_system_context(&mut self, appends: &[PendingSystemContextAppend]) {
-            let mut state = self
-                .system_context_state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
             for append in appends {
-                state.pending.push(append.clone());
+                self.system_context_state
+                    .stage_append_with_snapshot(
+                        &meerkat_core::service::AppendSystemContextRequest {
+                            text: append.text.clone(),
+                            source: append.source.clone(),
+                            idempotency_key: append.idempotency_key.clone(),
+                            source_kind: append.source_kind,
+                        },
+                        append.accepted_at,
+                    )
+                    .expect("test runtime system context should stage");
             }
         }
 
-        fn system_context_state(
-            &self,
-        ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
-            Arc::clone(&self.system_context_state)
+        fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
+            self.system_context_state.clone()
         }
     }
 
     #[tokio::test]
     async fn active_turn_boundary_probe_uses_turn_phase_not_running_latch() {
-        let turn_state =
-            Arc::new(meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let turn_state = Arc::new(RuntimeTurnStateHandle::ephemeral());
         let service = EphemeralSessionService::new(
             BoundaryPhaseProbeBuilder {
                 turn_state: Arc::clone(&turn_state),
@@ -4665,7 +4672,9 @@ mod runtime_turn_metadata_tests {
             "pre-LLM applying primitive can still consume staged context"
         );
 
-        turn_state.primitive_applied().expect("enter calling LLM");
+        turn_state
+            .primitive_applied(run_id.clone())
+            .expect("enter calling LLM");
         assert_eq!(
             service
                 .active_turn_system_context_boundary_available(&created.session_id)
@@ -4676,7 +4685,7 @@ mod runtime_turn_metadata_tests {
         );
 
         turn_state
-            .llm_returned_tool_calls(1)
+            .llm_returned_tool_calls(run_id.clone(), 1)
             .expect("enter waiting for ops");
         assert_eq!(
             service
@@ -4687,7 +4696,9 @@ mod runtime_turn_metadata_tests {
             "tool execution phase has a deterministic post-tool model boundary"
         );
 
-        turn_state.tool_calls_resolved().expect("drain boundary");
+        turn_state
+            .tool_calls_resolved(run_id.clone())
+            .expect("drain boundary");
         assert_eq!(
             service
                 .active_turn_system_context_boundary_available(&created.session_id)
@@ -4745,6 +4756,113 @@ mod runtime_turn_metadata_tests {
                 .expect("observed skill references lock poisoned"),
             vec![Some(vec![skill])],
             "eager first turn must forward the full runtime metadata carrier"
+        );
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn durable_snapshot_sync_preserves_live_deferred_turn_handle_without_authority_state() {
+        let service = EphemeralSessionService::new(
+            MetadataProbeBuilder {
+                observed_skill_references: Arc::new(Mutex::new(Vec::new())),
+                observed_context_texts: Arc::new(Mutex::new(Vec::new())),
+                run_context_counts: Arc::new(Mutex::new(Vec::new())),
+                fail_flow_overlay_set: false,
+                session_context_handle: None,
+            },
+            1,
+        );
+        let created = service
+            .create_session(CreateSessionRequest {
+                model: "metadata-probe-model".to_string(),
+                prompt: ContentInput::Text("staged".to_string()),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Stage,
+                build: None,
+                labels: None,
+            })
+            .await
+            .expect("deferred session should create");
+        let deferred_state = service
+            .deferred_turn_state(&created.session_id)
+            .await
+            .expect("deferred-turn state handle should exist");
+        assert_eq!(
+            lock_deferred_turn_state(&deferred_state).first_turn_phase(),
+            DeferredFirstTurnPhase::Pending
+        );
+
+        let durable = meerkat_core::Session::with_id(created.session_id.clone());
+        service
+            .sync_session_from_durable_snapshot(&created.session_id, durable)
+            .await
+            .expect("durable sync should succeed");
+
+        let guard = lock_deferred_turn_state(&deferred_state);
+        assert_eq!(guard.first_turn_phase(), DeferredFirstTurnPhase::Pending);
+        assert!(
+            guard.pending_initial_prompt().is_some(),
+            "missing durable authority state must not replace staged live deferred prompt"
+        );
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn durable_snapshot_sync_updates_live_deferred_turn_handle_from_authority_state() {
+        let service = EphemeralSessionService::new(
+            MetadataProbeBuilder {
+                observed_skill_references: Arc::new(Mutex::new(Vec::new())),
+                observed_context_texts: Arc::new(Mutex::new(Vec::new())),
+                run_context_counts: Arc::new(Mutex::new(Vec::new())),
+                fail_flow_overlay_set: false,
+                session_context_handle: None,
+            },
+            1,
+        );
+        let created = service
+            .create_session(CreateSessionRequest {
+                model: "metadata-probe-model".to_string(),
+                prompt: ContentInput::Text("staged".to_string()),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Stage,
+                build: None,
+                labels: None,
+            })
+            .await
+            .expect("deferred session should create");
+        let deferred_state = service
+            .deferred_turn_state(&created.session_id)
+            .await
+            .expect("deferred-turn state handle should exist");
+        assert_eq!(
+            lock_deferred_turn_state(&deferred_state).first_turn_phase(),
+            DeferredFirstTurnPhase::Pending
+        );
+
+        let mut durable = meerkat_core::Session::with_id(created.session_id.clone());
+        durable
+            .set_deferred_turn_state(SessionDeferredTurnState::default())
+            .expect("generated deferred-turn authority should authorize default state");
+        service
+            .sync_session_from_durable_snapshot(&created.session_id, durable)
+            .await
+            .expect("durable sync should succeed");
+
+        let guard = lock_deferred_turn_state(&deferred_state);
+        assert_eq!(guard.first_turn_phase(), DeferredFirstTurnPhase::Inactive);
+        assert!(
+            guard.pending_initial_prompt().is_none(),
+            "explicit generated durable state should replace staged live deferred prompt"
         );
     }
 
@@ -4867,6 +4985,7 @@ mod runtime_turn_metadata_tests {
                             text: "terminal peer context".to_string(),
                             source: Some("peer_response_terminal:test:req".to_string()),
                             idempotency_key: Some("peer_response_terminal:test:req".to_string()),
+                            source_kind: meerkat_core::session::SystemContextSource::Normal,
                             accepted_at: meerkat_core::time_compat::SystemTime::now(),
                         }],
                         Some(RuntimeTurnMetadata {
@@ -4931,6 +5050,7 @@ mod runtime_turn_metadata_tests {
             text: "Peer terminal response from test\nRequest ID: req\nStatus: completed\ntoken birch seventeen".to_string(),
             source: Some("peer_response_terminal:test:req".to_string()),
             idempotency_key: Some("peer_response_terminal:test:req".to_string()),
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: meerkat_core::time_compat::SystemTime::now(),
         }];
         let baseline_ticks = session_context_handle.ticks().len();
@@ -4973,8 +5093,7 @@ mod runtime_turn_metadata_tests {
     async fn active_turn_context_staging_does_not_wait_for_session_task_mailbox() {
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
-        let turn_state =
-            Arc::new(meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let turn_state = Arc::new(RuntimeTurnStateHandle::ephemeral());
         let service = Arc::new(EphemeralSessionService::new(
             BlockingBoundaryBuilder {
                 started: Arc::clone(&started),
@@ -5039,6 +5158,7 @@ mod runtime_turn_metadata_tests {
             text: "active-turn steer context".to_string(),
             source: Some("console:steer:test".to_string()),
             idempotency_key: Some("console:steer:test".to_string()),
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: meerkat_core::time_compat::SystemTime::now(),
         }];
 
@@ -5058,11 +5178,7 @@ mod runtime_turn_metadata_tests {
             .system_context_state(&result.session_id)
             .await
             .expect("session state should exist");
-        let pending = state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .pending
-            .clone();
+        let pending = state.snapshot().pending().to_vec();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].text, "active-turn steer context");
 
@@ -5071,28 +5187,24 @@ mod runtime_turn_metadata_tests {
             .expect("start_turn task should join")
             .expect("blocked turn should complete after release");
 
-        let after = state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let after = state.snapshot();
         assert!(
-            after.pending.is_empty(),
+            after.pending().is_empty(),
             "active-turn context that missed the run boundary must not leak into the next run"
         );
         assert!(
-            after.applied.is_empty(),
+            after.applied().is_empty(),
             "missed active-turn context was never applied at an LLM boundary"
         );
         assert!(
-            after.seen.is_empty(),
+            after.seen().is_empty(),
             "discarded active-turn context should not reserve idempotency keys"
         );
     }
 
     #[tokio::test]
     async fn active_turn_context_staging_revalidates_after_positive_probe() {
-        let turn_state =
-            Arc::new(meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let turn_state = Arc::new(RuntimeTurnStateHandle::ephemeral());
         let service = EphemeralSessionService::new(
             BoundaryPhaseProbeBuilder {
                 turn_state: Arc::clone(&turn_state),
@@ -5138,7 +5250,7 @@ mod runtime_turn_metadata_tests {
         );
 
         turn_state
-            .primitive_applied()
+            .primitive_applied(run_id.clone())
             .expect("advance past boundary");
 
         let err = service
@@ -5149,6 +5261,7 @@ mod runtime_turn_metadata_tests {
                     text: "STALE_ACTIVE_STEER_SHOULD_NOT_STAGE".to_string(),
                     source: Some("console:steer:stale".to_string()),
                     idempotency_key: Some("console:steer:stale".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
                 }],
             )
@@ -5163,24 +5276,19 @@ mod runtime_turn_metadata_tests {
             .system_context_state(&result.session_id)
             .await
             .expect("session state should exist");
-        {
-            let guard = state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            assert!(guard.pending.is_empty());
-            assert!(guard.applied.is_empty());
-            assert!(guard.active_turn_pending_keys.is_empty());
-            assert!(
-                guard.seen.is_empty(),
-                "discarded stale active-turn context should not reserve idempotency keys"
-            );
-        }
+        let guard = state.snapshot();
+        assert!(guard.pending().is_empty());
+        assert!(guard.applied().is_empty());
+        assert!(guard.active_turn_pending_keys().is_empty());
+        assert!(
+            guard.seen().is_empty(),
+            "discarded stale active-turn context should not reserve idempotency keys"
+        );
     }
 
     #[tokio::test]
     async fn active_turn_context_staging_rejects_wrong_run_token() {
-        let turn_state =
-            Arc::new(meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let turn_state = Arc::new(RuntimeTurnStateHandle::ephemeral());
         let service = EphemeralSessionService::new(
             BoundaryPhaseProbeBuilder {
                 turn_state: Arc::clone(&turn_state),
@@ -5226,6 +5334,7 @@ mod runtime_turn_metadata_tests {
                     text: "WRONG_RUN_STEER_SHOULD_NOT_STAGE".to_string(),
                     source: Some("console:steer:wrong-run".to_string()),
                     idempotency_key: Some("console:steer:wrong-run".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
                 }],
             )
@@ -5240,18 +5349,15 @@ mod runtime_turn_metadata_tests {
             .system_context_state(&result.session_id)
             .await
             .expect("session state should exist");
-        let guard = state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(guard.pending.is_empty());
-        assert!(guard.active_turn_pending_keys.is_empty());
-        assert!(guard.seen.is_empty());
+        let guard = state.snapshot();
+        assert!(guard.pending().is_empty());
+        assert!(guard.active_turn_pending_keys().is_empty());
+        assert!(guard.seen().is_empty());
     }
 
     #[tokio::test]
     async fn active_turn_context_staging_is_atomic_on_batch_conflict() {
-        let turn_state =
-            Arc::new(meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let turn_state = Arc::new(RuntimeTurnStateHandle::ephemeral());
         let service = EphemeralSessionService::new(
             BoundaryPhaseProbeBuilder {
                 turn_state: Arc::clone(&turn_state),
@@ -5298,12 +5404,14 @@ mod runtime_turn_metadata_tests {
                         text: "first staged context".to_string(),
                         source: Some("console:steer:test".to_string()),
                         idempotency_key: Some("console:steer:conflict".to_string()),
+                        source_kind: meerkat_core::session::SystemContextSource::Normal,
                         accepted_at,
                     },
                     PendingSystemContextAppend {
                         text: "conflicting staged context".to_string(),
                         source: Some("console:steer:test".to_string()),
                         idempotency_key: Some("console:steer:conflict".to_string()),
+                        source_kind: meerkat_core::session::SystemContextSource::Normal,
                         accepted_at,
                     },
                 ],
@@ -5319,15 +5427,13 @@ mod runtime_turn_metadata_tests {
             .system_context_state(&result.session_id)
             .await
             .expect("session state should exist");
-        let guard = state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let guard = state.snapshot();
         assert!(
-            guard.pending.is_empty(),
+            guard.pending().is_empty(),
             "failed active-turn staging batch must not leave partial pending context"
         );
         assert!(
-            guard.seen.is_empty(),
+            guard.seen().is_empty(),
             "failed active-turn staging batch must not reserve idempotency keys"
         );
     }
@@ -5385,6 +5491,7 @@ mod runtime_turn_metadata_tests {
                             text: "must not leak before setup succeeds".to_string(),
                             source: Some("peer_response_terminal:test:req".to_string()),
                             idempotency_key: Some("peer_response_terminal:test:req".to_string()),
+                            source_kind: meerkat_core::session::SystemContextSource::Normal,
                             accepted_at: meerkat_core::time_compat::SystemTime::now(),
                         }],
                         Some(RuntimeTurnMetadata {
@@ -5429,6 +5536,16 @@ mod admission_window_tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::{Arc, Mutex};
 
+    fn test_llm_identity(model: &str) -> SessionLlmIdentity {
+        SessionLlmIdentity {
+            model: model.to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        }
+    }
+
     #[derive(Clone)]
     struct AdmissionProbeBuilder {
         run_calls: Arc<AtomicUsize>,
@@ -5440,12 +5557,13 @@ mod admission_window_tests {
 
     struct AdmissionProbeAgent {
         session_id: SessionId,
+        identity: SessionLlmIdentity,
         run_calls: Arc<AtomicUsize>,
         cancel_calls: Arc<AtomicUsize>,
         cancel_after_boundary: Arc<AtomicBool>,
         turn_admission_for_run: Arc<Mutex<Option<Arc<Mutex<TurnAdmissionSlot>>>>>,
         interrupt_before_success: bool,
-        system_context_state: Arc<Mutex<SessionSystemContextState>>,
+        system_context_state: meerkat_core::SystemContextStateHandle,
     }
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -5455,17 +5573,21 @@ mod admission_window_tests {
 
         async fn build_agent(
             &self,
-            _req: &CreateSessionRequest,
+            req: &CreateSessionRequest,
             _event_tx: mpsc::Sender<AgentEvent>,
         ) -> Result<Self::Agent, SessionError> {
             Ok(AdmissionProbeAgent {
                 session_id: SessionId::new(),
+                identity: test_llm_identity(&req.model),
                 run_calls: Arc::clone(&self.run_calls),
                 cancel_calls: Arc::clone(&self.cancel_calls),
                 cancel_after_boundary: Arc::clone(&self.cancel_after_boundary),
                 turn_admission_for_run: Arc::clone(&self.turn_admission_for_run),
                 interrupt_before_success: self.interrupt_before_success,
-                system_context_state: Arc::new(Mutex::new(SessionSystemContextState::default())),
+                system_context_state: meerkat_core::SystemContextStateHandle::new(
+                    SessionSystemContextState::default(),
+                )
+                .expect("default system-context state should restore"),
             })
         }
     }
@@ -5554,10 +5676,18 @@ mod admission_window_tests {
             meerkat_core::Session::new()
         }
 
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            ObservedSessionTailKind::Empty
+        }
+
+        fn durable_llm_identity(&self) -> Option<SessionLlmIdentity> {
+            Some(self.identity.clone())
+        }
+
         fn apply_runtime_system_context(&mut self, _appends: &[PendingSystemContextAppend]) {}
 
-        fn system_context_state(&self) -> Arc<Mutex<SessionSystemContextState>> {
-            Arc::clone(&self.system_context_state)
+        fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
+            self.system_context_state.clone()
         }
     }
 
@@ -5804,14 +5934,14 @@ mod inline_video_admission_tests {
     }
 
     struct BuilderIdentityProbe {
-        identity: SessionLlmIdentity,
+        identity: Option<SessionLlmIdentity>,
         validated_identities: Arc<Mutex<Vec<SessionLlmIdentity>>>,
     }
 
     struct BuilderIdentityAgent {
         session_id: SessionId,
-        identity: SessionLlmIdentity,
-        system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+        identity: Option<SessionLlmIdentity>,
+        system_context_state: meerkat_core::SystemContextStateHandle,
     }
 
     struct NoopAgentLlmClient {
@@ -5855,7 +5985,11 @@ mod inline_video_admission_tests {
                 .lock()
                 .expect("validated identities lock poisoned")
                 .push(identity.clone());
-            Some(identity == &self.identity)
+            Some(
+                self.identity
+                    .as_ref()
+                    .is_some_and(|expected| identity == expected),
+            )
         }
 
         async fn build_agent(
@@ -5866,7 +6000,10 @@ mod inline_video_admission_tests {
             Ok(BuilderIdentityAgent {
                 session_id: SessionId::new(),
                 identity: self.identity.clone(),
-                system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
+                system_context_state: meerkat_core::SystemContextStateHandle::new(
+                    Default::default(),
+                )
+                .expect("default system-context state should restore"),
             })
         }
     }
@@ -5908,7 +6045,7 @@ mod inline_video_admission_tests {
             identity: SessionLlmIdentity,
             _request_policy: meerkat_core::SessionLlmRequestPolicy,
         ) -> Result<(), AgentError> {
-            self.identity = identity;
+            self.identity = Some(identity);
             Ok(())
         }
 
@@ -5933,16 +6070,18 @@ mod inline_video_admission_tests {
             meerkat_core::Session::new()
         }
 
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            ObservedSessionTailKind::Empty
+        }
+
         fn durable_llm_identity(&self) -> Option<SessionLlmIdentity> {
-            Some(self.identity.clone())
+            self.identity.clone()
         }
 
         fn apply_runtime_system_context(&mut self, _appends: &[PendingSystemContextAppend]) {}
 
-        fn system_context_state(
-            &self,
-        ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
-            Arc::clone(&self.system_context_state)
+        fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
+            self.system_context_state.clone()
         }
     }
 
@@ -6011,7 +6150,7 @@ mod inline_video_admission_tests {
         let validated_identities = Arc::new(Mutex::new(Vec::new()));
         let service = EphemeralSessionService::new(
             BuilderIdentityProbe {
-                identity: durable_identity.clone(),
+                identity: Some(durable_identity.clone()),
                 validated_identities: Arc::clone(&validated_identities),
             },
             1,
@@ -6039,12 +6178,47 @@ mod inline_video_admission_tests {
     }
 
     #[tokio::test]
+    async fn create_session_rejects_without_builder_identity() {
+        let validated_identities = Arc::new(Mutex::new(Vec::new()));
+        let service = EphemeralSessionService::new(
+            BuilderIdentityProbe {
+                identity: None,
+                validated_identities: Arc::clone(&validated_identities),
+            },
+            1,
+        );
+
+        let result = service
+            .create_session(create_request(
+                ContentInput::Text("defer".to_string()),
+                InitialTurnPolicy::Defer,
+            ))
+            .await;
+
+        let message = match result {
+            Err(SessionError::Agent(AgentError::ConfigError(message))) => Some(message),
+            _ => None,
+        };
+        assert!(
+            message
+                .as_deref()
+                .is_some_and(|message| message.contains("durable LLM identity"))
+        );
+        assert!(
+            validated_identities
+                .lock()
+                .expect("validated identities lock poisoned")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn start_turn_validates_video_against_builder_seeded_live_identity() {
         let durable_identity = identity(Provider::Gemini, "providerless-video-alias");
         let validated_identities = Arc::new(Mutex::new(Vec::new()));
         let service = EphemeralSessionService::new(
             BuilderIdentityProbe {
-                identity: durable_identity.clone(),
+                identity: Some(durable_identity.clone()),
                 validated_identities: Arc::clone(&validated_identities),
             },
             1,
@@ -6084,7 +6258,7 @@ mod inline_video_admission_tests {
         let validated_identities = Arc::new(Mutex::new(Vec::new()));
         let service = EphemeralSessionService::new(
             BuilderIdentityProbe {
-                identity: durable_identity,
+                identity: Some(durable_identity),
                 validated_identities,
             },
             1,
@@ -6119,99 +6293,5 @@ mod inline_video_admission_tests {
             .await
             .expect("live identity");
         assert_eq!(live_identity, target_identity);
-    }
-}
-
-#[cfg(test)]
-mod disposition_tests {
-    use super::*;
-    use meerkat_core::lifecycle::RuntimeExecutionKind;
-
-    #[test]
-    fn content_turn_always_runs() {
-        let d = evaluate_start_turn_disposition(
-            Some(RuntimeExecutionKind::ContentTurn),
-            &meerkat_core::types::ContentInput::Text(String::new()),
-            false,
-            false,
-        );
-        assert_eq!(d, StartTurnDisposition::RunContentTurn);
-    }
-
-    #[test]
-    fn resume_pending_with_session_boundary() {
-        let d = evaluate_start_turn_disposition(
-            Some(RuntimeExecutionKind::ResumePending),
-            &meerkat_core::types::ContentInput::Text(String::new()),
-            true,
-            false,
-        );
-        assert_eq!(d, StartTurnDisposition::RunPending);
-    }
-
-    #[test]
-    fn resume_pending_with_staged_tool_results() {
-        let d = evaluate_start_turn_disposition(
-            Some(RuntimeExecutionKind::ResumePending),
-            &meerkat_core::types::ContentInput::Text(String::new()),
-            false,
-            true,
-        );
-        assert_eq!(d, StartTurnDisposition::RunPending);
-    }
-
-    #[test]
-    fn resume_pending_no_boundary_no_staged() {
-        let d = evaluate_start_turn_disposition(
-            Some(RuntimeExecutionKind::ResumePending),
-            &meerkat_core::types::ContentInput::Text(String::new()),
-            false,
-            false,
-        );
-        assert_eq!(d, StartTurnDisposition::NoPendingBoundary);
-    }
-
-    #[test]
-    fn none_with_prompt_runs_content_turn() {
-        let d = evaluate_start_turn_disposition(
-            None,
-            &meerkat_core::types::ContentInput::Text("hello".into()),
-            false,
-            false,
-        );
-        assert_eq!(d, StartTurnDisposition::RunContentTurn);
-    }
-
-    #[test]
-    fn none_empty_prompt_with_boundary_runs_pending() {
-        let d = evaluate_start_turn_disposition(
-            None,
-            &meerkat_core::types::ContentInput::Text(String::new()),
-            true,
-            false,
-        );
-        assert_eq!(d, StartTurnDisposition::RunPending);
-    }
-
-    #[test]
-    fn none_empty_prompt_no_boundary_is_no_pending() {
-        let d = evaluate_start_turn_disposition(
-            None,
-            &meerkat_core::types::ContentInput::Text(String::new()),
-            false,
-            false,
-        );
-        assert_eq!(d, StartTurnDisposition::NoPendingBoundary);
-    }
-
-    #[test]
-    fn none_empty_prompt_staged_tool_results_runs_pending() {
-        let d = evaluate_start_turn_disposition(
-            None,
-            &meerkat_core::types::ContentInput::Text(String::new()),
-            false,
-            true,
-        );
-        assert_eq!(d, StartTurnDisposition::RunPending);
     }
 }

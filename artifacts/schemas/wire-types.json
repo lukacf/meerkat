@@ -2457,22 +2457,6 @@
               "phase"
             ],
             "type": "object"
-          },
-          {
-            "properties": {
-              "kind": {
-                "const": "legacy_status",
-                "type": "string"
-              },
-              "status": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "status"
-            ],
-            "type": "object"
           }
         ]
       },
@@ -2517,14 +2501,7 @@
             "type": "string"
           },
           "status_info": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/ToolConfigChangeStatus"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/$defs/ToolConfigChangeStatus"
           },
           "target": {
             "type": "string"
@@ -2534,6 +2511,7 @@
           "operation",
           "target",
           "status",
+          "status_info",
           "persisted"
         ],
         "type": "object"
@@ -3161,6 +3139,9 @@
           "can_add_evidence": {
             "type": "boolean"
           },
+          "can_block": {
+            "type": "boolean"
+          },
           "can_close_if_policy_allows": {
             "type": "boolean"
           },
@@ -3168,18 +3149,43 @@
             "default": false,
             "type": "boolean"
           },
-          "can_close_parent": {
+          "can_create": {
             "type": "boolean"
           },
-          "can_request_closure": {
+          "can_get": {
+            "type": "boolean"
+          },
+          "can_link": {
+            "type": "boolean"
+          },
+          "can_link_derived_from": {
+            "type": "boolean"
+          },
+          "can_link_parent": {
+            "type": "boolean"
+          },
+          "can_link_related": {
+            "type": "boolean"
+          },
+          "can_release": {
+            "type": "boolean"
+          },
+          "can_update": {
             "type": "boolean"
           }
         },
         "required": [
+          "can_get",
           "can_add_evidence",
-          "can_request_closure",
-          "can_close_if_policy_allows",
-          "can_close_parent"
+          "can_release",
+          "can_update",
+          "can_block",
+          "can_create",
+          "can_link",
+          "can_link_parent",
+          "can_link_related",
+          "can_link_derived_from",
+          "can_close_if_policy_allows"
         ],
         "type": "object"
       },
@@ -3194,12 +3200,54 @@
         ],
         "type": "string"
       },
+      "WorkEvidenceKind": {
+        "description": "Typed classification of confirmation evidence.\n\nThis is the canonical signal the `WorkGraphLifecycleMachine` consumes to\ndecide completion-policy satisfaction. The producer\n(`confirmation_evidence_for_policy`) sets this field; the raw\n[`WorkEvidenceRef::kind`] string remains only as opaque provenance/display\nand is never re-read to classify evidence for the satisfaction decision.",
+        "oneOf": [
+          {
+            "enum": [
+              "host_confirmation",
+              "principal_confirmation",
+              "supervisor_confirmation",
+              "reviewer_confirmation"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "self_attest",
+            "description": "Generic / self-attested evidence that does not satisfy any\nconfirmation policy on its own.",
+            "type": "string"
+          }
+        ]
+      },
       "WorkEvidenceRef": {
         "properties": {
+          "confirmation_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkEvidenceKind"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed confirmation classification set by the trusted producer. Drives the\nmachine-owned completion-policy satisfaction decision. Generic evidence\nleaves this unset (treated as `SelfAttest`)."
+          },
+          "confirming_owner_key": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkOwnerKey"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed identity of the confirming owner for supervisor/reviewer\nconfirmations. Set by the trusted producer; the machine records distinct\nowners per confirmation kind."
+          },
           "id": {
             "type": "string"
           },
           "kind": {
+            "description": "Opaque provenance/display label for the evidence. NOT used to classify\nevidence for the completion-policy satisfaction decision — see\n[`WorkEvidenceRef::confirmation_kind`].",
             "type": "string"
           },
           "label": {
@@ -3239,6 +3287,31 @@
           "item_id"
         ],
         "type": "object"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
       },
       "WorkStatus": {
         "enum": [
@@ -4014,6 +4087,9 @@
           "can_add_evidence": {
             "type": "boolean"
           },
+          "can_block": {
+            "type": "boolean"
+          },
           "can_close_if_policy_allows": {
             "type": "boolean"
           },
@@ -4021,18 +4097,43 @@
             "default": false,
             "type": "boolean"
           },
-          "can_close_parent": {
+          "can_create": {
             "type": "boolean"
           },
-          "can_request_closure": {
+          "can_get": {
+            "type": "boolean"
+          },
+          "can_link": {
+            "type": "boolean"
+          },
+          "can_link_derived_from": {
+            "type": "boolean"
+          },
+          "can_link_parent": {
+            "type": "boolean"
+          },
+          "can_link_related": {
+            "type": "boolean"
+          },
+          "can_release": {
+            "type": "boolean"
+          },
+          "can_update": {
             "type": "boolean"
           }
         },
         "required": [
+          "can_get",
           "can_add_evidence",
-          "can_request_closure",
-          "can_close_if_policy_allows",
-          "can_close_parent"
+          "can_release",
+          "can_update",
+          "can_block",
+          "can_create",
+          "can_link",
+          "can_link_parent",
+          "can_link_related",
+          "can_link_derived_from",
+          "can_close_if_policy_allows"
         ],
         "type": "object"
       },
@@ -4047,12 +4148,54 @@
         ],
         "type": "string"
       },
+      "WorkEvidenceKind": {
+        "description": "Typed classification of confirmation evidence.\n\nThis is the canonical signal the `WorkGraphLifecycleMachine` consumes to\ndecide completion-policy satisfaction. The producer\n(`confirmation_evidence_for_policy`) sets this field; the raw\n[`WorkEvidenceRef::kind`] string remains only as opaque provenance/display\nand is never re-read to classify evidence for the satisfaction decision.",
+        "oneOf": [
+          {
+            "enum": [
+              "host_confirmation",
+              "principal_confirmation",
+              "supervisor_confirmation",
+              "reviewer_confirmation"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "self_attest",
+            "description": "Generic / self-attested evidence that does not satisfy any\nconfirmation policy on its own.",
+            "type": "string"
+          }
+        ]
+      },
       "WorkEvidenceRef": {
         "properties": {
+          "confirmation_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkEvidenceKind"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed confirmation classification set by the trusted producer. Drives the\nmachine-owned completion-policy satisfaction decision. Generic evidence\nleaves this unset (treated as `SelfAttest`)."
+          },
+          "confirming_owner_key": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkOwnerKey"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed identity of the confirming owner for supervisor/reviewer\nconfirmations. Set by the trusted producer; the machine records distinct\nowners per confirmation kind."
+          },
           "id": {
             "type": "string"
           },
           "kind": {
+            "description": "Opaque provenance/display label for the evidence. NOT used to classify\nevidence for the completion-policy satisfaction decision — see\n[`WorkEvidenceRef::confirmation_kind`].",
             "type": "string"
           },
           "label": {
@@ -4092,6 +4235,31 @@
           "item_id"
         ],
         "type": "object"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
       },
       "WorkStatus": {
         "enum": [
@@ -4364,12 +4532,12 @@
         "properties": {
           "current_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 2,
+            "default": 3,
             "description": "Protocol version implemented by the responding member runtime."
           },
           "default_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 2,
+            "default": 3,
             "description": "Protocol version new supervisors should use for fresh authority records."
           },
           "deliver_member_input": {
@@ -4398,7 +4566,8 @@
           },
           "supported_protocol_versions": {
             "default": [
-              2
+              2,
+              3
             ],
             "description": "Protocol versions accepted by the responding member runtime.",
             "items": {
@@ -4468,12 +4637,12 @@
     "properties": {
       "current_protocol_version": {
         "$ref": "#/$defs/BridgeProtocolVersion",
-        "default": 2,
+        "default": 3,
         "description": "Protocol version implemented by the responding member runtime."
       },
       "default_protocol_version": {
         "$ref": "#/$defs/BridgeProtocolVersion",
-        "default": 2,
+        "default": 3,
         "description": "Protocol version new supervisors should use for fresh authority records."
       },
       "deliver_member_input": {
@@ -4502,7 +4671,8 @@
       },
       "supported_protocol_versions": {
         "default": [
-          2
+          2,
+          3
         ],
         "description": "Protocol versions accepted by the responding member runtime.",
         "items": {
@@ -4531,6 +4701,32 @@
       "BridgeBootstrapToken": {
         "description": "One-time bootstrap proof exchanged between a mob supervisor and a\nmember runtime on initial bind.\n\nTransparent over the wire (`#[serde(transparent)]` — a bare JSON string),\nbut carries a redacting `Debug` impl and has no `Display` impl so the\nraw secret cannot accidentally land in logs or panic messages. Treat it\nlike an API key: read `as_str()` only at the comms/transport boundary.",
         "type": "string"
+      },
+      "BridgeMobPeerOverlayHandoff": {
+        "additionalProperties": false,
+        "description": "Generated MobMachine peer overlay handoff carried with peer wiring commands.",
+        "properties": {
+          "peer_specs": {
+            "items": {
+              "$ref": "#/$defs/BridgePeerSpec"
+            },
+            "type": "array"
+          },
+          "recipient_peer_id": {
+            "type": "string"
+          },
+          "topology_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "recipient_peer_id",
+          "topology_epoch",
+          "peer_specs"
+        ],
+        "type": "object"
       },
       "BridgePeerSpec": {
         "additionalProperties": false,
@@ -5035,7 +5231,7 @@
       },
       {
         "additionalProperties": false,
-        "description": "Peer wiring command payload.",
+        "description": "Peer wiring command payload.\n\n`mob_peer_overlay` is present from protocol V3 onward. It is\n`#[serde(default, skip_serializing_if)]` so that (a) a V2 wiring payload\nemitted by a pre-overlay peer still deserializes here as `None` instead of\nerroring on a missing field, and (b) a V3 payload remains byte-identical on\nthe wire to the pre-Option shape (the field is always `Some` when emitted by\nV3 senders). A `None` overlay on a wiring command is rejected by the\nreceiver with a typed `UnsupportedProtocolVersion` cause.",
         "properties": {
           "command": {
             "const": "wire_member",
@@ -5045,6 +5241,16 @@
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
+          },
+          "mob_peer_overlay": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "peer_spec": {
             "$ref": "#/$defs/BridgePeerSpec"
@@ -5067,7 +5273,7 @@
       },
       {
         "additionalProperties": false,
-        "description": "Peer wiring command payload.",
+        "description": "Peer wiring command payload.\n\n`mob_peer_overlay` is present from protocol V3 onward. It is\n`#[serde(default, skip_serializing_if)]` so that (a) a V2 wiring payload\nemitted by a pre-overlay peer still deserializes here as `None` instead of\nerroring on a missing field, and (b) a V3 payload remains byte-identical on\nthe wire to the pre-Option shape (the field is always `Some` when emitted by\nV3 senders). A `None` overlay on a wiring command is rejected by the\nreceiver with a typed `UnsupportedProtocolVersion` cause.",
         "properties": {
           "command": {
             "const": "unwire_member",
@@ -5077,6 +5283,16 @@
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
+          },
+          "mob_peer_overlay": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "peer_spec": {
             "$ref": "#/$defs/BridgePeerSpec"
@@ -5980,6 +6196,103 @@
     "title": "BridgeMemberRuntimeState",
     "type": "string"
   },
+  "BridgeMobPeerOverlayHandoff": {
+    "$defs": {
+      "BridgePeerSpec": {
+        "additionalProperties": false,
+        "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          },
+          "pubkey": {
+            "default": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "description": "Ed25519 signing public key bytes — required so the receiver can\nverify envelope signatures after trust registration. Serialized\nas a 32-element array; the JSON form is an array of numbers, not\na base64/hex string, to keep the wire deliberately boring.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Generated MobMachine peer overlay handoff carried with peer wiring commands.",
+    "properties": {
+      "peer_specs": {
+        "items": {
+          "$ref": "#/$defs/BridgePeerSpec"
+        },
+        "type": "array"
+      },
+      "recipient_peer_id": {
+        "type": "string"
+      },
+      "topology_epoch": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "recipient_peer_id",
+      "topology_epoch",
+      "peer_specs"
+    ],
+    "title": "BridgeMobPeerOverlayHandoff",
+    "type": "object"
+  },
   "BridgeObservationResponse": {
     "$defs": {
       "BridgeMemberRuntimeState": {
@@ -6136,6 +6449,32 @@
   },
   "BridgePeerWiringPayload": {
     "$defs": {
+      "BridgeMobPeerOverlayHandoff": {
+        "additionalProperties": false,
+        "description": "Generated MobMachine peer overlay handoff carried with peer wiring commands.",
+        "properties": {
+          "peer_specs": {
+            "items": {
+              "$ref": "#/$defs/BridgePeerSpec"
+            },
+            "type": "array"
+          },
+          "recipient_peer_id": {
+            "type": "string"
+          },
+          "topology_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "recipient_peer_id",
+          "topology_epoch",
+          "peer_specs"
+        ],
+        "type": "object"
+      },
       "BridgePeerSpec": {
         "additionalProperties": false,
         "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
@@ -6212,12 +6551,22 @@
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "Peer wiring command payload.",
+    "description": "Peer wiring command payload.\n\n`mob_peer_overlay` is present from protocol V3 onward. It is\n`#[serde(default, skip_serializing_if)]` so that (a) a V2 wiring payload\nemitted by a pre-overlay peer still deserializes here as `None` instead of\nerroring on a missing field, and (b) a V3 payload remains byte-identical on\nthe wire to the pre-Option shape (the field is always `Some` when emitted by\nV3 senders). A `None` overlay on a wiring command is rejected by the\nreceiver with a typed `UnsupportedProtocolVersion` cause.",
     "properties": {
       "epoch": {
         "format": "uint64",
         "minimum": 0,
         "type": "integer"
+      },
+      "mob_peer_overlay": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "peer_spec": {
         "$ref": "#/$defs/BridgePeerSpec"
@@ -6316,12 +6665,12 @@
         "properties": {
           "current_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 2,
+            "default": 3,
             "description": "Protocol version implemented by the responding member runtime."
           },
           "default_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 2,
+            "default": 3,
             "description": "Protocol version new supervisors should use for fresh authority records."
           },
           "deliver_member_input": {
@@ -6350,7 +6699,8 @@
           },
           "supported_protocol_versions": {
             "default": [
-              2
+              2,
+              3
             ],
             "description": "Protocol versions accepted by the responding member runtime.",
             "items": {
@@ -7023,12 +7373,12 @@
         "properties": {
           "current_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 2,
+            "default": 3,
             "description": "Protocol version implemented by the responding member runtime."
           },
           "default_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 2,
+            "default": 3,
             "description": "Protocol version new supervisors should use for fresh authority records."
           },
           "deliver_member_input": {
@@ -7057,7 +7407,8 @@
           },
           "supported_protocol_versions": {
             "default": [
-              2
+              2,
+              3
             ],
             "description": "Protocol versions accepted by the responding member runtime.",
             "items": {
@@ -7362,7 +7713,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "Peer wiring command payload.",
+            "description": "Peer wiring command payload.\n\n`mob_peer_overlay` is present from protocol V3 onward. It is\n`#[serde(default, skip_serializing_if)]` so that (a) a V2 wiring payload\nemitted by a pre-overlay peer still deserializes here as `None` instead of\nerroring on a missing field, and (b) a V3 payload remains byte-identical on\nthe wire to the pre-Option shape (the field is always `Some` when emitted by\nV3 senders). A `None` overlay on a wiring command is rejected by the\nreceiver with a typed `UnsupportedProtocolVersion` cause.",
             "properties": {
               "command": {
                 "const": "wire_member",
@@ -7372,6 +7723,16 @@
                 "format": "uint64",
                 "minimum": 0,
                 "type": "integer"
+              },
+              "mob_peer_overlay": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "peer_spec": {
                 "$ref": "#/$defs/BridgePeerSpec"
@@ -7394,7 +7755,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "Peer wiring command payload.",
+            "description": "Peer wiring command payload.\n\n`mob_peer_overlay` is present from protocol V3 onward. It is\n`#[serde(default, skip_serializing_if)]` so that (a) a V2 wiring payload\nemitted by a pre-overlay peer still deserializes here as `None` instead of\nerroring on a missing field, and (b) a V3 payload remains byte-identical on\nthe wire to the pre-Option shape (the field is always `Some` when emitted by\nV3 senders). A `None` overlay on a wiring command is rejected by the\nreceiver with a typed `UnsupportedProtocolVersion` cause.",
             "properties": {
               "command": {
                 "const": "unwire_member",
@@ -7404,6 +7765,16 @@
                 "format": "uint64",
                 "minimum": 0,
                 "type": "integer"
+              },
+              "mob_peer_overlay": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "peer_spec": {
                 "$ref": "#/$defs/BridgePeerSpec"
@@ -7599,6 +7970,32 @@
           "destroyed"
         ],
         "type": "string"
+      },
+      "BridgeMobPeerOverlayHandoff": {
+        "additionalProperties": false,
+        "description": "Generated MobMachine peer overlay handoff carried with peer wiring commands.",
+        "properties": {
+          "peer_specs": {
+            "items": {
+              "$ref": "#/$defs/BridgePeerSpec"
+            },
+            "type": "array"
+          },
+          "recipient_peer_id": {
+            "type": "string"
+          },
+          "topology_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "recipient_peer_id",
+          "topology_epoch",
+          "peer_specs"
+        ],
+        "type": "object"
       },
       "BridgePeerConnectivity": {
         "description": "Connectivity class observed for the bridged member runtime.",
@@ -8905,7 +9302,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "Peer wiring command payload.",
+            "description": "Peer wiring command payload.\n\n`mob_peer_overlay` is present from protocol V3 onward. It is\n`#[serde(default, skip_serializing_if)]` so that (a) a V2 wiring payload\nemitted by a pre-overlay peer still deserializes here as `None` instead of\nerroring on a missing field, and (b) a V3 payload remains byte-identical on\nthe wire to the pre-Option shape (the field is always `Some` when emitted by\nV3 senders). A `None` overlay on a wiring command is rejected by the\nreceiver with a typed `UnsupportedProtocolVersion` cause.",
             "properties": {
               "command": {
                 "const": "wire_member",
@@ -8915,6 +9312,16 @@
                 "format": "uint64",
                 "minimum": 0,
                 "type": "integer"
+              },
+              "mob_peer_overlay": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "peer_spec": {
                 "$ref": "#/$defs/BridgePeerSpec"
@@ -8937,7 +9344,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "Peer wiring command payload.",
+            "description": "Peer wiring command payload.\n\n`mob_peer_overlay` is present from protocol V3 onward. It is\n`#[serde(default, skip_serializing_if)]` so that (a) a V2 wiring payload\nemitted by a pre-overlay peer still deserializes here as `None` instead of\nerroring on a missing field, and (b) a V3 payload remains byte-identical on\nthe wire to the pre-Option shape (the field is always `Some` when emitted by\nV3 senders). A `None` overlay on a wiring command is rejected by the\nreceiver with a typed `UnsupportedProtocolVersion` cause.",
             "properties": {
               "command": {
                 "const": "unwire_member",
@@ -8947,6 +9354,16 @@
                 "format": "uint64",
                 "minimum": 0,
                 "type": "integer"
+              },
+              "mob_peer_overlay": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "peer_spec": {
                 "$ref": "#/$defs/BridgePeerSpec"
@@ -8968,6 +9385,32 @@
             "type": "object"
           }
         ]
+      },
+      "BridgeMobPeerOverlayHandoff": {
+        "additionalProperties": false,
+        "description": "Generated MobMachine peer overlay handoff carried with peer wiring commands.",
+        "properties": {
+          "peer_specs": {
+            "items": {
+              "$ref": "#/$defs/BridgePeerSpec"
+            },
+            "type": "array"
+          },
+          "recipient_peer_id": {
+            "type": "string"
+          },
+          "topology_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "recipient_peer_id",
+          "topology_epoch",
+          "peer_specs"
+        ],
+        "type": "object"
       },
       "BridgePeerSpec": {
         "additionalProperties": false,
@@ -9219,12 +9662,12 @@
         "properties": {
           "current_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 2,
+            "default": 3,
             "description": "Protocol version implemented by the responding member runtime."
           },
           "default_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 2,
+            "default": 3,
             "description": "Protocol version new supervisors should use for fresh authority records."
           },
           "deliver_member_input": {
@@ -9253,7 +9696,8 @@
           },
           "supported_protocol_versions": {
             "default": [
-              2
+              2,
+              3
             ],
             "description": "Protocol versions accepted by the responding member runtime.",
             "items": {
@@ -9815,16 +10259,6 @@
           "capabilities": {
             "$ref": "#/$defs/PeerCapabilitySet"
           },
-          "last_unreachable_reason": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/PeerReachabilityReason"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "meta": {
             "$ref": "#/$defs/PeerMeta",
             "description": "Supplementary discovery metadata (description, labels)."
@@ -9836,9 +10270,6 @@
           "peer_id": {
             "$ref": "#/$defs/PeerId",
             "description": "Canonical runtime identity — the routing key."
-          },
-          "reachability": {
-            "$ref": "#/$defs/PeerReachability"
           },
           "sendable_kinds": {
             "items": {
@@ -9857,7 +10288,6 @@
           "source",
           "sendable_kinds",
           "capabilities",
-          "reachability",
           "meta"
         ],
         "type": "object"
@@ -9898,30 +10328,6 @@
       "PeerName": {
         "description": "Display-only slug for a peer.\n\n`PeerName` is **not** a routing key after Wave-B V5: the router resolves\nsends by [`PeerId`], and trust stores are keyed by [`PeerId`]. `PeerName`\nis retained so human-facing surfaces (CLI, REST `comms.peers`, logs) can\nrender a recognisable handle next to the opaque id.",
         "type": "string"
-      },
-      "PeerReachability": {
-        "enum": [
-          "unknown",
-          "reachable",
-          "unreachable"
-        ],
-        "type": "string"
-      },
-      "PeerReachabilityReason": {
-        "oneOf": [
-          {
-            "enum": [
-              "offline_or_no_ack",
-              "transport_error"
-            ],
-            "type": "string"
-          },
-          {
-            "const": "admission_dropped",
-            "description": "The peer admitted the transport but rejected our envelope at its\ningress policy gate (untrusted sender, full inbox, etc.). The peer\nis still reachable at the transport level; policy denied us.",
-            "type": "string"
-          }
-        ]
       },
       "PeerSendability": {
         "enum": [
@@ -10200,12 +10606,54 @@
   },
   "GoalConfirmRequest": {
     "$defs": {
+      "WorkEvidenceKind": {
+        "description": "Typed classification of confirmation evidence.\n\nThis is the canonical signal the `WorkGraphLifecycleMachine` consumes to\ndecide completion-policy satisfaction. The producer\n(`confirmation_evidence_for_policy`) sets this field; the raw\n[`WorkEvidenceRef::kind`] string remains only as opaque provenance/display\nand is never re-read to classify evidence for the satisfaction decision.",
+        "oneOf": [
+          {
+            "enum": [
+              "host_confirmation",
+              "principal_confirmation",
+              "supervisor_confirmation",
+              "reviewer_confirmation"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "self_attest",
+            "description": "Generic / self-attested evidence that does not satisfy any\nconfirmation policy on its own.",
+            "type": "string"
+          }
+        ]
+      },
       "WorkEvidenceRef": {
         "properties": {
+          "confirmation_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkEvidenceKind"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed confirmation classification set by the trusted producer. Drives the\nmachine-owned completion-policy satisfaction decision. Generic evidence\nleaves this unset (treated as `SelfAttest`)."
+          },
+          "confirming_owner_key": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkOwnerKey"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed identity of the confirming owner for supervisor/reviewer\nconfirmations. Set by the trusted producer; the machine records distinct\nowners per confirmation kind."
+          },
           "id": {
             "type": "string"
           },
           "kind": {
+            "description": "Opaque provenance/display label for the evidence. NOT used to classify\nevidence for the completion-policy satisfaction decision — see\n[`WorkEvidenceRef::confirmation_kind`].",
             "type": "string"
           },
           "label": {
@@ -10226,6 +10674,31 @@
           "id"
         ],
         "type": "object"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -13440,6 +13913,50 @@
     "title": "LiveChannelParams",
     "type": "object"
   },
+  "LiveCloseResult": {
+    "$defs": {
+      "LiveCloseStatus": {
+        "description": "Typed public result class for `live/close`.\n\nToday generated runtime authority emits only `Closed`. The enum is\n`#[non_exhaustive]` so future generated contracts can add explicit result\nclasses without changing the object shape.",
+        "oneOf": [
+          {
+            "const": "closed",
+            "description": "The host has accepted the close handoff and released channel transport\nresources on a best-effort basis.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `live/close`.\n\nThe boolean `closed` field is preserved for back-compat alongside the typed\n`status` discriminator. New code should route on `status`.",
+    "properties": {
+      "closed": {
+        "description": "Back-compat mirror of the generated close-authority result. Always\n`true` when paired with `status: closed`.",
+        "type": "boolean"
+      },
+      "status": {
+        "$ref": "#/$defs/LiveCloseStatus",
+        "description": "Typed close status emitted by generated runtime authority.\nToday: always [`LiveCloseStatus::Closed`]."
+      }
+    },
+    "required": [
+      "status",
+      "closed"
+    ],
+    "title": "LiveCloseResult",
+    "type": "object"
+  },
+  "LiveCloseStatus": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Typed public result class for `live/close`.\n\nToday generated runtime authority emits only `Closed`. The enum is\n`#[non_exhaustive]` so future generated contracts can add explicit result\nclasses without changing the object shape.",
+    "oneOf": [
+      {
+        "const": "closed",
+        "description": "The host has accepted the close handoff and released channel transport\nresources on a best-effort basis.",
+        "type": "string"
+      }
+    ],
+    "title": "LiveCloseStatus"
+  },
   "LiveCommitInputParams": {
     "$defs": {
       "WireLiveResponseModality": {
@@ -13906,11 +14423,11 @@
   "LiveRefreshResult": {
     "$defs": {
       "LiveRefreshStatus": {
-        "description": "Status of a `live/refresh` request relative to the adapter pump.\n\nR4-5 (P3): the refresh path is asynchronous — `LiveAdapterHost::send_command`\nreturns when the command has been queued on the adapter's mpsc channel,\nnot when the adapter pump has applied the resulting `session.update`. The\nrealtime stream is the source of truth for the actual refresh outcome\n(failures surface as `LiveAdapterObservation::Error`).\n\nToday every refresh path is `Queued`. The enum is `#[non_exhaustive]` so\na future revision can add `AppliedSync` (e.g. when a oneshot ack from the\nadapter pump back through the command channel lands, or when a refresh\nis detected as a no-op against the currently-applied snapshot) without\nbreaking the wire shape. SDK consumers route on the string value and\ntreat unknown values as \"outcome unknown — observe the realtime stream\".\n\nSerializes as a plain string (no envelope) so [`LiveRefreshResult`] can\nplace this typed status alongside the back-compat `refresh_enqueued`\nboolean as ordinary sibling fields, which keeps SDK codegen on the\nsimple-struct path.",
+        "description": "Status of a `live/refresh` request relative to the adapter pump.\n\nR4-5 (P3): the refresh path is asynchronous — host queue acceptance happens\nbefore the adapter pump has applied the resulting `session.update`. The\nrealtime stream is the source of truth for the actual refresh outcome\n(failures surface as `LiveAdapterObservation::Error`).\n\nToday generated runtime authority emits only `Queued`. The enum is\n`#[non_exhaustive]` so a future generated contract can add a typed status\nwithout changing the object shape. SDK consumers must route on the string\nvalue and fail closed for values outside the generated contract they were\nbuilt with.\n\nSerializes as a plain string (no envelope) so [`LiveRefreshResult`] can\nplace this typed status alongside the back-compat `refresh_enqueued`\nboolean as ordinary sibling fields, which keeps SDK codegen on the\nsimple-struct path.",
         "oneOf": [
           {
             "const": "queued",
-            "description": "The host has accepted the refresh command onto the adapter's mpsc\nqueue. The adapter pump applies the `session.update` asynchronously;\ncallers that need the actual outcome must observe the adapter's\nrealtime stream.",
+            "description": "The host has accepted the refresh command onto the adapter queue. The\nadapter pump applies the `session.update` asynchronously; callers that\nneed the actual outcome must observe the adapter's realtime stream.",
             "type": "string"
           }
         ]
@@ -13920,12 +14437,12 @@
     "description": "Response payload for `live/refresh`.\n\nR4-5 (P3): replaces the previous untyped `{\"refresh_enqueued\": true}`\nJSON blob. The boolean `refresh_enqueued` field is preserved for back-\ncompat (legacy clients that pattern-match on it stay on the green path)\nalongside the typed `status` discriminator. New code should route on\n`status`.\n\nSee [`LiveRefreshStatus`] for the variant set and the contract on\nasynchronous adapter-pump application.",
     "properties": {
       "refresh_enqueued": {
-        "description": "Back-compat mirror of the legacy untyped reply field. Always `true`\nwhen paired with `status: queued`. New code should route on `status`.",
+        "description": "Back-compat mirror of the generated queued-authority result. Always\n`true` when paired with `status: queued`. New code should route on\n`status`.",
         "type": "boolean"
       },
       "status": {
         "$ref": "#/$defs/LiveRefreshStatus",
-        "description": "Typed refresh status. Today: always [`LiveRefreshStatus::Queued`]."
+        "description": "Typed refresh status emitted by generated runtime authority.\nToday: always [`LiveRefreshStatus::Queued`]."
       }
     },
     "required": [
@@ -13937,11 +14454,11 @@
   },
   "LiveRefreshStatus": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Status of a `live/refresh` request relative to the adapter pump.\n\nR4-5 (P3): the refresh path is asynchronous — `LiveAdapterHost::send_command`\nreturns when the command has been queued on the adapter's mpsc channel,\nnot when the adapter pump has applied the resulting `session.update`. The\nrealtime stream is the source of truth for the actual refresh outcome\n(failures surface as `LiveAdapterObservation::Error`).\n\nToday every refresh path is `Queued`. The enum is `#[non_exhaustive]` so\na future revision can add `AppliedSync` (e.g. when a oneshot ack from the\nadapter pump back through the command channel lands, or when a refresh\nis detected as a no-op against the currently-applied snapshot) without\nbreaking the wire shape. SDK consumers route on the string value and\ntreat unknown values as \"outcome unknown — observe the realtime stream\".\n\nSerializes as a plain string (no envelope) so [`LiveRefreshResult`] can\nplace this typed status alongside the back-compat `refresh_enqueued`\nboolean as ordinary sibling fields, which keeps SDK codegen on the\nsimple-struct path.",
+    "description": "Status of a `live/refresh` request relative to the adapter pump.\n\nR4-5 (P3): the refresh path is asynchronous — host queue acceptance happens\nbefore the adapter pump has applied the resulting `session.update`. The\nrealtime stream is the source of truth for the actual refresh outcome\n(failures surface as `LiveAdapterObservation::Error`).\n\nToday generated runtime authority emits only `Queued`. The enum is\n`#[non_exhaustive]` so a future generated contract can add a typed status\nwithout changing the object shape. SDK consumers must route on the string\nvalue and fail closed for values outside the generated contract they were\nbuilt with.\n\nSerializes as a plain string (no envelope) so [`LiveRefreshResult`] can\nplace this typed status alongside the back-compat `refresh_enqueued`\nboolean as ordinary sibling fields, which keeps SDK codegen on the\nsimple-struct path.",
     "oneOf": [
       {
         "const": "queued",
-        "description": "The host has accepted the refresh command onto the adapter's mpsc\nqueue. The adapter pump applies the `session.update` asynchronously;\ncallers that need the actual outcome must observe the adapter's\nrealtime stream.",
+        "description": "The host has accepted the refresh command onto the adapter queue. The\nadapter pump applies the `session.update` asynchronously; callers that\nneed the actual outcome must observe the adapter's realtime stream.",
         "type": "string"
       }
     ],
@@ -18638,30 +19155,6 @@
         "description": "Display-only slug for a peer.\n\n`PeerName` is **not** a routing key after Wave-B V5: the router resolves\nsends by [`PeerId`], and trust stores are keyed by [`PeerId`]. `PeerName`\nis retained so human-facing surfaces (CLI, REST `comms.peers`, logs) can\nrender a recognisable handle next to the opaque id.",
         "type": "string"
       },
-      "PeerReachability": {
-        "enum": [
-          "unknown",
-          "reachable",
-          "unreachable"
-        ],
-        "type": "string"
-      },
-      "PeerReachabilityReason": {
-        "oneOf": [
-          {
-            "enum": [
-              "offline_or_no_ack",
-              "transport_error"
-            ],
-            "type": "string"
-          },
-          {
-            "const": "admission_dropped",
-            "description": "The peer admitted the transport but rejected our envelope at its\ningress policy gate (untrusted sender, full inbox, etc.). The peer\nis still reachable at the transport level; policy denied us.",
-            "type": "string"
-          }
-        ]
-      },
       "PeerSendability": {
         "enum": [
           "peer_message",
@@ -18700,16 +19193,6 @@
       "capabilities": {
         "$ref": "#/$defs/PeerCapabilitySet"
       },
-      "last_unreachable_reason": {
-        "anyOf": [
-          {
-            "$ref": "#/$defs/PeerReachabilityReason"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      },
       "meta": {
         "$ref": "#/$defs/PeerMeta",
         "description": "Supplementary discovery metadata (description, labels)."
@@ -18721,9 +19204,6 @@
       "peer_id": {
         "$ref": "#/$defs/PeerId",
         "description": "Canonical runtime identity — the routing key."
-      },
-      "reachability": {
-        "$ref": "#/$defs/PeerReachability"
       },
       "sendable_kinds": {
         "items": {
@@ -18742,7 +19222,6 @@
       "source",
       "sendable_kinds",
       "capabilities",
-      "reachability",
       "meta"
     ],
     "title": "PeerDirectoryEntry",
@@ -18793,16 +19272,6 @@
           "capabilities": {
             "$ref": "#/$defs/PeerCapabilitySet"
           },
-          "last_unreachable_reason": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/PeerReachabilityReason"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "meta": {
             "$ref": "#/$defs/PeerMeta",
             "description": "Supplementary discovery metadata (description, labels)."
@@ -18814,9 +19283,6 @@
           "peer_id": {
             "$ref": "#/$defs/PeerId",
             "description": "Canonical runtime identity — the routing key."
-          },
-          "reachability": {
-            "$ref": "#/$defs/PeerReachability"
           },
           "sendable_kinds": {
             "items": {
@@ -18835,7 +19301,6 @@
           "source",
           "sendable_kinds",
           "capabilities",
-          "reachability",
           "meta"
         ],
         "type": "object"
@@ -18876,30 +19341,6 @@
       "PeerName": {
         "description": "Display-only slug for a peer.\n\n`PeerName` is **not** a routing key after Wave-B V5: the router resolves\nsends by [`PeerId`], and trust stores are keyed by [`PeerId`]. `PeerName`\nis retained so human-facing surfaces (CLI, REST `comms.peers`, logs) can\nrender a recognisable handle next to the opaque id.",
         "type": "string"
-      },
-      "PeerReachability": {
-        "enum": [
-          "unknown",
-          "reachable",
-          "unreachable"
-        ],
-        "type": "string"
-      },
-      "PeerReachabilityReason": {
-        "oneOf": [
-          {
-            "enum": [
-              "offline_or_no_ack",
-              "transport_error"
-            ],
-            "type": "string"
-          },
-          {
-            "const": "admission_dropped",
-            "description": "The peer admitted the transport but rejected our envelope at its\ningress policy gate (untrusted sender, full inbox, etc.). The peer\nis still reachable at the transport level; policy denied us.",
-            "type": "string"
-          }
-        ]
       },
       "PeerSendability": {
         "enum": [
@@ -18968,34 +19409,6 @@
     "title": "PeerName",
     "type": "string"
   },
-  "PeerReachability": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "enum": [
-      "unknown",
-      "reachable",
-      "unreachable"
-    ],
-    "title": "PeerReachability",
-    "type": "string"
-  },
-  "PeerReachabilityReason": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "oneOf": [
-      {
-        "enum": [
-          "offline_or_no_ack",
-          "transport_error"
-        ],
-        "type": "string"
-      },
-      {
-        "const": "admission_dropped",
-        "description": "The peer admitted the transport but rejected our envelope at its\ningress policy gate (untrusted sender, full inbox, etc.). The peer\nis still reachable at the transport level; policy denied us.",
-        "type": "string"
-      }
-    ],
-    "title": "PeerReachabilityReason"
-  },
   "PeerResponseTerminalStatusWire": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Terminal status for dedicated correlated peer-response ingress.",
@@ -19045,6 +19458,9 @@
       "can_add_evidence": {
         "type": "boolean"
       },
+      "can_block": {
+        "type": "boolean"
+      },
       "can_close_if_policy_allows": {
         "type": "boolean"
       },
@@ -19052,18 +19468,43 @@
         "default": false,
         "type": "boolean"
       },
-      "can_close_parent": {
+      "can_create": {
         "type": "boolean"
       },
-      "can_request_closure": {
+      "can_get": {
+        "type": "boolean"
+      },
+      "can_link": {
+        "type": "boolean"
+      },
+      "can_link_derived_from": {
+        "type": "boolean"
+      },
+      "can_link_parent": {
+        "type": "boolean"
+      },
+      "can_link_related": {
+        "type": "boolean"
+      },
+      "can_release": {
+        "type": "boolean"
+      },
+      "can_update": {
         "type": "boolean"
       }
     },
     "required": [
+      "can_get",
       "can_add_evidence",
-      "can_request_closure",
-      "can_close_if_policy_allows",
-      "can_close_parent"
+      "can_release",
+      "can_update",
+      "can_block",
+      "can_create",
+      "can_link",
+      "can_link_parent",
+      "can_link_related",
+      "can_link_derived_from",
+      "can_close_if_policy_allows"
     ],
     "title": "ProjectedAttentionAuthority",
     "type": "object"
@@ -20582,6 +21023,72 @@
       },
       "Schedule": {
         "properties": {
+          "config": {
+            "$ref": "#/$defs/ScheduleConfig"
+          },
+          "misfire_policy": {
+            "$ref": "#/$defs/MisfirePolicy"
+          },
+          "missing_target_policy": {
+            "$ref": "#/$defs/MissingTargetPolicy"
+          },
+          "next_occurrence_ordinal": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "overlap_policy": {
+            "$ref": "#/$defs/OverlapPolicy"
+          },
+          "phase": {
+            "$ref": "#/$defs/SchedulePhase"
+          },
+          "planning_cursor_utc": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "schedule_id": {
+            "$ref": "#/$defs/ScheduleId"
+          },
+          "superseded_ack_ids": {
+            "items": {
+              "$ref": "#/$defs/OccurrenceId"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "target": {
+            "$ref": "#/$defs/TargetBinding"
+          },
+          "trigger": {
+            "$ref": "#/$defs/TriggerSpec"
+          }
+        },
+        "required": [
+          "schedule_id",
+          "phase",
+          "revision",
+          "trigger",
+          "target",
+          "misfire_policy",
+          "overlap_policy",
+          "missing_target_policy",
+          "next_occurrence_ordinal",
+          "superseded_ack_ids",
+          "config"
+        ],
+        "type": "object"
+      },
+      "ScheduleConfig": {
+        "properties": {
           "created_at_utc": {
             "format": "date-time",
             "type": "string"
@@ -20605,73 +21112,21 @@
             },
             "type": "object"
           },
-          "misfire_policy": {
-            "$ref": "#/$defs/MisfirePolicy",
-            "default": {
-              "type": "skip"
-            }
-          },
-          "missing_target_policy": {
-            "$ref": "#/$defs/MissingTargetPolicy",
-            "default": "mark_misfired"
-          },
           "name": {
             "type": [
               "string",
               "null"
             ]
           },
-          "next_occurrence_ordinal": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "overlap_policy": {
-            "$ref": "#/$defs/OverlapPolicy",
-            "default": "skip_if_running"
-          },
-          "phase": {
-            "$ref": "#/$defs/SchedulePhase"
-          },
-          "planning_cursor_utc": {
-            "format": "date-time",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "planning_horizon_days": {
-            "default": 30,
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
           },
           "planning_horizon_occurrences": {
-            "default": 64,
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
-          },
-          "revision": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "schedule_id": {
-            "$ref": "#/$defs/ScheduleId"
-          },
-          "superseded_ack_ids": {
-            "items": {
-              "$ref": "#/$defs/OccurrenceId"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "target": {
-            "$ref": "#/$defs/TargetBinding"
-          },
-          "trigger": {
-            "$ref": "#/$defs/TriggerSpec"
           },
           "updated_at_utc": {
             "format": "date-time",
@@ -20679,12 +21134,8 @@
           }
         },
         "required": [
-          "schedule_id",
-          "phase",
-          "revision",
-          "trigger",
-          "target",
-          "next_occurrence_ordinal",
+          "planning_horizon_days",
+          "planning_horizon_occurrences",
           "created_at_utc",
           "updated_at_utc"
         ],
@@ -21815,7 +22266,6 @@
       "Occurrence": {
         "properties": {
           "attempt_count": {
-            "default": 0,
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
@@ -21959,6 +22409,7 @@
           "misfire_policy",
           "overlap_policy",
           "missing_target_policy",
+          "attempt_count",
           "created_at_utc"
         ],
         "type": "object"
@@ -24373,22 +24824,6 @@
               "phase"
             ],
             "type": "object"
-          },
-          {
-            "properties": {
-              "kind": {
-                "const": "legacy_status",
-                "type": "string"
-              },
-              "status": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "status"
-            ],
-            "type": "object"
           }
         ]
       },
@@ -24433,14 +24868,7 @@
             "type": "string"
           },
           "status_info": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/ToolConfigChangeStatus"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/$defs/ToolConfigChangeStatus"
           },
           "target": {
             "type": "string"
@@ -24450,6 +24878,7 @@
           "operation",
           "target",
           "status",
+          "status_info",
           "persisted"
         ],
         "type": "object"
@@ -30514,7 +30943,7 @@
             "type": "object"
           },
           {
-            "description": "Provider emitted an assistant **spoken-transcript** delta for an\noutput item — text derived from audio output (e.g. OpenAI realtime\n`response.output_audio_transcript.delta`).\n\nIdentity shape mirrors [`Self::AssistantTextDelta`] so the session's\nidempotent ordering / staging logic owns dedup uniformly across\nlanes. Materializes as [`crate::types::AssistantBlock::Transcript`]\nwith `source: TranscriptSource::Spoken` (T9/T10).",
+            "description": "Provider emitted an assistant **spoken-transcript** delta for an\noutput item — text derived from audio output (e.g. OpenAI realtime\n`response.output_audio_transcript.delta`).\n\nIdentity shape mirrors [`Self::AssistantTextDelta`] so generated\nidempotent ordering / staging authority owns dedup uniformly across\nlanes. Materializes as [`crate::types::AssistantBlock::Transcript`]\nwith `source: TranscriptSource::Spoken` (T9/T10).",
             "properties": {
               "content_index": {
                 "format": "uint32",
@@ -34700,22 +35129,6 @@
               "phase"
             ],
             "type": "object"
-          },
-          {
-            "properties": {
-              "kind": {
-                "const": "legacy_status",
-                "type": "string"
-              },
-              "status": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "status"
-            ],
-            "type": "object"
           }
         ]
       },
@@ -34760,14 +35173,7 @@
             "type": "string"
           },
           "status_info": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/ToolConfigChangeStatus"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/$defs/ToolConfigChangeStatus"
           },
           "target": {
             "type": "string"
@@ -34777,6 +35183,7 @@
           "operation",
           "target",
           "status",
+          "status_info",
           "persisted"
         ],
         "type": "object"
@@ -36503,22 +36910,6 @@
               "phase"
             ],
             "type": "object"
-          },
-          {
-            "properties": {
-              "kind": {
-                "const": "legacy_status",
-                "type": "string"
-              },
-              "status": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "status"
-            ],
-            "type": "object"
           }
         ]
       },
@@ -36563,14 +36954,7 @@
             "type": "string"
           },
           "status_info": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/ToolConfigChangeStatus"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/$defs/ToolConfigChangeStatus"
           },
           "target": {
             "type": "string"
@@ -36580,6 +36964,7 @@
           "operation",
           "target",
           "status",
+          "status_info",
           "persisted"
         ],
         "type": "object"
@@ -38749,22 +39134,6 @@
               "phase"
             ],
             "type": "object"
-          },
-          {
-            "properties": {
-              "kind": {
-                "const": "legacy_status",
-                "type": "string"
-              },
-              "status": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "status"
-            ],
-            "type": "object"
           }
         ]
       },
@@ -38809,14 +39178,7 @@
             "type": "string"
           },
           "status_info": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/ToolConfigChangeStatus"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/$defs/ToolConfigChangeStatus"
           },
           "target": {
             "type": "string"
@@ -38826,6 +39188,7 @@
           "operation",
           "target",
           "status",
+          "status_info",
           "persisted"
         ],
         "type": "object"

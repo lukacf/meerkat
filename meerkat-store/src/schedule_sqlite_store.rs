@@ -3,10 +3,11 @@ use crate::sqlite_store::{begin_immediate_transaction, open_connection};
 use async_trait::async_trait;
 use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use meerkat_schedule::{
-    ClaimDueRequest, ClaimDueResult, DeliveryReceipt, DeliveryReceiptStage, Occurrence,
-    OccurrenceFailureClass, OccurrenceFilter, OccurrenceId, OccurrenceLifecycleError,
-    OccurrenceLifecycleInput, PendingSupersession, Schedule, ScheduleFilter, ScheduleStore,
-    ScheduleStoreError, ScheduleStoreKind,
+    AuthorizedOccurrenceWrite, AuthorizedScheduleWrite, ClaimDueRequest, ClaimDueResult,
+    DeliveryReceipt, Occurrence, OccurrenceDueAction, OccurrenceFilter, OccurrenceId,
+    OccurrenceLifecycleError, OccurrenceLifecycleInput, OccurrencePhase, OccurrenceSupersessionAck,
+    PendingSupersession, Schedule, ScheduleFilter, SchedulePhase, ScheduleStore,
+    ScheduleStoreError, ScheduleStoreKind, apply_supersession_feedback,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
@@ -74,12 +75,18 @@ impl SqliteScheduleStore {
         &self.path
     }
 
-    async fn put_schedule_impl(&self, schedule: Schedule) -> Result<(), StoreError> {
+    async fn commit_schedule_write_impl(
+        &self,
+        write: AuthorizedScheduleWrite,
+    ) -> Result<(), StoreError> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
             let mut conn = open_connection(&path)?;
             ensure_schedule_schema(&conn)?;
             let tx = begin_immediate_transaction(&mut conn)?;
+            reject_standalone_supersession_write(&write)?;
+            verify_authorized_schedule_write_in_txn(&tx, &write)?;
+            let schedule = write.into_schedule();
             write_schedule_in_txn(&tx, &schedule)?;
             tx.commit()?;
             Ok(())
@@ -146,12 +153,17 @@ impl SqliteScheduleStore {
         .map_err(StoreError::Join)?
     }
 
-    async fn put_occurrence_impl(&self, occurrence: Occurrence) -> Result<(), StoreError> {
+    async fn commit_occurrence_write_impl(
+        &self,
+        write: AuthorizedOccurrenceWrite,
+    ) -> Result<(), StoreError> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
             let mut conn = open_connection(&path)?;
             ensure_schedule_schema(&conn)?;
             let tx = begin_immediate_transaction(&mut conn)?;
+            verify_authorized_occurrence_write_in_txn(&tx, &write)?;
+            let occurrence = write.into_occurrence();
             write_occurrence_in_txn(&tx, &occurrence)?;
             tx.commit()?;
             Ok(())
@@ -160,14 +172,21 @@ impl SqliteScheduleStore {
         .map_err(StoreError::Join)?
     }
 
-    async fn put_occurrences_impl(&self, occurrences: Vec<Occurrence>) -> Result<(), StoreError> {
+    async fn commit_occurrence_writes_impl(
+        &self,
+        writes: Vec<AuthorizedOccurrenceWrite>,
+    ) -> Result<(), StoreError> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
             let mut conn = open_connection(&path)?;
             ensure_schedule_schema(&conn)?;
             let tx = begin_immediate_transaction(&mut conn)?;
-            for occurrence in &occurrences {
-                write_occurrence_in_txn(&tx, occurrence)?;
+            for write in &writes {
+                verify_authorized_occurrence_write_in_txn(&tx, write)?;
+            }
+            for write in writes {
+                let occurrence = write.into_occurrence();
+                write_occurrence_in_txn(&tx, &occurrence)?;
             }
             tx.commit()?;
             Ok(())
@@ -215,7 +234,7 @@ impl SqliteScheduleStore {
                 let bytes = row?;
                 let occurrence: Occurrence =
                     serde_json::from_slice(&bytes).map_err(StoreError::Serialization)?;
-                if !filter.include_terminal && occurrence.phase.is_terminal() {
+                if !filter.include_terminal && occurrence.is_terminal() {
                     continue;
                 }
                 if filter
@@ -257,8 +276,8 @@ impl SqliteScheduleStore {
             let mut conn = open_connection(&path)?;
             ensure_schedule_schema(&conn)?;
             let tx = begin_immediate_transaction(&mut conn)?;
-            write_receipt_in_txn(&tx, &receipt)?;
-            update_occurrence_last_receipt_in_txn(&tx, &receipt)?;
+            let canonical_receipt = record_occurrence_receipt_in_txn(&tx, &receipt)?;
+            write_receipt_in_txn(&tx, &canonical_receipt)?;
             tx.commit()?;
             Ok(())
         })
@@ -302,72 +321,94 @@ impl SqliteScheduleStore {
             let store_now_ms = select_store_now_ms(&tx)?;
             let store_now_utc = utc_from_millis(store_now_ms);
 
-            let limit = i64::try_from(request.limit).unwrap_or(i64::MAX);
-            let mut candidates = Vec::new();
+            let limit = request.limit;
+            let mut occurrences = Vec::new();
             {
                 let mut stmt = tx.prepare(
                     r"
-                    SELECT o.occurrence_json
+                    SELECT o.occurrence_json, s.schedule_json
                     FROM schedule_occurrences o
                     JOIN schedule_schedules s ON s.schedule_id = o.schedule_id
-                    WHERE s.phase = 'active'
                     ORDER BY o.due_at_ms ASC, o.schedule_revision ASC, o.occurrence_ordinal ASC
                     ",
                 )?;
-                let rows = stmt.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })?;
                 for row in rows {
-                    let bytes = row?;
-                    let occurrence: Occurrence =
-                        serde_json::from_slice(&bytes).map_err(StoreError::Serialization)?;
-                    if occurrence.is_claimable_at(store_now_utc) {
-                        candidates.push(occurrence);
+                    let (occurrence_bytes, schedule_bytes) = row?;
+                    let schedule: Schedule = serde_json::from_slice(&schedule_bytes)
+                        .map_err(StoreError::Serialization)?;
+                    if schedule.phase != SchedulePhase::Active {
+                        continue;
                     }
+                    let occurrence: Occurrence = serde_json::from_slice(&occurrence_bytes)
+                        .map_err(StoreError::Serialization)?;
+                    occurrences.push(occurrence);
                 }
             }
-            candidates.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
 
             let mut claimed = Vec::new();
-            for occurrence in candidates {
-                let occurrence = if occurrence.is_reclaimable_at(store_now_utc) {
-                    let expired = occurrence
-                        .apply(OccurrenceLifecycleInput::LeaseExpired {
-                            at_utc: store_now_utc,
-                        })
-                        .map_err(|error: OccurrenceLifecycleError| {
-                            StoreError::Internal(error.to_string())
-                        })?
-                        .into_occurrence();
-                    let mut receipt = DeliveryReceipt::new(
-                        expired.occurrence_id.clone(),
-                        expired.attempt_count,
-                        DeliveryReceiptStage::LeaseExpired,
-                    );
-                    receipt.failure_class = Some(OccurrenceFailureClass::LeaseLost);
-                    receipt.detail = Some("lease expired before completion".to_string());
-                    let mut expired = expired;
-                    expired.last_receipt = Some(receipt.clone());
-                    write_receipt_in_txn(&tx, &receipt)?;
-                    write_occurrence_in_txn(&tx, &expired)?;
-                    expired
-                } else {
-                    occurrence
-                };
-
-                let claim_token = Uuid::now_v7();
-                let lease_expires_at_utc = store_now_utc + request.lease_duration;
-                let claimed_occurrence = occurrence
-                    .apply(OccurrenceLifecycleInput::Claim {
-                        owner_id: request.owner_id.clone(),
-                        at_utc: store_now_utc,
-                        lease_expires_at_utc,
-                        claim_token,
-                    })
-                    .map_err(|error: OccurrenceLifecycleError| {
-                        StoreError::Internal(error.to_string())
-                    })?
-                    .into_occurrence();
-                write_occurrence_in_txn(&tx, &claimed_occurrence)?;
-                claimed.push(claimed_occurrence);
+            for occurrence in occurrences {
+                let action = occurrence.classify_due_action(store_now_utc).map_err(
+                    |error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()),
+                )?;
+                match action {
+                    Some(OccurrenceDueAction::MisfireRequired) => {
+                        let detail = Some(occurrence.due_misfire_detail_at(store_now_utc));
+                        let mut updated = occurrence
+                            .apply(OccurrenceLifecycleInput::ResolveDueMisfire {
+                                detail: detail.clone(),
+                                at_utc: store_now_utc,
+                            })
+                            .map_err(|error: OccurrenceLifecycleError| {
+                                StoreError::Internal(error.to_string())
+                            })?
+                            .into_occurrence();
+                        let receipt = updated.delivery_receipt_from_authority(None).map_err(
+                            |error: OccurrenceLifecycleError| {
+                                StoreError::Internal(error.to_string())
+                            },
+                        )?;
+                        updated = updated
+                            .apply(OccurrenceLifecycleInput::RecordReceipt {
+                                runtime_outcome: receipt.runtime_outcome.clone(),
+                                receipt: receipt.clone(),
+                            })
+                            .map_err(|error: OccurrenceLifecycleError| {
+                                StoreError::Internal(error.to_string())
+                            })?
+                            .into_occurrence();
+                        write_receipt_in_txn(&tx, &receipt)?;
+                        write_occurrence_in_txn(&tx, &updated)?;
+                    }
+                    Some(OccurrenceDueAction::ClaimEligible) => {
+                        if claimed.len() >= limit {
+                            continue;
+                        }
+                        let claimed_occurrence =
+                            claim_occurrence_for_sqlite(occurrence, &request, store_now_utc)?;
+                        write_occurrence_in_txn(&tx, &claimed_occurrence)?;
+                        claimed.push(claimed_occurrence);
+                    }
+                    Some(OccurrenceDueAction::LeaseExpired) => {
+                        if claimed.len() >= limit {
+                            continue;
+                        }
+                        let (expired, receipt) =
+                            expire_occurrence_lease_for_sqlite(occurrence, store_now_utc)?;
+                        write_receipt_in_txn(&tx, &receipt)?;
+                        write_occurrence_in_txn(&tx, &expired)?;
+                        let Ok(claimed_occurrence) =
+                            claim_occurrence_for_sqlite(expired, &request, store_now_utc)
+                        else {
+                            continue;
+                        };
+                        write_occurrence_in_txn(&tx, &claimed_occurrence)?;
+                        claimed.push(claimed_occurrence);
+                    }
+                    None => {}
+                }
             }
 
             tx.commit()?;
@@ -400,8 +441,11 @@ impl ScheduleStore for SqliteScheduleStore {
         .map_err(into_schedule_store_error)
     }
 
-    async fn put_schedule(&self, schedule: Schedule) -> Result<(), ScheduleStoreError> {
-        self.put_schedule_impl(schedule)
+    async fn commit_schedule_write(
+        &self,
+        write: AuthorizedScheduleWrite,
+    ) -> Result<(), ScheduleStoreError> {
+        self.commit_schedule_write_impl(write)
             .await
             .map_err(into_schedule_store_error)
     }
@@ -424,41 +468,54 @@ impl ScheduleStore for SqliteScheduleStore {
             .map_err(into_schedule_store_error)
     }
 
-    async fn put_occurrence(&self, occurrence: Occurrence) -> Result<(), ScheduleStoreError> {
-        self.put_occurrence_impl(occurrence)
+    async fn commit_occurrence_write(
+        &self,
+        write: AuthorizedOccurrenceWrite,
+    ) -> Result<(), ScheduleStoreError> {
+        self.commit_occurrence_write_impl(write)
             .await
             .map_err(into_schedule_store_error)
     }
 
-    async fn put_occurrences(
+    async fn commit_occurrence_writes(
         &self,
-        occurrences: Vec<Occurrence>,
+        writes: Vec<AuthorizedOccurrenceWrite>,
     ) -> Result<(), ScheduleStoreError> {
-        self.put_occurrences_impl(occurrences)
+        self.commit_occurrence_writes_impl(writes)
             .await
             .map_err(into_schedule_store_error)
     }
 
     async fn commit_schedule_mutation(
         &self,
-        schedule: Schedule,
-        occurrences: Vec<Occurrence>,
-        supersession: Option<PendingSupersession>,
-    ) -> Result<(), ScheduleStoreError> {
+        schedule: AuthorizedScheduleWrite,
+        occurrences: Vec<AuthorizedOccurrenceWrite>,
+    ) -> Result<Schedule, ScheduleStoreError> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
             let mut conn = open_connection(&path)?;
             ensure_schedule_schema(&conn)?;
             let tx = begin_immediate_transaction(&mut conn)?;
-            write_schedule_in_txn(&tx, &schedule)?;
+            verify_authorized_schedule_write_in_txn(&tx, &schedule)?;
             for occurrence in &occurrences {
-                write_occurrence_in_txn(&tx, occurrence)?;
+                verify_authorized_occurrence_write_in_txn(&tx, occurrence)?;
+            }
+            let (schedule, supersession) = schedule.into_parts();
+            let mut committed_schedule = schedule;
+            write_schedule_in_txn(&tx, &committed_schedule)?;
+            for occurrence in occurrences {
+                let occurrence = occurrence.into_occurrence();
+                write_occurrence_in_txn(&tx, &occurrence)?;
             }
             if let Some(supersession) = supersession {
-                supersede_pending_occurrences_in_txn(&tx, &schedule, supersession)?;
+                let acks =
+                    supersede_pending_occurrences_in_txn(&tx, &committed_schedule, supersession)?;
+                committed_schedule = apply_supersession_feedback(committed_schedule, acks)
+                    .map_err(|error| StoreError::Internal(error.to_string()))?;
+                write_schedule_in_txn(&tx, &committed_schedule)?;
             }
             tx.commit()?;
-            Ok(())
+            Ok(committed_schedule)
         })
         .await
         .map_err(StoreError::Join)
@@ -567,10 +624,72 @@ fn ensure_schedule_schema(conn: &Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
+fn reject_standalone_supersession_write(write: &AuthorizedScheduleWrite) -> Result<(), StoreError> {
+    if write.has_pending_supersession() {
+        return Err(StoreError::Internal(
+            "generated schedule supersession requires atomic schedule mutation".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn read_schedule_in_txn(
+    tx: &rusqlite::Transaction<'_>,
+    schedule_id: &meerkat_schedule::ScheduleId,
+) -> Result<Option<Schedule>, StoreError> {
+    tx.query_row(
+        "SELECT schedule_json FROM schedule_schedules WHERE schedule_id = ?1",
+        params![schedule_id.to_string()],
+        |row| row.get::<_, Vec<u8>>(0),
+    )
+    .optional()?
+    .map(|bytes| serde_json::from_slice(&bytes).map_err(StoreError::Serialization))
+    .transpose()
+}
+
+fn read_occurrence_in_txn(
+    tx: &rusqlite::Transaction<'_>,
+    occurrence_id: &OccurrenceId,
+) -> Result<Option<Occurrence>, StoreError> {
+    tx.query_row(
+        "SELECT occurrence_json FROM schedule_occurrences WHERE occurrence_id = ?1",
+        params![occurrence_id.to_string()],
+        |row| row.get::<_, Vec<u8>>(0),
+    )
+    .optional()?
+    .map(|bytes| serde_json::from_slice(&bytes).map_err(StoreError::Serialization))
+    .transpose()
+}
+
+fn verify_authorized_schedule_write_in_txn(
+    tx: &rusqlite::Transaction<'_>,
+    write: &AuthorizedScheduleWrite,
+) -> Result<(), StoreError> {
+    let current = read_schedule_in_txn(tx, write.schedule_id())?;
+    write
+        .precondition()
+        .check_current(current.as_ref())
+        .map_err(StoreError::Internal)
+}
+
+fn verify_authorized_occurrence_write_in_txn(
+    tx: &rusqlite::Transaction<'_>,
+    write: &AuthorizedOccurrenceWrite,
+) -> Result<(), StoreError> {
+    let current = read_occurrence_in_txn(tx, write.occurrence_id())?;
+    write
+        .precondition()
+        .check_current(current.as_ref())
+        .map_err(StoreError::Internal)
+}
+
 fn write_schedule_in_txn(
     tx: &rusqlite::Transaction<'_>,
     schedule: &Schedule,
 ) -> Result<(), StoreError> {
+    schedule
+        .validate_machine_projection()
+        .map_err(StoreError::Internal)?;
     let schedule_json = serde_json::to_vec(schedule)?;
     tx.execute(
         r"
@@ -611,6 +730,9 @@ fn write_occurrence_in_txn(
     tx: &rusqlite::Transaction<'_>,
     occurrence: &Occurrence,
 ) -> Result<(), StoreError> {
+    occurrence
+        .validate_machine_projection()
+        .map_err(StoreError::Internal)?;
     let occurrence_json = serde_json::to_vec(occurrence)?;
     tx.execute(
         r"
@@ -675,58 +797,111 @@ fn write_receipt_in_txn(
     Ok(())
 }
 
+fn expire_occurrence_lease_for_sqlite(
+    occurrence: Occurrence,
+    at_utc: DateTime<Utc>,
+) -> Result<(Occurrence, DeliveryReceipt), StoreError> {
+    let expired = occurrence
+        .apply(OccurrenceLifecycleInput::LeaseExpired { at_utc })
+        .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?
+        .into_occurrence();
+    let receipt = expired
+        .delivery_receipt_from_authority(None)
+        .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?;
+    let expired = expired
+        .apply(OccurrenceLifecycleInput::RecordReceipt {
+            runtime_outcome: receipt.runtime_outcome.clone(),
+            receipt: receipt.clone(),
+        })
+        .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?
+        .into_occurrence();
+    Ok((expired, receipt))
+}
+
+fn claim_occurrence_for_sqlite(
+    occurrence: Occurrence,
+    request: &ClaimDueRequest,
+    at_utc: DateTime<Utc>,
+) -> Result<Occurrence, StoreError> {
+    occurrence
+        .apply(OccurrenceLifecycleInput::Claim {
+            owner_id: request.owner_id.clone(),
+            at_utc,
+            lease_expires_at_utc: at_utc + request.lease_duration,
+            claim_token: Uuid::now_v7(),
+        })
+        .map(|mutator| mutator.into_occurrence())
+        .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))
+}
+
 fn supersede_pending_occurrences_in_txn(
     tx: &rusqlite::Transaction<'_>,
     schedule: &Schedule,
     supersession: PendingSupersession,
-) -> Result<(), StoreError> {
+) -> Result<Vec<OccurrenceSupersessionAck>, StoreError> {
     let mut stmt = tx.prepare(
         "SELECT occurrence_json
          FROM schedule_occurrences
-         WHERE schedule_id = ?1 AND phase = 'pending'
+         WHERE schedule_id = ?1
          ORDER BY due_at_ms ASC, schedule_revision ASC, occurrence_ordinal ASC",
     )?;
     let rows = stmt.query_map(params![schedule.schedule_id.to_string()], |row| {
         row.get::<_, Vec<u8>>(0)
     })?;
+    let mut acks = Vec::new();
     for row in rows {
         let bytes = row?;
         let occurrence: Occurrence =
             serde_json::from_slice(&bytes).map_err(StoreError::Serialization)?;
-        if occurrence.schedule_revision >= supersession.superseded_by_revision {
+        if occurrence.phase != OccurrencePhase::Pending
+            || occurrence.schedule_revision >= supersession.superseded_by_revision()
+        {
             continue;
         }
-        let updated = occurrence
+        let mutator = occurrence
             .apply(OccurrenceLifecycleInput::Supersede {
-                superseded_by_revision: supersession.superseded_by_revision,
-                at_utc: supersession.at_utc,
+                superseded_by_revision: supersession.superseded_by_revision(),
+                at_utc: supersession.at_utc(),
             })
-            .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?
-            .into_occurrence();
+            .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?;
+        let (updated, _effects, mutator_acks) = mutator.into_parts_with_supersession_feedback();
+        acks.extend(mutator_acks);
         write_occurrence_in_txn(tx, &updated)?;
     }
-    Ok(())
+    Ok(acks)
 }
 
-fn update_occurrence_last_receipt_in_txn(
+fn record_occurrence_receipt_in_txn(
     tx: &rusqlite::Transaction<'_>,
     receipt: &DeliveryReceipt,
-) -> Result<(), StoreError> {
+) -> Result<DeliveryReceipt, StoreError> {
     let occurrence_id = receipt.occurrence_id.to_string();
     let Some(bytes) = tx
         .query_row(
             "SELECT occurrence_json FROM schedule_occurrences WHERE occurrence_id = ?1",
-            params![occurrence_id],
+            params![&occurrence_id],
             |row| row.get::<_, Vec<u8>>(0),
         )
         .optional()?
     else {
-        return Ok(());
+        return Err(StoreError::Internal(format!(
+            "occurrence {occurrence_id} not found while recording receipt"
+        )));
     };
-    let mut occurrence: Occurrence =
+    let occurrence: Occurrence =
         serde_json::from_slice(&bytes).map_err(StoreError::Serialization)?;
-    occurrence.last_receipt = Some(receipt.clone());
-    write_occurrence_in_txn(tx, &occurrence)
+    let occurrence = occurrence
+        .apply(OccurrenceLifecycleInput::RecordReceipt {
+            runtime_outcome: receipt.runtime_outcome.clone(),
+            receipt: receipt.clone(),
+        })
+        .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?
+        .into_occurrence();
+    let canonical_receipt = occurrence.last_receipt.clone().ok_or_else(|| {
+        StoreError::Internal("generated occurrence authority did not produce a receipt".to_string())
+    })?;
+    write_occurrence_in_txn(tx, &occurrence)?;
+    Ok(canonical_receipt)
 }
 
 fn schedule_phase_label(phase: meerkat_schedule::SchedulePhase) -> &'static str {

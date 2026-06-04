@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use meerkat_core::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
@@ -17,11 +16,10 @@ struct StoredBlob {
 }
 
 fn compute_blob_id(media_type: &str, data: &str) -> BlobId {
-    let mut hasher = Sha256::new();
-    hasher.update(media_type.as_bytes());
-    hasher.update([0]);
-    hasher.update(data.as_bytes());
-    BlobId::new(format!("sha256:{:x}", hasher.finalize()))
+    // Single owner of the content-addressed blob identity lives in
+    // meerkat-core so transcript-identity digests and the blob store agree on
+    // one definition.
+    meerkat_core::blob::content_blob_id(media_type, data)
 }
 
 /// In-memory blob store for ephemeral and test paths.

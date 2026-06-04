@@ -4,16 +4,19 @@
 use chrono::{Duration, Utc};
 use meerkat_core::{ContentInput, SessionId};
 use meerkat_schedule::{
-    CreateScheduleRequest, MisfirePolicy, MissingTargetPolicy, Occurrence, OccurrenceFilter,
-    OccurrencePhase, OverlapPolicy, PendingSupersession, Schedule, ScheduleStore,
-    ScheduledSessionAction, SessionTargetBinding, TargetBinding, TriggerSpec,
+    ClaimDueRequest, CreateScheduleRequest, MisfirePolicy, MissingTargetPolicy, Occurrence,
+    OccurrenceFilter, OccurrenceOrdinal, OccurrencePhase, OverlapPolicy, Schedule,
+    ScheduleLifecycleEffect, ScheduleLifecycleInput, ScheduleLifecycleMutator, ScheduleRevision,
+    ScheduleStore, ScheduledSessionAction, SessionTargetBinding, TargetBinding, TriggerSpec,
+    UpdateScheduleRequest,
 };
 use meerkat_store::SqliteScheduleStore;
+use rusqlite::Connection;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-fn sample_schedule() -> Schedule {
-    Schedule::new(CreateScheduleRequest {
+fn sample_schedule_request() -> CreateScheduleRequest {
+    CreateScheduleRequest {
         name: Some("atomic-mutation".to_string()),
         description: None,
         trigger: TriggerSpec::Once {
@@ -35,41 +38,76 @@ fn sample_schedule() -> Schedule {
         labels: BTreeMap::new(),
         planning_horizon_days: Some(1),
         planning_horizon_occurrences: Some(2),
-    })
+    }
+}
+
+fn sample_schedule_mutator() -> ScheduleLifecycleMutator {
+    Schedule::apply(
+        None,
+        ScheduleLifecycleInput::Create(sample_schedule_request()),
+    )
+    .expect("sample schedule creation should pass generated authority")
 }
 
 async fn assert_atomic_schedule_mutation_supersedes_old_pending(
     store: Arc<dyn ScheduleStore>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let original = sample_schedule();
-    store.put_schedule(original.clone()).await?;
+    let create_mutator = sample_schedule_mutator();
+    let original = create_mutator.schedule.clone();
+    store
+        .commit_schedule_write(create_mutator.into_authorized_write())
+        .await?;
 
-    let old_pending = Occurrence::planned_from_schedule(
+    let old_pending_write = Occurrence::planned_write_from_schedule(
         &original,
         original.next_occurrence_ordinal,
         Utc::now() + Duration::minutes(6),
-    );
-    store.put_occurrence(old_pending.clone()).await?;
+    )
+    .expect("old occurrence planning should pass generated authority");
+    let old_pending = old_pending_write.occurrence().clone();
+    store.commit_occurrence_write(old_pending_write).await?;
 
-    let mut updated = original.clone();
-    updated.revision = updated.revision.next();
-    updated.config.updated_at_utc = Utc::now();
-    updated.next_occurrence_ordinal = updated.next_occurrence_ordinal.next();
+    let updated_trigger = TriggerSpec::Once {
+        due_at_utc: Utc::now() + Duration::minutes(10),
+    };
+    let update_mutator = Schedule::apply(
+        Some(original.clone()),
+        ScheduleLifecycleInput::Update {
+            request: UpdateScheduleRequest {
+                expected_revision: Some(original.revision),
+                trigger: Some(updated_trigger),
+                ..UpdateScheduleRequest::default()
+            },
+            at_utc: Utc::now(),
+        },
+    )
+    .expect("schedule update should pass generated authority");
+    let mut update_mutator = update_mutator;
+    let planning_mutator = Schedule::apply(
+        Some(update_mutator.schedule.clone()),
+        ScheduleLifecycleInput::RecordPlanningWindow {
+            planning_cursor_utc: Utc::now() + Duration::minutes(6),
+            next_occurrence_ordinal: original.next_occurrence_ordinal.next(),
+        },
+    )
+    .expect("planning window should pass generated authority");
+    update_mutator
+        .absorb_followup(planning_mutator)
+        .expect("planning window should chain from generated schedule authority");
+    let updated = update_mutator.schedule.clone();
 
-    let replacement = Occurrence::planned_from_schedule(
+    let replacement_write = Occurrence::planned_write_from_schedule(
         &updated,
         updated.next_occurrence_ordinal,
         Utc::now() + Duration::minutes(10),
-    );
+    )
+    .expect("replacement occurrence planning should pass generated authority");
+    let replacement = replacement_write.occurrence().clone();
 
-    store
+    let committed = store
         .commit_schedule_mutation(
-            updated.clone(),
-            vec![replacement.clone()],
-            Some(PendingSupersession {
-                at_utc: Utc::now(),
-                superseded_by_revision: updated.revision,
-            }),
+            update_mutator.into_authorized_write(),
+            vec![replacement_write],
         )
         .await?;
 
@@ -78,6 +116,15 @@ async fn assert_atomic_schedule_mutation_supersedes_old_pending(
         .await?
         .expect("updated schedule should exist");
     assert_eq!(stored.revision, updated.revision);
+    assert!(
+        committed
+            .superseded_ack_ids
+            .contains(&old_pending.occurrence_id)
+            && stored
+                .superseded_ack_ids
+                .contains(&old_pending.occurrence_id),
+        "supersession ack should be routed back through schedule authority in the atomic mutation"
+    );
 
     let occurrences = store
         .list_occurrences(OccurrenceFilter {
@@ -115,4 +162,103 @@ async fn sqlite_atomic_schedule_mutation_supersedes_old_pending()
         dir.path().join("schedule.sqlite3"),
     )?) as Arc<dyn ScheduleStore>;
     assert_atomic_schedule_mutation_supersedes_old_pending(store).await
+}
+
+#[tokio::test]
+async fn sqlite_public_effect_tampering_cannot_forge_supersession()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let store = Arc::new(SqliteScheduleStore::open(
+        dir.path().join("schedule.sqlite3"),
+    )?) as Arc<dyn ScheduleStore>;
+
+    let create_mutator = sample_schedule_mutator();
+    let original = create_mutator.schedule.clone();
+    store
+        .commit_schedule_write(create_mutator.into_authorized_write())
+        .await?;
+
+    let old_pending_write = Occurrence::planned_write_from_schedule(
+        &original,
+        original.next_occurrence_ordinal,
+        Utc::now() + Duration::minutes(6),
+    )
+    .expect("old occurrence planning should pass generated authority");
+    let old_pending = old_pending_write.occurrence().clone();
+    store.commit_occurrence_write(old_pending_write).await?;
+
+    let mut pause_mutator = Schedule::apply(
+        Some(original.clone()),
+        ScheduleLifecycleInput::Pause { at_utc: Utc::now() },
+    )
+    .expect("pause should pass generated authority");
+    pause_mutator
+        .effects
+        .push(ScheduleLifecycleEffect::SupersedePendingOccurrences {
+            superseding_revision: ScheduleRevision(original.revision.0 + 1),
+            at_utc: Utc::now(),
+        });
+
+    store
+        .commit_schedule_mutation(pause_mutator.into_authorized_write(), Vec::new())
+        .await?;
+
+    let occurrences = store
+        .list_occurrences(OccurrenceFilter {
+            schedule_id: Some(original.schedule_id.clone()),
+            include_terminal: true,
+            ..OccurrenceFilter::default()
+        })
+        .await?;
+    let stored = occurrences
+        .iter()
+        .find(|occurrence| occurrence.occurrence_id == old_pending.occurrence_id)
+        .expect("old pending occurrence should still be present");
+    assert_eq!(
+        stored.phase,
+        OccurrencePhase::Pending,
+        "public effect tampering must not mint supersession authority"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn sqlite_claim_due_reads_canonical_schedule_phase() -> Result<(), Box<dyn std::error::Error>>
+{
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("schedule.sqlite3");
+    let store = SqliteScheduleStore::open(&path)?;
+
+    let create_mutator = sample_schedule_mutator();
+    let schedule = create_mutator.schedule.clone();
+    store
+        .commit_schedule_write(create_mutator.into_authorized_write())
+        .await?;
+    let occurrence_write = Occurrence::planned_write_from_schedule(
+        &schedule,
+        OccurrenceOrdinal(0),
+        Utc::now() - Duration::seconds(1),
+    )
+    .expect("due occurrence planning should pass generated authority");
+    let occurrence = occurrence_write.occurrence().clone();
+    store.commit_occurrence_write(occurrence_write).await?;
+
+    let conn = Connection::open(&path)?;
+    conn.execute(
+        "UPDATE schedule_schedules SET phase = 'deleted' WHERE schedule_id = ?1",
+        [schedule.schedule_id.to_string()],
+    )?;
+    drop(conn);
+
+    let claimed = store
+        .claim_due_occurrences(ClaimDueRequest {
+            owner_id: "sqlite-canonical-phase-test".to_string(),
+            limit: 1,
+            lease_duration: Duration::minutes(5),
+        })
+        .await?;
+
+    assert_eq!(claimed.claimed.len(), 1);
+    assert_eq!(claimed.claimed[0].occurrence_id, occurrence.occurrence_id);
+    Ok(())
 }

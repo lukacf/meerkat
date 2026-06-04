@@ -64,11 +64,11 @@ impl<'de> Deserialize<'de> for MobEvent {
 #[derive(Debug, Clone)]
 pub struct NewMobEvent {
     /// Mob this event belongs to.
-    pub mob_id: MobId,
+    pub(crate) mob_id: MobId,
     /// Optional timestamp override (primarily for deterministic/backdated tests).
-    pub timestamp: Option<DateTime<Utc>>,
+    pub(crate) timestamp: Option<DateTime<Utc>>,
     /// Event payload.
-    pub kind: MobEventKind,
+    pub(crate) kind: MobEventKind,
 }
 
 /// Backend-neutral reference to a mob member.
@@ -240,6 +240,17 @@ pub enum MobEventKind {
     MobCreated {
         /// Full mob definition (serializable form, excluding runtime-only state).
         definition: Box<MobDefinition>,
+    },
+    /// Generated MobMachine owner bridge-session binding for the mob.
+    ///
+    /// This event is a durable projection of `MobMachineEffect::OwnerBridgeSessionBound`.
+    /// Replay feeds it back through `MobMachineSignal::RecoverOwnerBridgeSession`;
+    /// cleanup and implicit-mob admission must read the recovered machine state,
+    /// not this event payload directly.
+    MobOwnerBridgeSessionBound {
+        bridge_session_id: SessionId,
+        destroy_on_owner_archive: bool,
+        implicit_delegation_mob: bool,
     },
     /// Mob reached terminal completed state.
     MobCompleted,
@@ -642,49 +653,30 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::definition::{BackendConfig, MobDefinition, WiringRules};
-    use crate::ids::MobId;
+    use crate::definition::MobDefinition;
     use crate::profile::{Profile, ProfileBinding, ToolConfig};
     use serde_json::json;
     use std::collections::BTreeMap;
     use uuid::Uuid;
 
     fn sample_definition() -> MobDefinition {
-        MobDefinition {
-            id: MobId::from("test-mob"),
-            orchestrator: None,
-            profiles: {
-                let mut m = BTreeMap::new();
-                m.insert(
-                    ProfileName::from("worker"),
-                    ProfileBinding::Inline(Profile {
-                        model: "claude-sonnet-4-5".to_string(),
-                        skills: vec![],
-                        tools: ToolConfig::default(),
-                        peer_description: "A worker".to_string(),
-                        external_addressable: false,
-                        backend: None,
-                        runtime_mode: MobRuntimeMode::AutonomousHost,
-                        max_inline_peer_notifications: None,
-                        output_schema: None,
-                        provider_params: None,
-                    }),
-                );
-                m
-            },
-            wiring: WiringRules::default(),
-            skills: BTreeMap::new(),
-            backend: BackendConfig::default(),
-            flows: BTreeMap::new(),
-            topology: None,
-            supervisor: None,
-            limits: None,
-            spawn_policy: None,
-            event_router: None,
-            owner_bridge_session_id: None,
-            session_cleanup_policy: crate::definition::SessionCleanupPolicy::Manual,
-            is_implicit: false,
-        }
+        let mut definition = MobDefinition::explicit("test-mob");
+        definition.profiles.insert(
+            ProfileName::from("worker"),
+            ProfileBinding::Inline(Profile {
+                model: "claude-sonnet-4-5".to_string(),
+                skills: vec![],
+                tools: ToolConfig::default(),
+                peer_description: "A worker".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: MobRuntimeMode::AutonomousHost,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            }),
+        );
+        definition
     }
 
     fn roundtrip(kind: &MobEventKind) {
@@ -697,6 +689,15 @@ mod tests {
     fn test_mob_created_roundtrip() {
         roundtrip(&MobEventKind::MobCreated {
             definition: Box::new(sample_definition()),
+        });
+    }
+
+    #[test]
+    fn test_mob_owner_bridge_session_bound_roundtrip() {
+        roundtrip(&MobEventKind::MobOwnerBridgeSessionBound {
+            bridge_session_id: SessionId::from_uuid(Uuid::nil()),
+            destroy_on_owner_archive: true,
+            implicit_delegation_mob: true,
         });
     }
 

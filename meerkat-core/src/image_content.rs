@@ -170,10 +170,10 @@ pub async fn externalize_deferred_turn_state(
     blob_store: &dyn BlobStore,
     state: &mut SessionDeferredTurnState,
 ) -> Result<(), BlobStoreError> {
-    if let Some(prompt) = state.pending_initial_prompt.as_mut() {
+    if let Some(prompt) = state.pending_initial_prompt_mut_for_blob_rewrite() {
         externalize_content_input(blob_store, &mut prompt.prompt).await?;
     }
-    for pending in &mut state.pending_tool_results {
+    for pending in state.pending_tool_results_mut_for_blob_rewrite() {
         for result in &mut pending.results {
             externalize_content_blocks(blob_store, &mut result.content).await?;
         }
@@ -186,10 +186,10 @@ pub async fn hydrate_deferred_turn_state(
     state: &mut SessionDeferredTurnState,
     missing_behavior: MissingBlobBehavior,
 ) -> Result<(), BlobStoreError> {
-    if let Some(prompt) = state.pending_initial_prompt.as_mut() {
+    if let Some(prompt) = state.pending_initial_prompt_mut_for_blob_rewrite() {
         hydrate_content_input(blob_store, &mut prompt.prompt, missing_behavior).await?;
     }
-    for pending in &mut state.pending_tool_results {
+    for pending in state.pending_tool_results_mut_for_blob_rewrite() {
         for result in &mut pending.results {
             hydrate_content_blocks(blob_store, &mut result.content, missing_behavior).await?;
         }

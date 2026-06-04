@@ -7,7 +7,8 @@ mod state;
 mod tools;
 
 use meerkat::surface::{
-    noop_request_action, spawn_stdio_json_writer, RequestTerminal, SurfaceRequestExecutor,
+    noop_request_action, spawn_stdio_json_writer, RequestAdmissionError, RequestTerminal,
+    SurfaceRequestExecutor,
 };
 use serde_json::{json, Value};
 use state::ForceState;
@@ -122,7 +123,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .unwrap_or_else(|| json!({}));
                         let progress_token = params.pointer("/_meta/progressToken").cloned();
 
-                        let context = executor.begin_request(request_key.clone(), noop_request_action());
+                        let context = match executor.try_begin_request(
+                            request_key.clone(),
+                            noop_request_action(),
+                        ) {
+                            Ok(context) => context,
+                            Err(error) => {
+                                if writer
+                                    .send(request_admission_error_response(Some(request_id), error))
+                                    .await
+                                    .is_err()
+                                {
+                                    break Ok(());
+                                }
+                                continue;
+                            }
+                        };
                         let writer_for_progress = writer.clone();
                         let progress_notifier: tools::ProgressNotifier = Arc::new(move |token, progress, total, message| {
                             let writer = writer_for_progress.clone();
@@ -207,6 +223,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             meerkat::surface::CompleteOutcome::SupersededByCancel => {
                                 request_cancelled_response(cancel_id)
                             }
+                            meerkat::surface::CompleteOutcome::AuthorityRejected => {
+                                request_authority_error_response(cancel_id)
+                            }
                         };
                         if writer.send(to_write).await.is_err() {
                             break Ok(());
@@ -255,4 +274,36 @@ fn request_cancelled_response(id: Option<Value>) -> Value {
             "message": "request cancelled before response publish"
         }
     })
+}
+
+fn request_authority_error_response(id: Option<Value>) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id.unwrap_or(Value::Null),
+        "error": {
+            "code": -32603,
+            "message": "generated request authority rejected completion"
+        }
+    })
+}
+
+fn request_admission_error_response(id: Option<Value>, err: RequestAdmissionError) -> Value {
+    match err {
+        RequestAdmissionError::AlreadyExists => json!({
+            "jsonrpc": "2.0",
+            "id": id.unwrap_or(Value::Null),
+            "error": {
+                "code": -32004,
+                "message": "request already admitted"
+            }
+        }),
+        RequestAdmissionError::AuthorityRejected { .. } => json!({
+            "jsonrpc": "2.0",
+            "id": id.unwrap_or(Value::Null),
+            "error": {
+                "code": -32603,
+                "message": format!("request admission rejected by generated authority: {err}")
+            }
+        }),
+    }
 }

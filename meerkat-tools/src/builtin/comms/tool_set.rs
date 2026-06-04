@@ -1,8 +1,7 @@
 //! CommsToolSet - groups all comms tools together
 
 use super::tools::{CommsToolState, PeersTool, SendTool};
-use meerkat_comms::{Router, TrustedPeers};
-use parking_lot::RwLock;
+use meerkat_comms::{Router, TrustedPeersView};
 use std::sync::Arc;
 
 /// Collection of all comms tools: `send` and `peers`.
@@ -13,7 +12,7 @@ pub struct CommsToolSet {
 
 impl CommsToolSet {
     /// Create a new comms tool set
-    pub fn new(router: Arc<Router>, trusted_peers: Arc<RwLock<TrustedPeers>>) -> Self {
+    pub fn new(router: Arc<Router>, trusted_peers: TrustedPeersView) -> Self {
         let state = CommsToolState::new(router, trusted_peers);
         Self {
             send: SendTool::new(state.clone()),
@@ -49,23 +48,21 @@ mod tests {
     fn test_comms_tool_set_creation() {
         let keypair = Keypair::generate();
         let peer_keypair = Keypair::generate();
-        let trusted_peers = TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: "test-peer".to_string(),
-                pubkey: peer_keypair.public_key(),
-                addr: "tcp://127.0.0.1:4200".to_string(),
-                meta: meerkat_comms::PeerMeta::default(),
-            }],
-        };
-        let trusted_peers = Arc::new(RwLock::new(trusted_peers));
+        let trusted_peers = TrustedPeers::from_peers(vec![TrustedPeer {
+            name: "test-peer".to_string(),
+            pubkey: peer_keypair.public_key(),
+            addr: "tcp://127.0.0.1:4200".to_string(),
+            meta: meerkat_comms::PeerMeta::default(),
+        }]);
         let (_, inbox_sender) = meerkat_comms::Inbox::new();
-        let router = Arc::new(Router::with_shared_peers(
+        let router = Arc::new(Router::new(
             keypair,
-            trusted_peers.clone(),
+            trusted_peers,
             CommsConfig::default(),
             inbox_sender,
             true,
         ));
+        let trusted_peers = router.trusted_peers_view();
 
         let tool_set = CommsToolSet::new(router, trusted_peers);
         assert_eq!(tool_set.tool_names().len(), 2);

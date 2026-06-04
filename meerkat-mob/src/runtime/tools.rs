@@ -230,7 +230,17 @@ pub(super) fn compose_external_tools_for_profile(
                 .keys()
                 .map(|profile| profile.as_str().to_string())
                 .collect::<Vec<_>>();
-            authority_context = authority_context.grant_spawn_profiles_in_mob(mob_id, profiles);
+            authority_context =
+                meerkat_runtime::mob_operator_authority::grant_spawn_profiles_in_mob(
+                    &authority_context,
+                    mob_id,
+                    profiles,
+                )
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "generated mob operator authority rejected default spawn profiles: {error}"
+                    ))
+                })?;
         }
         dispatchers.push(Arc::new(MobOperatorToolDispatcher::new(
             mob_handle,
@@ -333,7 +343,6 @@ struct MobOperatorToolDispatcher {
     authority_context: MobToolAuthorityContext,
     tools: Arc<[Arc<ToolDef>]>,
     owner_bridge_session_id: Option<SessionId>,
-    ops_registry: Option<Arc<dyn OpsLifecycleRegistry>>,
 }
 
 impl MobOperatorToolDispatcher {
@@ -342,6 +351,7 @@ impl MobOperatorToolDispatcher {
         enable_mob: bool,
         authority_context: MobToolAuthorityContext,
     ) -> Self {
+        let enable_mob = enable_mob && authority_context.is_generated_authority_context();
         let mut defs: Vec<Arc<ToolDef>> = Vec::new();
         if enable_mob {
             defs.push(tool_def(
@@ -523,16 +533,24 @@ impl MobOperatorToolDispatcher {
             authority_context,
             tools: defs.into(),
             owner_bridge_session_id: None,
-            ops_registry: None,
         }
     }
 
-    fn ensure_current_mob_scope(&self, tool_name: &str) -> Result<(), ToolError> {
+    async fn ensure_current_mob_scope(&self, tool_name: &str) -> Result<(), ToolError> {
+        // Pure observation extracted from the machine-owned operator-scope
+        // projection. MobMachine — not this shell — decides the Allow/Deny
+        // verdict; we mirror it (Denied -> access_denied). Fails closed.
         let mob_id = self.handle.definition().id.as_str();
-        if self.authority_context.can_manage_mob(mob_id) {
-            return Ok(());
+        let can_manage_mob = self.authority_context.can_manage_mob(mob_id);
+        let admission = self
+            .handle
+            .resolve_current_mob_admission(can_manage_mob)
+            .await
+            .map_err(|error| Self::map_mob_error_to_tool_access(tool_name, error))?;
+        match admission {
+            CurrentMobAdmission::Allowed => Ok(()),
+            CurrentMobAdmission::Denied => Err(ToolError::access_denied(tool_name)),
         }
-        Err(ToolError::access_denied(tool_name))
     }
 
     fn can_manage_current_mob(&self) -> bool {
@@ -540,37 +558,77 @@ impl MobOperatorToolDispatcher {
         self.authority_context.can_manage_mob(mob_id)
     }
 
-    fn ensure_spawn_member_scope(
+    async fn ensure_spawn_member_scope(
         &self,
         tool_name: &str,
         args: &SpawnMemberArgs,
     ) -> Result<(), ToolError> {
-        if self.can_manage_current_mob() {
-            return Ok(());
-        }
-        if args.resume_bridge_session_id.is_some()
-            || args.resume_session_id.is_some()
-            || args.backend.is_some()
-            || args.runtime_mode.is_some()
-            || args.launch_mode.is_some()
-            || args.tool_access_policy.is_some()
-            || args.budget_split_policy.is_some()
-        {
-            return Err(ToolError::access_denied(tool_name));
-        }
+        // RAW, atomic observations extracted from the machine-owned
+        // operator-scope projection and the typed spawn args, fed WITHOUT
+        // pre-composing them. MobMachine — not this shell — owns the
+        // privileged-argument SET membership policy (which args are privileged)
+        // and the `manage_scope || profile_scope_contains` disjunction, and
+        // composes the Allow/Deny admission verdict. We extract each arg's pure
+        // `.is_some()` presence and the raw per-profile scope set membership;
+        // args this surface's spawn tool does not accept stay `false`.
         let mob_id = self.handle.definition().id.as_str();
-        if self
-            .authority_context
-            .can_spawn_profile_in_mob(mob_id, &args.profile)
-        {
-            return Ok(());
+        let observations = SpawnMemberAdmissionObservations {
+            manage_scope_present: self.authority_context.can_manage_mob(mob_id),
+            profile_scope_contains: self
+                .authority_context
+                .spawn_profile_scope_contains(mob_id, &args.profile),
+            resume_bridge_session_present: args.resume_bridge_session_id.is_some(),
+            resume_session_present: args.resume_session_id.is_some(),
+            backend_present: args.backend.is_some(),
+            runtime_mode_present: args.runtime_mode.is_some(),
+            launch_mode_present: args.launch_mode.is_some(),
+            tool_access_policy_present: args.tool_access_policy.is_some(),
+            budget_split_policy_present: args.budget_split_policy.is_some(),
+            ..SpawnMemberAdmissionObservations::default()
+        };
+        let admission = self
+            .handle
+            .resolve_spawn_member_admission(observations)
+            .await
+            .map_err(|error| Self::map_mob_error_to_tool_access(tool_name, error))?;
+        match admission {
+            SpawnMemberAdmission::Allowed => Ok(()),
+            SpawnMemberAdmission::Denied => Err(ToolError::access_denied(tool_name)),
         }
-        Err(ToolError::access_denied(tool_name))
     }
 
-    fn can_spawn_any_profile_in_current_mob(&self) -> bool {
+    fn map_mob_error_to_tool_access(tool_name: &str, error: MobError) -> ToolError {
+        ToolError::execution_failed(format!(
+            "tool '{tool_name}' spawn-member admission failed: {error}"
+        ))
+    }
+
+    /// Coarse spawn-tool admission for the spawn-member tool surfaces.
+    ///
+    /// Extracts TWO raw, atomic observations — whether the operator can manage
+    /// the current mob (`can_manage_mob`) and whether the operator's
+    /// spawn-profile scope for the mob is non-empty (`spawn_profile_scope_present`)
+    /// — and feeds BOTH to MobMachine WITHOUT pre-composing them. MobMachine,
+    /// not this shell, composes the `can_manage_mob || spawn_profile_scope_present`
+    /// disjunction and decides the Allow/Deny verdict; we mirror it (Denied ->
+    /// access_denied). This coarse gate uniquely covers the empty-specs
+    /// `spawn_many_members` case (where the per-member loop runs zero iterations
+    /// and fires no per-member admission), so the deny must be machine-routed
+    /// here rather than reduced in the shell. Fails closed.
+    async fn ensure_spawn_tool_scope(&self, tool_name: &str) -> Result<(), ToolError> {
         let mob_id = self.handle.definition().id.as_str();
-        self.authority_context.can_spawn_any_profile_in_mob(mob_id)
+        let can_manage_mob = self.authority_context.can_manage_mob(mob_id);
+        let spawn_profile_scope_present =
+            self.authority_context.spawn_profile_scope_present(mob_id);
+        let admission = self
+            .handle
+            .resolve_spawn_tool_admission(can_manage_mob, spawn_profile_scope_present)
+            .await
+            .map_err(|error| Self::map_mob_error_to_tool_access(tool_name, error))?;
+        match admission {
+            SpawnToolAdmission::Allowed => Ok(()),
+            SpawnToolAdmission::Denied => Err(ToolError::access_denied(tool_name)),
+        }
     }
 
     fn map_mob_error(call: ToolCallView<'_>, error: MobError) -> ToolError {
@@ -806,11 +864,9 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
         if self.tools.iter().any(|tool| tool.name == call.name)
             && !matches!(call.name, TOOL_SPAWN_MEMBER | TOOL_SPAWN_MANY_MEMBERS)
         {
-            self.ensure_current_mob_scope(call.name)?;
-        } else if matches!(call.name, TOOL_SPAWN_MEMBER | TOOL_SPAWN_MANY_MEMBERS)
-            && !self.can_spawn_any_profile_in_current_mob()
-        {
-            return Err(ToolError::access_denied(call.name));
+            self.ensure_current_mob_scope(call.name).await?;
+        } else if matches!(call.name, TOOL_SPAWN_MEMBER | TOOL_SPAWN_MANY_MEMBERS) {
+            self.ensure_spawn_tool_scope(call.name).await?;
         }
         match call.name {
             TOOL_SPAWN_MEMBER => {
@@ -823,7 +879,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                     owner_bound = self.owner_bridge_session_id.is_some(),
                     "MobOperatorToolDispatcher::spawn_member dispatch start"
                 );
-                self.ensure_spawn_member_scope(call.name, &args)?;
+                self.ensure_spawn_member_scope(call.name, &args).await?;
                 let agent_identity = AgentIdentity::from(args.member_id.as_str());
                 let mut spec = SpawnMemberSpec::from_wire(
                     args.profile,
@@ -850,17 +906,13 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                 if let Some(auto_wire) = args.auto_wire_parent {
                     spec = spec.with_auto_wire_parent(auto_wire);
                 }
-                let (result, async_ops) = match (&self.owner_bridge_session_id, &self.ops_registry)
-                {
-                    (Some(owner_bridge_session_id), Some(ops_registry)) => {
+                let (result, async_ops) =
+                    if let Some(owner_bridge_session_id) = self.owner_bridge_session_id.clone() {
                         let receipt = self
                             .handle
-                            .spawn_spec_receipt_with_owner_context(
+                            .spawn_spec_receipt_with_generated_owner_context(
                                 spec,
-                                super::handle::CanonicalOpsOwnerContext {
-                                    owner_bridge_session_id: owner_bridge_session_id.clone(),
-                                    ops_registry: Arc::clone(ops_registry),
-                                },
+                                owner_bridge_session_id,
                             )
                             .await
                             .map_err(|error| Self::map_mob_error(call, error))?;
@@ -869,8 +921,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                             .await
                             .map_err(|error| Self::map_mob_error(call, error))?;
                         (result, vec![AsyncOpRef::detached(receipt.operation_id)])
-                    }
-                    _ => {
+                    } else {
                         let spawn_result = self
                             .handle
                             .spawn_spec(spec)
@@ -879,8 +930,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                         let result =
                             Self::spawn_result_payload(&self.handle.definition().id, &spawn_result);
                         (result, Vec::new())
-                    }
-                };
+                    };
                 self.record_successful_operator_action(call.name).await;
                 Self::encode_result_with_async_ops(call, result, async_ops)
             }
@@ -889,7 +939,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
                 for spec in &args.specs {
-                    self.ensure_spawn_member_scope(call.name, spec)?;
+                    self.ensure_spawn_member_scope(call.name, spec).await?;
                 }
                 let identities = args
                     .specs
@@ -926,19 +976,16 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                         spawn_spec
                     })
                     .collect::<Vec<_>>();
-                let (results, async_ops) = match (&self.owner_bridge_session_id, &self.ops_registry)
-                {
-                    (Some(owner_bridge_session_id), Some(ops_registry)) => {
+                let (results, async_ops) =
+                    if let Some(owner_bridge_session_id) = self.owner_bridge_session_id.clone() {
                         let receipts = self
                             .handle
-                            .spawn_many_receipts_with_owner_context(
+                            .spawn_many_receipts_with_generated_owner_context(
                                 specs,
-                                super::handle::CanonicalOpsOwnerContext {
-                                    owner_bridge_session_id: owner_bridge_session_id.clone(),
-                                    ops_registry: Arc::clone(ops_registry),
-                                },
+                                owner_bridge_session_id,
                             )
-                            .await;
+                            .await
+                            .map_err(|error| Self::map_mob_error(call, error))?;
                         let async_ops = receipts
                             .iter()
                             .filter_map(|result| result.as_ref().ok())
@@ -957,7 +1004,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                                 Err(error) => {
                                     results.push(json!(
                                         meerkat_contracts::MobSpawnManyResultEntry::failed(
-                                            error.spawn_many_failure_cause(),
+                                            error.cause(),
                                             error.to_string()
                                         )
                                     ));
@@ -965,12 +1012,12 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                             }
                         }
                         (results, async_ops)
-                    }
-                    _ => {
+                    } else {
                         let results = self
                             .handle
                             .spawn_many(specs)
                             .await
+                            .map_err(|error| Self::map_mob_error(call, error))?
                             .into_iter()
                             .map(|result| match result {
                                 Ok(spawn_result) => {
@@ -985,15 +1032,14 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                                 }
                                 Err(error) => {
                                     json!(meerkat_contracts::MobSpawnManyResultEntry::failed(
-                                        error.spawn_many_failure_cause(),
+                                        error.cause(),
                                         error.to_string()
                                     ))
                                 }
                             })
                             .collect::<Vec<_>>();
                         (results, Vec::new())
-                    }
-                };
+                    };
                 self.record_successful_operator_action(call.name).await;
                 Self::encode_result_with_async_ops(call, json!({ "results": results }), async_ops)
             }
@@ -1123,7 +1169,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
 
     fn bind_ops_lifecycle(
         self: Arc<Self>,
-        registry: Arc<dyn OpsLifecycleRegistry>,
+        _registry: Arc<dyn OpsLifecycleRegistry>,
         owner_bridge_session_id: SessionId,
     ) -> Result<BindOutcome, OpsLifecycleBindError> {
         if Arc::strong_count(&self) != 1 {
@@ -1135,7 +1181,6 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
             authority_context: this.authority_context,
             tools: this.tools,
             owner_bridge_session_id: Some(owner_bridge_session_id),
-            ops_registry: Some(registry),
         })))
     }
 }

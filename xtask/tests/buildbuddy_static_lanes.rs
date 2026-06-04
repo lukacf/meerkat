@@ -146,8 +146,9 @@ fn buildbuddy_machine_authority_lane_runs_tlc_machine_verify() {
     );
     assert!(
         wrapper.contains("machine-verify --all --skip-cargo-tests")
+            && wrapper.contains("--skip-tlc-composition meerkat_mob_seam")
             && wrapper.contains("export RUSTFMT"),
-        "machine_verify_all_tlc_test wrapper must normalize RUSTFMT and run hermetic machine-verify"
+        "machine_verify_all_tlc_test wrapper must normalize RUSTFMT and run hermetic machine-verify with broad-seam TLC skip"
     );
     assert!(
         doctor.contains("machine_verify_all_tlc_test")

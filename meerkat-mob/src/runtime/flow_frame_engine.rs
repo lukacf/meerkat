@@ -20,7 +20,7 @@ use crate::run::{
 use crate::run::{flow_frame, flow_run, loop_iteration};
 use crate::runtime::MobHandle;
 use crate::runtime::conditions::evaluate_condition;
-use crate::store::MobRunStore;
+use crate::store::{MobRunStore, authority_validating_mob_run_store};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio::time as tokio_time;
 use async_trait::async_trait;
@@ -42,10 +42,7 @@ pub enum FrameStepResult {
     Skipped,
     /// Step failed for a step-local reason; the frame should fail this node
     /// but continue admitting unrelated siblings.
-    Failed {
-        reason: String,
-        failure_ledger_recorded: bool,
-    },
+    Failed { reason: String },
 }
 
 /// Canonical outcome of executing a frame subtree.
@@ -67,7 +64,6 @@ pub struct FrameStepProjection {
 #[derive(Debug, Clone)]
 pub struct FrameStepFailureProjection {
     pub reason: String,
-    pub append_failure_ledger: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -388,16 +384,9 @@ pub struct FlowFrameKernel {
 impl FlowFrameKernel {
     pub fn new(run_store: Arc<dyn MobRunStore>, projector: MobHandle) -> Self {
         Self {
-            run_store,
+            run_store: authority_validating_mob_run_store(run_store),
             projector,
         }
-    }
-
-    async fn project_mob_machine_input(
-        &self,
-        input: mob_dsl::MobMachineInput,
-    ) -> Result<mob_dsl::MobMachineState, MobError> {
-        self.projector.project_machine_input(input).await
     }
 
     async fn preview_mob_machine_input(
@@ -411,8 +400,14 @@ impl FlowFrameKernel {
         &self,
         inputs: &[mob_dsl::MobMachineInput],
     ) -> Result<mob_dsl::MobMachineState, MobError> {
-        let mut authority =
-            mob_dsl::MobMachineAuthority::from_state(self.current_mob_machine_state().await?);
+        let mut authority = mob_dsl::MobMachineAuthority::recover_from_state(
+            self.current_mob_machine_state().await?,
+        )
+        .map_err(|error| {
+            MobError::Internal(format!(
+                "MobMachine preview could not recover current state: {error}"
+            ))
+        })?;
         for input in inputs {
             let transition = mob_dsl::MobMachineMutator::apply(&mut authority, input.clone())
                 .map_err(|error| {
@@ -420,11 +415,9 @@ impl FlowFrameKernel {
                         "MobMachine preview rejected staged input {input:?}: {error}"
                     ))
                 })?;
-            if transition.from_phase != transition.to_phase {
-                authority.state.lifecycle_phase = transition.to_phase;
-            }
+            let _ = transition;
         }
-        Ok(authority.state)
+        Ok(authority.state().clone())
     }
 
     async fn current_mob_machine_state(&self) -> Result<mob_dsl::MobMachineState, MobError> {
@@ -508,9 +501,40 @@ impl FlowFrameKernel {
                 return Ok(());
             }
         }
-        match self.project_mob_machine_input(seed_input).await {
-            Ok(machine_state) => {
+        // `CreateFrameSeed` is idempotent at the machine: MobMachine — not this
+        // shell — owns whether the input freshly seeded the frame (`Seeded`) or
+        // was a no-op re-confirm of an already-tracked frame (`AlreadySeeded`).
+        // We mirror the typed disposition rather than reinterpreting a guard
+        // rejection by literal-matching its guard name. Fails closed (returns
+        // the machine's error) if no disposition is emitted.
+        let effects = self
+            .projector
+            .apply_machine_input_effects(seed_input)
+            .await?;
+        let disposition = effects
+            .iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::FrameSeedConfirmed { disposition, .. } => {
+                    Some(*disposition)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted CreateFrameSeed but emitted no frame-seed disposition"
+                        .into(),
+                )
+            })?;
+        match disposition {
+            // Idempotent no-op: the frame was already seeded. Mirror as success
+            // without re-validating against the local snapshot, exactly as the
+            // former `frame_seed_is_new` already-confirmed path did.
+            mob_dsl::MobFrameSeedDisposition::AlreadySeeded => Ok(()),
+            // Fresh seed: validate the committed machine state against the local
+            // snapshot when one is present, as before.
+            mob_dsl::MobFrameSeedDisposition::Seeded => {
                 if let Some(existing) = existing {
+                    let machine_state = self.current_mob_machine_state().await?;
                     validate_seed_confirmation_matches_snapshot(
                         frame_id,
                         existing,
@@ -519,8 +543,6 @@ impl FlowFrameKernel {
                 }
                 Ok(())
             }
-            Err(error) if mob_machine_seed_already_confirmed(&error) => Ok(()),
-            Err(error) => Err(error),
         }
     }
 
@@ -853,8 +875,8 @@ impl FlowFrameMutator for FlowFrameKernel {
         for _ in 0..=5 {
             let current = self.require_frame(run_id, frame_id).await?;
             let machine_state = self.current_mob_machine_state().await?;
-            let terminal_status =
-                machine_candidate_frame_terminal_status(&machine_state, frame_id).ok_or_else(|| {
+            let terminal_status = generated_frame_terminal_status_candidate(&machine_state, frame_id)?
+                .ok_or_else(|| {
                     MobError::Internal(format!(
                         "frame '{frame_id}' cannot be sealed because MobMachine does not project a terminal frame class"
                     ))
@@ -956,6 +978,17 @@ impl FlowFrameEngine {
         spec: &FrameSpec,
     ) -> Result<FrameSnapshot, MobError> {
         self.frame_kernel.start_frame(run_id, frame_id, spec).await
+    }
+
+    pub async fn fail_running_nodes_for_terminalization(
+        &self,
+        run_id: &RunId,
+        root_frame_id: &FrameId,
+        root_spec: &FrameSpec,
+        context: &FlowContext,
+    ) -> Result<(), MobError> {
+        self.heal_orphaned_running_nodes(run_id, root_frame_id, root_spec, context)
+            .await
     }
 
     // ─── Private helpers ─────────────────────────────────────────────────────
@@ -1310,17 +1343,9 @@ impl FlowFrameEngine {
                             .skip_node(run_id, &frame_id, &node_id)
                             .await?;
                     }
-                    Ok(FrameStepResult::Failed {
-                        reason,
-                        failure_ledger_recorded,
-                    }) => {
-                        step_failures.insert(
-                            step_id.clone(),
-                            FrameStepFailureProjection {
-                                reason,
-                                append_failure_ledger: !failure_ledger_recorded,
-                            },
-                        );
+                    Ok(FrameStepResult::Failed { reason }) => {
+                        step_failures
+                            .insert(step_id.clone(), FrameStepFailureProjection { reason });
                         self.frame_kernel
                             .fail_node(run_id, &frame_id, &node_id)
                             .await?;
@@ -2413,47 +2438,68 @@ fn machine_loop_pending_body_frame_registered(
         .contains(&mob_dsl::LoopInstanceId::from(loop_instance_id.as_str()))
 }
 
-fn machine_candidate_frame_terminal_status(
+fn generated_frame_terminal_status_candidate(
     machine_state: &mob_dsl::MobMachineState,
     frame_id: &FrameId,
-) -> Option<flow_frame::FrameTerminalStatus> {
+) -> Result<Option<flow_frame::FrameTerminalStatus>, MobError> {
     let frame_key = mob_dsl::FrameId::from(frame_id.as_str());
-    if machine_state.frame_phase.get(&frame_key) != Some(&mob_dsl::FrameStatus::Running) {
-        return None;
+    let input = mob_dsl::MobMachineInput::ClassifyFlowFrameTerminalStatus {
+        frame_id: frame_key.clone(),
+    };
+    let mut authority = mob_dsl::MobMachineAuthority::recover_from_state(machine_state.clone())
+        .map_err(|error| {
+            MobError::Internal(format!(
+                "MobMachine frame terminal classifier could not recover current state for frame '{frame_id}': {error}"
+            ))
+        })?;
+    let transition = mob_dsl::MobMachineMutator::apply(&mut authority, input).map_err(|error| {
+        MobError::Internal(format!(
+            "MobMachine frame terminal classifier rejected frame '{frame_id}': {error}"
+        ))
+    })?;
+    let mut classified = None;
+    for effect in transition.into_effects() {
+        match effect {
+            mob_dsl::MobMachineEffect::FlowFrameTerminalStatusClassified {
+                frame_id: effect_frame_id,
+                terminal_status,
+            } if effect_frame_id == frame_key => {
+                classified = Some(Some(project_machine_frame_terminal_status(
+                    terminal_status,
+                    frame_id,
+                )?));
+            }
+            mob_dsl::MobMachineEffect::FlowFrameTerminalStatusUnavailable {
+                frame_id: effect_frame_id,
+            } if effect_frame_id == frame_key => {
+                classified = Some(None);
+            }
+            other => {
+                return Err(MobError::Internal(format!(
+                    "MobMachine frame terminal classifier emitted unexpected effect for frame '{frame_id}': {other:?}"
+                )));
+            }
+        }
     }
-    let tracked_nodes = machine_state.frame_tracked_nodes.get(&frame_key)?;
-    let node_status = machine_state.frame_node_status.get(&frame_key)?;
-    if !tracked_nodes.iter().all(|node_id| {
-        node_status
-            .get(node_id)
-            .copied()
-            .is_some_and(machine_node_status_is_terminal)
-    }) {
-        return None;
-    }
-    if tracked_nodes
-        .iter()
-        .any(|node_id| node_status.get(node_id) == Some(&mob_dsl::NodeRunStatus::Failed))
-    {
-        Some(flow_frame::FrameTerminalStatus::Failed)
-    } else if tracked_nodes
-        .iter()
-        .any(|node_id| node_status.get(node_id) == Some(&mob_dsl::NodeRunStatus::Canceled))
-    {
-        Some(flow_frame::FrameTerminalStatus::Canceled)
-    } else {
-        Some(flow_frame::FrameTerminalStatus::Completed)
-    }
+    classified.ok_or_else(|| {
+        MobError::Internal(format!(
+            "MobMachine frame terminal classifier emitted no classification for frame '{frame_id}'"
+        ))
+    })
 }
 
-fn machine_node_status_is_terminal(status: mob_dsl::NodeRunStatus) -> bool {
-    matches!(
-        status,
-        mob_dsl::NodeRunStatus::Completed
-            | mob_dsl::NodeRunStatus::Failed
-            | mob_dsl::NodeRunStatus::Skipped
-            | mob_dsl::NodeRunStatus::Canceled
-    )
+fn project_machine_frame_terminal_status(
+    status: mob_dsl::FrameStatus,
+    frame_id: &FrameId,
+) -> Result<flow_frame::FrameTerminalStatus, MobError> {
+    match status {
+        mob_dsl::FrameStatus::Completed => Ok(flow_frame::FrameTerminalStatus::Completed),
+        mob_dsl::FrameStatus::Failed => Ok(flow_frame::FrameTerminalStatus::Failed),
+        mob_dsl::FrameStatus::Canceled => Ok(flow_frame::FrameTerminalStatus::Canceled),
+        mob_dsl::FrameStatus::Running => Err(MobError::Internal(format!(
+            "MobMachine frame terminal classifier returned nonterminal Running for frame '{frame_id}'"
+        ))),
+    }
 }
 
 fn root_terminal_phase(frame: &FrameSnapshot) -> Option<FlowFrameTerminalPhase> {
@@ -2472,7 +2518,7 @@ fn run_transition_outcome(
     command: MobMachineFlowRunCommand,
     authority: MobMachineFlowAuthorityToken,
 ) -> Result<flow_run::Outcome, MobError> {
-    apply_mob_machine_flow_run_command(state, machine_state, run_id, command, authority)
+    apply_mob_machine_flow_run_command(state, machine_state, run_id, command, authority, &[])
 }
 
 fn run_transition_state(
@@ -2632,10 +2678,6 @@ impl FlowFrameEngine {
             machine_state,
         ))
     }
-}
-
-fn mob_machine_seed_already_confirmed(error: &MobError) -> bool {
-    error.to_string().contains("frame_seed_is_new")
 }
 
 fn machine_frame_scope(scope: flow_frame::FrameScope) -> crate::machines::mob_machine::FrameScope {
@@ -2862,7 +2904,7 @@ impl FlowFrameEngine {
         let _ = frame_spec;
         let current_machine_state = self.frame_kernel.current_mob_machine_state().await?;
         let Some(terminal_status) =
-            machine_candidate_frame_terminal_status(&current_machine_state, frame_id)
+            generated_frame_terminal_status_candidate(&current_machine_state, frame_id)?
         else {
             return Ok(None);
         };
@@ -3889,6 +3931,211 @@ mod tests {
         assert_eq!(
             node_terminal_step_status(flow_frame::NodeRunStatus::Running),
             None
+        );
+    }
+
+    #[test]
+    fn frame_terminal_status_candidate_comes_from_generated_classifier() {
+        let mut authority = mob_dsl::MobMachineAuthority::new();
+        let frame_id = FrameId::from("frame-1");
+        let frame_key = mob_dsl::FrameId::from(frame_id.as_str());
+        let run_key = mob_dsl::RunId::from("run-1");
+        let node_a = mob_dsl::FlowNodeId::from("node-a");
+        let node_b = mob_dsl::FlowNodeId::from("node-b");
+        let step_a = mob_dsl::StepId::from("step-a");
+        let step_b = mob_dsl::StepId::from("step-b");
+        let steps = vec![step_a.clone(), step_b.clone()];
+        let nodes = vec![node_a.clone(), node_b.clone()];
+
+        mob_dsl::MobMachineMutator::apply(
+            &mut authority,
+            mob_dsl::MobMachineInput::CreateRunSeed {
+                run_id: run_key.clone(),
+                step_ids: steps.iter().cloned().collect(),
+                ordered_steps: steps.clone(),
+                step_status: steps.iter().cloned().map(|step| (step, None)).collect(),
+                output_recorded: steps.iter().cloned().map(|step| (step, false)).collect(),
+                step_condition_results: steps.iter().cloned().map(|step| (step, None)).collect(),
+                step_has_conditions: steps.iter().cloned().map(|step| (step, false)).collect(),
+                step_dependencies: steps
+                    .iter()
+                    .cloned()
+                    .map(|step| (step, Vec::new()))
+                    .collect(),
+                step_dependency_modes: steps
+                    .iter()
+                    .cloned()
+                    .map(|step| (step, mob_dsl::DependencyMode::All))
+                    .collect(),
+                step_branches: steps.iter().cloned().map(|step| (step, None)).collect(),
+                step_collection_policies: steps
+                    .iter()
+                    .cloned()
+                    .map(|step| (step, mob_dsl::CollectionPolicyKind::All))
+                    .collect(),
+                step_quorum_thresholds: steps.iter().cloned().map(|step| (step, 0)).collect(),
+                step_target_counts: steps.iter().cloned().map(|step| (step, 0)).collect(),
+                step_target_success_counts: steps.iter().cloned().map(|step| (step, 0)).collect(),
+                step_target_terminal_failure_counts: steps
+                    .iter()
+                    .cloned()
+                    .map(|step| (step, 0))
+                    .collect(),
+                escalation_threshold: 0,
+                max_step_retries: 0,
+                max_active_nodes: 0,
+                max_active_frames: 0,
+                max_frame_depth: 0,
+            },
+        )
+        .expect("generated run seed should be accepted");
+
+        mob_dsl::MobMachineMutator::apply(
+            &mut authority,
+            mob_dsl::MobMachineInput::CreateFrameSeed {
+                run_id: run_key,
+                frame_id: frame_key.clone(),
+                frame_scope: mob_dsl::FrameScope::Root,
+                loop_instance_id: None,
+                iteration: 0,
+                tracked_nodes: nodes.iter().cloned().collect(),
+                ordered_nodes: nodes.clone(),
+                node_kind: nodes
+                    .iter()
+                    .cloned()
+                    .map(|node| (node, mob_dsl::FlowNodeKind::Step))
+                    .collect(),
+                node_dependencies: nodes
+                    .iter()
+                    .cloned()
+                    .map(|node| (node, Vec::new()))
+                    .collect(),
+                node_dependency_modes: nodes
+                    .iter()
+                    .cloned()
+                    .map(|node| (node, mob_dsl::DependencyMode::All))
+                    .collect(),
+                node_branches: nodes.iter().cloned().map(|node| (node, None)).collect(),
+                node_step_ids: vec![(node_a.clone(), step_a), (node_b.clone(), step_b)]
+                    .into_iter()
+                    .collect(),
+                node_loop_ids: Default::default(),
+                node_status: nodes
+                    .iter()
+                    .cloned()
+                    .map(|node| (node, mob_dsl::NodeRunStatus::Ready))
+                    .collect(),
+                ready_queue: nodes.clone(),
+                output_recorded: nodes.iter().cloned().map(|node| (node, false)).collect(),
+                node_condition_results: nodes.iter().cloned().map(|node| (node, None)).collect(),
+                last_admitted_node: None,
+            },
+        )
+        .expect("generated frame seed should be accepted");
+
+        assert_eq!(
+            generated_frame_terminal_status_candidate(authority.state(), &frame_id)
+                .expect("generated classifier should accept seeded frame"),
+            None
+        );
+
+        for (node_id, command, node_status) in [
+            (
+                node_a.clone(),
+                mob_dsl::FlowFrameReducerCommandKind::AdmitNextReadyNode,
+                mob_dsl::NodeRunStatus::Running,
+            ),
+            (
+                node_a,
+                mob_dsl::FlowFrameReducerCommandKind::CompleteNode,
+                mob_dsl::NodeRunStatus::Completed,
+            ),
+            (
+                node_b.clone(),
+                mob_dsl::FlowFrameReducerCommandKind::AdmitNextReadyNode,
+                mob_dsl::NodeRunStatus::Running,
+            ),
+            (
+                node_b,
+                mob_dsl::FlowFrameReducerCommandKind::CancelNode,
+                mob_dsl::NodeRunStatus::Canceled,
+            ),
+        ] {
+            mob_dsl::MobMachineMutator::apply(
+                &mut authority,
+                mob_dsl::MobMachineInput::AuthorizeFlowFrameReducerCommand {
+                    frame_id: frame_key.clone(),
+                    command,
+                    node_id: Some(node_id),
+                    node_status: Some(node_status),
+                    terminal_status: None,
+                },
+            )
+            .expect("generated frame command should be accepted");
+        }
+
+        assert_eq!(
+            generated_frame_terminal_status_candidate(authority.state(), &frame_id)
+                .expect("generated classifier should classify terminal frame"),
+            Some(flow_frame::FrameTerminalStatus::Canceled)
+        );
+
+        let mut completed_authority =
+            mob_dsl::MobMachineAuthority::recover_from_state(authority.state().clone())
+                .expect("generated authority should recover terminal frame state");
+        mob_dsl::MobMachineMutator::apply(
+            &mut completed_authority,
+            mob_dsl::MobMachineInput::Complete,
+        )
+        .expect("generated complete transition should be accepted");
+        assert_eq!(
+            generated_frame_terminal_status_candidate(completed_authority.state(), &frame_id)
+                .expect("generated classifier should classify in completed phase"),
+            Some(flow_frame::FrameTerminalStatus::Canceled)
+        );
+        mob_dsl::MobMachineMutator::apply(
+            &mut completed_authority,
+            mob_dsl::MobMachineInput::AuthorizeFlowFrameReducerCommand {
+                frame_id: frame_key.clone(),
+                command: mob_dsl::FlowFrameReducerCommandKind::SealFrame,
+                node_id: None,
+                node_status: None,
+                terminal_status: Some(mob_dsl::FrameStatus::Canceled),
+            },
+        )
+        .expect("generated seal-frame transition should be accepted in completed phase");
+        assert_eq!(
+            completed_authority.state().lifecycle_phase,
+            mob_dsl::MobPhase::Completed
+        );
+
+        let mut stopped_authority =
+            mob_dsl::MobMachineAuthority::recover_from_state(authority.state().clone())
+                .expect("generated authority should recover terminal frame state");
+        stopped_authority
+            .apply_signal(mob_dsl::MobMachineSignal::CompleteFlow)
+            .expect("generated complete-flow convergence should be accepted");
+        mob_dsl::MobMachineMutator::apply(&mut stopped_authority, mob_dsl::MobMachineInput::Stop)
+            .expect("generated stop transition should be accepted after flow completion");
+        assert_eq!(
+            generated_frame_terminal_status_candidate(stopped_authority.state(), &frame_id)
+                .expect("generated classifier should classify in stopped phase"),
+            Some(flow_frame::FrameTerminalStatus::Canceled)
+        );
+        mob_dsl::MobMachineMutator::apply(
+            &mut stopped_authority,
+            mob_dsl::MobMachineInput::AuthorizeFlowFrameReducerCommand {
+                frame_id: frame_key.clone(),
+                command: mob_dsl::FlowFrameReducerCommandKind::SealFrame,
+                node_id: None,
+                node_status: None,
+                terminal_status: Some(mob_dsl::FrameStatus::Canceled),
+            },
+        )
+        .expect("generated seal-frame transition should be accepted in stopped phase");
+        assert_eq!(
+            stopped_authority.state().lifecycle_phase,
+            mob_dsl::MobPhase::Stopped
         );
     }
 }

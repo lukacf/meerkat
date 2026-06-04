@@ -6,11 +6,38 @@ use serde_json::json;
 use crate::WorkGraphError;
 use crate::machines::{work_attention_lifecycle as attention_dsl, workgraph_lifecycle as wg_dsl};
 use crate::types::{
-    AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
-    ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkAttentionBinding, WorkAttentionStatus,
-    WorkClaim, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceRef, WorkGraphEvent,
-    WorkGraphEventKind, WorkGraphMachineState, WorkItem, WorkItemId, WorkNamespace, WorkStatus,
+    AddEvidenceRequest, AttentionDelegatedAuthority, ClaimWorkItemRequest, CloseWorkItemRequest,
+    CreateWorkItemRequest, ProjectedAttentionAuthority, ReleaseWorkItemRequest,
+    UpdateWorkItemRequest, WorkAttentionBinding, WorkAttentionMode, WorkAttentionStatus, WorkClaim,
+    WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkGraphEvent, WorkGraphEventKind,
+    WorkGraphMachineState, WorkItem, WorkItemId, WorkNamespace, WorkStatus,
 };
+
+/// Machine-owned public error classification surfaced to REST/RPC callers.
+///
+/// Re-exported from the canonical `WorkGraphLifecycleMachine` DSL: the machine
+/// is the sole authority for the variant->class POLICY (see
+/// `WorkGraphMachine::public_error_class`). Surfaces mirror the emitted class.
+pub use wg_dsl::WorkGraphPublicErrorClass;
+
+/// Machine-owned public-confirmation admission verdict surfaced to the
+/// public-confirm surface.
+///
+/// Re-exported from the canonical `WorkGraphLifecycleMachine` DSL: the machine
+/// is the sole authority for the trust-scoped eligibility (see
+/// `WorkGraphMachine::classify_public_confirmation_admission`). The surface
+/// mirrors the emitted verdict.
+pub use wg_dsl::WorkPublicConfirmationAdmissionKind;
+
+/// Machine-owned admission verdict for a requested mutation of a work item's
+/// `completion_policy`.
+///
+/// Re-exported from the canonical `WorkGraphLifecycleMachine` DSL: the machine is
+/// the sole authority for the immutability invariant "a work item's completion
+/// policy is fixed at creation and cannot be changed by an update" (see
+/// `WorkGraphMachine::classify_completion_policy_mutation_admission`). The shell
+/// mirrors the emitted verdict.
+pub use wg_dsl::WorkCompletionPolicyMutationAdmissionKind;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WorkAttentionMachine;
@@ -59,15 +86,180 @@ impl WorkAttentionMachine {
         Ok(binding)
     }
 
-    pub fn is_eligible_at(binding: &WorkAttentionBinding, now: DateTime<Utc>) -> bool {
-        match binding.machine_state.lifecycle_phase {
-            attention_dsl::WorkAttentionLifecycleState::Active => true,
-            attention_dsl::WorkAttentionLifecycleState::Paused => binding
-                .machine_state
-                .paused_until_utc_ms
-                .is_some_and(|until| until <= datetime_to_millis(now)),
-            attention_dsl::WorkAttentionLifecycleState::Superseded
-            | attention_dsl::WorkAttentionLifecycleState::Stopped => false,
+    /// Resolve attention-projection eligibility for the binding at `now`.
+    ///
+    /// The shell extracts only the raw wall-clock `now` (a pure observation) and
+    /// drives the canonical `WorkAttentionLifecycleMachine`'s
+    /// `ClassifyAttentionEligibility` input over the recovered binding state. The
+    /// machine owns the eligibility POLICY — including the Paused deadline-elapsed
+    /// rule (`paused_until <= now`) — and emits the verdict; this function only
+    /// mirrors the emitted `AttentionEligibilityClassified.eligible`. It fails
+    /// closed (returns `Err`) if the machine refuses to classify or emits no
+    /// verdict; it decides nothing.
+    pub fn classify_eligibility_at(
+        binding: &WorkAttentionBinding,
+        now: DateTime<Utc>,
+    ) -> Result<bool, WorkGraphError> {
+        let mut dsl_auth =
+            attention_dsl::WorkAttentionLifecycleMachineAuthority::recover_from_state(
+                binding.machine_state.clone(),
+            )
+            .map_err(|error| {
+                WorkGraphError::InvalidTransition(format!(
+                    "attention binding {} refused eligibility recovery: {error:?}",
+                    binding.binding_id
+                ))
+            })?;
+        let transition = attention_dsl::WorkAttentionLifecycleMachineMutator::apply(
+            &mut dsl_auth,
+            attention_dsl::WorkAttentionLifecycleInput::ClassifyAttentionEligibility {
+                now_utc_ms: datetime_to_millis(now),
+            },
+        )
+        .map_err(|error| {
+            WorkGraphError::InvalidTransition(format!(
+                "attention binding {} refused eligibility classification: {error:?}",
+                binding.binding_id
+            ))
+        })?;
+
+        let mut classified = None;
+        for effect in transition.effects() {
+            if let attention_dsl::WorkAttentionLifecycleEffect::AttentionEligibilityClassified {
+                eligible,
+            } = effect
+                && classified.replace(*eligible).is_some()
+            {
+                return Err(WorkGraphError::Store(format!(
+                    "attention binding {} emitted multiple eligibility verdicts",
+                    binding.binding_id
+                )));
+            }
+        }
+
+        classified.ok_or_else(|| {
+            WorkGraphError::Store(format!(
+                "attention binding {} emitted no eligibility verdict",
+                binding.binding_id
+            ))
+        })
+    }
+
+    /// Resolve the projected attention authority for the binding.
+    ///
+    /// The shell extracts only the raw binding facts (`mode`,
+    /// `delegated_authority`) and drives the canonical
+    /// `WorkAttentionLifecycleMachine`'s `ClassifyAttentionAuthority` input over
+    /// the recovered binding state. The machine owns the COMPLETE per-stance
+    /// tool-admission POLICY (which stances may read, add evidence, release,
+    /// update, block, create, link, close their own review item, or
+    /// close-if-policy-allows) and emits the capability verdict; this function
+    /// mirrors the emitted `AttentionAuthorityClassified` capability bits. Fails
+    /// closed.
+    pub fn classify_authority(
+        binding: &WorkAttentionBinding,
+    ) -> Result<ProjectedAttentionAuthority, WorkGraphError> {
+        let mode = attention_mode_to_dsl(binding.mode);
+        let delegated_authority = attention_delegated_authority_to_dsl(binding.delegated_authority);
+        let mut dsl_auth =
+            attention_dsl::WorkAttentionLifecycleMachineAuthority::recover_from_state(
+                binding.machine_state.clone(),
+            )
+            .map_err(|error| {
+                WorkGraphError::InvalidTransition(format!(
+                    "attention binding {} refused authority recovery: {error:?}",
+                    binding.binding_id
+                ))
+            })?;
+        let transition = attention_dsl::WorkAttentionLifecycleMachineMutator::apply(
+            &mut dsl_auth,
+            attention_dsl::WorkAttentionLifecycleInput::ClassifyAttentionAuthority {
+                mode,
+                delegated_authority,
+            },
+        )
+        .map_err(|error| {
+            WorkGraphError::InvalidTransition(format!(
+                "attention binding {} refused authority classification: {error:?}",
+                binding.binding_id
+            ))
+        })?;
+
+        let mut classified = None;
+        for effect in transition.effects() {
+            if let attention_dsl::WorkAttentionLifecycleEffect::AttentionAuthorityClassified {
+                can_get,
+                can_add_evidence,
+                can_release,
+                can_update,
+                can_block,
+                can_create,
+                can_link,
+                can_link_parent,
+                can_link_related,
+                can_link_derived_from,
+                can_close_own_review_item,
+                can_close_if_policy_allows,
+            } = effect
+            {
+                let verdict = ProjectedAttentionAuthority {
+                    can_get: *can_get,
+                    can_add_evidence: *can_add_evidence,
+                    can_release: *can_release,
+                    can_update: *can_update,
+                    can_block: *can_block,
+                    can_create: *can_create,
+                    can_link: *can_link,
+                    can_link_parent: *can_link_parent,
+                    can_link_related: *can_link_related,
+                    can_link_derived_from: *can_link_derived_from,
+                    can_close_own_review_item: *can_close_own_review_item,
+                    can_close_if_policy_allows: *can_close_if_policy_allows,
+                };
+                if classified.replace(verdict).is_some() {
+                    return Err(WorkGraphError::Store(format!(
+                        "attention binding {} emitted multiple authority verdicts",
+                        binding.binding_id
+                    )));
+                }
+            }
+        }
+
+        classified.ok_or_else(|| {
+            WorkGraphError::Store(format!(
+                "attention binding {} emitted no authority verdict",
+                binding.binding_id
+            ))
+        })
+    }
+}
+
+fn attention_mode_to_dsl(mode: WorkAttentionMode) -> attention_dsl::WorkAttentionMode {
+    match mode {
+        WorkAttentionMode::Pursue => attention_dsl::WorkAttentionMode::Pursue,
+        WorkAttentionMode::Coordinate => attention_dsl::WorkAttentionMode::Coordinate,
+        WorkAttentionMode::Review => attention_dsl::WorkAttentionMode::Review,
+        WorkAttentionMode::Falsify => attention_dsl::WorkAttentionMode::Falsify,
+        WorkAttentionMode::Judge => attention_dsl::WorkAttentionMode::Judge,
+        WorkAttentionMode::Observe => attention_dsl::WorkAttentionMode::Observe,
+    }
+}
+
+fn attention_delegated_authority_to_dsl(
+    authority: AttentionDelegatedAuthority,
+) -> attention_dsl::AttentionDelegatedAuthority {
+    match authority {
+        AttentionDelegatedAuthority::AddEvidence => {
+            attention_dsl::AttentionDelegatedAuthority::AddEvidence
+        }
+        AttentionDelegatedAuthority::CloseOwnReviewItem => {
+            attention_dsl::AttentionDelegatedAuthority::CloseOwnReviewItem
+        }
+        AttentionDelegatedAuthority::RequestClosure => {
+            attention_dsl::AttentionDelegatedAuthority::RequestClosure
+        }
+        AttentionDelegatedAuthority::CloseIfPolicyAllows => {
+            attention_dsl::AttentionDelegatedAuthority::CloseIfPolicyAllows
         }
     }
 }
@@ -80,6 +272,377 @@ impl WorkGraphMachine {
         validate_item_machine_projection(item)
     }
 
+    /// Resolve the public error class for a `WorkGraphError`.
+    ///
+    /// The shell performs only a pure typed extraction of the error variant
+    /// into a `WorkGraphErrorKind` discriminant (one kind per variant, no
+    /// grouping). The variant->class POLICY is owned by the canonical
+    /// `WorkGraphLifecycleMachine`: this drives the machine's
+    /// `ClassifyWorkGraphPublicError` input and mirrors the emitted
+    /// `WorkGraphPublicErrorClassified` effect. The shell decides nothing.
+    pub fn public_error_class(
+        error: &WorkGraphError,
+    ) -> Result<WorkGraphPublicErrorClass, WorkGraphError> {
+        let kind = work_graph_error_kind(error);
+        let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::new();
+        let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(
+            &mut dsl_auth,
+            wg_dsl::WorkGraphLifecycleInput::ClassifyWorkGraphPublicError { kind },
+        )
+        .map_err(|transition_error| {
+            WorkGraphError::Store(format!(
+                "generated WorkGraph public error classification refused kind {kind:?}: {transition_error:?}"
+            ))
+        })?;
+
+        let mut classified = None;
+        for effect in transition.effects() {
+            if let wg_dsl::WorkGraphLifecycleEffect::WorkGraphPublicErrorClassified {
+                kind: emitted_kind,
+                public_class,
+            } = effect
+            {
+                if *emitted_kind != kind {
+                    return Err(WorkGraphError::Store(format!(
+                        "generated WorkGraph public error classification emitted kind {emitted_kind:?} while classifying {kind:?}"
+                    )));
+                }
+                if classified.replace(*public_class).is_some() {
+                    return Err(WorkGraphError::Store(format!(
+                        "generated WorkGraph public error classification emitted multiple classes for kind {kind:?}"
+                    )));
+                }
+            }
+        }
+
+        classified.ok_or_else(|| {
+            WorkGraphError::Store(format!(
+                "generated WorkGraph public error classification did not emit a class for kind {kind:?}"
+            ))
+        })
+    }
+
+    /// Resolve whether an untrusted PUBLIC caller may confirm an item with the
+    /// given machine-owned completion policy.
+    ///
+    /// The trust-scoped eligibility "only a self-attested completion policy may
+    /// be confirmed by a public caller; every other policy requires trusted
+    /// in-process host authority" is owned by the canonical
+    /// `WorkGraphLifecycleMachine`, not the public-confirm surface. The shell
+    /// performs only a pure typed extraction of the machine-owned
+    /// `completion_policy` into the DSL observation, drives the machine's
+    /// `ClassifyPublicConfirmationAdmission` input, and mirrors the emitted
+    /// `PublicConfirmationAdmissionClassified` verdict. The shell decides
+    /// nothing and fails closed if the machine refuses or emits no verdict.
+    pub fn classify_public_confirmation_admission(
+        completion_policy: &crate::types::WorkCompletionPolicy,
+    ) -> Result<wg_dsl::WorkPublicConfirmationAdmissionKind, WorkGraphError> {
+        let policy = completion_policy.to_machine();
+        let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::new();
+        let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(
+            &mut dsl_auth,
+            wg_dsl::WorkGraphLifecycleInput::ClassifyPublicConfirmationAdmission {
+                completion_policy: policy,
+            },
+        )
+        .map_err(|error| {
+            WorkGraphError::InvalidInput(format!(
+                "WorkGraphLifecycle refused public-confirmation admission for {policy:?}: {error:?}"
+            ))
+        })?;
+
+        let mut admission = None;
+        for effect in transition.effects() {
+            if let wg_dsl::WorkGraphLifecycleEffect::PublicConfirmationAdmissionClassified {
+                admission: emitted,
+            } = effect
+                && admission.replace(*emitted).is_some()
+            {
+                return Err(WorkGraphError::Store(format!(
+                    "WorkGraphLifecycle public-confirmation admission emitted multiple verdicts for {policy:?}"
+                )));
+            }
+        }
+
+        admission.ok_or_else(|| {
+            WorkGraphError::Store(format!(
+                "WorkGraphLifecycle public-confirmation admission emitted no verdict for {policy:?}"
+            ))
+        })
+    }
+
+    /// Resolve whether a requested completion policy is admissible at CREATE for
+    /// a non-goal work item.
+    ///
+    /// The creation policy "non-goal work items must use the self-attest
+    /// completion policy" is owned by the canonical `WorkGraphLifecycleMachine`,
+    /// not the create shell. The shell performs only a pure typed extraction of
+    /// the requested completion policy into the DSL observation, drives the
+    /// machine's `ClassifyCreateCompletionPolicyAdmission` input over a fresh
+    /// authority, and mirrors the emitted
+    /// `CreateCompletionPolicyAdmissionClassified` verdict. The shell decides
+    /// nothing and fails closed if the machine refuses or emits no verdict.
+    pub fn classify_create_completion_policy_admission(
+        completion_policy: &crate::types::WorkCompletionPolicy,
+    ) -> Result<wg_dsl::WorkCreateCompletionPolicyAdmissionKind, WorkGraphError> {
+        let policy = completion_policy.to_machine();
+        let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::new();
+        let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(
+            &mut dsl_auth,
+            wg_dsl::WorkGraphLifecycleInput::ClassifyCreateCompletionPolicyAdmission {
+                completion_policy: policy,
+            },
+        )
+        .map_err(|error| {
+            WorkGraphError::InvalidInput(format!(
+                "WorkGraphLifecycle refused create completion-policy admission for {policy:?}: {error:?}"
+            ))
+        })?;
+
+        let mut admission = None;
+        for effect in transition.effects() {
+            if let wg_dsl::WorkGraphLifecycleEffect::CreateCompletionPolicyAdmissionClassified {
+                admission: emitted,
+            } = effect
+                && admission.replace(*emitted).is_some()
+            {
+                return Err(WorkGraphError::Store(format!(
+                    "WorkGraphLifecycle create completion-policy admission emitted multiple verdicts for {policy:?}"
+                )));
+            }
+        }
+
+        admission.ok_or_else(|| {
+            WorkGraphError::Store(format!(
+                "WorkGraphLifecycle create completion-policy admission emitted no verdict for {policy:?}"
+            ))
+        })
+    }
+
+    /// Resolve whether a requested completion-policy mutation is admissible.
+    ///
+    /// The immutability invariant "a work item's completion policy is fixed at
+    /// creation and cannot be changed by an update" is owned by the canonical
+    /// `WorkGraphLifecycleMachine`, not the shell. The shell performs only a pure
+    /// typed extraction of the requested completion policy into the DSL
+    /// observation (variant plus supervisor owner key plus reviewer quorum
+    /// threshold), drives the machine's `ClassifyCompletionPolicyMutationAdmission`
+    /// input over the item's recovered machine state, and mirrors the emitted
+    /// `CompletionPolicyMutationAdmissionClassified` verdict. The machine compares
+    /// the requested policy — in full — against its own machine-owned completion
+    /// policy; this function decides nothing and fails closed if the machine
+    /// refuses or emits no verdict.
+    pub fn classify_completion_policy_mutation_admission(
+        item: &WorkItem,
+        requested: &crate::types::WorkCompletionPolicy,
+    ) -> Result<wg_dsl::WorkCompletionPolicyMutationAdmissionKind, WorkGraphError> {
+        validate_item_machine_projection(item)?;
+        let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::recover_from_state(
+            item.machine_state.clone(),
+        )
+        .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
+        let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(
+            &mut dsl_auth,
+            wg_dsl::WorkGraphLifecycleInput::ClassifyCompletionPolicyMutationAdmission {
+                requested_completion_policy: requested.to_machine(),
+                requested_completion_supervisor_owner_key: requested.supervisor_owner_key(),
+                requested_completion_reviewer_quorum_threshold: requested
+                    .reviewer_quorum_threshold(),
+            },
+        )
+        .map_err(|error| {
+            WorkGraphError::InvalidTransition(format!(
+                "work item {} refused completion-policy mutation classification: {error:?}",
+                item.id
+            ))
+        })?;
+
+        let mut admission = None;
+        for effect in transition.effects() {
+            if let wg_dsl::WorkGraphLifecycleEffect::CompletionPolicyMutationAdmissionClassified {
+                admission: emitted,
+            } = effect
+                && admission.replace(*emitted).is_some()
+            {
+                return Err(WorkGraphError::Store(format!(
+                    "work item {} emitted multiple completion-policy mutation verdicts",
+                    item.id
+                )));
+            }
+        }
+
+        admission.ok_or_else(|| {
+            WorkGraphError::Store(format!(
+                "work item {} emitted no completion-policy mutation verdict",
+                item.id
+            ))
+        })
+    }
+
+    /// Resolve whether a trusted-path goal confirmation is admissible for a work
+    /// item's machine-owned completion policy.
+    ///
+    /// The eligibility "is this confirming principal + supplied evidence kind
+    /// admissible for this completion policy" is owned by the canonical
+    /// `WorkGraphLifecycleMachine`, not the goal-confirm shell. The shell
+    /// performs only pure typed extraction of the observations (the machine-owned
+    /// completion policy + its supervisor owner key, the requested confirming
+    /// principal owner key + kind, and the typed evidence-kind observation parsed
+    /// from the opaque `evidence.kind` string), drives the machine's
+    /// `ClassifyConfirmationAdmission` input, and mirrors the emitted
+    /// `ConfirmationAdmissionClassified` verdict. This function decides nothing
+    /// and fails closed if the machine refuses or emits no verdict.
+    pub fn classify_confirmation_admission(
+        completion_policy: &crate::types::WorkCompletionPolicy,
+        requested_principal: Option<&crate::types::WorkOwnerKey>,
+        supplied_evidence_kind: wg_dsl::WorkConfirmationEvidenceObservation,
+    ) -> Result<wg_dsl::WorkConfirmationAdmissionKind, WorkGraphError> {
+        let policy = completion_policy.to_machine();
+        let requested_principal_owner_key =
+            requested_principal.map(crate::types::work_owner_key_to_machine);
+        let requested_principal_kind = requested_principal
+            .map(|principal| crate::types::work_owner_kind_to_machine(principal.kind));
+        let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::new();
+        let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(
+            &mut dsl_auth,
+            wg_dsl::WorkGraphLifecycleInput::ClassifyConfirmationAdmission {
+                completion_policy: policy,
+                completion_supervisor_owner_key: completion_policy.supervisor_owner_key(),
+                requested_principal_owner_key,
+                requested_principal_kind,
+                supplied_evidence_kind,
+            },
+        )
+        .map_err(|error| {
+            WorkGraphError::Store(format!(
+                "WorkGraphLifecycle refused confirmation admission for {policy:?}: {error:?}"
+            ))
+        })?;
+
+        let mut admission = None;
+        for effect in transition.effects() {
+            if let wg_dsl::WorkGraphLifecycleEffect::ConfirmationAdmissionClassified {
+                admission: emitted,
+            } = effect
+                && admission.replace(*emitted).is_some()
+            {
+                return Err(WorkGraphError::Store(format!(
+                    "WorkGraphLifecycle confirmation admission emitted multiple verdicts for {policy:?}"
+                )));
+            }
+        }
+
+        admission.ok_or_else(|| {
+            WorkGraphError::Store(format!(
+                "WorkGraphLifecycle confirmation admission emitted no verdict for {policy:?}"
+            ))
+        })
+    }
+
+    /// Resolve whether a work item is terminal.
+    ///
+    /// The shell extracts no fact: it drives the canonical
+    /// `WorkGraphLifecycleMachine`'s `ClassifyTerminality` input over the item's
+    /// recovered machine state. The machine owns the lifecycle_phase and the
+    /// terminality verdict (which phases are terminal); this function mirrors the
+    /// emitted `WorkItemTerminalityClassified.terminal`, failing closed if the
+    /// machine refuses or emits no verdict. It decides nothing.
+    pub fn classify_terminality(item: &WorkItem) -> Result<bool, WorkGraphError> {
+        validate_item_machine_projection(item)?;
+        let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::recover_from_state(
+            item.machine_state.clone(),
+        )
+        .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
+        let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(
+            &mut dsl_auth,
+            wg_dsl::WorkGraphLifecycleInput::ClassifyTerminality {},
+        )
+        .map_err(|error| {
+            WorkGraphError::InvalidTransition(format!(
+                "work item {} refused terminality classification: {error:?}",
+                item.id
+            ))
+        })?;
+
+        let mut classified = None;
+        for effect in transition.effects() {
+            if let wg_dsl::WorkGraphLifecycleEffect::WorkItemTerminalityClassified { terminal } =
+                effect
+                && classified.replace(*terminal).is_some()
+            {
+                return Err(WorkGraphError::Store(format!(
+                    "work item {} emitted multiple terminality verdicts",
+                    item.id
+                )));
+            }
+        }
+
+        classified.ok_or_else(|| {
+            WorkGraphError::Store(format!(
+                "work item {} emitted no terminality verdict",
+                item.id
+            ))
+        })
+    }
+
+    /// Resolve whether a single blocking edge is satisfied.
+    ///
+    /// The shell extracts only the raw blocker lifecycle phase (a pure
+    /// observation projected from the blocker's own machine state) and whether
+    /// the blocker was resolvable at all, then drives the canonical
+    /// `WorkGraphLifecycleMachine`'s `ClassifyBlockerSatisfied` input over the
+    /// gated item's recovered state. The machine owns the satisfaction POLICY (a
+    /// blocking edge is satisfied iff its blocker reached terminal SUCCESS,
+    /// `Completed`) and emits the verdict; this function mirrors it. The caller
+    /// mechanically fans-in (counts) the unsatisfied edges. Fails closed.
+    pub fn classify_blocker_satisfied(
+        gated_item: &WorkItem,
+        blocker: Option<&WorkItem>,
+    ) -> Result<bool, WorkGraphError> {
+        validate_item_machine_projection(gated_item)?;
+        let blocker_lifecycle_phase = match blocker {
+            Some(blocker) => blocker.machine_state.lifecycle_phase,
+            None => wg_dsl::WorkLifecycleState::Absent,
+        };
+        let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::recover_from_state(
+            gated_item.machine_state.clone(),
+        )
+        .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
+        let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(
+            &mut dsl_auth,
+            wg_dsl::WorkGraphLifecycleInput::ClassifyBlockerSatisfied {
+                blocker_present: blocker.is_some(),
+                blocker_lifecycle_phase,
+            },
+        )
+        .map_err(|error| {
+            WorkGraphError::InvalidTransition(format!(
+                "work item {} refused blocker satisfaction classification: {error:?}",
+                gated_item.id
+            ))
+        })?;
+
+        let mut classified = None;
+        for effect in transition.effects() {
+            if let wg_dsl::WorkGraphLifecycleEffect::BlockerSatisfactionClassified { satisfied } =
+                effect
+                && classified.replace(*satisfied).is_some()
+            {
+                return Err(WorkGraphError::Store(format!(
+                    "work item {} emitted multiple blocker satisfaction verdicts",
+                    gated_item.id
+                )));
+            }
+        }
+
+        classified.ok_or_else(|| {
+            WorkGraphError::Store(format!(
+                "work item {} emitted no blocker satisfaction verdict",
+                gated_item.id
+            ))
+        })
+    }
+
     pub fn create_item(
         request: CreateWorkItemRequest,
         realm_id: String,
@@ -88,44 +651,48 @@ impl WorkGraphMachine {
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
         let title = validate_title(request.title)?;
         let status = request.status.unwrap_or_default();
-        if matches!(
-            status,
-            WorkStatus::InProgress
-                | WorkStatus::Completed
-                | WorkStatus::Cancelled
-                | WorkStatus::Failed
-        ) {
-            return Err(WorkGraphError::InvalidTransition(
-                "new work items may only start open or blocked".to_string(),
-            ));
-        }
-        let input = match status {
-            WorkStatus::Open => wg_dsl::WorkGraphLifecycleInput::CreateOpen {
-                due_at_utc_ms: request.due_at.map(datetime_to_millis),
-                not_before_utc_ms: request.not_before.map(datetime_to_millis),
-                snoozed_until_utc_ms: request.snoozed_until.map(datetime_to_millis),
-                completion_policy: request.completion_policy.clone().to_machine(),
-                completion_supervisor_owner_key: request.completion_policy.supervisor_owner_key(),
-                completion_reviewer_quorum_threshold: request
-                    .completion_policy
-                    .reviewer_quorum_threshold(),
-                unresolved_blocker_count: 0,
-            },
-            WorkStatus::Blocked => wg_dsl::WorkGraphLifecycleInput::CreateBlocked {
-                due_at_utc_ms: request.due_at.map(datetime_to_millis),
-                not_before_utc_ms: request.not_before.map(datetime_to_millis),
-                snoozed_until_utc_ms: request.snoozed_until.map(datetime_to_millis),
-                completion_policy: request.completion_policy.clone().to_machine(),
-                completion_supervisor_owner_key: request.completion_policy.supervisor_owner_key(),
-                completion_reviewer_quorum_threshold: request
-                    .completion_policy
-                    .reviewer_quorum_threshold(),
-                unresolved_blocker_count: 0,
-            },
-            WorkStatus::InProgress
-            | WorkStatus::Completed
-            | WorkStatus::Cancelled
-            | WorkStatus::Failed => unreachable!("invalid create status rejected above"),
+        // The creation policy "a new work item may only start open or blocked"
+        // is owned by WorkGraphLifecycleMachine, not this shell. We extract the
+        // requested status as a pure typed observation, drive the machine's
+        // admission classifier, and mirror the verdict: AdmittedOpen ->
+        // CreateOpen, AdmittedBlocked -> CreateBlocked, Denied -> the same
+        // InvalidTransition rejection. Fails closed.
+        let input = match classify_create_status_admission(status)? {
+            wg_dsl::WorkCreateStatusAdmissionKind::AdmittedOpen => {
+                wg_dsl::WorkGraphLifecycleInput::CreateOpen {
+                    due_at_utc_ms: request.due_at.map(datetime_to_millis),
+                    not_before_utc_ms: request.not_before.map(datetime_to_millis),
+                    snoozed_until_utc_ms: request.snoozed_until.map(datetime_to_millis),
+                    completion_policy: request.completion_policy.clone().to_machine(),
+                    completion_supervisor_owner_key: request
+                        .completion_policy
+                        .supervisor_owner_key(),
+                    completion_reviewer_quorum_threshold: request
+                        .completion_policy
+                        .reviewer_quorum_threshold(),
+                    unresolved_blocker_count: 0,
+                }
+            }
+            wg_dsl::WorkCreateStatusAdmissionKind::AdmittedBlocked => {
+                wg_dsl::WorkGraphLifecycleInput::CreateBlocked {
+                    due_at_utc_ms: request.due_at.map(datetime_to_millis),
+                    not_before_utc_ms: request.not_before.map(datetime_to_millis),
+                    snoozed_until_utc_ms: request.snoozed_until.map(datetime_to_millis),
+                    completion_policy: request.completion_policy.clone().to_machine(),
+                    completion_supervisor_owner_key: request
+                        .completion_policy
+                        .supervisor_owner_key(),
+                    completion_reviewer_quorum_threshold: request
+                        .completion_policy
+                        .reviewer_quorum_threshold(),
+                    unresolved_blocker_count: 0,
+                }
+            }
+            wg_dsl::WorkCreateStatusAdmissionKind::Denied => {
+                return Err(WorkGraphError::InvalidTransition(
+                    "new work items may only start open or blocked".to_string(),
+                ));
+            }
         };
         let dsl_state = apply_new_item_dsl(input)?;
         let mut item = WorkItem {
@@ -332,27 +899,33 @@ impl WorkGraphMachine {
         request: CloseWorkItemRequest,
         now: DateTime<Utc>,
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
-        if request.status.is_terminal_success() && !completion_policy_is_satisfied(&item) {
-            return Err(WorkGraphError::InvalidTransition(format!(
-                "work item {} completion policy {} is not satisfied",
-                item.id,
-                completion_policy_name(&item.completion_policy)
-            )));
-        }
-        let dsl_input = match request.status {
-            WorkStatus::Completed => wg_dsl::WorkGraphLifecycleInput::CloseCompleted {
-                expected_revision: request.expected_revision,
-                at_utc_ms: datetime_to_millis(now),
-            },
-            WorkStatus::Cancelled => wg_dsl::WorkGraphLifecycleInput::CloseCancelled {
-                expected_revision: request.expected_revision,
-                at_utc_ms: datetime_to_millis(now),
-            },
-            WorkStatus::Failed => wg_dsl::WorkGraphLifecycleInput::CloseFailed {
-                expected_revision: request.expected_revision,
-                at_utc_ms: datetime_to_millis(now),
-            },
-            WorkStatus::Open | WorkStatus::InProgress | WorkStatus::Blocked => {
+        // The lifecycle-class fact "close requires a terminal status" is owned
+        // by WorkGraphLifecycleMachine, not this shell. We extract the requested
+        // target status as a pure typed observation, drive the machine's
+        // admission classifier, and mirror the verdict: AdmittedCompleted ->
+        // CloseCompleted, AdmittedCancelled -> CloseCancelled, AdmittedFailed ->
+        // CloseFailed, DeniedNonTerminal -> the exact same InvalidTransition
+        // rejection. Fails closed.
+        let dsl_input = match classify_close_status_admission(request.status)? {
+            wg_dsl::WorkCloseStatusAdmissionKind::AdmittedCompleted => {
+                wg_dsl::WorkGraphLifecycleInput::CloseCompleted {
+                    expected_revision: request.expected_revision,
+                    at_utc_ms: datetime_to_millis(now),
+                }
+            }
+            wg_dsl::WorkCloseStatusAdmissionKind::AdmittedCancelled => {
+                wg_dsl::WorkGraphLifecycleInput::CloseCancelled {
+                    expected_revision: request.expected_revision,
+                    at_utc_ms: datetime_to_millis(now),
+                }
+            }
+            wg_dsl::WorkCloseStatusAdmissionKind::AdmittedFailed => {
+                wg_dsl::WorkGraphLifecycleInput::CloseFailed {
+                    expected_revision: request.expected_revision,
+                    at_utc_ms: datetime_to_millis(now),
+                }
+            }
+            wg_dsl::WorkCloseStatusAdmissionKind::DeniedNonTerminal => {
                 return Err(WorkGraphError::InvalidTransition(
                     "close requires a terminal status".to_string(),
                 ));
@@ -378,11 +951,23 @@ impl WorkGraphMachine {
         request: AddEvidenceRequest,
         now: DateTime<Utc>,
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
+        let evidence_kind = request
+            .evidence
+            .confirmation_kind
+            .unwrap_or(crate::types::WorkEvidenceKind::SelfAttest)
+            .to_machine();
+        let confirming_owner_key = request
+            .evidence
+            .confirming_owner_key
+            .as_ref()
+            .map(crate::types::work_owner_key_to_machine);
         let dsl_state = apply_item_dsl(
             &item,
             item.machine_state.unresolved_blocker_count,
             wg_dsl::WorkGraphLifecycleInput::AddEvidence {
                 expected_revision: request.expected_revision,
+                evidence_kind,
+                confirming_owner_key,
             },
             Some(request.expected_revision),
         )?;
@@ -394,23 +979,64 @@ impl WorkGraphMachine {
         Ok((item, event))
     }
 
-    pub fn is_ready(item: &WorkItem, now: DateTime<Utc>) -> bool {
-        let owner_key = wg_dsl::WorkOwnerKey {
-            kind: wg_dsl::WorkOwnerKind::Label,
-            id: "__ready_probe__".to_string(),
-        };
-        apply_item_dsl(
-            item,
-            item.machine_state.unresolved_blocker_count,
-            wg_dsl::WorkGraphLifecycleInput::Claim {
-                expected_revision: item.revision,
-                owner_key,
-                now_utc_ms: datetime_to_millis(now),
-                lease_expires_at_utc_ms: None,
-            },
-            Some(item.revision),
+    /// Classify whether a work item is ready to claim at `now`.
+    ///
+    /// The shell extracts only the raw wall-clock `now` (a pure observation) and
+    /// drives the canonical `WorkGraphLifecycleMachine`'s `ClassifyReadiness`
+    /// input over the item's recovered machine state. The machine owns the
+    /// readiness POLICY — reproducing exactly the `Claim` transition guards
+    /// (`ClaimOpen` / `ClaimExpiredInProgress`) — and emits the verdict; this
+    /// function mirrors the emitted `WorkItemReadinessClassified.ready`, failing
+    /// closed if the machine refuses or emits no verdict. It decides nothing.
+    pub fn classify_readiness(item: &WorkItem, now: DateTime<Utc>) -> Result<bool, WorkGraphError> {
+        validate_item_machine_projection(item)?;
+        let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::recover_from_state(
+            item.machine_state.clone(),
         )
-        .is_ok()
+        .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
+        let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(
+            &mut dsl_auth,
+            wg_dsl::WorkGraphLifecycleInput::ClassifyReadiness {
+                now_utc_ms: datetime_to_millis(now),
+            },
+        )
+        .map_err(|error| {
+            WorkGraphError::InvalidTransition(format!(
+                "work item {} refused readiness classification: {error:?}",
+                item.id
+            ))
+        })?;
+
+        let mut classified = None;
+        for effect in transition.effects() {
+            if let wg_dsl::WorkGraphLifecycleEffect::WorkItemReadinessClassified { ready } = effect
+                && classified.replace(*ready).is_some()
+            {
+                return Err(WorkGraphError::Store(format!(
+                    "work item {} emitted multiple readiness verdicts",
+                    item.id
+                )));
+            }
+        }
+
+        classified.ok_or_else(|| {
+            WorkGraphError::Store(format!(
+                "work item {} emitted no readiness verdict",
+                item.id
+            ))
+        })
+    }
+
+    /// Mirror the machine-owned readiness verdict as a `bool`, failing closed.
+    ///
+    /// The readiness verdict belongs to the canonical
+    /// `WorkGraphLifecycleMachine` (see
+    /// [`WorkGraphMachine::classify_readiness`]). This filter-facing projection
+    /// mirrors the machine bool; if the machine refuses to classify, it fails
+    /// closed by treating the item as NOT ready so an unclassifiable item is
+    /// never offered as claimable work.
+    pub fn is_ready(item: &WorkItem, now: DateTime<Utc>) -> bool {
+        Self::classify_readiness(item, now).unwrap_or(false)
     }
 
     pub fn ready_items(items: Vec<WorkItem>, now: DateTime<Utc>) -> Vec<WorkItem> {
@@ -440,41 +1066,24 @@ impl WorkGraphMachine {
     }
 }
 
-pub(crate) fn completion_policy_is_satisfied(item: &WorkItem) -> bool {
-    match &item.completion_policy {
-        WorkCompletionPolicy::SelfAttest => true,
-        WorkCompletionPolicy::HostConfirmed => item
-            .evidence_refs
-            .iter()
-            .any(|evidence| evidence.kind == "host_confirmation"),
-        WorkCompletionPolicy::PrincipalConfirmed => item
-            .evidence_refs
-            .iter()
-            .any(|evidence| evidence.kind == "principal_confirmation"),
-        WorkCompletionPolicy::Supervisor { owner_key } => {
-            let owner = owner_key.canonical();
-            item.evidence_refs.iter().any(|evidence| {
-                evidence.kind == "supervisor_confirmation"
-                    && (evidence.id == owner || evidence.label.as_deref() == Some(owner.as_str()))
-            })
+/// Pure typed extraction of a `WorkGraphError` into the machine's typed
+/// error-kind discriminant. This is a 1:1 variant->kind map with NO grouping;
+/// the many-to-one variant->public-class POLICY lives in the canonical
+/// `WorkGraphLifecycleMachine`, not here.
+fn work_graph_error_kind(error: &WorkGraphError) -> wg_dsl::WorkGraphErrorKind {
+    match error {
+        WorkGraphError::NotFound { .. } => wg_dsl::WorkGraphErrorKind::NotFound,
+        WorkGraphError::AttentionNotFound { .. } => wg_dsl::WorkGraphErrorKind::AttentionNotFound,
+        WorkGraphError::StaleRevision { .. } => wg_dsl::WorkGraphErrorKind::StaleRevision,
+        WorkGraphError::Conflict(_) => wg_dsl::WorkGraphErrorKind::Conflict,
+        WorkGraphError::InvalidTransition(_) => wg_dsl::WorkGraphErrorKind::InvalidTransition,
+        WorkGraphError::InvalidInput(_) => wg_dsl::WorkGraphErrorKind::InvalidInput,
+        WorkGraphError::InvalidTimestampMillis { .. } => {
+            wg_dsl::WorkGraphErrorKind::InvalidTimestampMillis
         }
-        WorkCompletionPolicy::ReviewerQuorum { threshold } => {
-            let reviewers = item
-                .evidence_refs
-                .iter()
-                .filter(|evidence| evidence.kind == "reviewer_confirmation")
-                .filter_map(reviewer_identity)
-                .collect::<BTreeSet<_>>();
-            reviewers.len() >= usize::from(*threshold)
-        }
+        WorkGraphError::Store(_) => wg_dsl::WorkGraphErrorKind::Store,
+        WorkGraphError::UnsupportedBackend(_) => wg_dsl::WorkGraphErrorKind::UnsupportedBackend,
     }
-}
-
-fn reviewer_identity(evidence: &WorkEvidenceRef) -> Option<&str> {
-    evidence
-        .label
-        .as_deref()
-        .or_else(|| (!evidence.id.is_empty()).then_some(evidence.id.as_str()))
 }
 
 pub(crate) fn completion_policy_name(policy: &WorkCompletionPolicy) -> &'static str {
@@ -517,14 +1126,105 @@ fn apply_new_item_dsl(
     let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::new();
     wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input)
         .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
-    Ok(dsl_auth.state)
+    Ok(dsl_auth.state().clone())
+}
+
+/// Resolve whether a requested INITIAL work status is an admissible creation
+/// state.
+///
+/// The shell performs only a pure typed extraction of the requested
+/// `WorkStatus` into the machine's `WorkLifecycleState` observation. The
+/// creation POLICY "a new work item may only start open or blocked" is owned by
+/// the canonical `WorkGraphLifecycleMachine`: this drives its
+/// `ClassifyCreateStatusAdmission` input over a fresh authority and mirrors the
+/// emitted `CreateStatusAdmissionClassified` verdict. The shell decides nothing
+/// and fails closed if the machine refuses or emits no verdict.
+fn classify_create_status_admission(
+    status: WorkStatus,
+) -> Result<wg_dsl::WorkCreateStatusAdmissionKind, WorkGraphError> {
+    let requested_status = crate::types::work_lifecycle_state_from_status(status);
+    let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::new();
+    let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(
+        &mut dsl_auth,
+        wg_dsl::WorkGraphLifecycleInput::ClassifyCreateStatusAdmission { requested_status },
+    )
+    .map_err(|error| {
+        WorkGraphError::InvalidTransition(format!(
+            "WorkGraphLifecycle refused create-status admission for {requested_status:?}: {error:?}"
+        ))
+    })?;
+
+    let mut admission = None;
+    for effect in transition.effects() {
+        if let wg_dsl::WorkGraphLifecycleEffect::CreateStatusAdmissionClassified {
+            admission: emitted,
+        } = effect
+            && admission.replace(*emitted).is_some()
+        {
+            return Err(WorkGraphError::Store(format!(
+                "WorkGraphLifecycle create-status admission emitted multiple verdicts for {requested_status:?}"
+            )));
+        }
+    }
+
+    admission.ok_or_else(|| {
+        WorkGraphError::Store(format!(
+            "WorkGraphLifecycle create-status admission emitted no verdict for {requested_status:?}"
+        ))
+    })
+}
+
+/// Resolve whether a requested target lifecycle status is an admissible CLOSE
+/// target.
+///
+/// The shell performs only a pure typed extraction of the requested
+/// `WorkStatus` into the machine's `WorkLifecycleState` observation. The
+/// lifecycle-class fact "close requires a terminal status" is owned by the
+/// canonical `WorkGraphLifecycleMachine`: this drives its
+/// `ClassifyCloseStatusAdmission` input over a fresh authority and mirrors the
+/// emitted `CloseStatusAdmissionClassified` verdict. The shell decides nothing
+/// and fails closed if the machine refuses or emits no verdict.
+fn classify_close_status_admission(
+    status: WorkStatus,
+) -> Result<wg_dsl::WorkCloseStatusAdmissionKind, WorkGraphError> {
+    let requested_status = crate::types::work_lifecycle_state_from_status(status);
+    let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::new();
+    let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(
+        &mut dsl_auth,
+        wg_dsl::WorkGraphLifecycleInput::ClassifyCloseStatusAdmission { requested_status },
+    )
+    .map_err(|error| {
+        WorkGraphError::InvalidTransition(format!(
+            "WorkGraphLifecycle refused close-status admission for {requested_status:?}: {error:?}"
+        ))
+    })?;
+
+    let mut admission = None;
+    for effect in transition.effects() {
+        if let wg_dsl::WorkGraphLifecycleEffect::CloseStatusAdmissionClassified {
+            admission: emitted,
+        } = effect
+            && admission.replace(*emitted).is_some()
+        {
+            return Err(WorkGraphError::Store(format!(
+                "WorkGraphLifecycle close-status admission emitted multiple verdicts for {requested_status:?}"
+            )));
+        }
+    }
+
+    admission.ok_or_else(|| {
+        WorkGraphError::Store(format!(
+            "WorkGraphLifecycle close-status admission emitted no verdict for {requested_status:?}"
+        ))
+    })
 }
 
 fn apply_link_validation_dsl(
     state: WorkGraphMachineState,
     input: wg_dsl::WorkGraphLifecycleInput,
 ) -> Result<(), WorkGraphError> {
-    let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::from_state(state);
+    let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::recover_from_state(state)
+        .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
     wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input)
         .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
     Ok(())
@@ -534,9 +1234,15 @@ fn apply_attention_dsl(
     binding: &WorkAttentionBinding,
     input: attention_dsl::WorkAttentionLifecycleInput,
 ) -> Result<attention_dsl::WorkAttentionLifecycleMachineState, WorkGraphError> {
-    let mut dsl_auth = attention_dsl::WorkAttentionLifecycleMachineAuthority::from_state(
+    let mut dsl_auth = attention_dsl::WorkAttentionLifecycleMachineAuthority::recover_from_state(
         binding.machine_state.clone(),
-    );
+    )
+    .map_err(|error| {
+        WorkGraphError::InvalidTransition(format!(
+            "attention binding {} refused recovery: {error:?}",
+            binding.binding_id
+        ))
+    })?;
     attention_dsl::WorkAttentionLifecycleMachineMutator::apply(&mut dsl_auth, input).map_err(
         |error| {
             WorkGraphError::InvalidTransition(format!(
@@ -545,7 +1251,7 @@ fn apply_attention_dsl(
             ))
         },
     )?;
-    Ok(dsl_auth.state)
+    Ok(dsl_auth.state().clone())
 }
 
 fn apply_item_dsl(
@@ -557,7 +1263,8 @@ fn apply_item_dsl(
     validate_item_machine_projection(item)?;
     let mut state = item.machine_state.clone();
     state.unresolved_blocker_count = unresolved_blocker_count;
-    let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::from_state(state);
+    let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::recover_from_state(state)
+        .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
     wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input).map_err(|error| {
         if let Some(expected) = expected_revision
             && item.revision != expected
@@ -570,7 +1277,7 @@ fn apply_item_dsl(
         }
         WorkGraphError::InvalidTransition(format!("{error:?}"))
     })?;
-    Ok(dsl_auth.state)
+    Ok(dsl_auth.state().clone())
 }
 
 fn sync_attention_from_machine_state(binding: &mut WorkAttentionBinding) {
@@ -857,14 +1564,28 @@ fn seconds_to_duration(seconds: u64) -> Duration {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::redundant_clone
+)]
 mod tests {
     use super::*;
     use crate::types::{
-        ClaimWorkItemRequest, CloseWorkItemRequest, UpdateWorkItemRequest, WorkOwner, WorkOwnerKey,
+        AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, UpdateWorkItemRequest,
+        WorkEvidenceKind, WorkEvidenceRef, WorkOwner, WorkOwnerKey,
     };
 
     fn create(title: &str, now: DateTime<Utc>) -> WorkItem {
+        create_with_policy(title, WorkCompletionPolicy::SelfAttest, now)
+    }
+
+    fn create_with_policy(
+        title: &str,
+        completion_policy: WorkCompletionPolicy,
+        now: DateTime<Utc>,
+    ) -> WorkItem {
         WorkGraphMachine::create_item(
             CreateWorkItemRequest {
                 realm_id: None,
@@ -872,7 +1593,7 @@ mod tests {
                 title: title.to_string(),
                 description: None,
                 priority: Default::default(),
-                completion_policy: Default::default(),
+                completion_policy,
                 labels: BTreeSet::new(),
                 due_at: None,
                 not_before: None,
@@ -891,6 +1612,222 @@ mod tests {
 
     fn owner(id: &str) -> WorkOwner {
         WorkOwner::new(WorkOwnerKey::label(id).expect("owner key"))
+    }
+
+    fn create_with_status(
+        status: Option<WorkStatus>,
+        now: DateTime<Utc>,
+    ) -> Result<WorkItem, WorkGraphError> {
+        WorkGraphMachine::create_item(
+            CreateWorkItemRequest {
+                realm_id: None,
+                namespace: None,
+                title: "status-create".to_string(),
+                description: None,
+                priority: Default::default(),
+                completion_policy: WorkCompletionPolicy::SelfAttest,
+                labels: BTreeSet::new(),
+                due_at: None,
+                not_before: None,
+                snoozed_until: None,
+                external_refs: Vec::new(),
+                evidence_refs: Vec::new(),
+                status,
+            },
+            "realm".to_string(),
+            WorkNamespace::default(),
+            now,
+        )
+        .map(|(item, _)| item)
+    }
+
+    #[test]
+    fn create_status_admission_is_decided_by_machine() {
+        use wg_dsl::WorkCreateStatusAdmissionKind as Admission;
+        // The machine owns the "only open or blocked" creation policy.
+        assert_eq!(
+            classify_create_status_admission(WorkStatus::Open).expect("classify open"),
+            Admission::AdmittedOpen
+        );
+        assert_eq!(
+            classify_create_status_admission(WorkStatus::Blocked).expect("classify blocked"),
+            Admission::AdmittedBlocked
+        );
+        for status in [
+            WorkStatus::InProgress,
+            WorkStatus::Completed,
+            WorkStatus::Cancelled,
+            WorkStatus::Failed,
+        ] {
+            assert_eq!(
+                classify_create_status_admission(status)
+                    .unwrap_or_else(|error| panic!("classify {status:?}: {error:?}")),
+                Admission::Denied,
+                "requested status {status:?} must be denied as a creation state"
+            );
+        }
+    }
+
+    #[test]
+    fn create_item_admits_open_and_blocked_and_rejects_the_rest() {
+        let now = Utc::now();
+        assert_eq!(
+            create_with_status(Some(WorkStatus::Open), now)
+                .expect("open admitted")
+                .status,
+            WorkStatus::Open
+        );
+        assert_eq!(
+            create_with_status(Some(WorkStatus::Blocked), now)
+                .expect("blocked admitted")
+                .status,
+            WorkStatus::Blocked
+        );
+        // Default (None) resolves to Open and must be admitted.
+        assert_eq!(
+            create_with_status(None, now)
+                .expect("default admitted")
+                .status,
+            WorkStatus::Open
+        );
+        for status in [
+            WorkStatus::InProgress,
+            WorkStatus::Completed,
+            WorkStatus::Cancelled,
+            WorkStatus::Failed,
+        ] {
+            let error = create_with_status(Some(status), now)
+                .expect_err("non-open/blocked create status must be rejected");
+            match error {
+                WorkGraphError::InvalidTransition(message) => assert_eq!(
+                    message, "new work items may only start open or blocked",
+                    "rejection message preserved for {status:?}"
+                ),
+                other => panic!("expected InvalidTransition for {status:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn public_confirmation_admission_is_decided_by_machine() {
+        use wg_dsl::WorkPublicConfirmationAdmissionKind as Admission;
+        // The machine owns the trust-scoped eligibility: only SelfAttest is
+        // publicly confirmable; every other policy requires trusted host.
+        assert_eq!(
+            WorkGraphMachine::classify_public_confirmation_admission(
+                &WorkCompletionPolicy::SelfAttest
+            )
+            .expect("self-attest admission"),
+            Admission::Admitted
+        );
+        let owner_key = WorkOwnerKey::label("supervisor").expect("owner key");
+        let denied = [
+            WorkCompletionPolicy::HostConfirmed,
+            WorkCompletionPolicy::PrincipalConfirmed,
+            WorkCompletionPolicy::Supervisor {
+                owner_key: owner_key.clone(),
+            },
+            WorkCompletionPolicy::ReviewerQuorum { threshold: 2 },
+        ];
+        for policy in denied {
+            assert_eq!(
+                WorkGraphMachine::classify_public_confirmation_admission(&policy)
+                    .unwrap_or_else(|error| panic!("classify {policy:?}: {error:?}")),
+                Admission::DeniedRequiresTrustedHost,
+                "policy {policy:?} must require trusted host for public confirmation"
+            );
+        }
+    }
+
+    #[test]
+    fn create_completion_policy_admission_is_decided_by_machine() {
+        use wg_dsl::WorkCreateCompletionPolicyAdmissionKind as Admission;
+        // The machine owns the "non-goal work items must use self_attest"
+        // creation policy.
+        assert_eq!(
+            WorkGraphMachine::classify_create_completion_policy_admission(
+                &WorkCompletionPolicy::SelfAttest
+            )
+            .expect("self-attest admission"),
+            Admission::Admitted
+        );
+        let owner_key = WorkOwnerKey::label("supervisor").expect("owner key");
+        let denied = [
+            WorkCompletionPolicy::HostConfirmed,
+            WorkCompletionPolicy::PrincipalConfirmed,
+            WorkCompletionPolicy::Supervisor { owner_key },
+            WorkCompletionPolicy::ReviewerQuorum { threshold: 2 },
+        ];
+        for policy in denied {
+            assert_eq!(
+                WorkGraphMachine::classify_create_completion_policy_admission(&policy)
+                    .unwrap_or_else(|error| panic!("classify {policy:?}: {error:?}")),
+                Admission::DeniedNonSelfAttest,
+                "policy {policy:?} must be denied at create for a non-goal work item"
+            );
+        }
+    }
+
+    #[test]
+    fn close_status_admission_is_decided_by_machine() {
+        use wg_dsl::WorkCloseStatusAdmissionKind as Admission;
+        // The machine owns the "close requires a terminal status" lifecycle
+        // class fact.
+        assert_eq!(
+            classify_close_status_admission(WorkStatus::Completed).expect("classify completed"),
+            Admission::AdmittedCompleted
+        );
+        assert_eq!(
+            classify_close_status_admission(WorkStatus::Cancelled).expect("classify cancelled"),
+            Admission::AdmittedCancelled
+        );
+        assert_eq!(
+            classify_close_status_admission(WorkStatus::Failed).expect("classify failed"),
+            Admission::AdmittedFailed
+        );
+        for status in [
+            WorkStatus::Open,
+            WorkStatus::InProgress,
+            WorkStatus::Blocked,
+        ] {
+            assert_eq!(
+                classify_close_status_admission(status)
+                    .unwrap_or_else(|error| panic!("classify {status:?}: {error:?}")),
+                Admission::DeniedNonTerminal,
+                "requested close status {status:?} must be denied as a non-terminal target"
+            );
+        }
+    }
+
+    #[test]
+    fn close_item_rejects_non_terminal_status_with_preserved_message() {
+        let now = Utc::now();
+        for status in [
+            WorkStatus::Open,
+            WorkStatus::InProgress,
+            WorkStatus::Blocked,
+        ] {
+            let item = create("close-target", now);
+            let error = WorkGraphMachine::close_item(
+                item.clone(),
+                CloseWorkItemRequest {
+                    id: item.id.clone(),
+                    realm_id: None,
+                    namespace: None,
+                    expected_revision: item.revision,
+                    status,
+                },
+                now,
+            )
+            .expect_err("non-terminal close status must be rejected");
+            match error {
+                WorkGraphError::InvalidTransition(message) => assert_eq!(
+                    message, "close requires a terminal status",
+                    "rejection message preserved for {status:?}"
+                ),
+                other => panic!("expected InvalidTransition for {status:?}, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -930,6 +1867,78 @@ mod tests {
     }
 
     #[test]
+    fn readiness_is_decided_by_machine_matching_claim_guards() {
+        let now = Utc::now();
+
+        // A fresh open item with no blockers and no time windows is ready —
+        // exactly what the `ClaimOpen` guard accepts.
+        let open = create("ready-open", now);
+        assert_eq!(open.status, WorkStatus::Open);
+        assert!(
+            WorkGraphMachine::classify_readiness(&open, now).expect("classify open"),
+            "an unblocked, due-eligible open item must be machine-classified ready"
+        );
+        assert!(WorkGraphMachine::is_ready(&open, now));
+
+        // A future-due open item is not ready (mirrors `due_eligible` guard).
+        let (future, _) = WorkGraphMachine::update_item(
+            open,
+            UpdateWorkItemRequest {
+                id: WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: 1,
+                title: None,
+                description: None,
+                priority: None,
+                completion_policy: None,
+                labels: None,
+                due_at: Some(now + Duration::hours(1)),
+                not_before: None,
+                snoozed_until: None,
+                external_refs: Vec::new(),
+            },
+            now,
+        )
+        .expect("update future due");
+        assert!(
+            !WorkGraphMachine::classify_readiness(&future, now).expect("classify future"),
+            "a future-due open item must be machine-classified not ready"
+        );
+        assert!(!WorkGraphMachine::is_ready(&future, now));
+
+        // A claimed (InProgress) item with a live lease is NOT ready; once the
+        // lease expires it becomes ready (mirrors `ClaimExpiredInProgress`).
+        let claimable = create("reclaim", now);
+        let (claimed, _) = WorkGraphMachine::claim_item(
+            claimable,
+            ClaimWorkItemRequest {
+                id: WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: 1,
+                owner: owner("worker"),
+                lease_seconds: Some(30),
+                lease_expires_at: None,
+            },
+            now,
+        )
+        .expect("claim");
+        assert_eq!(claimed.status, WorkStatus::InProgress);
+        assert!(
+            !WorkGraphMachine::classify_readiness(&claimed, now).expect("classify live lease"),
+            "an in-progress item with a live lease must not be machine-classified ready"
+        );
+        let after_lease = now + Duration::seconds(31);
+        assert!(
+            WorkGraphMachine::classify_readiness(&claimed, after_lease)
+                .expect("classify expired lease"),
+            "an in-progress item with an expired lease must be machine-classified ready"
+        );
+        assert!(WorkGraphMachine::is_ready(&claimed, after_lease));
+    }
+
+    #[test]
     fn terminal_items_cannot_be_claimed() {
         let now = Utc::now();
         let item = create("done", now);
@@ -965,13 +1974,19 @@ mod tests {
     #[test]
     fn completed_close_is_completion_policy_gated_by_machine() {
         let now = Utc::now();
-        let mut item = create("needs host confirmation", now);
-        item.completion_policy = WorkCompletionPolicy::HostConfirmed;
+        let item = create_with_policy(
+            "needs host confirmation",
+            WorkCompletionPolicy::HostConfirmed,
+            now,
+        );
 
+        // The machine's completion_policy_satisfied guard refuses the
+        // CloseCompleted transition while no host confirmation evidence has
+        // been recorded.
         let error = WorkGraphMachine::close_item(
             item.clone(),
             CloseWorkItemRequest {
-                id: item.id,
+                id: item.id.clone(),
                 realm_id: None,
                 namespace: None,
                 expected_revision: 1,
@@ -981,6 +1996,151 @@ mod tests {
         )
         .expect_err("machine must reject completed close without policy evidence");
         assert!(matches!(error, WorkGraphError::InvalidTransition(_)));
+
+        // Once typed host-confirmation evidence is recorded, the machine's
+        // owned host_confirmation_count satisfies the policy and the close
+        // transition is admitted.
+        let (item, _) = WorkGraphMachine::add_evidence(
+            item,
+            AddEvidenceRequest {
+                id: WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: 1,
+                evidence: WorkEvidenceRef {
+                    kind: "host_confirmation".to_string(),
+                    id: "acceptance".to_string(),
+                    label: None,
+                    summary: None,
+                    confirmation_kind: Some(WorkEvidenceKind::HostConfirmation),
+                    confirming_owner_key: None,
+                },
+            },
+            now,
+        )
+        .expect("record host confirmation evidence");
+
+        let (closed, _) = WorkGraphMachine::close_item(
+            item.clone(),
+            CloseWorkItemRequest {
+                id: item.id,
+                realm_id: None,
+                namespace: None,
+                expected_revision: item.revision,
+                status: WorkStatus::Completed,
+            },
+            now,
+        )
+        .expect("machine admits close once host confirmation is satisfied");
+        assert_eq!(closed.status, WorkStatus::Completed);
+    }
+
+    #[test]
+    fn reviewer_quorum_close_requires_distinct_reviewers() {
+        let now = Utc::now();
+        let item = create_with_policy(
+            "needs two reviewers",
+            WorkCompletionPolicy::ReviewerQuorum { threshold: 2 },
+            now,
+        );
+
+        let reviewer_evidence = |reviewer: &str| WorkEvidenceRef {
+            kind: "reviewer_confirmation".to_string(),
+            id: reviewer.to_string(),
+            label: Some(reviewer.to_string()),
+            summary: None,
+            confirmation_kind: Some(WorkEvidenceKind::ReviewerConfirmation),
+            confirming_owner_key: Some(
+                WorkOwnerKey::principal(reviewer).expect("reviewer principal"),
+            ),
+        };
+
+        // One distinct reviewer is short of the quorum: machine refuses close.
+        let (item, _) = WorkGraphMachine::add_evidence(
+            item,
+            AddEvidenceRequest {
+                id: WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: 1,
+                evidence: reviewer_evidence("alice"),
+            },
+            now,
+        )
+        .expect("record first reviewer");
+
+        let error = WorkGraphMachine::close_item(
+            item.clone(),
+            CloseWorkItemRequest {
+                id: item.id.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: item.revision,
+                status: WorkStatus::Completed,
+            },
+            now,
+        )
+        .expect_err("single reviewer must not satisfy a quorum of two");
+        assert!(matches!(error, WorkGraphError::InvalidTransition(_)));
+
+        // A duplicate confirmation from the same reviewer does not advance the
+        // distinct-reviewer count; the machine still refuses.
+        let expected_revision = item.revision;
+        let (item, _) = WorkGraphMachine::add_evidence(
+            item,
+            AddEvidenceRequest {
+                id: WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision,
+                evidence: reviewer_evidence("alice"),
+            },
+            now,
+        )
+        .expect("record duplicate reviewer");
+
+        let error = WorkGraphMachine::close_item(
+            item.clone(),
+            CloseWorkItemRequest {
+                id: item.id.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: item.revision,
+                status: WorkStatus::Completed,
+            },
+            now,
+        )
+        .expect_err("duplicate reviewer must not satisfy a quorum of two");
+        assert!(matches!(error, WorkGraphError::InvalidTransition(_)));
+
+        // A second distinct reviewer reaches the quorum; machine admits close.
+        let expected_revision = item.revision;
+        let (item, _) = WorkGraphMachine::add_evidence(
+            item,
+            AddEvidenceRequest {
+                id: WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision,
+                evidence: reviewer_evidence("bob"),
+            },
+            now,
+        )
+        .expect("record second reviewer");
+
+        let (closed, _) = WorkGraphMachine::close_item(
+            item.clone(),
+            CloseWorkItemRequest {
+                id: item.id,
+                realm_id: None,
+                namespace: None,
+                expected_revision: item.revision,
+                status: WorkStatus::Completed,
+            },
+            now,
+        )
+        .expect("two distinct reviewers satisfy the quorum");
+        assert_eq!(closed.status, WorkStatus::Completed);
     }
 
     #[test]
@@ -990,6 +2150,71 @@ mod tests {
         let error =
             WorkGraphMachine::block_item(item, 7, now).expect_err("stale transition should fail");
         assert!(matches!(error, WorkGraphError::StaleRevision { .. }));
+    }
+
+    #[test]
+    fn public_error_class_is_machine_owned() {
+        use crate::types::{WorkAttentionBindingId, WorkNamespace};
+
+        let cases: &[(WorkGraphError, WorkGraphPublicErrorClass)] = &[
+            (
+                WorkGraphError::not_found(
+                    "realm".to_string(),
+                    WorkNamespace::default(),
+                    WorkItemId::generated(),
+                ),
+                WorkGraphPublicErrorClass::NotFound,
+            ),
+            (
+                WorkGraphError::attention_not_found(
+                    "realm".to_string(),
+                    WorkNamespace::default(),
+                    WorkAttentionBindingId::generated(),
+                ),
+                WorkGraphPublicErrorClass::NotFound,
+            ),
+            (
+                WorkGraphError::StaleRevision {
+                    id: WorkItemId::generated(),
+                    expected: 1,
+                    actual: 2,
+                },
+                WorkGraphPublicErrorClass::Conflict,
+            ),
+            (
+                WorkGraphError::Conflict("conflict".to_string()),
+                WorkGraphPublicErrorClass::Conflict,
+            ),
+            (
+                WorkGraphError::InvalidTransition("bad".to_string()),
+                WorkGraphPublicErrorClass::InvalidTransition,
+            ),
+            (
+                WorkGraphError::InvalidInput("bad".to_string()),
+                WorkGraphPublicErrorClass::InvalidArguments,
+            ),
+            (
+                WorkGraphError::InvalidTimestampMillis {
+                    field: "due_at",
+                    millis: -1,
+                },
+                WorkGraphPublicErrorClass::InvalidArguments,
+            ),
+            (
+                WorkGraphError::Store("store".to_string()),
+                WorkGraphPublicErrorClass::StoreError,
+            ),
+            (
+                WorkGraphError::UnsupportedBackend("backend".to_string()),
+                WorkGraphPublicErrorClass::CapabilityUnavailable,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            let class = WorkGraphMachine::public_error_class(error)
+                .expect("machine must classify every WorkGraphError variant");
+            assert_eq!(class, *expected, "unexpected public class for {error:?}");
+        }
     }
 
     #[test]

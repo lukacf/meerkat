@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0-alpha.0] - 2026-06-04
+
+Meerkat 0.7.0-alpha.0 publishes the generated-authority canary for downstream
+testing. It includes breaking wire and SDK-surface changes, so downstream
+canaries should pin exact dependencies with `=0.7.0-alpha.0`.
+
 ### Changed
 
 - **Supervisor bridge protocol bumped to V3 (breaking wire change)** — peer

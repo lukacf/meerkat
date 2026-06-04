@@ -61,11 +61,11 @@ pub use types::{
     PublicGoalCompletionPolicy, PublicGoalCreateRequest, PublicGoalRequestCloseRequest,
     ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkAttentionBinding,
     WorkAttentionBindingId, WorkAttentionMachineState, WorkAttentionMode, WorkAttentionStatus,
-    WorkAttentionTarget, WorkClaim, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceRef,
-    WorkGraphEvent, WorkGraphEventKind, WorkGraphEventsResponse, WorkGraphItemsResponse,
-    WorkGraphMachineState, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem, WorkItemFilter,
-    WorkItemId, WorkItemRef, WorkNamespace, WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority,
-    WorkStatus,
+    WorkAttentionTarget, WorkClaim, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceKind,
+    WorkEvidenceRef, WorkGraphEvent, WorkGraphEventKind, WorkGraphEventsResponse,
+    WorkGraphItemsResponse, WorkGraphMachineState, WorkGraphSnapshot, WorkGraphSnapshotFilter,
+    WorkItem, WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace, WorkOwner, WorkOwnerKey,
+    WorkOwnerKind, WorkPriority, WorkStatus,
 };
 
 pub const WORKGRAPH_CAPABILITY_DISABLED_DESCRIPTION: &str =

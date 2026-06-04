@@ -24953,8 +24953,9 @@ async fn test_spawn_rejects_reserved_flow_system_member_prefix() {
         .await
         .expect_err("reserved system member prefix should be rejected");
     assert!(
-        err.to_string().contains("reserved system prefix"),
-        "error should clearly explain reserved id prefix: {err}"
+        err.to_string()
+            .contains("reserved system identifier namespace"),
+        "error should clearly explain reserved id namespace: {err}"
     );
 }
 

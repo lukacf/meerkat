@@ -144,11 +144,7 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
                 severity: DiagnosticSeverity::Error,
             });
         }
-        if name.as_str() == crate::runtime::flow_system_member_id().as_str()
-            || name
-                .as_str()
-                .starts_with(crate::runtime::FLOW_SYSTEM_MEMBER_ID_PREFIX)
-        {
+        if crate::ids::AgentIdentity::from(name.as_str()).is_system_reserved() {
             diagnostics.push(Diagnostic {
                 code: DiagnosticCode::ReservedSystemIdentifier,
                 message: format!(

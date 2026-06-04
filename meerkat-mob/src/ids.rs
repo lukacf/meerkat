@@ -223,6 +223,33 @@ impl From<&AgentIdentity> for AgentIdentity {
     }
 }
 
+impl AgentIdentity {
+    /// Returns `true` when this identity falls inside the reserved
+    /// flow-system namespace.
+    ///
+    /// This is the single canonical predicate for "is this a system-owned
+    /// identity the public spawn/wire surfaces must reject"; all admission and
+    /// validation sites route through it rather than re-deriving the meaning
+    /// from the underlying string prefix.
+    pub(crate) fn is_system_reserved(&self) -> bool {
+        self.as_str()
+            .starts_with(crate::runtime::FLOW_SYSTEM_MEMBER_ID_PREFIX)
+    }
+
+    /// Constructs the reserved provenance identity used to attribute
+    /// flow-system-authored step ledger entries.
+    pub(crate) fn flow_system_provenance() -> Self {
+        Self::from(crate::run::FLOW_RUN_PROVENANCE_AGENT_ID)
+    }
+
+    /// Returns `true` when this identity is exactly the reserved flow-system
+    /// provenance identity (stricter than [`Self::is_system_reserved`], which
+    /// matches the whole reserved namespace).
+    pub(crate) fn is_flow_system_provenance(&self) -> bool {
+        self.as_str() == crate::run::FLOW_RUN_PROVENANCE_AGENT_ID
+    }
+}
+
 /// Monotonically increasing generation counter for a mob member.
 ///
 /// Starts at 0 on first spawn, advances on each reset. The generation is

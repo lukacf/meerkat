@@ -158,7 +158,8 @@ pub struct MeerkatRunInput {
     #[serde(default)]
     pub system_prompt: Option<String>,
     #[serde(default)]
-    pub model: Option<String>,
+    #[schemars(with = "Option<String>")]
+    pub model: Option<meerkat_core::lifecycle::run_primitive::ModelId>,
     #[serde(default)]
     pub max_tokens: Option<u32>,
     #[serde(default)]
@@ -1007,7 +1008,8 @@ pub struct MeerkatResumeInput {
     pub peer_meta: Option<meerkat_core::PeerMeta>,
     /// Optional model override for resume.
     #[serde(default)]
-    pub model: Option<String>,
+    #[schemars(with = "Option<String>")]
+    pub model: Option<meerkat_core::lifecycle::run_primitive::ModelId>,
     /// Optional max_tokens override for resume.
     #[serde(default)]
     pub max_tokens: Option<u32>,
@@ -1142,14 +1144,110 @@ pub struct MeerkatSessionEventStreamOpenInput {
     pub session_id: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct MeerkatSessionEventStreamReadInput {
-    pub stream_id: String,
+/// Tri-state read-timeout policy for an event-stream read.
+///
+/// Owns the single semantic distinction that drives which timeout branch runs:
+/// a finite caller timeout, an unbounded wait, or the surface default. The
+/// legacy two-field wire form (`timeout_ms` + `no_timeout`) is collapsed into
+/// this enum once at the deserialization boundary
+/// ([`StreamReadTimeoutWire`]); consumers read [`StreamReadTimeout::duration`]
+/// rather than re-deriving the policy by field precedence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamReadTimeout {
+    /// No `timeout_ms` / `no_timeout` supplied: apply the surface default.
+    Default,
+    /// `no_timeout` requested: wait indefinitely for the next event.
+    Infinite,
+    /// `timeout_ms` supplied: apply this finite per-read timeout.
+    Fixed { ms: u64 },
+}
+
+impl Default for StreamReadTimeout {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
+impl StreamReadTimeout {
+    /// Resolve the policy to an optional wait duration. `None` means
+    /// "wait indefinitely"; `Some` is the finite timeout for this read.
+    #[must_use]
+    pub fn duration(self) -> Option<std::time::Duration> {
+        match self {
+            Self::Infinite => None,
+            Self::Fixed { ms } => Some(std::time::Duration::from_millis(ms)),
+            Self::Default => Some(std::time::Duration::from_millis(
+                DEFAULT_STREAM_READ_TIMEOUT_MS,
+            )),
+        }
+    }
+}
+
+/// Legacy two-field wire form for [`StreamReadTimeout`]. Kept so the MCP tool
+/// input schema and existing clients (which send `timeout_ms`/`no_timeout`)
+/// continue to work unchanged; the precedence collapse happens here, once.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct StreamReadTimeoutWire {
     #[serde(default)]
     pub timeout_ms: Option<u64>,
     /// Disable timeout and wait indefinitely for the next event.
     #[serde(default)]
     pub no_timeout: bool,
+}
+
+impl From<StreamReadTimeoutWire> for StreamReadTimeout {
+    fn from(wire: StreamReadTimeoutWire) -> Self {
+        // Precedence (preserved from the prior consumer logic): an explicit
+        // `no_timeout` wins over any `timeout_ms`; otherwise a supplied
+        // `timeout_ms` is finite; otherwise the surface default applies.
+        if wire.no_timeout {
+            Self::Infinite
+        } else {
+            match wire.timeout_ms {
+                Some(ms) => Self::Fixed { ms },
+                None => Self::Default,
+            }
+        }
+    }
+}
+
+/// `#[serde(flatten)]` carrier that deserializes the legacy
+/// `timeout_ms`/`no_timeout` fields into the typed [`StreamReadTimeout`] policy
+/// without changing the wire form. Consumers read `.policy.duration()`.
+#[derive(Debug, Default)]
+pub struct StreamReadTimeoutFlat {
+    pub policy: StreamReadTimeout,
+}
+
+impl<'de> Deserialize<'de> for StreamReadTimeoutFlat {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        StreamReadTimeoutWire::deserialize(deserializer).map(|wire| Self {
+            policy: wire.into(),
+        })
+    }
+}
+
+impl JsonSchema for StreamReadTimeoutFlat {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        StreamReadTimeoutWire::schema_name()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        StreamReadTimeoutWire::json_schema(generator)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MeerkatSessionEventStreamReadInput {
+    pub stream_id: String,
+    /// Read-timeout policy. Deserialized from the legacy `timeout_ms` /
+    /// `no_timeout` fields and flattened so the wire form is unchanged.
+    #[serde(flatten)]
+    #[schemars(flatten)]
+    pub timeout: StreamReadTimeoutFlat,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1170,11 +1268,11 @@ pub struct MeerkatMobEventStreamOpenInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MeerkatMobEventStreamReadInput {
     pub stream_id: String,
-    #[serde(default)]
-    pub timeout_ms: Option<u64>,
-    /// Disable timeout and wait indefinitely for the next event.
-    #[serde(default)]
-    pub no_timeout: bool,
+    /// Read-timeout policy. Deserialized from the legacy `timeout_ms` /
+    /// `no_timeout` fields and flattened so the wire form is unchanged.
+    #[serde(flatten)]
+    #[schemars(flatten)]
+    pub timeout: StreamReadTimeoutFlat,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2530,31 +2628,20 @@ async fn handle_meerkat_event_stream_read(
         .cloned()
         .ok_or_else(|| format!("Stream not found: {}", input.stream_id))?;
 
-    let timeout_ms = if input.no_timeout {
-        None
-    } else {
-        Some(input.timeout_ms.unwrap_or(DEFAULT_STREAM_READ_TIMEOUT_MS))
-    };
+    let read_timeout = input.timeout.policy.duration();
     let next_event = {
         let mut stream = handle.stream.lock().await;
-        match timeout_ms {
+        match read_timeout {
             None => stream.next().await,
-            Some(timeout_ms) => {
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(timeout_ms),
-                    stream.next(),
-                )
-                .await
-                {
-                    Ok(item) => item,
-                    Err(_) => {
-                        return Ok(wrap_tool_payload(json!({
-                            "stream_id": input.stream_id,
-                            "status": "timeout"
-                        })));
-                    }
+            Some(timeout) => match tokio::time::timeout(timeout, stream.next()).await {
+                Ok(item) => item,
+                Err(_) => {
+                    return Ok(wrap_tool_payload(json!({
+                        "stream_id": input.stream_id,
+                        "status": "timeout"
+                    })));
                 }
-            }
+            },
         }
     };
 
@@ -2648,34 +2735,23 @@ async fn handle_meerkat_mob_event_stream_read(
         .cloned()
         .ok_or_else(|| format!("Mob event stream not found: {}", input.stream_id))?;
 
-    let timeout_ms = if input.no_timeout {
-        None
-    } else {
-        Some(input.timeout_ms.unwrap_or(DEFAULT_STREAM_READ_TIMEOUT_MS))
-    };
+    let read_timeout = input.timeout.policy.duration();
 
     match handle.as_ref() {
         MobEventStreamInner::Member(stream_mutex) => {
             let next_event = {
                 let mut stream = stream_mutex.lock().await;
-                match timeout_ms {
+                match read_timeout {
                     None => stream.next().await,
-                    Some(ms) => {
-                        match tokio::time::timeout(
-                            std::time::Duration::from_millis(ms),
-                            stream.next(),
-                        )
-                        .await
-                        {
-                            Ok(item) => item,
-                            Err(_) => {
-                                return Ok(wrap_tool_payload(json!({
-                                    "stream_id": input.stream_id,
-                                    "status": "timeout"
-                                })));
-                            }
+                    Some(timeout) => match tokio::time::timeout(timeout, stream.next()).await {
+                        Ok(item) => item,
+                        Err(_) => {
+                            return Ok(wrap_tool_payload(json!({
+                                "stream_id": input.stream_id,
+                                "status": "timeout"
+                            })));
                         }
-                    }
+                    },
                 }
             };
             match next_event {
@@ -2704,15 +2780,10 @@ async fn handle_meerkat_mob_event_stream_read(
         MobEventStreamInner::MobWide(router_mutex) => {
             let next_event = {
                 let mut router_handle = router_mutex.lock().await;
-                match timeout_ms {
+                match read_timeout {
                     None => router_handle.event_rx.recv().await,
-                    Some(ms) => {
-                        match tokio::time::timeout(
-                            std::time::Duration::from_millis(ms),
-                            router_handle.event_rx.recv(),
-                        )
-                        .await
-                        {
+                    Some(timeout) => {
+                        match tokio::time::timeout(timeout, router_handle.event_rx.recv()).await {
                             Ok(item) => item,
                             Err(_) => {
                                 return Ok(wrap_tool_payload(json!({
@@ -2918,7 +2989,9 @@ async fn handle_meerkat_help(
     let run_input = MeerkatRunInput {
         prompt,
         system_prompt: Some(meerkat::help::help_system_prompt().to_string()),
-        model: input.model,
+        model: input
+            .model
+            .map(meerkat_core::lifecycle::run_primitive::ModelId::new),
         max_tokens: input.max_tokens,
         provider,
         output_schema: None,
@@ -2991,7 +3064,8 @@ async fn handle_meerkat_run(
         .unwrap_or_default();
     let model = input
         .model
-        .clone()
+        .as_ref()
+        .map(|m| m.as_str().to_string())
         .unwrap_or_else(|| config.agent.model.clone());
 
     // Build callback tools supplied by the MCP client. The per-session live
@@ -3405,7 +3479,8 @@ async fn handle_meerkat_resume(
     }
     let model = input
         .model
-        .clone()
+        .as_ref()
+        .map(|m| m.as_str().to_string())
         .unwrap_or_else(|| stored_metadata.model.clone());
     let max_tokens = input.max_tokens.or(Some(stored_metadata.max_tokens));
     let provider = input.provider.map(ProviderInput::to_provider);
@@ -3514,7 +3589,7 @@ async fn handle_meerkat_resume(
     let llm_binding = meerkat_core::session_recovery::resolve_resume_llm_binding(
         stored_metadata.provider,
         stored_metadata.self_hosted_server_id.clone(),
-        input.model.as_deref(),
+        input.model.as_ref().map(|m| m.as_str()),
         provider,
     )
     .map_err(|error| ToolCallError::invalid_params(error.to_string()))?;
@@ -4768,7 +4843,12 @@ mod tests {
 
         let input: MeerkatRunInput = serde_json::from_value(input_json).unwrap();
         assert_eq!(input.prompt, "Hello");
-        assert_eq!(input.model, Some("claude-sonnet-4".to_string()));
+        assert_eq!(
+            input.model,
+            Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                "claude-sonnet-4"
+            ))
+        );
         assert_eq!(input.max_tokens, None);
         assert_eq!(input.structured_output_retries, None);
         assert!(input.output_schema.is_none());
@@ -5189,7 +5269,9 @@ mod tests {
             MeerkatRunInput {
                 prompt: "test".to_string(),
                 system_prompt: None,
-                model: Some("claude-opus-4-8".to_string()),
+                model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    "claude-opus-4-8",
+                )),
                 max_tokens: Some(4096),
                 provider: None,
                 output_schema: None,
@@ -5241,7 +5323,9 @@ mod tests {
             MeerkatRunInput {
                 prompt: "test".to_string(),
                 system_prompt: None,
-                model: Some("claude-opus-4-8".to_string()),
+                model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    "claude-opus-4-8",
+                )),
                 max_tokens: Some(4096),
                 provider: None,
                 output_schema: None,

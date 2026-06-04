@@ -248,7 +248,7 @@ impl McpConnection {
                 .await
                 .map_err(|error| StreamableConnectError {
                     reason: format!("Failed to establish MCP connection: {error}"),
-                    auth_challenge: recorder.take(),
+                    auth: recorder.take(),
                 })?;
         Ok(Self {
             config: config.clone(),
@@ -403,12 +403,15 @@ impl McpConnection {
 
 struct StreamableConnectError {
     reason: String,
-    auth_challenge: Option<String>,
+    /// Typed auth-failure record captured at the transport boundary: a parsed
+    /// `www-authenticate` challenge and/or the `401`/`403` status. Both are
+    /// `None` for non-auth failures.
+    auth: crate::transport::streamable_http::AuthChallengeState,
 }
 
 impl StreamableConnectError {
     fn auth_challenge(&self) -> Option<String> {
-        self.auth_challenge.clone()
+        self.auth.challenge().map(String::from)
     }
 
     fn into_mcp_error(self) -> McpError {
@@ -419,12 +422,7 @@ impl StreamableConnectError {
 }
 
 fn auth_failure_suggests_oauth(error: &StreamableConnectError) -> bool {
-    error.auth_challenge.is_some()
-        || error.reason.contains("Auth required")
-        || error.reason.contains("401")
-        || error.reason.contains("403")
-        || error.reason.contains("Unauthorized")
-        || error.reason.contains("Forbidden")
+    error.auth.challenge().is_some() || error.auth.status().is_some()
 }
 
 fn mcp_auth_error_to_connection_failed(error: McpOAuthError) -> McpError {

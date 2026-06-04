@@ -41,6 +41,61 @@ impl InitialTurnHandle {
     }
 }
 
+/// Typed flag set recording which physical wiring side(s) of a peer-only edge
+/// were successfully installed (local recipient, peer recipient, or both).
+///
+/// Drives best-effort rollback compensation: the wire rollback unwires only the
+/// sides that were installed, and the unwire rollback rewires only the sides
+/// that had been torn down. Replaces a hand-rolled `&[&str]` of `"local"` /
+/// `"peer"` literals re-classified by `.contains(...)`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct WiringSides {
+    local: bool,
+    peer: bool,
+}
+
+impl WiringSides {
+    /// No sides installed/torn down.
+    fn empty() -> Self {
+        Self {
+            local: false,
+            peer: false,
+        }
+    }
+
+    /// Only the local recipient side.
+    fn local() -> Self {
+        Self {
+            local: true,
+            peer: false,
+        }
+    }
+
+    /// Only the peer recipient side.
+    fn peer() -> Self {
+        Self {
+            local: false,
+            peer: true,
+        }
+    }
+
+    /// Both recipient sides.
+    fn both() -> Self {
+        Self {
+            local: true,
+            peer: true,
+        }
+    }
+
+    fn has_local(self) -> bool {
+        self.local
+    }
+
+    fn has_peer(self) -> bool {
+        self.peer
+    }
+}
+
 enum SubmitWorkDispatchCompletion {
     Completed,
     AwaitTurnAdmission {
@@ -7495,12 +7550,9 @@ impl MobActor {
             _ => None,
         };
         let prepare_result = async {
-            if agent_identity
-                .as_str()
-                .starts_with(FLOW_SYSTEM_MEMBER_ID_PREFIX)
-            {
+            if agent_identity.is_system_reserved() {
                 return Err(MobError::WiringError(format!(
-                    "meerkat id '{agent_identity}' uses reserved system prefix '{FLOW_SYSTEM_MEMBER_ID_PREFIX}'"
+                    "meerkat id '{agent_identity}' uses reserved system identifier namespace"
                 )));
             }
             tracing::debug!(
@@ -8336,12 +8388,9 @@ impl MobActor {
             continuity_intent,
         } = member_spec;
 
-        if agent_identity
-            .as_str()
-            .starts_with(FLOW_SYSTEM_MEMBER_ID_PREFIX)
-        {
+        if agent_identity.is_system_reserved() {
             return Err(MobError::WiringError(format!(
-                "meerkat id '{agent_identity}' uses reserved system prefix '{FLOW_SYSTEM_MEMBER_ID_PREFIX}'"
+                "meerkat id '{agent_identity}' uses reserved system identifier namespace"
             )));
         }
         if self.pending_spawns.contains_member(agent_identity) {
@@ -9451,7 +9500,7 @@ impl MobActor {
                         self.rollback_peer_only_wire(
                             &edge,
                             false,
-                            &["local"],
+                            WiringSides::local(),
                             &local,
                             &peer_meerkat_id,
                             local_spec,
@@ -9596,7 +9645,7 @@ impl MobActor {
                 self.rollback_peer_only_wire(
                     &edge,
                     dsl_added,
-                    &[],
+                    WiringSides::empty(),
                     &local,
                     &peer_meerkat_id,
                     local_spec,
@@ -9617,7 +9666,7 @@ impl MobActor {
                 self.rollback_peer_only_wire(
                     &edge,
                     dsl_added,
-                    &["local"],
+                    WiringSides::local(),
                     &local,
                     &peer_meerkat_id,
                     local_spec,
@@ -9640,7 +9689,7 @@ impl MobActor {
                     self.rollback_peer_only_wire(
                         &edge,
                         dsl_added,
-                        &["local", "peer"],
+                        WiringSides::both(),
                         &local,
                         &peer_meerkat_id,
                         local_spec,
@@ -9687,7 +9736,7 @@ impl MobActor {
                     self.rollback_peer_only_wire(
                         &edge,
                         dsl_added,
-                        &[],
+                        WiringSides::empty(),
                         &local,
                         &peer_meerkat_id,
                         local_spec,
@@ -9722,7 +9771,7 @@ impl MobActor {
                 self.rollback_peer_only_wire(
                     &edge,
                     dsl_added,
-                    &[],
+                    WiringSides::empty(),
                     &local,
                     &peer_meerkat_id,
                     local_spec,
@@ -9759,7 +9808,7 @@ impl MobActor {
                     self.rollback_peer_only_wire(
                         &edge,
                         dsl_added,
-                        &["peer"],
+                        WiringSides::peer(),
                         &local,
                         &peer_meerkat_id,
                         local_spec,
@@ -9802,7 +9851,7 @@ impl MobActor {
                     self.rollback_peer_only_wire(
                         &edge,
                         dsl_added,
-                        &[],
+                        WiringSides::empty(),
                         &local,
                         &peer_meerkat_id,
                         local_spec,
@@ -9837,7 +9886,7 @@ impl MobActor {
                 self.rollback_peer_only_wire(
                     &edge,
                     dsl_added,
-                    &[],
+                    WiringSides::empty(),
                     &local,
                     &peer_meerkat_id,
                     local_spec,
@@ -9873,7 +9922,7 @@ impl MobActor {
                     self.rollback_peer_only_wire(
                         &edge,
                         dsl_added,
-                        &["local"],
+                        WiringSides::local(),
                         &local,
                         &peer_meerkat_id,
                         local_spec,
@@ -10560,7 +10609,7 @@ impl MobActor {
         &mut self,
         edge: &mob_dsl::WiringEdge,
         dsl_added: bool,
-        installed_sides: &[&str],
+        installed_sides: WiringSides,
         _local_identity: &AgentIdentity,
         _peer_identity: &AgentIdentity,
         local_spec: &TrustedPeerDescriptor,
@@ -10580,7 +10629,7 @@ impl MobActor {
             );
             return;
         }
-        if installed_sides.contains(&"local")
+        if installed_sides.has_local()
             && let Err(error) = self
                 .unwire_peer_only_recipient(
                     local_spec,
@@ -10596,7 +10645,7 @@ impl MobActor {
                 "peer-only wire rollback: failed to unwire local recipient"
             );
         }
-        if installed_sides.contains(&"peer")
+        if installed_sides.has_peer()
             && let Err(error) = self
                 .unwire_peer_only_recipient(
                     peer_spec,
@@ -10618,7 +10667,7 @@ impl MobActor {
     async fn rollback_peer_only_unwire(
         &mut self,
         edge: &mob_dsl::WiringEdge,
-        sides_to_rewire: &[&str],
+        sides_to_rewire: WiringSides,
         _local_identity: &AgentIdentity,
         _peer_identity: &AgentIdentity,
         local_spec: &TrustedPeerDescriptor,
@@ -10634,7 +10683,7 @@ impl MobActor {
             );
             return;
         }
-        if sides_to_rewire.contains(&"local") {
+        if sides_to_rewire.has_local() {
             if let Err(error) = self
                 .wire_peer_only_recipient(
                     local_spec,
@@ -10651,7 +10700,7 @@ impl MobActor {
                 );
             }
         }
-        if sides_to_rewire.contains(&"peer") {
+        if sides_to_rewire.has_peer() {
             if let Err(error) = self
                 .wire_peer_only_recipient(
                     peer_spec,
@@ -10911,7 +10960,7 @@ impl MobActor {
             {
                 self.rollback_peer_only_unwire(
                     &edge,
-                    &[],
+                    WiringSides::empty(),
                     &local,
                     &peer_meerkat_id,
                     local_spec,
@@ -10933,7 +10982,7 @@ impl MobActor {
             {
                 self.rollback_peer_only_unwire(
                     &edge,
-                    &["local"],
+                    WiringSides::local(),
                     &local,
                     &peer_meerkat_id,
                     local_spec,
@@ -10958,7 +11007,7 @@ impl MobActor {
                 Err(error) => {
                     self.rollback_peer_only_unwire(
                         &edge,
-                        &["local", "peer"],
+                        WiringSides::both(),
                         &local,
                         &peer_meerkat_id,
                         local_spec,

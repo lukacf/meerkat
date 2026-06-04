@@ -1,6 +1,5 @@
 use super::conditions::evaluate_condition;
 use super::events::MobEventEmitter;
-use super::flow_system_member_id;
 use super::handle::MobHandle;
 use super::path::resolve_context_path;
 use super::supervisor::Supervisor;
@@ -549,7 +548,7 @@ impl FlowEngine {
         })?;
 
         let requested_step_timeout = Duration::from_millis(step.timeout_ms.unwrap_or(30_000));
-        let (step_timeout, flow_deadline_timeout_reason) =
+        let (step_timeout, step_timeout_outcome) =
             effective_step_timeout(requested_step_timeout, flow_deadline, run_id)?;
         let flow_tool_overlay = step_tool_overlay(step);
 
@@ -570,7 +569,7 @@ impl FlowEngine {
                 step_timeout,
                 max_retries,
                 cancel,
-                flow_deadline_timeout_reason,
+                step_timeout_outcome,
             )
             .await?
         {
@@ -622,7 +621,7 @@ impl FlowEngine {
     ) -> Result<StepGuardOutcome, MobError> {
         let step_timeout = Duration::from_millis(step.timeout_ms.unwrap_or(30_000));
         let flow_tool_overlay = step_tool_overlay(step);
-        let (step_timeout, flow_deadline_timeout_reason) =
+        let (step_timeout, step_timeout_outcome) =
             effective_step_timeout(step_timeout, flow_deadline, run_id)?;
         let prompt = match render_content_input_template(&step.message, context) {
             Ok(prompt) => prompt,
@@ -647,7 +646,7 @@ impl FlowEngine {
             let prompt = prompt.clone();
             let overlay = flow_tool_overlay.clone();
             let output_format = step.output_format.clone();
-            let flow_deadline_timeout_reason = flow_deadline_timeout_reason.clone();
+            let step_timeout_outcome = step_timeout_outcome.clone();
             in_flight.push(async move {
                 let result = engine
                     .execute_single_target_with_retries(
@@ -660,7 +659,7 @@ impl FlowEngine {
                         step_timeout,
                         max_retries,
                         cancel,
-                        flow_deadline_timeout_reason,
+                        step_timeout_outcome,
                     )
                     .await;
                 (target, result)
@@ -741,7 +740,7 @@ impl FlowEngine {
         step_timeout: Duration,
         max_retries: usize,
         cancel: Option<&CancellationToken>,
-        flow_deadline_timeout_reason: Option<String>,
+        step_timeout_outcome: StepTimeoutOutcome,
     ) -> Result<Result<Value, StepTargetFailure>, MobError> {
         let mut attempt = 0usize;
         loop {
@@ -893,10 +892,10 @@ impl FlowEngine {
                             });
                         }
                     };
-                    if let Some(reason) = flow_deadline_timeout_reason.clone() {
+                    if let StepTimeoutOutcome::FailFlow { reason } = &step_timeout_outcome {
                         return Err(MobError::FlowFailed {
                             run_id: run_id.clone(),
-                            reason,
+                            reason: reason.clone(),
                         });
                     }
                     if attempt < max_retries {
@@ -974,7 +973,7 @@ impl FlowEngine {
                 run_id,
                 StepLedgerEntry {
                     step_id: step_notice.step_id,
-                    agent_identity: AgentIdentity::from(flow_system_member_id().as_str()),
+                    agent_identity: AgentIdentity::flow_system_provenance(),
                     status: StepRunStatus::Dispatched,
                     output: None,
                     timestamp: Utc::now(),
@@ -1002,7 +1001,7 @@ impl FlowEngine {
                 run_id,
                 StepLedgerEntry {
                     step_id: step_id.clone(),
-                    agent_identity: AgentIdentity::from(flow_system_member_id().as_str()),
+                    agent_identity: AgentIdentity::flow_system_provenance(),
                     status: effects.step_status.clone(),
                     output: if effects.persist_output { output } else { None },
                     timestamp: Utc::now(),
@@ -1079,7 +1078,7 @@ impl FlowEngine {
                 run_id,
                 StepLedgerEntry {
                     step_id: step_id.clone(),
-                    agent_identity: AgentIdentity::from(flow_system_member_id().as_str()),
+                    agent_identity: AgentIdentity::flow_system_provenance(),
                     status: StepRunStatus::Failed,
                     output: None,
                     timestamp: Utc::now(),
@@ -1135,7 +1134,7 @@ impl FlowEngine {
                     run_id,
                     StepLedgerEntry {
                         step_id: step_notice.step_id.clone(),
-                        agent_identity: AgentIdentity::from(flow_system_member_id().as_str()),
+                        agent_identity: AgentIdentity::flow_system_provenance(),
                         status: step_notice.status,
                         output: None,
                         timestamp: Utc::now(),
@@ -2534,13 +2533,25 @@ fn flow_deadline_reason(deadline: Instant, run_id: &RunId) -> String {
     }
 }
 
+/// Lifecycle disposition for a step timeout, separated from any display text.
+///
+/// `Retryable` means an ordinary step timeout that may be retried up to the
+/// step's retry budget. `FailFlow` means the step deadline was clamped by the
+/// overall flow deadline, so on timeout the entire flow must fail terminally
+/// with the carried reason (no retry).
+#[derive(Debug, Clone)]
+enum StepTimeoutOutcome {
+    Retryable,
+    FailFlow { reason: String },
+}
+
 fn effective_step_timeout(
     requested_step_timeout: Duration,
     flow_deadline: Option<Instant>,
     run_id: &RunId,
-) -> Result<(Duration, Option<String>), MobError> {
+) -> Result<(Duration, StepTimeoutOutcome), MobError> {
     let Some(deadline) = flow_deadline else {
-        return Ok((requested_step_timeout, None));
+        return Ok((requested_step_timeout, StepTimeoutOutcome::Retryable));
     };
     let now = Instant::now();
     if now >= deadline {
@@ -2552,9 +2563,14 @@ fn effective_step_timeout(
 
     let remaining = deadline.saturating_duration_since(now);
     if remaining <= requested_step_timeout {
-        Ok((remaining, Some(flow_deadline_reason(deadline, run_id))))
+        Ok((
+            remaining,
+            StepTimeoutOutcome::FailFlow {
+                reason: flow_deadline_reason(deadline, run_id),
+            },
+        ))
     } else {
-        Ok((requested_step_timeout, None))
+        Ok((requested_step_timeout, StepTimeoutOutcome::Retryable))
     }
 }
 

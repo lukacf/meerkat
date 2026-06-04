@@ -388,14 +388,60 @@ impl WorkEvidenceKind {
             Self::ReviewerConfirmation => wg_dsl::WorkEvidenceKind::ReviewerConfirmation,
         }
     }
+
+    /// Parse a reserved confirmation classification out of the opaque
+    /// provenance/display [`WorkEvidenceRef::kind`] string at the ingress
+    /// boundary. The recognized reserved literals map 1:1 onto a confirmation
+    /// variant; the generic `"self_attest"` literal and every other string
+    /// (including the empty string) carry no reserved confirmation and yield
+    /// `None`. This is the single place the opaque string is classified — every
+    /// downstream decision reads the typed classification, not the string.
+    pub(crate) fn from_kind_str(kind: &str) -> Option<Self> {
+        match kind {
+            "host_confirmation" => Some(Self::HostConfirmation),
+            "principal_confirmation" => Some(Self::PrincipalConfirmation),
+            "supervisor_confirmation" => Some(Self::SupervisorConfirmation),
+            "reviewer_confirmation" => Some(Self::ReviewerConfirmation),
+            _ => None,
+        }
+    }
+
+    /// Whether this classification is a reserved confirmation that may only be
+    /// stamped by the trusted goal-confirm producer. Generic
+    /// [`WorkEvidenceKind::SelfAttest`] evidence is never reserved.
+    pub(crate) fn is_reserved_confirmation(self) -> bool {
+        !matches!(self, Self::SelfAttest)
+    }
+
+    /// Project the typed classification into the machine-owned confirmation
+    /// observation the `WorkGraphLifecycleMachine` consumes. Generic
+    /// self-attested evidence projects to the `Other` observation; the
+    /// empty-display case is handled separately by the caller.
+    pub(crate) fn to_confirmation_observation(self) -> wg_dsl::WorkConfirmationEvidenceObservation {
+        match self {
+            Self::SelfAttest => wg_dsl::WorkConfirmationEvidenceObservation::Other,
+            Self::HostConfirmation => wg_dsl::WorkConfirmationEvidenceObservation::HostConfirmation,
+            Self::PrincipalConfirmation => {
+                wg_dsl::WorkConfirmationEvidenceObservation::PrincipalConfirmation
+            }
+            Self::SupervisorConfirmation => {
+                wg_dsl::WorkConfirmationEvidenceObservation::SupervisorConfirmation
+            }
+            Self::ReviewerConfirmation => {
+                wg_dsl::WorkConfirmationEvidenceObservation::ReviewerConfirmation
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WorkEvidenceRef {
-    /// Opaque provenance/display label for the evidence. NOT used to classify
-    /// evidence for the completion-policy satisfaction decision — see
-    /// [`WorkEvidenceRef::confirmation_kind`].
+    /// Opaque provenance/display label for the evidence. It is parsed into the
+    /// typed confirmation classification at the ingress boundary only (see
+    /// [`WorkEvidenceRef::confirmation_classification`]); no completion-policy
+    /// satisfaction decision re-reads this string. The typed
+    /// [`WorkEvidenceRef::confirmation_kind`] is the authoritative carrier.
     pub kind: String,
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -412,6 +458,24 @@ pub struct WorkEvidenceRef {
     /// owners per confirmation kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirming_owner_key: Option<WorkOwnerKey>,
+}
+
+impl WorkEvidenceRef {
+    /// The effective typed confirmation classification carried by this evidence,
+    /// considering BOTH carriers: the typed [`WorkEvidenceRef::confirmation_kind`]
+    /// field (authoritative when set) and the reserved confirmation literals that
+    /// may be encoded only in the opaque [`WorkEvidenceRef::kind`] string at
+    /// ingress. Returns `None` for generic self-attested evidence.
+    ///
+    /// This is the single typed read every confirmation decision uses, so a
+    /// reserved classification surfaces regardless of which carrier the caller
+    /// supplied — closing the gap where the machine honored a forged
+    /// `confirmation_kind` while the guards inspected only the `kind` string.
+    pub(crate) fn confirmation_classification(&self) -> Option<WorkEvidenceKind> {
+        self.confirmation_kind
+            .filter(|kind| kind.is_reserved_confirmation())
+            .or_else(|| WorkEvidenceKind::from_kind_str(&self.kind))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

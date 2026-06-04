@@ -50,7 +50,8 @@ function makeMemberRef(mobId, agentIdentity) {
 
 describe("Contract Version", () => {
   it("should be semver format", () => {
-    const parts = CONTRACT_VERSION.split(".");
+    const core = CONTRACT_VERSION.split("-", 1)[0].split("+", 1)[0];
+    const parts = core.split(".");
     assert.equal(parts.length, 3);
     for (const part of parts) {
       assert.ok(!isNaN(Number(part)));

@@ -3076,9 +3076,16 @@ export class MeerkatClient {
   }
 
   private static checkVersionCompatible(server: string, client: string): boolean {
+    const coreParts = (version: string): number[] =>
+      version
+        .split("-", 1)[0]
+        .split("+", 1)[0]
+        .split(".")
+        .map(Number);
+
     try {
-      const s = server.split(".").map(Number);
-      const c = client.split(".").map(Number);
+      const s = coreParts(server);
+      const c = coreParts(client);
       if (s[0] === 0 && c[0] === 0) return s[1] === c[1];
       return s[0] === c[0];
     } catch {

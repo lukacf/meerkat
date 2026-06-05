@@ -206,6 +206,10 @@ enum RealmProfileStoreSelection {
     DefaultInMemory(Arc<dyn meerkat_mob::RealmProfileStore>),
     /// Default store that has already been upgraded to durable SQLite under a
     /// persistent storage root. Must not be upgraded again.
+    ///
+    /// Only constructed on non-wasm targets (the SQLite persistent-root upgrade
+    /// is `#[cfg(not(wasm32))]`); on wasm32 it is an unreachable arm.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     DefaultDurable(Arc<dyn meerkat_mob::RealmProfileStore>),
     /// Caller-supplied store (or explicit `None` to disable). Must never be
     /// overridden by the persistent-root auto-upgrade.
@@ -221,7 +225,9 @@ impl RealmProfileStoreSelection {
         }
     }
 
-    /// Whether this is the auto-upgradeable default in-memory store.
+    /// Whether this is the auto-upgradeable default in-memory store. Only
+    /// consulted by the non-wasm persistent-root auto-upgrade.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn is_default(&self) -> bool {
         matches!(self, Self::DefaultInMemory(_))
     }

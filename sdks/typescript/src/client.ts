@@ -317,6 +317,38 @@ function setIfDefined<T extends object, K extends keyof T>(
   }
 }
 
+/**
+ * Lower an ergonomic `value` / `clear` pair to the canonical tagged tri-state
+ * `WireTurnMetadataOverride`:
+ *
+ * - `clear` truthy   -> `{ action: "clear" }` (Clear)
+ * - `value` provided -> `{ action: "set", value }` (Set)
+ * - neither          -> `undefined` (omitted = Inherit)
+ *
+ * The illegal `set + clear` combination is rejected here, mirroring the wire
+ * serde boundary which fails the same payload.
+ */
+function turnMetadataOverride(
+  value: Record<string, unknown> | undefined,
+  clear: boolean | undefined,
+  setField: string,
+  clearField: string,
+): Record<string, unknown> | undefined {
+  if (clear && value !== undefined) {
+    throw new MeerkatError(
+      "INVALID_ARGS",
+      `${clearField} cannot be combined with ${setField}`,
+    );
+  }
+  if (clear) {
+    return { action: "clear" };
+  }
+  if (value !== undefined) {
+    return { action: "set", value };
+  }
+  return undefined;
+}
+
 function mobSpawnPayload(mobId: string, spec: SpawnSpec): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     mob_id: mobId,
@@ -387,10 +419,26 @@ function mobTurnStartPayload(
   setIfDefined(payload, "system_prompt", options?.systemPrompt);
   setIfDefined(payload, "output_schema", options?.outputSchema);
   setIfDefined(payload, "structured_output_retries", options?.structuredOutputRetries);
-  setIfDefined(payload, "provider_params", options?.providerParams);
-  setIfDefined(payload, "clear_provider_params", options?.clearProviderParams);
-  setIfDefined(payload, "auth_binding", options?.authBinding);
-  setIfDefined(payload, "clear_auth_binding", options?.clearAuthBinding);
+  setIfDefined(
+    payload,
+    "provider_params",
+    turnMetadataOverride(
+      options?.providerParams,
+      options?.clearProviderParams,
+      "providerParams",
+      "clearProviderParams",
+    ),
+  );
+  setIfDefined(
+    payload,
+    "auth_binding",
+    turnMetadataOverride(
+      options?.authBinding,
+      options?.clearAuthBinding,
+      "authBinding",
+      "clearAuthBinding",
+    ),
+  );
   return payload;
 }
 

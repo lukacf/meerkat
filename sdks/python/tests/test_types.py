@@ -175,10 +175,11 @@ def test_generated_mob_contract_types_include_spawn_and_turn_start_shapes():
         agent_identity="worker-1",
         prompt=[{"type": "text", "text": "continue"}],
         model="gpt-test",
-        clear_provider_params=True,
+        provider_params={"action": "clear"},
     )
     assert turn.prompt == [{"type": "text", "text": "continue"}]
     assert turn.model == "gpt-test"
+    assert turn.provider_params == {"action": "clear"}
 
     result = GeneratedMobSpawnResult(
         mob_id="mob-1",
@@ -2588,6 +2589,7 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
 
     client._request = fake_request  # type: ignore[method-assign]
 
+    # Set coverage: a concrete value lowers to the tagged `set` override.
     await client.mob_turn_start(
         "mob-1",
         "worker-1",
@@ -2608,9 +2610,7 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
         output_schema={"type": "object"},
         structured_output_retries=2,
         provider_params={"temperature": 0.2},
-        clear_provider_params=True,
         auth_binding={"realm": "dev", "binding": "default_openai"},
-        clear_auth_binding=True,
     )
 
     assert calls == [
@@ -2639,13 +2639,56 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
                 "system_prompt": "system",
                 "output_schema": {"type": "object"},
                 "structured_output_retries": 2,
-                "provider_params": {"temperature": 0.2},
-                "clear_provider_params": True,
-                "auth_binding": {"realm": "dev", "binding": "default_openai"},
-                "clear_auth_binding": True,
+                "provider_params": {
+                    "action": "set",
+                    "value": {"temperature": 0.2},
+                },
+                "auth_binding": {
+                    "action": "set",
+                    "value": {"realm": "dev", "binding": "default_openai"},
+                },
             },
         )
     ]
+
+    # Clear coverage: `clear_*=True` lowers to the tagged `clear` override.
+    calls.clear()
+    await client.mob_turn_start(
+        "mob-1",
+        "worker-1",
+        "continue",
+        clear_provider_params=True,
+        clear_auth_binding=True,
+    )
+    assert calls == [
+        (
+            "mob/turn_start",
+            {
+                "mob_id": "mob-1",
+                "agent_identity": "worker-1",
+                "prompt": "continue",
+                "provider_params": {"action": "clear"},
+                "auth_binding": {"action": "clear"},
+            },
+        )
+    ]
+
+    # Inherit coverage: neither value nor clear -> the field is omitted.
+    calls.clear()
+    await client.mob_turn_start("mob-1", "worker-1", "continue")
+    assert "provider_params" not in calls[0][1]
+    assert "auth_binding" not in calls[0][1]
+
+    # The illegal set + clear combination is rejected at the wrapper boundary,
+    # mirroring the wire serde boundary.
+    with pytest.raises(MeerkatError):
+        await client.mob_turn_start(
+            "mob-1",
+            "worker-1",
+            "continue",
+            provider_params={"temperature": 0.2},
+            clear_provider_params=True,
+        )
 
     with pytest.raises(TypeError):
         await client.mob_turn_start(

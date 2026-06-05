@@ -1539,11 +1539,8 @@ async fn persistent_archive_rejects_stored_only_session() {
         .expect("raw store load should succeed")
         .expect("archive should retain a compatibility projection");
     assert_eq!(
-        archived
-            .metadata()
-            .get("session_archived")
-            .and_then(serde_json::Value::as_bool),
-        Some(true),
+        archived.lifecycle_terminal(),
+        Some(meerkat_core::SessionLifecycleTerminal::Archived),
         "compatibility archive should mark the stored projection archived"
     );
     assert!(

@@ -5427,7 +5427,7 @@ mod tests {
                     .with_label("role", "reviewer")
                     .with_label("meerkat_id", "alice"),
             ),
-            realm_id: Some("mob.team".to_string()),
+            realm_id: Some(meerkat_core::RealmId::parse("mob.team").unwrap()),
             instance_id: None,
             backend: None,
             config_generation: None,
@@ -5475,7 +5475,7 @@ mod tests {
                     .with_label("role", "reviewer")
                     .with_label("meerkat_id", "alice"),
             ),
-            realm_id: Some("mob.team".to_string()),
+            realm_id: Some(meerkat_core::RealmId::parse("mob.team").unwrap()),
             instance_id: None,
             backend: None,
             config_generation: None,

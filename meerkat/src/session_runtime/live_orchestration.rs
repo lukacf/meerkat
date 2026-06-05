@@ -546,9 +546,7 @@ mod orchestrator {
             };
 
             let mut build = build_config.to_session_build_options();
-            build.realm_id = build
-                .realm_id
-                .or_else(|| self.realm_id.map(ToString::to_string));
+            build.realm_id = build.realm_id.or_else(|| self.realm_id.cloned());
             build.instance_id = build
                 .instance_id
                 .or_else(|| self.instance_id.map(ToString::to_string));

@@ -186,7 +186,7 @@ pub async fn build_agent_config(
     config.keep_alive = false;
     config.comms_name = Some(comms_name);
     config.peer_meta = Some(peer_meta);
-    config.realm_id = Some(realm_id.to_string());
+    config.realm_id = Some(realm_id);
     config.mob_member_binding = Some(member_binding);
     match system_prompt_override {
         Some(crate::runtime::SpawnSystemPromptOverride::Replace(prompt)) => {
@@ -878,7 +878,7 @@ mod tests {
         .expect("build_agent_config");
 
         assert_eq!(
-            config.realm_id.as_deref(),
+            config.realm_id.as_ref().map(meerkat_core::RealmId::as_str),
             Some("mob.test-mob"),
             "realm_id should be a canonical mob realm slug"
         );
@@ -1822,7 +1822,10 @@ mod tests {
         let build = req.build.expect("build options should be set");
         assert_eq!(build.comms_name.as_deref(), Some("test-mob/lead/lead-1"));
         assert!(build.peer_meta.is_some());
-        assert_eq!(build.realm_id.as_deref(), Some("mob.test-mob"));
+        assert_eq!(
+            build.realm_id.as_ref().map(meerkat_core::RealmId::as_str),
+            Some("mob.test-mob")
+        );
         assert_eq!(
             build.mob_member_binding,
             Some(meerkat_core::MobMemberBinding {

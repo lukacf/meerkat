@@ -715,10 +715,7 @@ pub trait SessionAgent: Send {
         &mut self,
         _session: meerkat_core::Session,
     ) -> Result<(), meerkat_core::error::AgentError> {
-        Err(meerkat_core::error::AgentError::ConfigError(
-            "durable session snapshot synchronization is not supported by this session agent"
-                .to_string(),
-        ))
+        Err(meerkat_core::error::AgentError::DurableSnapshotSyncUnsupported)
     }
 
     /// Get an event injector for pushing external events.

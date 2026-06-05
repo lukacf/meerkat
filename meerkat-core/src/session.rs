@@ -781,6 +781,17 @@ pub const SESSION_BUILD_STATE_KEY: &str = "session_build_state";
 /// Metadata key used to store durable session-local tool visibility intent.
 pub const SESSION_TOOL_VISIBILITY_STATE_KEY: &str = "session_tool_visibility_state_v1";
 
+/// Metadata key used to store the typed session lifecycle-terminal fact.
+pub const SESSION_LIFECYCLE_TERMINAL_KEY: &str = "session_lifecycle_terminal";
+
+/// Legacy raw-bool metadata key for session archival.
+///
+/// Sessions archived before the typed [`SessionLifecycleTerminal`] owner was
+/// introduced persist `session_archived: true` here. The only remaining reader
+/// is the legacy back-read in [`Session::try_lifecycle_terminal`]; no code path
+/// writes it anymore.
+pub const SESSION_ARCHIVED_LEGACY_KEY: &str = "session_archived";
+
 /// Canonical tool name gated by `image_tool_results` capability.
 pub const VIEW_IMAGE_TOOL_NAME: &str = "view_image";
 
@@ -1107,6 +1118,31 @@ pub struct PendingSystemContextAppend {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_response_terminal: Option<crate::handles::PeerResponseTerminalFact>,
     pub accepted_at: SystemTime,
+}
+
+/// Canonical typed terminal-lifecycle fact for the standalone (runtime-less)
+/// session path.
+///
+/// The runtime-backed path owns terminality through `RuntimeState::Retired`;
+/// the standalone path has no runtime store, so this typed reserved-key field
+/// is the authoritative owner there. A two-variant enum (rather than a bare
+/// bool) keeps future terminal classes — e.g. `Destroyed` — extending the type
+/// rather than the call sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLifecycleTerminal {
+    /// The session is live / resumable.
+    Active,
+    /// The session has been archived and is terminal.
+    Archived,
+}
+
+impl SessionLifecycleTerminal {
+    /// Whether this terminal fact marks the session as archived.
+    #[must_use]
+    pub fn is_archived(self) -> bool {
+        matches!(self, Self::Archived)
+    }
 }
 
 /// Durable control state for deferred first-turn prompt and staged callback tool results.
@@ -3165,6 +3201,54 @@ impl Session {
         }
     }
 
+    /// Store the typed session lifecycle-terminal fact in the session metadata map.
+    pub fn set_lifecycle_terminal(
+        &mut self,
+        terminal: SessionLifecycleTerminal,
+    ) -> Result<(), serde_json::Error> {
+        let value = serde_json::to_value(terminal)?;
+        self.set_metadata_unchecked(SESSION_LIFECYCLE_TERMINAL_KEY, value);
+        Ok(())
+    }
+
+    /// Try to load the typed session lifecycle-terminal fact.
+    ///
+    /// Reads the typed [`SESSION_LIFECYCLE_TERMINAL_KEY`] first. When that key
+    /// is absent, falls back to folding the legacy raw
+    /// `session_archived: true` bool (the only place that literal string is
+    /// still honored) into [`SessionLifecycleTerminal::Archived`] so sessions
+    /// persisted before the typed owner existed still read as terminal.
+    pub fn try_lifecycle_terminal(
+        &self,
+    ) -> Result<Option<SessionLifecycleTerminal>, serde_json::Error> {
+        if let Some(value) = self.metadata.get(SESSION_LIFECYCLE_TERMINAL_KEY) {
+            return serde_json::from_value(value.clone()).map(Some);
+        }
+        // Legacy back-read: pre-typed-owner archive writes persisted a raw
+        // `session_archived: true` JSON bool. Fold a `true` into Archived; an
+        // absent/false legacy bool means no terminal fact.
+        match self
+            .metadata
+            .get(SESSION_ARCHIVED_LEGACY_KEY)
+            .and_then(serde_json::Value::as_bool)
+        {
+            Some(true) => Ok(Some(SessionLifecycleTerminal::Archived)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Load the typed session lifecycle-terminal fact, failing closed on a
+    /// corrupt typed value.
+    ///
+    /// Callers that need the typed rejection must use
+    /// [`Self::try_lifecycle_terminal`].
+    pub fn lifecycle_terminal(&self) -> Option<SessionLifecycleTerminal> {
+        match self.try_lifecycle_terminal() {
+            Ok(state) => state,
+            Err(err) => fail_closed_generated_restore("session-lifecycle-terminal", err),
+        }
+    }
+
     /// Store recoverable build-only session state in the session metadata map.
     pub fn set_build_state(&mut self, state: SessionBuildState) -> Result<(), serde_json::Error> {
         let state = session_durable_config_authority::authorize_session_build_state_persist(state)
@@ -3700,8 +3784,12 @@ pub struct SessionMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_meta: Option<PeerMeta>,
     /// Realm identity for cross-surface storage sharing/isolation.
+    ///
+    /// Typed [`crate::RealmId`]; the realm slug is validated at the serde
+    /// boundary. `RealmId` serializes transparently as its slug string, so the
+    /// durable JSON shape is identical to the prior `Option<String>` form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub realm_id: Option<String>,
+    pub realm_id: Option<crate::RealmId>,
     /// Optional process/agent instance identifier within a realm.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance_id: Option<String>,
@@ -6030,6 +6118,135 @@ mod tests {
         session.set_metadata("key", serde_json::json!("value"));
 
         assert_eq!(session.metadata().get("key").unwrap(), "value");
+    }
+
+    #[test]
+    fn session_metadata_realm_id_is_back_read_compatible_string() {
+        // A typed realm_id serializes as a bare JSON string (byte-identical to
+        // the prior Option<String> durable shape).
+        let metadata = SessionMetadata {
+            schema_version: SESSION_METADATA_SCHEMA_VERSION,
+            model: "test-model".to_string(),
+            max_tokens: 1024,
+            structured_output_retries: 2,
+            provider: Provider::Other,
+            self_hosted_server_id: None,
+            provider_params: None,
+            tooling: SessionTooling::default(),
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: Some(crate::RealmId::parse("env_default").unwrap()),
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            auth_binding: None,
+            mob_member_binding: None,
+        };
+        let value = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(
+            value.get("realm_id"),
+            Some(&serde_json::json!("env_default")),
+            "typed realm_id must serialize as a bare slug string"
+        );
+
+        // A legacy persisted row stored realm_id as a JSON string; it must
+        // deserialize into the typed RealmId (durable back-read).
+        let legacy = serde_json::json!({
+            "schema_version": SESSION_METADATA_SCHEMA_VERSION,
+            "model": "test-model",
+            "max_tokens": 1024,
+            "structured_output_retries": 2,
+            "provider": "other",
+            "tooling": SessionTooling::default(),
+            "keep_alive": false,
+            "comms_name": null,
+            "realm_id": "legacy_realm",
+        });
+        let restored: SessionMetadata = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            restored.realm_id.as_ref().map(crate::RealmId::as_str),
+            Some("legacy_realm")
+        );
+    }
+
+    #[test]
+    fn lifecycle_terminal_typed_round_trip() {
+        let mut session = Session::new();
+        assert_eq!(session.lifecycle_terminal(), None);
+
+        session
+            .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
+            .expect("typed terminal write should serialize");
+        assert_eq!(
+            session.lifecycle_terminal(),
+            Some(SessionLifecycleTerminal::Archived)
+        );
+        assert!(
+            session
+                .lifecycle_terminal()
+                .is_some_and(SessionLifecycleTerminal::is_archived)
+        );
+        // Persisted JSON for the typed key is the snake_case variant string.
+        assert_eq!(
+            session
+                .metadata()
+                .get(SESSION_LIFECYCLE_TERMINAL_KEY)
+                .unwrap(),
+            &serde_json::json!("archived")
+        );
+    }
+
+    #[test]
+    fn lifecycle_terminal_key_rejects_raw_mutation() {
+        let mut session = Session::new();
+        assert!(
+            session
+                .try_set_metadata(
+                    SESSION_LIFECYCLE_TERMINAL_KEY,
+                    serde_json::json!("archived")
+                )
+                .is_err(),
+            "the typed lifecycle-terminal key is reserved for session authority"
+        );
+    }
+
+    #[test]
+    fn lifecycle_terminal_legacy_session_archived_bool_reads_as_archived() {
+        // Sessions persisted before the typed owner existed stored a raw
+        // `session_archived: true` bool. The typed reader must fold it into
+        // Archived (durable back-read), without the typed key present.
+        let mut session = Session::new();
+        session.set_metadata(SESSION_ARCHIVED_LEGACY_KEY, serde_json::Value::Bool(true));
+        assert!(
+            session
+                .metadata()
+                .get(SESSION_LIFECYCLE_TERMINAL_KEY)
+                .is_none()
+        );
+        assert_eq!(
+            session.lifecycle_terminal(),
+            Some(SessionLifecycleTerminal::Archived)
+        );
+
+        // A legacy `false`/absent bool means no terminal fact.
+        let mut active = Session::new();
+        active.set_metadata(SESSION_ARCHIVED_LEGACY_KEY, serde_json::Value::Bool(false));
+        assert_eq!(active.lifecycle_terminal(), None);
+    }
+
+    #[test]
+    fn lifecycle_terminal_typed_key_takes_precedence_over_legacy_bool() {
+        let mut session = Session::new();
+        // Legacy bool says archived, typed owner says active — the typed owner wins.
+        session.set_metadata(SESSION_ARCHIVED_LEGACY_KEY, serde_json::Value::Bool(true));
+        session
+            .set_lifecycle_terminal(SessionLifecycleTerminal::Active)
+            .expect("typed terminal write should serialize");
+        assert_eq!(
+            session.lifecycle_terminal(),
+            Some(SessionLifecycleTerminal::Active)
+        );
     }
 
     #[test]

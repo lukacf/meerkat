@@ -63,7 +63,7 @@ pub type TurnOverrides = SurfaceSessionRecoveryOverrides;
 /// that are not already durable session defaults.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RealmDefaults {
-    pub realm_id: Option<String>,
+    pub realm_id: Option<crate::RealmId>,
     pub instance_id: Option<String>,
     pub backend: Option<String>,
     pub config_generation: Option<u64>,
@@ -113,7 +113,7 @@ pub struct SurfaceSessionRecoveryContext {
     pub checkpointer: Option<Arc<dyn SessionCheckpointer>>,
     pub runtime_build_mode: Option<RuntimeBuildMode>,
     pub require_runtime_build_mode: bool,
-    pub realm_id: Option<String>,
+    pub realm_id: Option<crate::RealmId>,
     pub instance_id: Option<String>,
     pub backend: Option<String>,
     pub config_generation: Option<u64>,
@@ -641,7 +641,7 @@ mod tests {
                         .with_description("persisted peer")
                         .with_label("tier", "persisted"),
                 ),
-                realm_id: Some("realm-a".to_string()),
+                realm_id: Some(crate::RealmId::parse("realm-a").unwrap()),
                 instance_id: Some("instance-a".to_string()),
                 backend: Some("sqlite".to_string()),
                 config_generation: Some(7),
@@ -718,7 +718,7 @@ mod tests {
         let effective = resolve_effective_turn_config(
             session,
             RealmDefaults {
-                realm_id: Some("realm-fallback".to_string()),
+                realm_id: Some(crate::RealmId::parse("realm-fallback").unwrap()),
                 instance_id: Some("instance-fallback".to_string()),
                 backend: Some("jsonl".to_string()),
                 config_generation: Some(99),
@@ -814,7 +814,10 @@ mod tests {
         );
         assert_eq!(build.structured_output_retries, 9);
         assert_eq!(build.comms_name.as_deref(), Some("peer-a"));
-        assert_eq!(build.realm_id.as_deref(), Some("realm-a"));
+        assert_eq!(
+            build.realm_id.as_ref().map(crate::RealmId::as_str),
+            Some("realm-a")
+        );
         assert_eq!(build.instance_id.as_deref(), Some("instance-a"));
         assert_eq!(build.backend.as_deref(), Some("sqlite"));
         assert_eq!(build.config_generation, Some(7));
@@ -1041,7 +1044,7 @@ mod tests {
             session,
             &SurfaceSessionRecoveryOverrides::default(),
             SurfaceSessionRecoveryContext {
-                realm_id: Some("realm-from-context".to_string()),
+                realm_id: Some(crate::RealmId::parse("realm-from-context").unwrap()),
                 instance_id: Some("instance-from-context".to_string()),
                 backend: Some("sqlite".to_string()),
                 config_generation: Some(99),
@@ -1051,7 +1054,11 @@ mod tests {
         .expect("recovered session with context fallback");
 
         assert_eq!(
-            recovered.build.realm_id.as_deref(),
+            recovered
+                .build
+                .realm_id
+                .as_ref()
+                .map(crate::RealmId::as_str),
             Some("realm-from-context")
         );
         assert_eq!(

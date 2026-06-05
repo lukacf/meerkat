@@ -5283,9 +5283,7 @@ impl SessionRuntime {
             };
 
             let mut build = build_config.to_session_build_options();
-            build.realm_id = build
-                .realm_id
-                .or_else(|| self.inner.realm_id().map(|r| r.to_string()));
+            build.realm_id = build.realm_id.or_else(|| self.inner.realm_id());
             build.instance_id = build.instance_id.or_else(|| self.inner.instance_id());
             build.backend = build.backend.or_else(|| self.inner.backend());
             build.config_generation = build.config_generation.or(runtime_generation);
@@ -5704,9 +5702,7 @@ impl SessionRuntime {
             };
 
             let mut build = build_config.to_session_build_options();
-            build.realm_id = build
-                .realm_id
-                .or_else(|| self.inner.realm_id().map(|r| r.to_string()));
+            build.realm_id = build.realm_id.or_else(|| self.inner.realm_id());
             build.instance_id = build.instance_id.or_else(|| self.inner.instance_id());
             build.backend = build.backend.or_else(|| self.inner.backend());
             build.config_generation = build.config_generation.or(runtime_generation);

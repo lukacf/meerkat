@@ -93,7 +93,17 @@ fn materialized_build_options(
     if !create.preload_skills.is_empty() {
         build.preload_skills = Some(create.preload_skills.clone());
     }
-    build.realm_id = create.realm_id.clone();
+    // Schedule specs carry the realm as a plain slug string; parse it once at
+    // this surface ingest boundary into the typed carrier. A malformed slug
+    // (not expected — specs derive from already-resolved sessions) drops to
+    // None with a warning rather than failing materialization.
+    build.realm_id = create.realm_id.as_deref().and_then(|slug| {
+        meerkat_core::RealmId::parse(slug)
+            .map_err(|err| {
+                tracing::warn!(realm = slug, error = %err, "ignoring malformed realm slug in session materialization spec");
+            })
+            .ok()
+    });
     build.instance_id = create.instance_id.clone();
     build.backend = create.backend.clone();
     build.config_generation = create.config_generation;

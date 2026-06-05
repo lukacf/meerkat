@@ -878,7 +878,7 @@ impl McpRuntimeIngressContext {
             SurfaceSessionRecoveryContext {
                 llm_client_override: None,
                 external_tools,
-                realm_id: Some(self.realm_id.to_string()),
+                realm_id: Some(self.realm_id.clone()),
                 instance_id: self.instance_id.clone(),
                 backend: Some(self.backend.clone()),
                 config_generation: current_generation,
@@ -937,7 +937,7 @@ impl McpRuntimeIngressContext {
             SurfaceSessionRecoveryContext {
                 llm_client_override: None,
                 external_tools,
-                realm_id: Some(self.realm_id.to_string()),
+                realm_id: Some(self.realm_id.clone()),
                 instance_id: self.instance_id.clone(),
                 backend: Some(self.backend.clone()),
                 config_generation: current_generation,

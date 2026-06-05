@@ -8757,7 +8757,7 @@ async fn run_agent(
             workgraph_tools: None,
             mob_tool_authority_context: None,
             preload_skills,
-            realm_id: Some(scope.locator.realm.as_str().to_owned()),
+            realm_id: Some(scope.locator.realm.clone()),
             instance_id: scope.instance_id.clone(),
             backend: Some(manifest.backend.as_str().to_string()),
             config_generation: None,
@@ -9447,7 +9447,7 @@ async fn resume_session_with_llm_override(
             session,
             &recovery_overrides,
             meerkat_core::session_recovery::SurfaceSessionRecoveryContext {
-                realm_id: Some(scope.locator.realm.as_str().to_owned()),
+                realm_id: Some(scope.locator.realm.clone()),
                 instance_id: scope.instance_id.clone(),
                 backend: Some(manifest.backend.as_str().to_string()),
                 config_generation: stored_metadata.config_generation,
@@ -10136,6 +10136,15 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
 
+        // Schedule specs carry the realm as a plain slug string; parse it once
+        // at this ingest boundary into the typed carrier.
+        let realm_id = create
+            .realm_id
+            .as_deref()
+            .map(meerkat_core::RealmId::parse)
+            .transpose()
+            .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
+
         let build = SessionBuildOptions {
             provider: create.provider,
             output_schema: create.output_schema.clone(),
@@ -10147,7 +10156,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             preload_skills: materialized_preload_skills(&create.preload_skills),
             additional_instructions: (!create.additional_instructions.is_empty())
                 .then(|| create.additional_instructions.clone()),
-            realm_id: create.realm_id.clone(),
+            realm_id,
             instance_id: create.instance_id.clone(),
             backend: create.backend.clone(),
             keep_alive: create.keep_alive,

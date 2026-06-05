@@ -13966,7 +13966,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                     .with_label("role", "worker")
                     .with_label("member_id", "w-1"),
             ),
-            realm_id: Some("mob.test-mob".to_string()),
+            realm_id: Some(meerkat_core::RealmId::parse("mob.test-mob").unwrap()),
             instance_id: None,
             backend: None,
             config_generation: None,

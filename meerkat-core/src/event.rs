@@ -479,6 +479,9 @@ impl From<&AgentError> for AgentErrorClass {
                 }
             }
             AgentError::NoPendingBoundary => Self::NoPendingBoundary,
+            // Capability-unsupported sync; classified like the config-class it
+            // was previously represented as (a `ConfigError`).
+            AgentError::DurableSnapshotSyncUnsupported => Self::Config,
         }
     }
 }

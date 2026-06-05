@@ -200,7 +200,7 @@ mod context {
                     checkpointer: None,
                     runtime_build_mode: Some(RuntimeBuildMode::SessionOwned(bindings)),
                     require_runtime_build_mode: true,
-                    realm_id: self.realm_id.map(ToString::to_string),
+                    realm_id: self.realm_id.cloned(),
                     instance_id: self.instance_id.map(ToString::to_string),
                     backend: self.backend.map(ToString::to_string),
                     config_generation: current_generation,

@@ -1152,20 +1152,15 @@ pub struct MeerkatSessionEventStreamOpenInput {
 /// this enum once at the deserialization boundary
 /// ([`StreamReadTimeoutWire`]); consumers read [`StreamReadTimeout::duration`]
 /// rather than re-deriving the policy by field precedence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StreamReadTimeout {
     /// No `timeout_ms` / `no_timeout` supplied: apply the surface default.
+    #[default]
     Default,
     /// `no_timeout` requested: wait indefinitely for the next event.
     Infinite,
     /// `timeout_ms` supplied: apply this finite per-read timeout.
     Fixed { ms: u64 },
-}
-
-impl Default for StreamReadTimeout {
-    fn default() -> Self {
-        Self::Default
-    }
 }
 
 impl StreamReadTimeout {
@@ -3227,7 +3222,7 @@ async fn handle_meerkat_run(
         workgraph_tools: None,
         mob_tool_authority_context: None,
         preload_skills,
-        realm_id: Some(state.realm_id.to_string()),
+        realm_id: Some(state.realm_id.clone()),
         instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
@@ -3636,7 +3631,7 @@ async fn handle_meerkat_resume(
             realm_id: stored_metadata
                 .realm_id
                 .clone()
-                .or_else(|| Some(state.realm_id.to_string())),
+                .or_else(|| Some(state.realm_id.clone())),
             instance_id: stored_metadata
                 .instance_id
                 .clone()
@@ -4269,7 +4264,7 @@ mod tests {
                 keep_alive: false,
                 comms_name: None,
                 peer_meta: None,
-                realm_id: Some(state.realm_id.to_string()),
+                realm_id: Some(state.realm_id.clone()),
                 instance_id: state.instance_id.clone(),
                 backend: Some(state.backend.clone()),
                 config_generation: None,
@@ -5714,7 +5709,7 @@ mod tests {
                 keep_alive: false,
                 comms_name: None,
                 peer_meta: None,
-                realm_id: Some(state.realm_id.to_string()),
+                realm_id: Some(state.realm_id.clone()),
                 instance_id: state.instance_id.clone(),
                 backend: Some(state.backend.clone()),
                 config_generation: None,
@@ -6059,7 +6054,7 @@ mod tests {
                 keep_alive: false,
                 comms_name: Some("stale-mcp-agent".to_string()),
                 peer_meta: None,
-                realm_id: Some(state.realm_id.to_string()),
+                realm_id: Some(state.realm_id.clone()),
                 instance_id: state.instance_id.clone(),
                 backend: Some(state.backend.clone()),
                 config_generation: None,
@@ -6147,7 +6142,7 @@ mod tests {
                 keep_alive: false,
                 comms_name: Some("existing-mcp-agent".to_string()),
                 peer_meta: None,
-                realm_id: Some(state.realm_id.to_string()),
+                realm_id: Some(state.realm_id.clone()),
                 instance_id: state.instance_id.clone(),
                 backend: Some(state.backend.clone()),
                 config_generation: None,

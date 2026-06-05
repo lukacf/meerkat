@@ -386,6 +386,13 @@ pub enum AgentError {
     /// output produced).
     #[error("no pending boundary for resume")]
     NoPendingBoundary,
+
+    /// The session agent does not support durable-snapshot synchronization
+    /// (the default `SessionAgent::sync_session_from_durable_snapshot`
+    /// capability). Consumers treat this as "skip live sync", distinct from a
+    /// genuine [`AgentError::ConfigError`].
+    #[error("durable session snapshot synchronization is not supported by this session agent")]
+    DurableSnapshotSyncUnsupported,
 }
 
 impl AgentError {

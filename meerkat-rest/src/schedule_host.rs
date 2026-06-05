@@ -141,10 +141,15 @@ impl RestScheduleContext {
         build_config.preload_skills = materialized_preload_skills(&create.preload_skills);
         build_config.additional_instructions = (!create.additional_instructions.is_empty())
             .then(|| create.additional_instructions.clone());
+        // Schedule specs carry the realm as a plain slug string; parse it once
+        // at this ingest boundary, falling back to the runtime's typed realm.
         build_config.realm_id = create
             .realm_id
-            .clone()
-            .or_else(|| Some(self.runtime.realm.to_string()));
+            .as_deref()
+            .map(meerkat_core::RealmId::parse)
+            .transpose()
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
+            .or_else(|| Some(self.runtime.realm.clone()));
         build_config.instance_id = create
             .instance_id
             .clone()

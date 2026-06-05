@@ -262,7 +262,7 @@ pub struct SessionBuildOptions {
     /// Agent-facing WorkGraph tools supplied by the embedding surface.
     pub workgraph_tools: Option<Arc<dyn AgentToolDispatcher>>,
     pub preload_skills: Option<Vec<crate::skills::SkillKey>>,
-    pub realm_id: Option<String>,
+    pub realm_id: Option<crate::RealmId>,
     pub instance_id: Option<String>,
     pub backend: Option<String>,
     pub config_generation: Option<u64>,

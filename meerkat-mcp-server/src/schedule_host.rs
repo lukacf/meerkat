@@ -186,6 +186,15 @@ impl McpScheduleContext {
             .ok()
             .map(|snapshot| snapshot.generation)
             .or(create.config_generation);
+        // Schedule specs carry the realm as a plain slug string; parse it once
+        // at this ingest boundary, falling back to the host's typed realm.
+        let realm_id = create
+            .realm_id
+            .as_deref()
+            .map(meerkat_core::connection::RealmId::parse)
+            .transpose()
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
+            .or_else(|| Some(self.realm_id.clone()));
         let build = SessionBuildOptions {
             provider: create.provider,
             self_hosted_server_id: None,
@@ -214,10 +223,7 @@ impl McpScheduleContext {
             workgraph_tools: None,
             mob_tool_authority_context: None,
             preload_skills: materialized_preload_skills(&create.preload_skills),
-            realm_id: create
-                .realm_id
-                .clone()
-                .or_else(|| Some(self.realm_id.to_string())),
+            realm_id,
             instance_id: create
                 .instance_id
                 .clone()

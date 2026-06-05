@@ -5252,7 +5252,7 @@ impl SessionRuntime {
                     }
                 }
                 if let Some(retries) = ov.structured_output_retries {
-                    build_config.structured_output_retries = retries;
+                    build_config.structured_output_retries = Some(retries);
                 }
                 if let Some(keep_alive) = ov.keep_alive {
                     if let Err(err) = self
@@ -5673,7 +5673,7 @@ impl SessionRuntime {
                     }
                 }
                 if let Some(retries) = ov.structured_output_retries {
-                    build_config.structured_output_retries = retries;
+                    build_config.structured_output_retries = Some(retries);
                 }
                 if let Some(keep_alive) = ov.keep_alive {
                     if let Err(err) = self

@@ -1,4 +1,8 @@
 use async_trait::async_trait;
+use meerkat::session_runtime::admission::{
+    RuntimePreAdmissionEntry, RuntimePreAdmissionRegistration, RuntimePreAdmissionRestore,
+    RuntimeRegistrationLockLease,
+};
 #[cfg(feature = "comms")]
 use meerkat::surface::configure_peer_ingress;
 use meerkat::{
@@ -37,92 +41,37 @@ pub(crate) type SharedMcpRuntimeSessions =
     Arc<RwLock<HashMap<SessionId, Arc<McpRuntimeSessionState>>>>;
 pub(crate) type SharedMcpAdapters = Arc<Mutex<HashMap<String, Arc<McpRouterAdapter>>>>;
 pub(crate) type SharedMcpRuntimePreAdmissions =
-    Arc<Mutex<HashMap<SessionId, Vec<McpRuntimePreAdmissionEntry>>>>;
+    Arc<StdMutex<HashMap<SessionId, Vec<RuntimePreAdmissionEntry>>>>;
 pub(crate) type SharedMcpRuntimeRegistrationLocks =
     Arc<StdMutex<HashMap<SessionId, Weak<Mutex<()>>>>>;
 
-pub(crate) struct McpRuntimePreAdmissionEntry {
-    input_id: meerkat_core::lifecycle::InputId,
-    admission: meerkat::RuntimeContextAdmissionGuard,
-}
-
-struct McpRuntimePreAdmissionRegistration {
+/// Sync restore hook backing the shared [`RuntimePreAdmissionRegistration`]
+/// RAII seam for MCP (defined in `meerkat::session_runtime::admission`, the
+/// same seam RPC consumes). When an un-disarmed registration drops, the shared
+/// guard calls `restore_or_release`, which removes the pre-admission entry —
+/// dropping its `RuntimePreAdmission` and releasing the reserved capacity.
+struct McpPreAdmissionLedger {
     pre_admissions: SharedMcpRuntimePreAdmissions,
-    session_id: SessionId,
-    input_id: meerkat_core::lifecycle::InputId,
-    release_on_drop: bool,
 }
 
-pub(crate) struct McpRuntimeRegistrationLockLease {
-    locks: SharedMcpRuntimeRegistrationLocks,
-    session_id: SessionId,
-    lock: Arc<Mutex<()>>,
-}
-
-impl McpRuntimePreAdmissionRegistration {
-    fn new(
-        pre_admissions: SharedMcpRuntimePreAdmissions,
-        session_id: SessionId,
-        input_id: meerkat_core::lifecycle::InputId,
-    ) -> Self {
-        Self {
-            pre_admissions,
-            session_id,
-            input_id,
-            release_on_drop: true,
-        }
-    }
-
-    fn disarm(mut self) {
-        self.release_on_drop = false;
+impl RuntimePreAdmissionRestore for McpPreAdmissionLedger {
+    fn restore_or_release(
+        &self,
+        session_id: &SessionId,
+        input_id: &meerkat_core::lifecycle::InputId,
+    ) {
+        discard_mcp_runtime_pre_admission(&self.pre_admissions, session_id, input_id);
     }
 }
 
-impl Drop for McpRuntimePreAdmissionRegistration {
-    fn drop(&mut self) {
-        if !self.release_on_drop {
-            return;
-        }
-        let pre_admissions = Arc::clone(&self.pre_admissions);
-        let session_id = self.session_id.clone();
-        let input_id = self.input_id.clone();
-        tokio::spawn(async move {
-            discard_mcp_runtime_pre_admission(&pre_admissions, &session_id, &input_id).await;
-        });
-    }
-}
-
-impl McpRuntimeRegistrationLockLease {
-    pub(crate) fn mutex(&self) -> &Mutex<()> {
-        &self.lock
-    }
-}
-
-impl Drop for McpRuntimeRegistrationLockLease {
-    fn drop(&mut self) {
-        if Arc::strong_count(&self.lock) != 1 {
-            return;
-        }
-        let this_lock = Arc::downgrade(&self.lock);
-        let mut locks = self
-            .locks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if locks
-            .get(&self.session_id)
-            .is_some_and(|registered| registered.ptr_eq(&this_lock))
-        {
-            locks.remove(&self.session_id);
-        }
-    }
-}
-
-async fn discard_mcp_runtime_pre_admission(
+fn discard_mcp_runtime_pre_admission(
     pre_admissions: &SharedMcpRuntimePreAdmissions,
     session_id: &SessionId,
     input_id: &meerkat_core::lifecycle::InputId,
 ) {
-    let mut pre_admissions = pre_admissions.lock().await;
+    let mut pre_admissions = pre_admissions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let Some(entries) = pre_admissions.get_mut(session_id) else {
         return;
     };
@@ -134,7 +83,7 @@ async fn discard_mcp_runtime_pre_admission(
     }
 }
 
-async fn rekey_mcp_runtime_pre_admission(
+fn rekey_mcp_runtime_pre_admission(
     pre_admissions: &SharedMcpRuntimePreAdmissions,
     session_id: &SessionId,
     from_input_id: &meerkat_core::lifecycle::InputId,
@@ -143,7 +92,9 @@ async fn rekey_mcp_runtime_pre_admission(
     if from_input_id == &to_input_id {
         return;
     }
-    let mut pre_admissions = pre_admissions.lock().await;
+    let mut pre_admissions = pre_admissions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(entries) = pre_admissions.get_mut(session_id)
         && let Some(entry) = entries
             .iter_mut()
@@ -151,18 +102,6 @@ async fn rekey_mcp_runtime_pre_admission(
     {
         entry.input_id = to_input_id;
     }
-}
-
-fn spawn_mcp_runtime_pre_admission_rekey(
-    pre_admissions: SharedMcpRuntimePreAdmissions,
-    session_id: SessionId,
-    from_input_id: meerkat_core::lifecycle::InputId,
-    to_input_id: meerkat_core::lifecycle::InputId,
-) {
-    tokio::spawn(async move {
-        rekey_mcp_runtime_pre_admission(&pre_admissions, &session_id, &from_input_id, to_input_id)
-            .await;
-    });
 }
 
 fn wrap_mcp_runtime_pre_admission_cleanup(
@@ -447,14 +386,17 @@ impl McpRuntimeIngressContext {
         input_id: meerkat_core::lifecycle::InputId,
         admission: meerkat::RuntimeContextAdmissionGuard,
     ) -> Result<(), SessionError> {
-        let mut pre_admissions = self.runtime_pre_admissions.lock().await;
+        let mut pre_admissions = self
+            .runtime_pre_admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entries = pre_admissions.entry(session_id.clone()).or_default();
         if entries.iter().any(|entry| entry.input_id == input_id) {
             return Err(SessionError::Busy { id: session_id });
         }
-        entries.push(McpRuntimePreAdmissionEntry {
+        entries.push(RuntimePreAdmissionEntry {
             input_id,
-            admission,
+            admission: admission.into(),
         });
         Ok(())
     }
@@ -467,7 +409,10 @@ impl McpRuntimeIngressContext {
         if input_ids.is_empty() {
             return None;
         }
-        let mut pre_admissions = self.runtime_pre_admissions.lock().await;
+        let mut pre_admissions = self
+            .runtime_pre_admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entries = pre_admissions.get_mut(session_id)?;
         let index = entries
             .iter()
@@ -476,7 +421,7 @@ impl McpRuntimeIngressContext {
         if entries.is_empty() {
             pre_admissions.remove(session_id);
         }
-        Some(entry.admission)
+        Some(entry.admission.into_admission())
     }
 
     async fn discard_runtime_pre_admission(
@@ -484,17 +429,20 @@ impl McpRuntimeIngressContext {
         session_id: &SessionId,
         input_id: &meerkat_core::lifecycle::InputId,
     ) {
-        discard_mcp_runtime_pre_admission(&self.runtime_pre_admissions, session_id, input_id).await;
+        discard_mcp_runtime_pre_admission(&self.runtime_pre_admissions, session_id, input_id);
     }
 
     async fn discard_all_runtime_pre_admissions_for_session(&self, session_id: &SessionId) {
-        self.runtime_pre_admissions.lock().await.remove(session_id);
+        self.runtime_pre_admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(session_id);
     }
 
     pub(crate) fn runtime_registration_lock(
         &self,
         session_id: &SessionId,
-    ) -> McpRuntimeRegistrationLockLease {
+    ) -> RuntimeRegistrationLockLease {
         let lock = {
             let mut locks = self
                 .runtime_registration_locks
@@ -508,7 +456,7 @@ impl McpRuntimeIngressContext {
                 lock
             }
         };
-        McpRuntimeRegistrationLockLease {
+        RuntimeRegistrationLockLease {
             locks: Arc::clone(&self.runtime_registration_locks),
             session_id: session_id.clone(),
             lock,
@@ -532,7 +480,7 @@ impl McpRuntimeIngressContext {
         if self
             .runtime_pre_admissions
             .lock()
-            .await
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains_key(session_id)
         {
             return;
@@ -610,8 +558,10 @@ impl McpRuntimeIngressContext {
                     reason: error.to_string(),
                 });
             }
-            pre_admission_registration = Some(McpRuntimePreAdmissionRegistration::new(
-                Arc::clone(&self.runtime_pre_admissions),
+            pre_admission_registration = Some(RuntimePreAdmissionRegistration::new(
+                Arc::new(McpPreAdmissionLedger {
+                    pre_admissions: Arc::clone(&self.runtime_pre_admissions),
+                }),
                 session_id.clone(),
                 requested_input_id.clone(),
             ));
@@ -678,10 +628,10 @@ impl McpRuntimeIngressContext {
                         input_id.clone(),
                         raw_handle,
                     );
-                    spawn_mcp_runtime_pre_admission_rekey(
-                        Arc::clone(&self.runtime_pre_admissions),
-                        session_id.clone(),
-                        requested_input_id.clone(),
+                    rekey_mcp_runtime_pre_admission(
+                        &self.runtime_pre_admissions,
+                        session_id,
+                        &requested_input_id,
                         input_id.clone(),
                     );
                     handle = Some(cleanup_handle);
@@ -1565,7 +1515,7 @@ mod tests {
             backend: "test".to_string(),
             mcp_adapters: Arc::new(Mutex::new(HashMap::new())),
             runtime_sessions: Arc::new(RwLock::new(HashMap::new())),
-            runtime_pre_admissions: Arc::new(Mutex::new(HashMap::new())),
+            runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
             runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
         })
     }
@@ -1987,7 +1937,7 @@ mod tests {
             context
                 .runtime_pre_admissions
                 .lock()
-                .await
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(&session_id)
                 .is_none(),
             "runtime termination cleanup must release MCP runtime pre-admission"
@@ -2060,23 +2010,27 @@ mod tests {
             .await
             .expect("cleanup handle should finish");
 
-        let pre_admissions = context.runtime_pre_admissions.lock().await;
-        let entries = pre_admissions
-            .get(&session_id)
-            .expect("unrelated pre-admission must remain after completion cleanup");
-        assert!(
-            entries
-                .iter()
-                .all(|entry| entry.input_id != requested_input_id),
-            "generated cleanup release must remove only the completed input pre-admission"
-        );
-        assert!(
-            entries
-                .iter()
-                .any(|entry| entry.input_id == unrelated_input_id),
-            "runtime cleanup must not release unrelated MCP pre-admission"
-        );
-        drop(pre_admissions);
+        {
+            let pre_admissions = context
+                .runtime_pre_admissions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entries = pre_admissions
+                .get(&session_id)
+                .expect("unrelated pre-admission must remain after completion cleanup");
+            assert!(
+                entries
+                    .iter()
+                    .all(|entry| entry.input_id != requested_input_id),
+                "generated cleanup release must remove only the completed input pre-admission"
+            );
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.input_id == unrelated_input_id),
+                "runtime cleanup must not release unrelated MCP pre-admission"
+            );
+        }
 
         context
             .discard_runtime_pre_admission(&session_id, &unrelated_input_id)
@@ -2127,7 +2081,7 @@ mod tests {
             context
                 .runtime_pre_admissions
                 .lock()
-                .await
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(&target_session_id)
                 .is_some_and(|entries| entries
                     .iter()
@@ -2261,7 +2215,7 @@ mod tests {
             context
                 .runtime_pre_admissions
                 .lock()
-                .await
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(&target_session_id)
                 .is_none(),
             "accept_input must not reserve active capacity while registration mutation is locked"
@@ -2423,7 +2377,7 @@ mod tests {
             context
                 .runtime_pre_admissions
                 .lock()
-                .await
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(&target_session_id)
                 .is_none(),
             "terminal no-handle accept must release pre-admission"
@@ -2502,7 +2456,7 @@ mod tests {
             let pre_admission_cleared = context
                 .runtime_pre_admissions
                 .lock()
-                .await
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(&target_session_id)
                 .is_none();
             let active_inputs = context

@@ -48,10 +48,6 @@
 //! - `mob_subscribe_events(mob_id)` → handle (mob-wide)
 //! - `poll_subscription(handle)` → JSON events
 //! - `close_subscription(handle)`
-//!
-//! ### Comms (placeholder)
-//! - `comms_peers(session_id)` → JSON
-//! - `comms_send(session_id, params_json)` → JSON
 
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {

@@ -211,7 +211,10 @@ pub struct SessionBuildOptions {
     pub provider: Option<Provider>,
     pub self_hosted_server_id: Option<String>,
     pub output_schema: Option<OutputSchema>,
-    pub structured_output_retries: u32,
+    /// Structured-output retry budget *intent*. `None` inherits the canonical
+    /// default ([`crate::config::default_structured_output_retries`]); the
+    /// `AgentFactory` seam resolves it. Surfaces must not fabricate a default.
+    pub structured_output_retries: Option<u32>,
     pub hooks_override: HookRunOverrides,
     pub comms_name: Option<String>,
     pub peer_meta: Option<PeerMeta>,
@@ -971,7 +974,7 @@ impl Default for SessionBuildOptions {
             provider: None,
             self_hosted_server_id: None,
             output_schema: None,
-            structured_output_retries: 2,
+            structured_output_retries: None,
             hooks_override: HookRunOverrides::default(),
             comms_name: None,
             peer_meta: None,

@@ -1959,7 +1959,7 @@ mod tests {
                 max_tokens: None,
                 provider: None,
                 output_schema: None,
-                structured_output_retries: 0,
+                structured_output_retries: None,
                 provider_params: None,
                 comms_name: Some("scheduled-materializer".into()),
                 peer_meta: None,

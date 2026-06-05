@@ -2746,12 +2746,14 @@ describe("Parity wrappers", () => {
     const expectedRef = makeMemberRef("mob-1", "worker-1");
     client.request = async (method) => {
       if (method === "mob/members") {
+        // Canonical wire field is `role` (MobMemberListEntryWire.role); the
+        // SDK no longer accepts phantom `profile`/`profile_name` aliases.
         return {
           members: [
             {
               agent_identity: "worker-1",
               member_ref: expectedRef,
-              profile: "worker",
+              role: "worker",
             },
           ],
         };
@@ -2764,6 +2766,7 @@ describe("Parity wrappers", () => {
     assert.equal(members.length, 1);
     assert.equal(members[0].agentIdentity, "worker-1");
     assert.equal(members[0].memberRef, expectedRef);
+    assert.equal(members[0].profile, "worker");
     assert.equal(members[0].agentRuntimeId, undefined);
     assert.equal(members[0].fenceToken, undefined);
   });
@@ -2945,6 +2948,361 @@ describe("Mob decoder strictness", () => {
       () => client.waitMobReady("mob-1"),
       /is_final must be boolean/,
     );
+  });
+});
+
+describe("Mob surface fail-closed status parsing (DOGMA Rule 6)", () => {
+  // SITE 1 — listMobs: lifecycle status is require-present-non-empty-string.
+  describe("listMobs", () => {
+    function mobListClient(response) {
+      const client = new MeerkatClient();
+      // listMobs gates on the "mob" capability; force it on for the unit path.
+      client.hasCapability = () => true;
+      client.request = async () => response;
+      return client;
+    }
+
+    it("parses a present lifecycle status", async () => {
+      const client = mobListClient({
+        mobs: [{ mob_id: "mob-1", status: "running" }],
+      });
+      const mobs = await client.listMobs();
+      assert.equal(mobs.length, 1);
+      assert.equal(mobs[0].mobId, "mob-1");
+      assert.equal(mobs[0].status, "running");
+    });
+
+    it("rejects an absent status instead of coalescing to empty string", async () => {
+      const client = mobListClient({ mobs: [{ mob_id: "mob-1" }] });
+      await assert.rejects(
+        () => client.listMobs(),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /missing status/.test(String(error.message)),
+      );
+    });
+
+    it("rejects an empty status string", async () => {
+      const client = mobListClient({ mobs: [{ mob_id: "mob-1", status: "" }] });
+      await assert.rejects(
+        () => client.listMobs(),
+        (error) =>
+          error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+      );
+    });
+  });
+
+  // SITE 2 — mobStatus: require record + non-empty status + non-empty mob_id;
+  // no Object.keys(...)[0] enum-key reconstruction.
+  describe("mobStatus", () => {
+    function mobStatusClient(response) {
+      const client = new MeerkatClient();
+      client.request = async () => response;
+      return client;
+    }
+
+    it("parses a present lifecycle status", async () => {
+      const client = mobStatusClient({ mob_id: "mob-1", status: "running" });
+      const result = await client.mobStatus("mob-1");
+      assert.equal(result.mobId, "mob-1");
+      assert.equal(result.status, "running");
+    });
+
+    it("rejects an absent status (no enum-key reconstruction)", async () => {
+      const client = mobStatusClient({ mob_id: "mob-1" });
+      await assert.rejects(
+        () => client.mobStatus("mob-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /missing status/.test(String(error.message)),
+      );
+    });
+
+    it("does NOT reconstruct status from an externally-tagged enum object", async () => {
+      // Old permissive behavior fabricated status via Object.keys(obj)[0].
+      const client = mobStatusClient({
+        mob_id: "mob-1",
+        status: { DisabledByPolicy: { description: "nope" } },
+      });
+      await assert.rejects(
+        () => client.mobStatus("mob-1"),
+        (error) =>
+          error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+      );
+    });
+
+    it("rejects an absent mob_id", async () => {
+      const client = mobStatusClient({ status: "running" });
+      await assert.rejects(
+        () => client.mobStatus("mob-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /missing mob_id/.test(String(error.message)),
+      );
+    });
+  });
+
+  // SITE 3 — listMobMembers: profile derives from `role` only; member status,
+  // when present, is enum-validated.
+  describe("listMobMembers", () => {
+    function membersClient(members) {
+      const client = new MeerkatClient();
+      client.request = async () => ({ members });
+      return client;
+    }
+
+    it("rejects a member missing role (no phantom profile/profile_name aliases)", async () => {
+      const ref = makeMemberRef("mob-1", "worker-1");
+      const client = membersClient([
+        { agent_identity: "worker-1", member_ref: ref, profile: "worker" },
+      ]);
+      await assert.rejects(
+        () => client.listMobMembers("mob-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /missing role/.test(String(error.message)),
+      );
+    });
+
+    it("parses a present member status against the closed enum", async () => {
+      const ref = makeMemberRef("mob-1", "worker-1");
+      const client = membersClient([
+        {
+          agent_identity: "worker-1",
+          member_ref: ref,
+          role: "worker",
+          status: "retiring",
+        },
+      ]);
+      const members = await client.listMobMembers("mob-1");
+      assert.equal(members[0].profile, "worker");
+      assert.equal(members[0].status, "retiring");
+    });
+
+    it("rejects a non-variant member status string", async () => {
+      const ref = makeMemberRef("mob-1", "worker-1");
+      const client = membersClient([
+        {
+          agent_identity: "worker-1",
+          member_ref: ref,
+          role: "worker",
+          status: "definitely-not-a-variant",
+        },
+      ]);
+      await assert.rejects(
+        () => client.listMobMembers("mob-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /invalid member status/.test(String(error.message)),
+      );
+    });
+  });
+
+  // SITE 4 — respawnMobMember: status must be present and in the closed set;
+  // never default to "completed".
+  describe("respawnMobMember", () => {
+    function respawnClient(response) {
+      const client = new MeerkatClient();
+      client.request = async () => response;
+      return client;
+    }
+
+    const receipt = {
+      member_ref: makeMemberRef("mob-1", "worker-1"),
+      identity: "worker-1",
+    };
+
+    it("parses a valid completed status", async () => {
+      const client = respawnClient({ status: "completed", receipt });
+      const result = await client.respawnMobMember("mob-1", "worker-1");
+      assert.equal(result.status, "completed");
+      assert.equal(result.receipt.memberRef, receipt.member_ref);
+    });
+
+    it("parses a valid topology_restore_failed status", async () => {
+      const client = respawnClient({
+        status: "topology_restore_failed",
+        receipt,
+        failed_peer_ids: ["peer-9"],
+      });
+      const result = await client.respawnMobMember("mob-1", "worker-1");
+      assert.equal(result.status, "topology_restore_failed");
+      assert.deepEqual(result.failedPeerIds, ["peer-9"]);
+    });
+
+    it("rejects an absent status instead of defaulting to completed", async () => {
+      const client = respawnClient({ receipt });
+      await assert.rejects(
+        () => client.respawnMobMember("mob-1", "worker-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /missing status|status/.test(String(error.message)),
+      );
+    });
+
+    it("rejects an out-of-set status (no collapse to completed)", async () => {
+      const client = respawnClient({ status: "weird", receipt });
+      await assert.rejects(
+        () => client.respawnMobMember("mob-1", "worker-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /invalid status/.test(String(error.message)),
+      );
+    });
+  });
+
+  // SITE 5 — mobMemberStatus: member status is enum-validated; "unknown" is a
+  // valid runtime variant but must NOT be fabricated on absence.
+  describe("mobMemberStatus", () => {
+    function memberStatusClient(response) {
+      const client = new MeerkatClient();
+      client.request = async () => response;
+      return client;
+    }
+
+    for (const variant of ["active", "retiring", "broken", "completed", "unknown"]) {
+      it(`accepts the valid member status variant '${variant}'`, async () => {
+        const client = memberStatusClient({
+          status: variant,
+          tokens_used: 0,
+          is_final: false,
+        });
+        const result = await client.mobMemberStatus("mob-1", "worker-1");
+        assert.equal(result.status, variant);
+      });
+    }
+
+    it("rejects an absent status instead of fabricating 'unknown'", async () => {
+      const client = memberStatusClient({ tokens_used: 0, is_final: false });
+      await assert.rejects(
+        () => client.mobMemberStatus("mob-1", "worker-1"),
+        (error) =>
+          error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+      );
+    });
+
+    it("rejects a non-variant status string", async () => {
+      const client = memberStatusClient({
+        status: "halfbaked",
+        tokens_used: 0,
+        is_final: false,
+      });
+      await assert.rejects(
+        () => client.mobMemberStatus("mob-1", "worker-1"),
+        (error) =>
+          error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+      );
+    });
+  });
+
+  // SITE 6 — mobSnapshot: lifecycle status is require-present-non-empty-string.
+  describe("mobSnapshot", () => {
+    function snapshotClient(response) {
+      const client = new MeerkatClient();
+      client.request = async () => response;
+      return client;
+    }
+
+    it("parses a present lifecycle status", async () => {
+      const client = snapshotClient({
+        mob_id: "mob-1",
+        status: "running",
+        members: [],
+      });
+      const result = await client.mobSnapshot("mob-1");
+      assert.equal(result.status, "running");
+    });
+
+    it("rejects an absent status instead of fabricating 'unknown'", async () => {
+      const client = snapshotClient({ mob_id: "mob-1", members: [] });
+      await assert.rejects(
+        () => client.mobSnapshot("mob-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /missing status/.test(String(error.message)),
+      );
+    });
+  });
+
+  // SITE 7 — parseAttributedMobEvent: typed source {identity, generation} +
+  // role; nothing coalesced to "".
+  describe("parseAttributedMobEvent", () => {
+    const validEnvelope = {
+      source: { type: "session", session_id: "00000000-0000-4000-8000-000000000001" },
+      payload: { type: "text_delta", delta: "hi" },
+    };
+
+    it("projects validated identity + role from the typed source", () => {
+      const event = MeerkatClient.parseAttributedMobEvent({
+        source: { identity: "worker-1", generation: 2 },
+        role: "worker",
+        envelope: validEnvelope,
+      });
+      assert.equal(event.source, "worker-1");
+      assert.equal(event.profile, "worker");
+      assert.deepEqual(event.envelope.source, {
+        type: "session",
+        sessionId: "00000000-0000-4000-8000-000000000001",
+      });
+    });
+
+    it("rejects a missing source instead of coalescing to empty string", () => {
+      assert.throws(
+        () =>
+          MeerkatClient.parseAttributedMobEvent({
+            role: "worker",
+            envelope: validEnvelope,
+          }),
+        (error) =>
+          error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+      );
+    });
+
+    it("rejects a non-string source (no [object Object] stringification)", () => {
+      assert.throws(
+        () =>
+          MeerkatClient.parseAttributedMobEvent({
+            source: { generation: 0 },
+            role: "worker",
+            envelope: validEnvelope,
+          }),
+        (error) =>
+          error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+      );
+    });
+
+    it("rejects a non-integer / negative generation", () => {
+      assert.throws(
+        () =>
+          MeerkatClient.parseAttributedMobEvent({
+            source: { identity: "worker-1", generation: -1 },
+            role: "worker",
+            envelope: validEnvelope,
+          }),
+        (error) =>
+          error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+      );
+    });
+
+    it("rejects a missing role instead of coalescing to empty string", () => {
+      assert.throws(
+        () =>
+          MeerkatClient.parseAttributedMobEvent({
+            source: { identity: "worker-1", generation: 0 },
+            envelope: validEnvelope,
+          }),
+        (error) =>
+          error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+      );
+    });
   });
 });
 

@@ -1233,8 +1233,8 @@ pub struct SessionMaterializationSpec {
         alias = "output_schema_json"
     )]
     pub output_schema: Option<OutputSchema>,
-    #[serde(default)]
-    pub structured_output_retries: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_output_retries: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2553,7 +2553,7 @@ mod tests {
             max_tokens: None,
             provider: None,
             output_schema: None,
-            structured_output_retries: 0,
+            structured_output_retries: None,
             provider_params: None,
             comms_name: None,
             peer_meta: None,

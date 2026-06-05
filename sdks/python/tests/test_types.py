@@ -1155,11 +1155,172 @@ def test_capability_available():
     assert disabled.available is False
 
 
-def test_normalize_status_accepts_externally_tagged_enum():
-    status = MeerkatClient._normalize_status(
-        {"DisabledByPolicy": {"description": "comms disabled"}}
+# ---------------------------------------------------------------------------
+# Fail-closed wire-status parsing (DOGMA Rule 6: no permissive coalescing of
+# absent/unknown runtime-owned status to a permissive class)
+# ---------------------------------------------------------------------------
+
+
+# SITE 1 — capabilities status: externally-tagged CapabilityStatus enum.
+def test_parse_wire_capability_status_accepts_bare_string():
+    assert (
+        MeerkatClient._parse_wire_capability_status("Available", "ctx")
+        == "Available"
     )
-    assert status == "DisabledByPolicy"
+
+
+def test_parse_wire_capability_status_accepts_externally_tagged_enum():
+    # Open vocabulary: any single-key dict tag is accepted (no whitelist).
+    assert (
+        MeerkatClient._parse_wire_capability_status(
+            {"DisabledByPolicy": {"description": "comms disabled"}}, "ctx"
+        )
+        == "DisabledByPolicy"
+    )
+    assert (
+        MeerkatClient._parse_wire_capability_status(
+            {"SomeFutureVariant": {}}, "ctx"
+        )
+        == "SomeFutureVariant"
+    )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [None, "", {}, 42, [], {"": {}}, {123: {}}],
+)
+def test_parse_wire_capability_status_fails_closed(raw):
+    # No fabricated "Available" default on absence/invalid input.
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_wire_capability_status(raw, "ctx")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+# SITE 2 — mob/member_send handling_mode.
+def test_parse_wire_handling_mode_accepts_valid():
+    assert MeerkatClient._parse_wire_handling_mode("queue", "ctx") == "queue"
+    assert MeerkatClient._parse_wire_handling_mode("steer", "ctx") == "steer"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [None, "", "QUEUE", "fire", 1, {"queue": {}}, []],
+)
+def test_parse_wire_handling_mode_fails_closed(raw):
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_wire_handling_mode(raw, "ctx")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+def test_member_send_never_falls_back_to_requested_handling_mode():
+    """SITE 2: the client's requested handling_mode must NEVER be used as a
+    fallback when the runtime receipt omits or corrupts handling_mode."""
+    import asyncio
+
+    client = MeerkatClient.__new__(MeerkatClient)
+
+    async def fake_request(method, params):
+        assert method == "mob/member_send"
+        # Runtime echoes identity/member_ref but OMITS handling_mode entirely.
+        # The client requested "steer" — it must not be substituted.
+        return {
+            "agent_identity": params["agent_identity"],
+            "member_ref": "m1",
+        }
+
+    client._request = fake_request  # type: ignore[attr-defined]
+
+    async def run():
+        with pytest.raises(MeerkatError) as excinfo:
+            await client.send_mob_member_content(
+                "mob1",
+                "ident1",
+                "hi",
+                handling_mode="steer",
+            )
+        assert excinfo.value.code == "INVALID_RESPONSE"
+
+    asyncio.run(run())
+
+
+def test_member_send_returns_runtime_handling_mode():
+    """SITE 2: a valid runtime handling_mode is returned verbatim, even when it
+    differs from the client's request (proving it is runtime-owned)."""
+    import asyncio
+
+    client = MeerkatClient.__new__(MeerkatClient)
+
+    async def fake_request(method, params):
+        return {
+            "agent_identity": params["agent_identity"],
+            "member_ref": "m1",
+            # Runtime resolved to "queue" though client asked for "steer".
+            "handling_mode": "queue",
+        }
+
+    client._request = fake_request  # type: ignore[attr-defined]
+
+    async def run():
+        receipt = await client.send_mob_member_content(
+            "mob1",
+            "ident1",
+            "hi",
+            handling_mode="steer",
+        )
+        assert receipt["handling_mode"] == "queue"
+
+    asyncio.run(run())
+
+
+# SITE 3 — mob/respawn outcome.
+def test_parse_wire_respawn_outcome_accepts_valid():
+    assert (
+        MeerkatClient._parse_wire_respawn_outcome("completed", "ctx")
+        == "completed"
+    )
+    assert (
+        MeerkatClient._parse_wire_respawn_outcome(
+            "topology_restore_failed", "ctx"
+        )
+        == "topology_restore_failed"
+    )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [None, "", "done", "failed", 0, {"completed": {}}, []],
+)
+def test_parse_wire_respawn_outcome_fails_closed(raw):
+    # No coalescing of absent/unknown status to "completed".
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_wire_respawn_outcome(raw, "ctx")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+# SITE 4 — mob/append_system_context status.
+def test_parse_wire_append_system_context_status_accepts_valid():
+    assert (
+        MeerkatClient._parse_wire_append_system_context_status("staged", "ctx")
+        == "staged"
+    )
+    assert (
+        MeerkatClient._parse_wire_append_system_context_status(
+            "duplicate", "ctx"
+        )
+        == "duplicate"
+    )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [None, "", "applied", "queued", 1, {"staged": {}}, []],
+)
+def test_parse_wire_append_system_context_status_fails_closed(raw):
+    # Closed contract is exactly {"staged", "duplicate"} — NOT "applied" — and
+    # absence must not coalesce to "staged".
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_wire_append_system_context_status(raw, "ctx")
+    assert excinfo.value.code == "INVALID_RESPONSE"
 
 
 # ---------------------------------------------------------------------------

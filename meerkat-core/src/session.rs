@@ -3674,7 +3674,7 @@ pub struct SessionMetadata {
     pub schema_version: u32,
     pub model: String,
     pub max_tokens: u32,
-    #[serde(default = "default_structured_output_retries")]
+    #[serde(default = "crate::config::default_structured_output_retries")]
     pub structured_output_retries: u32,
     pub provider: Provider,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3711,10 +3711,6 @@ pub struct SessionMetadata {
     /// (backward compatible via `#[serde(default)]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<crate::AuthBindingRef>,
-}
-
-fn default_structured_output_retries() -> u32 {
-    2
 }
 
 fn default_session_metadata_schema_version() -> u32 {

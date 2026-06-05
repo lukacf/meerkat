@@ -4698,18 +4698,37 @@ async fn spawn_live_external_peer_with_transport(
                                 _ => serde_json::json!({ "ok": true }),
                             }
                         };
-                        if let Err(error) = responder_runtime
-                            .send(CommsCommand::PeerResponse {
-                                to,
-                                in_reply_to: candidate.interaction.id,
-                                status: meerkat_core::interaction::ResponseStatus::Completed,
-                                result: response,
-                                blocks: None,
-                                handling_mode: None,
-                            })
-                            .await
-                        {
-                            panic!("send live external peer response failed: {error}");
+                        // `trust_candidate_sender_for_reply` records trust for the
+                        // requester, but the registration of that peer in the
+                        // send path propagates asynchronously. Under slow
+                        // scheduling (notably the Linux CI executors) it can lag
+                        // this reply, surfacing a transient `PeerNotFound`. Wait
+                        // for the registration to land rather than racing it; any
+                        // other send error still fails immediately (no masking).
+                        let send_deadline =
+                            tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+                        loop {
+                            match responder_runtime
+                                .send(CommsCommand::PeerResponse {
+                                    to: to.clone(),
+                                    in_reply_to: candidate.interaction.id,
+                                    status: meerkat_core::interaction::ResponseStatus::Completed,
+                                    result: response.clone(),
+                                    blocks: None,
+                                    handling_mode: None,
+                                })
+                                .await
+                            {
+                                Ok(_) => break,
+                                Err(meerkat_core::comms::SendError::PeerNotFound(_))
+                                    if tokio::time::Instant::now() < send_deadline =>
+                                {
+                                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                                }
+                                Err(error) => {
+                                    panic!("send live external peer response failed: {error}");
+                                }
+                            }
                         }
                         responder_runtime.mark_interaction_complete(candidate.interaction.id.0);
                         for supervisor_pubkey in remove_supervisors_after_response {

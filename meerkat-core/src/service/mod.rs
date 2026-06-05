@@ -1183,7 +1183,9 @@ pub struct StartTurnRequest {
 }
 
 /// Request to append runtime system context to an existing session.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+// Cannot derive `Eq`: the typed `peer_response_terminal` fact carries a
+// `serde_json::Value` render payload, which is `PartialEq` but not `Eq`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppendSystemContextRequest {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1201,6 +1203,12 @@ pub struct AppendSystemContextRequest {
         skip_serializing_if = "crate::session::SystemContextSource::is_normal"
     )]
     pub source_kind: crate::session::SystemContextSource,
+    /// Typed terminal-peer-response fact this append carries, when the append
+    /// projects a [`crate::handles::PeerResponseTerminalFact`]. The producer
+    /// stamps the typed fact here; realtime/live consumers read it directly
+    /// instead of re-parsing the flattened prompt `text`/`source` string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_response_terminal: Option<crate::handles::PeerResponseTerminalFact>,
 }
 
 /// Result of appending runtime system context to a session.

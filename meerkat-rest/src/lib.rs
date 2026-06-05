@@ -1015,6 +1015,7 @@ fn pending_system_context_appends(
             idempotency_key: Some(append.key.clone()),
             accepted_at,
             source_kind: meerkat_core::session::SystemContextSource::Normal,
+            peer_response_terminal: None,
         })
         .collect()
 }
@@ -5080,6 +5081,7 @@ async fn append_system_context(
         source: req.source,
         idempotency_key: req.idempotency_key,
         source_kind: meerkat_core::session::SystemContextSource::Normal,
+        peer_response_terminal: None,
     };
     let result = state
         .session_service
@@ -7035,8 +7037,8 @@ mod tests {
             ]))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {
@@ -7078,8 +7080,8 @@ mod tests {
             })
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {
@@ -7105,8 +7107,8 @@ mod tests {
             })]))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {

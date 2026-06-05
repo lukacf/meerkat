@@ -37,19 +37,32 @@ pub fn rpc_request_lifecycle(method: &str, params_json: Option<&str>) -> Request
         .unwrap_or(RequestLifecycle::InlineObservation)
 }
 
+/// Typed wire view of the `session/create` `initial_turn` field. Mirrors the
+/// surface `InitialTurn` enum so lifecycle classification deserializes a closed
+/// type instead of string-matching a raw JSON `Value`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireInitialTurn {
+    /// Run the first turn immediately as part of session creation (default).
+    RunImmediately,
+    /// Register the session and defer the first turn.
+    Deferred,
+}
+
+#[derive(serde::Deserialize)]
+struct SessionCreateInitialTurnView {
+    #[serde(default)]
+    initial_turn: Option<WireInitialTurn>,
+}
+
 fn session_create_runs_immediately(params_json: Option<&str>) -> bool {
     let Some(params_json) = params_json else {
         return true;
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(params_json) else {
+    let Ok(view) = serde_json::from_str::<SessionCreateInitialTurnView>(params_json) else {
         return true;
     };
-    !matches!(
-        value
-            .get("initial_turn")
-            .and_then(serde_json::Value::as_str),
-        Some("deferred")
-    )
+    !matches!(view.initial_turn, Some(WireInitialTurn::Deferred))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

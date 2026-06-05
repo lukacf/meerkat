@@ -510,8 +510,8 @@ pub enum LiveConfigRejectionReason {
     /// Adapter-side `Refresh` rejected because the snapshot's provider
     /// differs from the bound provider — close + reopen required.
     RefreshProviderSwap {
-        from_provider: String,
-        to_provider: String,
+        from_provider: Provider,
+        to_provider: Provider,
     },
     /// Adapter-side `Refresh` rejected because the snapshot's audio
     /// config cannot be applied in place (e.g. OpenAI Realtime's session
@@ -573,7 +573,7 @@ impl std::fmt::Display for LiveConfigRejectionReason {
                 to_provider,
             } => write!(
                 f,
-                "live adapter refresh: provider swap from `{from_provider}` to `{to_provider}` requires close + reopen"
+                "live adapter refresh: provider swap from `{from_provider:?}` to `{to_provider:?}` requires close + reopen"
             ),
             Self::RefreshAudioConfigMismatch { detail } => {
                 write!(f, "live adapter refresh: audio config mismatch ({detail})")
@@ -619,7 +619,13 @@ pub struct LiveProjectionSnapshot {
     pub visible_tools: Vec<ToolDef>,
     pub system_prompt: Option<String>,
     pub model_id: String,
-    pub provider_id: String,
+    // Typed in memory (the realtime refresh guard compares
+    // `Provider == Provider`), but serialized with the canonical provider
+    // names (`"openai"`, not the derive's `"open_a_i"`) so the durable/adapter
+    // wire shape matches the prior `String` carrier exactly.
+    #[serde(with = "crate::provider::provider_canonical_str")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub provider_id: Provider,
     pub audio_config: Option<LiveAudioConfig>,
     /// R3: typed runtime system-context entries projected alongside seed
     /// history.
@@ -1123,7 +1129,7 @@ mod tests {
                 visible_tools: vec![],
                 system_prompt: Some("You are helpful.".into()),
                 model_id: "gpt-5.4".into(),
-                provider_id: "openai".into(),
+                provider_id: Provider::OpenAI,
                 audio_config: None,
                 runtime_system_context: vec![],
             },
@@ -1148,7 +1154,7 @@ mod tests {
             visible_tools: vec![],
             system_prompt: None,
             model_id: "gpt-5.4".into(),
-            provider_id: "openai".into(),
+            provider_id: Provider::OpenAI,
             audio_config: None,
             runtime_system_context: vec![crate::session::PendingSystemContextAppend {
                 text: "peer terminal: pty=42".into(),
@@ -1156,6 +1162,7 @@ mod tests {
                 idempotency_key: Some("k1".into()),
                 source_kind: crate::session::SystemContextSource::Normal,
                 accepted_at: SystemTime::UNIX_EPOCH,
+                peer_response_terminal: None,
             }],
         };
         let json = serde_json::to_string(&snapshot).unwrap();
@@ -1671,7 +1678,7 @@ mod tests {
             visible_tools: vec![],
             system_prompt: None,
             model_id: "gpt-5.4".into(),
-            provider_id: "openai".into(),
+            provider_id: Provider::OpenAI,
             audio_config: None,
             runtime_system_context: vec![],
         };
@@ -1978,8 +1985,8 @@ mod tests {
                 to_model: "gpt-realtime-2".into(),
             },
             LiveConfigRejectionReason::RefreshProviderSwap {
-                from_provider: "openai".into(),
-                to_provider: "anthropic".into(),
+                from_provider: Provider::OpenAI,
+                to_provider: Provider::Anthropic,
             },
             LiveConfigRejectionReason::RefreshAudioConfigMismatch {
                 detail: "rate=16000/16000 ch=1/1 cannot be applied in place".into(),

@@ -1040,17 +1040,11 @@ impl meerkat_llm_core::ImageGenerationExecutor for RoutingImageGenerationExecuto
         request: meerkat_llm_core::ProviderImageGenerationRequest,
     ) -> Result<meerkat_llm_core::ProviderImageGenerationOutput, meerkat_llm_core::LlmError> {
         let provider = Self::provider_key(&request.execution_plan);
-        let executor = self
-            .executors
-            .get(provider)
-            .or_else(|| {
-                (provider == "gemini")
-                    .then(|| self.executors.get("google"))
-                    .flatten()
-            })
-            .ok_or_else(|| meerkat_llm_core::LlmError::InvalidRequest {
+        let executor = self.executors.get(provider).ok_or_else(|| {
+            meerkat_llm_core::LlmError::InvalidRequest {
                 message: format!("no image generation executor configured for provider {provider}"),
-            })?;
+            }
+        })?;
         executor.execute_image_generation(request).await
     }
 }
@@ -2632,9 +2626,11 @@ impl AgentFactory {
         }
 
         if let Some(client) = build_config.llm_client_override.as_ref() {
-            return Ok((Provider::from_name(client.provider()), None));
+            return Ok((client.provider(), None));
         }
         if let Some(client) = build_config.agent_llm_client_override.as_ref() {
+            // `AgentLlmClient::provider()` still returns the display label;
+            // parse it back into the typed enum at this boundary.
             return Ok((Provider::from_name(client.provider()), None));
         }
 
@@ -5080,8 +5076,8 @@ mod tests {
             Box::pin(futures::stream::empty())
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
@@ -8866,8 +8862,8 @@ mod prompt_tests {
             })]))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {

@@ -2492,6 +2492,7 @@ impl MethodRouter {
             source: params.source,
             idempotency_key: params.idempotency_key,
             source_kind: meerkat_core::session::SystemContextSource::Normal,
+            peer_response_terminal: None,
         };
         match self.resolve_session_owner(&session_id).await {
             Some(SessionOwner::Runtime) => {
@@ -3535,8 +3536,8 @@ mod tests {
             ]))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {
@@ -3612,8 +3613,8 @@ mod tests {
             }))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {

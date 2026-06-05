@@ -119,20 +119,21 @@ async fn run_chat(
         // Test helper: project untyped JSON into the per-provider tag at the
         // adapter boundary so legacy e2e fixtures keep working against the
         // typed-provider-params surface.
+        use meerkat_core::Provider;
         use meerkat_core::lifecycle::run_primitive::{
             AnthropicProviderTag, GeminiProviderTag, OpenAiProviderTag, ProviderTag,
         };
         let tag = match client.provider() {
-            "anthropic" => AnthropicProviderTag::from_legacy_value(&params)
+            Provider::Anthropic => AnthropicProviderTag::from_legacy_value(&params)
                 .ok()
                 .map(ProviderTag::Anthropic),
-            "openai" => OpenAiProviderTag::from_legacy_value(&params)
+            Provider::OpenAI => OpenAiProviderTag::from_legacy_value(&params)
                 .ok()
                 .map(ProviderTag::OpenAi),
-            "gemini" | "google" => GeminiProviderTag::from_legacy_value(&params)
+            Provider::Gemini => GeminiProviderTag::from_legacy_value(&params)
                 .ok()
                 .map(ProviderTag::Gemini),
-            _ => None,
+            Provider::SelfHosted | Provider::Other => None,
         };
         if let Some(tag) = tag {
             request = request.with_provider_params(tag);

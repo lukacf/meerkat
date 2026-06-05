@@ -667,7 +667,7 @@ fn build_live_projection_snapshot(
         // this on the seed-history path alone loses it on refresh.
         system_prompt: extract_system_prompt_from_seed_messages(&open_config.seed_messages),
         model_id: open_config.llm_identity.model.clone(),
-        provider_id: open_config.llm_identity.provider.as_str().to_string(),
+        provider_id: open_config.llm_identity.provider,
         // Audio config is not part of the open config today; the live
         // adapter inherits provider defaults. When the runtime starts
         // surfacing per-session audio policy, this becomes
@@ -2217,7 +2217,7 @@ mod tests {
             visible_tools: Vec::new(),
             system_prompt: None,
             model_id: "gpt-realtime-2".into(),
-            provider_id: Provider::OpenAI.as_str().into(),
+            provider_id: meerkat_core::Provider::OpenAI,
             audio_config: None,
             runtime_system_context: Vec::new(),
         };
@@ -2638,7 +2638,7 @@ mod tests {
             visible_tools: vec![],
             system_prompt: None,
             model_id: "gpt-realtime-2".into(),
-            provider_id: "openai".into(),
+            provider_id: meerkat_core::Provider::OpenAI,
             audio_config: None,
             runtime_system_context: vec![],
         };
@@ -2823,7 +2823,7 @@ mod tests {
                 visible_tools: vec![],
                 system_prompt: None,
                 model_id: "gpt-realtime-2".into(),
-                provider_id: "openai".into(),
+                provider_id: meerkat_core::Provider::OpenAI,
                 audio_config: None,
                 runtime_system_context: vec![],
             };

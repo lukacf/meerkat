@@ -67,3 +67,31 @@ impl Provider {
         Provider::SelfHosted,
     ];
 }
+
+/// Serde helper that (de)serializes a [`Provider`] using its canonical
+/// [`Provider::as_str`] names (`"openai"`, `"self_hosted"`, …) rather than the
+/// derived `#[serde(rename_all = "snake_case")]` output (which mangles
+/// `OpenAI` into `"open_a_i"`).
+///
+/// Use this at typed seams that previously carried the provider as a canonical
+/// `String` and must keep that exact wire/durable shape after being retyped to
+/// the [`Provider`] enum (e.g. `LiveProjectionSnapshot.provider_id`).
+pub mod provider_canonical_str {
+    use super::Provider;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(value: &Provider, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        value.as_str().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Provider, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let name = String::deserialize(deserializer)?;
+        Ok(Provider::from_name(&name))
+    }
+}

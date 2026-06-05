@@ -14,7 +14,7 @@ use meerkat_core::lifecycle::run_primitive::ProviderTag;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::web_search::{WebSearchRequest, WebSearchResult};
 use meerkat_core::{
-    AssistantImageRef, MediaType, Message, OutputSchema, StopReason, ToolDef, Usage,
+    AssistantImageRef, MediaType, Message, OutputSchema, Provider, StopReason, ToolDef, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -45,7 +45,7 @@ pub trait LlmClient: Send + Sync {
         Err(LlmError::InvalidRequest {
             message: format!(
                 "{} client does not implement provider replay projection",
-                self.provider()
+                self.provider().as_str()
             ),
         })
     }
@@ -56,8 +56,12 @@ pub trait LlmClient: Send + Sync {
     /// when the model finishes (either with EndTurn or ToolUse).
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a>;
 
-    /// Get the provider name (for logging/debugging)
-    fn provider(&self) -> &'static str;
+    /// Typed provider identity for this client.
+    ///
+    /// Each provider implementation statically knows its own identity and
+    /// returns the corresponding [`Provider`] variant. Callers that need a
+    /// display/log label use `provider().as_str()`.
+    fn provider(&self) -> Provider;
 
     /// Check if the client is healthy/connected
     async fn health_check(&self) -> Result<(), LlmError>;

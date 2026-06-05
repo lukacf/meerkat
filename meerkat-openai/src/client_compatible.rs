@@ -629,8 +629,8 @@ impl LlmClient for OpenAiCompatibleClient {
         }
     }
 
-    fn provider(&self) -> &'static str {
-        "self_hosted"
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::SelfHosted
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {

@@ -1222,6 +1222,7 @@ mod tests {
             source: Some("test".to_string()),
             idempotency_key: Some("k1".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
+            peer_response_terminal: None,
         };
         let now = meerkat_core::time_compat::SystemTime::now();
         let res = reg.append_system_context(&id, &req, now, 200).await;

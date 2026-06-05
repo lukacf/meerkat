@@ -1435,8 +1435,8 @@ impl LlmClient for AnthropicClient {
         streaming::ensure_terminal_done(inner)
     }
 
-    fn provider(&self) -> &'static str {
-        "anthropic"
+    fn provider(&self) -> Provider {
+        Provider::Anthropic
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {
@@ -2303,14 +2303,14 @@ mod tests {
             .request_timeout(std::time::Duration::from_secs(120))
             .build()?;
 
-        assert_eq!(client.provider(), "anthropic");
+        assert_eq!(client.provider(), Provider::Anthropic);
         Ok(())
     }
 
     #[test]
     fn test_client_default_has_connection_pool() -> Result<(), Box<dyn std::error::Error>> {
         let client = AnthropicClient::new("test-key".to_string())?;
-        assert_eq!(client.provider(), "anthropic");
+        assert_eq!(client.provider(), Provider::Anthropic);
         Ok(())
     }
 

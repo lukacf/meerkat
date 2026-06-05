@@ -2160,8 +2160,8 @@ impl LlmClient for OpenAiClient {
         streaming::ensure_terminal_done(inner)
     }
 
-    fn provider(&self) -> &'static str {
-        "openai"
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::OpenAI
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {

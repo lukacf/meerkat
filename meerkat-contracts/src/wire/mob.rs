@@ -588,12 +588,29 @@ pub struct MobMemberParams {
     pub agent_identity: String,
 }
 
+/// Lifecycle status of a mob on the wire. Mirrors
+/// `meerkat_mob::runtime::MobState` so surfaces report mob lifecycle through a
+/// closed type rather than re-deriving meaning from free-form status text.
+///
+/// Variants serialize to their PascalCase names (`"Creating"`, `"Running"`,
+/// ...) to match the canonical `MobState::as_str()` projection that producers
+/// emit on the wire.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum WireMobLifecycleStatus {
+    Creating,
+    Running,
+    Stopped,
+    Completed,
+    Destroyed,
+}
+
 /// One active mob row returned by `mob/list`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobStatusResult {
     pub mob_id: String,
-    pub status: String,
+    pub status: WireMobLifecycleStatus,
 }
 
 /// Response payload for `mob/list`.
@@ -860,11 +877,23 @@ pub struct MobRespawnReceipt {
     pub member_ref: WireMemberRef,
 }
 
+/// Outcome of a `mob/respawn` call. Mirrors the success vs
+/// `MobRespawnError::TopologyRestoreFailed` distinction as a closed type so SDK
+/// consumers branch on a typed variant instead of re-deriving meaning from a
+/// free-form status string.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMobRespawnOutcome {
+    Completed,
+    TopologyRestoreFailed,
+}
+
 /// Response payload for `mob/respawn`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobRespawnResult {
-    pub status: String,
+    pub status: WireMobRespawnOutcome,
     pub receipt: MobRespawnReceipt,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_peer_ids: Vec<String>,
@@ -1547,6 +1576,18 @@ pub enum WireMobLifecycleAction {
     Destroy,
 }
 
+/// Typed wire/unwire action for the `mob_wire` agent tool. Replaces the prior
+/// `action: String` discriminator with an exhaustive enum so the agent-tool
+/// surface reasons about the wire/unwire distinction through the type system
+/// rather than string folklore (mirrors [`WireMobLifecycleAction`]).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMobWireAction {
+    Wire,
+    Unwire,
+}
+
 /// Request payload for `mob/lifecycle`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1581,13 +1622,36 @@ pub struct MobAppendSystemContextParams {
     pub idempotency_key: Option<String>,
 }
 
+/// Outcome of a `mob/append_system_context` call on the wire. Mirrors
+/// `meerkat_core::AppendSystemContextStatus` so consumers reason about the
+/// applied/staged/duplicate distinction through a closed type rather than a
+/// free-form status string.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireAppendSystemContextStatus {
+    Applied,
+    Staged,
+    Duplicate,
+}
+
+impl From<meerkat_core::AppendSystemContextStatus> for WireAppendSystemContextStatus {
+    fn from(status: meerkat_core::AppendSystemContextStatus) -> Self {
+        match status {
+            meerkat_core::AppendSystemContextStatus::Applied => Self::Applied,
+            meerkat_core::AppendSystemContextStatus::Staged => Self::Staged,
+            meerkat_core::AppendSystemContextStatus::Duplicate => Self::Duplicate,
+        }
+    }
+}
+
 /// Response payload for `mob/append_system_context`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobAppendSystemContextResult {
     pub mob_id: String,
     pub agent_identity: String,
-    pub status: String,
+    pub status: WireAppendSystemContextStatus,
 }
 
 /// Response payload for `mob/flows`.
@@ -1856,8 +1920,8 @@ pub struct MobMemberStatusResult {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobSnapshotResult {
     pub mob_id: String,
-    pub status: String,
-    pub members: Vec<Value>,
+    pub status: WireMobLifecycleStatus,
+    pub members: Vec<MobMemberListEntryWire>,
 }
 
 #[cfg(test)]

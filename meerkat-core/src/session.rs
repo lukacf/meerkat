@@ -1031,7 +1031,9 @@ impl SystemContextStateHandle {
 }
 
 /// Durable control state for runtime system-context append requests.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+// Cannot derive `Eq`: `PendingSystemContextAppend` carries a typed
+// `peer_response_terminal` fact whose render payload is a `serde_json::Value`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionSystemContextState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1089,7 +1091,9 @@ impl SystemContextSource {
 }
 
 /// Pending append request accepted by the control plane but not yet applied at an LLM boundary.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+// Cannot derive `Eq`: the typed `peer_response_terminal` fact carries a
+// `serde_json::Value` render payload, which is `PartialEq` but not `Eq`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct PendingSystemContextAppend {
     pub text: String,
@@ -1100,6 +1104,15 @@ pub struct PendingSystemContextAppend {
     /// Typed provenance: whether this append is a transient runtime steer.
     #[serde(default, skip_serializing_if = "SystemContextSource::is_normal")]
     pub source_kind: SystemContextSource,
+    /// Typed terminal-peer-response fact this append carries, when the append
+    /// projects a `PeerResponseTerminalFact`. The producer stamps the typed
+    /// fact here at construction; realtime/live consumers read the typed fact
+    /// directly instead of re-parsing the flattened prompt `text`/`source`
+    /// string (the `peer_response_terminal:` prefix + `Payload:` split). This
+    /// mirrors the `source_kind` precedent that retired the `runtime:steer:`
+    /// string-prefix re-derivation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_response_terminal: Option<crate::handles::PeerResponseTerminalFact>,
     pub accepted_at: SystemTime,
 }
 
@@ -2155,6 +2168,10 @@ mod system_context_authority {
             source: req.source.clone(),
             idempotency_key: req.idempotency_key.clone(),
             source_kind: req.source_kind,
+            // Carry the typed `PeerResponseTerminalFact` so realtime/live
+            // consumers read it directly instead of re-parsing the flattened
+            // prompt text. Mirrors the `source_kind` typed-provenance precedent.
+            peer_response_terminal: req.peer_response_terminal.clone(),
             accepted_at,
         };
         if let Some(key) = req.idempotency_key.as_ref() {
@@ -6346,6 +6363,7 @@ mod tests {
                     ),
                     idempotency_key: Some("018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
                     source_kind: SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
                 accepted_at,
             )
@@ -6380,6 +6398,7 @@ mod tests {
                     source: Some("runtime:steer:input-1".to_string()),
                     idempotency_key: Some("runtime:steer:input-1".to_string()),
                     source_kind: SystemContextSource::RuntimeSteer,
+                    peer_response_terminal: None,
                 },
                 SystemTime::UNIX_EPOCH,
             )
@@ -6408,6 +6427,7 @@ mod tests {
                         source: Some(key.to_string()),
                         idempotency_key: Some(key.to_string()),
                         source_kind: SystemContextSource::RuntimeSteer,
+                        peer_response_terminal: None,
                     },
                     SystemTime::UNIX_EPOCH,
                 )
@@ -6451,6 +6471,7 @@ mod tests {
                     source: Some("runtime:steer:input-2".to_string()),
                     idempotency_key: Some("runtime:steer:input-2".to_string()),
                     source_kind: SystemContextSource::RuntimeSteer,
+                    peer_response_terminal: None,
                 },
                 SystemTime::UNIX_EPOCH,
             )
@@ -6484,6 +6505,7 @@ mod tests {
                 source: Some("steer-source-old".to_string()),
                 idempotency_key: Some("steer-key-old".to_string()),
                 source_kind: SystemContextSource::RuntimeSteer,
+                peer_response_terminal: None,
                 accepted_at: SystemTime::UNIX_EPOCH,
             }),
             SYSTEM_CONTEXT_SEPARATOR,
@@ -6492,6 +6514,7 @@ mod tests {
                 source: Some("peer_response_terminal:analyst:req".to_string()),
                 idempotency_key: Some("peer_response_terminal:analyst:req".to_string()),
                 source_kind: SystemContextSource::Normal,
+                peer_response_terminal: None,
                 accepted_at: SystemTime::UNIX_EPOCH,
             })
         ));
@@ -6502,6 +6525,7 @@ mod tests {
                     source: Some("steer-source-pending".to_string()),
                     idempotency_key: Some("steer-key-pending".to_string()),
                     source_kind: SystemContextSource::RuntimeSteer,
+                    peer_response_terminal: None,
                     accepted_at: SystemTime::UNIX_EPOCH,
                 }],
                 applied: vec![
@@ -6510,6 +6534,7 @@ mod tests {
                         source: Some("steer-source-old".to_string()),
                         idempotency_key: Some("steer-key-old".to_string()),
                         source_kind: SystemContextSource::RuntimeSteer,
+                        peer_response_terminal: None,
                         accepted_at: SystemTime::UNIX_EPOCH,
                     },
                     PendingSystemContextAppend {
@@ -6517,6 +6542,7 @@ mod tests {
                         source: Some("peer_response_terminal:analyst:req".to_string()),
                         idempotency_key: Some("peer_response_terminal:analyst:req".to_string()),
                         source_kind: SystemContextSource::Normal,
+                        peer_response_terminal: None,
                         accepted_at: SystemTime::UNIX_EPOCH,
                     },
                 ],
@@ -6559,6 +6585,7 @@ mod tests {
             ),
             idempotency_key: Some("018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
             source_kind: SystemContextSource::Normal,
+            peer_response_terminal: None,
             accepted_at: SystemTime::UNIX_EPOCH,
         };
         let mut session = Session::new();
@@ -6582,6 +6609,7 @@ mod tests {
                     source: Some("rpc/session_inject_context".to_string()),
                     idempotency_key: Some("ctx-boundary".to_string()),
                     source_kind: SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
                 accepted_at,
             )
@@ -6625,6 +6653,7 @@ mod tests {
                     source: Some("rpc/session_inject_context".to_string()),
                     idempotency_key: None,
                     source_kind: SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
                 accepted_at,
             )
@@ -6658,6 +6687,7 @@ mod tests {
             source: Some("peer_response_terminal:analyst:req-1".to_string()),
             idempotency_key: Some("req-1".to_string()),
             source_kind: SystemContextSource::Normal,
+            peer_response_terminal: None,
             accepted_at: SystemTime::UNIX_EPOCH,
         };
         let duplicate = PendingSystemContextAppend {
@@ -6696,6 +6726,7 @@ mod tests {
             source: Some("peer_response_terminal:analyst:req-1".to_string()),
             idempotency_key: Some("req-1".to_string()),
             source_kind: SystemContextSource::Normal,
+            peer_response_terminal: None,
             accepted_at: SystemTime::UNIX_EPOCH,
         };
         let conflicting = PendingSystemContextAppend {

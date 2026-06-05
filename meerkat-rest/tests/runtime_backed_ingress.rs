@@ -67,8 +67,8 @@ impl LlmClient for FirstTurnOnlyClient {
         }
     }
 
-    fn provider(&self) -> &'static str {
-        "first-turn-only"
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Other
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {

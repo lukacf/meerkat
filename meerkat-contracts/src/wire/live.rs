@@ -1003,8 +1003,8 @@ pub enum WireLiveConfigRejectionReason {
         to_model: String,
     },
     RefreshProviderSwap {
-        from_provider: String,
-        to_provider: String,
+        from_provider: WireProvider,
+        to_provider: WireProvider,
     },
     RefreshAudioConfigMismatch {
         detail: String,
@@ -1085,8 +1085,8 @@ impl From<LiveConfigRejectionReason> for WireLiveConfigRejectionReason {
                 from_provider,
                 to_provider,
             } => Self::RefreshProviderSwap {
-                from_provider,
-                to_provider,
+                from_provider: from_provider.into(),
+                to_provider: to_provider.into(),
             },
             LiveConfigRejectionReason::RefreshAudioConfigMismatch { detail } => {
                 Self::RefreshAudioConfigMismatch { detail }
@@ -1170,8 +1170,8 @@ impl TryFrom<WireLiveConfigRejectionReason> for LiveConfigRejectionReason {
                 from_provider,
                 to_provider,
             } => Ok(Self::RefreshProviderSwap {
-                from_provider,
-                to_provider,
+                from_provider: from_provider.try_into()?,
+                to_provider: to_provider.try_into()?,
             }),
             WireLiveConfigRejectionReason::RefreshAudioConfigMismatch { detail } => {
                 Ok(Self::RefreshAudioConfigMismatch { detail })

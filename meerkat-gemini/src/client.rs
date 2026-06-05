@@ -1658,8 +1658,8 @@ impl LlmClient for GeminiClient {
         streaming::ensure_terminal_done(inner)
     }
 
-    fn provider(&self) -> &'static str {
-        "gemini"
+    fn provider(&self) -> Provider {
+        Provider::Gemini
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {

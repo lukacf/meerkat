@@ -1134,6 +1134,7 @@ async fn inject_context_applied_when_idle() {
                 source: Some("test".to_string()),
                 idempotency_key: Some("ctx-idle-1".to_string()),
                 source_kind: meerkat_core::session::SystemContextSource::Normal,
+                peer_response_terminal: None,
             },
         )
         .await
@@ -1166,6 +1167,7 @@ async fn inject_context_duplicate_idempotent() {
         source: Some("test".to_string()),
         idempotency_key: Some("ctx-dedup-1".to_string()),
         source_kind: meerkat_core::session::SystemContextSource::Normal,
+        peer_response_terminal: None,
     };
 
     // First append

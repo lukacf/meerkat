@@ -142,7 +142,7 @@ pub fn build_live_projection_snapshot_for_runtime(
         // `Message::System` entry in `seed_messages`.
         system_prompt: extract_system_prompt_from_seed_messages_runtime(&open_config.seed_messages),
         model_id: open_config.llm_identity.model.clone(),
-        provider_id: open_config.llm_identity.provider.as_str().to_string(),
+        provider_id: open_config.llm_identity.provider,
         audio_config: None,
         // R3: forward typed runtime system-context so refresh snapshots
         // carry the same authoritative system instructions the open path

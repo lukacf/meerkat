@@ -1471,6 +1471,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                         source: append.source,
                         idempotency_key: append.idempotency_key,
                         source_kind: append.source_kind,
+                        peer_response_terminal: None,
                     },
                     append.accepted_at,
                 )
@@ -4605,6 +4606,7 @@ mod runtime_turn_metadata_tests {
                             source: append.source.clone(),
                             idempotency_key: append.idempotency_key.clone(),
                             source_kind: append.source_kind,
+                            peer_response_terminal: None,
                         },
                         append.accepted_at,
                     )
@@ -4987,6 +4989,7 @@ mod runtime_turn_metadata_tests {
                             idempotency_key: Some("peer_response_terminal:test:req".to_string()),
                             source_kind: meerkat_core::session::SystemContextSource::Normal,
                             accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                            peer_response_terminal: None,
                         }],
                         Some(RuntimeTurnMetadata {
                             execution_kind: Some(RuntimeExecutionKind::ContentTurn),
@@ -5052,6 +5055,7 @@ mod runtime_turn_metadata_tests {
             idempotency_key: Some("peer_response_terminal:test:req".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                    peer_response_terminal: None,
         }];
         let baseline_ticks = session_context_handle.ticks().len();
 
@@ -5160,6 +5164,7 @@ mod runtime_turn_metadata_tests {
             idempotency_key: Some("console:steer:test".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: meerkat_core::time_compat::SystemTime::now(),
+            peer_response_terminal: None,
         }];
 
         tokio::time::timeout(
@@ -5263,6 +5268,7 @@ mod runtime_turn_metadata_tests {
                     idempotency_key: Some("console:steer:stale".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                    peer_response_terminal: None,
                 }],
             )
             .await
@@ -5336,6 +5342,7 @@ mod runtime_turn_metadata_tests {
                     idempotency_key: Some("console:steer:wrong-run".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                    peer_response_terminal: None,
                 }],
             )
             .await
@@ -5406,6 +5413,7 @@ mod runtime_turn_metadata_tests {
                         idempotency_key: Some("console:steer:conflict".to_string()),
                         source_kind: meerkat_core::session::SystemContextSource::Normal,
                         accepted_at,
+                        peer_response_terminal: None,
                     },
                     PendingSystemContextAppend {
                         text: "conflicting staged context".to_string(),
@@ -5413,6 +5421,7 @@ mod runtime_turn_metadata_tests {
                         idempotency_key: Some("console:steer:conflict".to_string()),
                         source_kind: meerkat_core::session::SystemContextSource::Normal,
                         accepted_at,
+                        peer_response_terminal: None,
                     },
                 ],
             )
@@ -5493,6 +5502,7 @@ mod runtime_turn_metadata_tests {
                             idempotency_key: Some("peer_response_terminal:test:req".to_string()),
                             source_kind: meerkat_core::session::SystemContextSource::Normal,
                             accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                            peer_response_terminal: None,
                         }],
                         Some(RuntimeTurnMetadata {
                             execution_kind: Some(RuntimeExecutionKind::ContentTurn),

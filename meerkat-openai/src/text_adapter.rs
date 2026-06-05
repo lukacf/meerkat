@@ -411,10 +411,10 @@ impl LlmClient for OpenAiRealtimeTextAdapter {
         })
     }
 
-    fn provider(&self) -> &'static str {
-        // Share the "openai" provider label so factory-level provider
+    fn provider(&self) -> meerkat_core::Provider {
+        // Share the OpenAI provider identity so factory-level provider
         // inference / logging treats realtime sessions uniformly.
-        "openai"
+        meerkat_core::Provider::OpenAI
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {
@@ -1051,6 +1051,6 @@ mod tests {
     #[test]
     fn provider_is_openai() {
         let adapter = OpenAiRealtimeTextAdapter::new("sk-test");
-        assert_eq!(adapter.provider(), "openai");
+        assert_eq!(adapter.provider(), meerkat_core::Provider::OpenAI);
     }
 }

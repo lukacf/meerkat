@@ -10,8 +10,8 @@ use meerkat_contracts::{
     RealtimeInputKind, RealtimeOutputKind, RealtimeTurningMode,
 };
 use meerkat_core::{
-    Message, PendingSystemContextAppend, RealtimeTranscriptEvent, RealtimeTranscriptRole, ToolDef,
-    ToolResult,
+    Message, PendingSystemContextAppend, Provider, RealtimeTranscriptEvent, RealtimeTranscriptRole,
+    ToolDef, ToolResult,
 };
 use meerkat_core::{StopReason, types::Usage};
 use meerkat_llm_core::LlmError;
@@ -28,7 +28,6 @@ use oai_rt_rs::protocol::models::{
 use oai_rt_rs::{
     ClientEvent, Error as OpenAiLiveError, RealtimeClient, RealtimeSender, ServerEvent,
 };
-use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
@@ -368,16 +367,14 @@ fn openai_realtime_authoritative_system_context(
 fn openai_realtime_terminal_peer_response_summary(
     append: &PendingSystemContextAppend,
 ) -> Option<String> {
-    let source = append.source.as_deref().unwrap_or("runtime_system_context");
-    if !source.starts_with("peer_response_terminal:") {
-        return None;
-    }
-    let (_, result_text) = append
-        .text
-        .split_once("Payload:")
-        .or_else(|| append.text.split_once("Result:"))?;
-    let mut deserializer = serde_json::Deserializer::from_str(result_text.trim());
-    let result = serde_json::Value::deserialize(&mut deserializer).ok()?;
+    // The producer stamps the typed `PeerResponseTerminalFact` on the append
+    // (mirroring the `source_kind` precedent that retired the `runtime:steer:`
+    // string prefix). The realtime consumer reads the typed fact directly — no
+    // `starts_with("peer_response_terminal:")` prefix probe, no
+    // `split_once("Payload:")` text scrape, no JSON re-parse of prose.
+    let fact = append.peer_response_terminal.as_ref()?;
+    let source = fact.context_key();
+    let result = fact.render_payload_value()?;
     let intent = result
         .get("request_intent")
         .and_then(|value| value.as_str())?;
@@ -1266,7 +1263,7 @@ pub struct OpenAiRealtimeSession {
     /// R1: see `current_model_id`. Same rejection semantics for
     /// `provider_id` since a provider swap (Anthropic ↔ OpenAI) cannot be
     /// done in place on a hosted realtime session either.
-    current_provider_id: Option<String>,
+    current_provider_id: Option<Provider>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1326,13 +1323,9 @@ impl OpenAiRealtimeSession {
     /// detect mid-session model/provider swaps and reject them with a
     /// typed error (the OpenAI Realtime API has no mutable `model` field
     /// on `session.update`, so a model swap requires close + reopen).
-    pub fn set_current_identity(
-        &mut self,
-        model_id: impl Into<String>,
-        provider_id: impl Into<String>,
-    ) {
+    pub fn set_current_identity(&mut self, model_id: impl Into<String>, provider: Provider) {
         self.current_model_id = Some(model_id.into());
-        self.current_provider_id = Some(provider_id.into());
+        self.current_provider_id = Some(provider);
     }
 
     fn effective_nudge_timeout_ms(&self) -> u64 {
@@ -2808,7 +2801,7 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
         // does not accept a `model` field on `session.update`).
         session.set_current_identity(
             open_config.llm_identity.model.clone(),
-            open_config.llm_identity.provider.as_str().to_string(),
+            open_config.llm_identity.provider,
         );
         session
             .seed_history_projection(
@@ -2851,7 +2844,7 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
         // does not accept a `model` field on `session.update`).
         session.set_current_identity(
             open_config.llm_identity.model.clone(),
-            open_config.llm_identity.provider.as_str().to_string(),
+            open_config.llm_identity.provider,
         );
         // E25 + A9: seed canonical history at session-open time. The
         // `LiveAdapterCommand::Open { snapshot }` arm in
@@ -3593,8 +3586,8 @@ enum OpenAiLiveCommandError {
     /// Refresh rejected: snapshot's `provider_id` differs from the bound
     /// provider; close + reopen required.
     RefreshProviderSwap {
-        from_provider: String,
-        to_provider: String,
+        from_provider: Provider,
+        to_provider: Provider,
     },
     /// Refresh rejected: snapshot's `audio_config` cannot be applied in
     /// place (OpenAI Realtime is fixed to pcm/24kHz mono). `detail`
@@ -3643,7 +3636,7 @@ impl std::fmt::Display for OpenAiLiveCommandError {
                 to_provider,
             } => write!(
                 f,
-                "live adapter refresh: provider swap from `{from_provider}` to `{to_provider}` requires close + reopen"
+                "live adapter refresh: provider swap from `{from_provider:?}` to `{to_provider:?}` requires close + reopen"
             ),
             Self::RefreshAudioConfigMismatch { detail } => {
                 write!(f, "live adapter refresh: audio config mismatch ({detail})")
@@ -3699,8 +3692,8 @@ fn classify_command_error(
         } => (
             LiveAdapterErrorCode::ConfigRejected {
                 reason: LiveConfigRejectionReason::RefreshProviderSwap {
-                    from_provider: from_provider.clone(),
-                    to_provider: to_provider.clone(),
+                    from_provider: *from_provider,
+                    to_provider: *to_provider,
                 },
             },
             false,
@@ -3822,12 +3815,12 @@ async fn execute_openai_live_command(
                     to_model: snapshot.model_id.clone(),
                 });
             }
-            if let Some(current_provider) = session.current_provider_id.as_deref()
+            if let Some(current_provider) = session.current_provider_id
                 && current_provider != snapshot.provider_id
             {
                 return Err(OpenAiLiveCommandError::RefreshProviderSwap {
-                    from_provider: current_provider.to_string(),
-                    to_provider: snapshot.provider_id.clone(),
+                    from_provider: current_provider,
+                    to_provider: snapshot.provider_id,
                 });
             }
             if let Some(audio_cfg) = snapshot.audio_config.as_ref()
@@ -4158,6 +4151,27 @@ mod tests {
 
     type FakeEventQueue = Arc<Mutex<VecDeque<Result<Option<ServerEvent>, LlmError>>>>;
 
+    /// Build a typed terminal-peer-response fact for the canonical (typed)
+    /// realtime-summary path. `route` is the canonical peer UUID for the
+    /// reply route; the runtime stamps this fact on the
+    /// `PendingSystemContextAppend` so the consumer reads it directly instead
+    /// of re-parsing the flattened prompt text.
+    fn terminal_peer_response_fact(
+        route_uuid: &str,
+        display: &str,
+        correlation_uuid: &str,
+        payload: serde_json::Value,
+    ) -> meerkat_core::PeerResponseTerminalFact {
+        meerkat_core::PeerResponseTerminalFact::new(
+            meerkat_core::PeerResponseTerminalSource::parse(None::<String>, route_uuid, display)
+                .expect("valid terminal-peer-response source"),
+            meerkat_core::PeerResponseTerminalCorrelationId::parse(correlation_uuid)
+                .expect("valid correlation id"),
+            meerkat_core::PeerResponseTerminalProjectionStatus::Completed,
+            meerkat_core::PeerResponseTerminalRenderPayload::new(Some(payload)),
+        )
+    }
+
     #[test]
     fn synthetic_text_item_ids_fit_openai_realtime_limit() {
         let id = openai_realtime_synthetic_text_item_id();
@@ -4410,6 +4424,7 @@ mod tests {
             source: Some("peer_response_terminal:analyst:req-123".to_string()),
             idempotency_key: Some("req-123".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
+            peer_response_terminal: None,
             accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
         }])
     }
@@ -4597,6 +4612,7 @@ mod tests {
             source: Some("peer_response_terminal:analyst:req-123".to_string()),
             idempotency_key: Some("req-123".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
+            peer_response_terminal: None,
             accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
         }];
 
@@ -4619,15 +4635,30 @@ mod tests {
             "You are the realtime operator.".to_string(),
         ))];
         let runtime_system_context = vec![PendingSystemContextAppend {
-            text: "Peer terminal response from analyst-rt\nRequest ID: req-123\nStatus: completed\nPayload: {
+            text: "Peer terminal response from analyst-rt\nRequest ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1\nStatus: completed\nPayload: {
   \"request_intent\": \"checksum_token\",
   \"request_subject\": \"alpha beta gamma\",
   \"token\": \"birch seventeen\"
 }"
             .to_string(),
-            source: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
-            idempotency_key: Some("req-123".to_string()),
+            source: Some(
+                "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
+                    .to_string(),
+            ),
+            idempotency_key: Some("018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
+            // Canonical typed path: the consumer reads the stamped fact, not
+            // the flattened text.
+            peer_response_terminal: Some(terminal_peer_response_fact(
+                "550e8400-e29b-41d4-a716-446655440000",
+                "analyst-rt",
+                "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                serde_json::json!({
+                    "request_intent": "checksum_token",
+                    "request_subject": "alpha beta gamma",
+                    "token": "birch seventeen",
+                }),
+            )),
             accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
         }];
 
@@ -4675,10 +4706,23 @@ mod tests {
             }),
         ];
         let runtime_system_context = vec![PendingSystemContextAppend {
-            text: "Peer terminal response from analyst-rt\nRequest ID: req-123\nStatus: completed\nPayload: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}".to_string(),
-            source: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
-            idempotency_key: Some("req-123".to_string()),
+            text: "Peer terminal response from analyst-rt\nRequest ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1\nStatus: completed\nPayload: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}".to_string(),
+            source: Some(
+                "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
+                    .to_string(),
+            ),
+            idempotency_key: Some("018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
+            peer_response_terminal: Some(terminal_peer_response_fact(
+                "550e8400-e29b-41d4-a716-446655440000",
+                "analyst-rt",
+                "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                serde_json::json!({
+                    "request_intent": "checksum_token",
+                    "request_subject": "alpha beta gamma",
+                    "token": "birch seventeen",
+                }),
+            )),
             accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
         }];
 
@@ -4798,6 +4842,7 @@ mod tests {
             source: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
             idempotency_key: Some("req-123".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
+            peer_response_terminal: None,
             accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
         }];
         let events = openai_realtime_history_events(&seed_messages, &runtime_system_context);
@@ -7602,7 +7647,7 @@ mod tests {
             visible_tools: Vec::new(),
             system_prompt: None,
             model_id: "gpt-realtime-2".to_string(),
-            provider_id: Provider::OpenAI.as_str().to_string(),
+            provider_id: Provider::OpenAI,
             audio_config: None,
             runtime_system_context: Vec::new(),
         };
@@ -7716,6 +7761,7 @@ mod tests {
             source: Some("peer_terminal".to_string()),
             idempotency_key: Some("k1".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
+            peer_response_terminal: None,
             accepted_at: SystemTime::UNIX_EPOCH,
         }];
 
@@ -7733,7 +7779,7 @@ mod tests {
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
         // Stamp identity so the model-swap guard sees a stable origin.
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI.as_str());
+        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
         let adapter = OpenAiLiveAdapter::new(session);
 
         // Drain initial Ready so the pump is in its select! loop.
@@ -7755,7 +7801,7 @@ mod tests {
                 visible_tools: Vec::new(),
                 system_prompt: Some(format!("instructions revision {refresh_index}")),
                 model_id: "gpt-realtime-2".to_string(),
-                provider_id: Provider::OpenAI.as_str().to_string(),
+                provider_id: Provider::OpenAI,
                 audio_config: None,
                 runtime_system_context: runtime_system_context.clone(),
             };
@@ -7851,7 +7897,7 @@ mod tests {
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
         // Stamp identity so the model-swap guard sees a stable origin
         // and proceeds (matching model + provider).
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI.as_str());
+        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
         let adapter = OpenAiLiveAdapter::new(session);
 
         // Drain initial Ready so the pump is in its select! loop.
@@ -7879,7 +7925,7 @@ mod tests {
             visible_tools: mutated_tools.clone(),
             system_prompt: Some(mutated_prompt.clone()),
             model_id: "gpt-realtime-2".to_string(),
-            provider_id: Provider::OpenAI.as_str().to_string(),
+            provider_id: Provider::OpenAI,
             audio_config: None,
             runtime_system_context: Vec::new(),
         };
@@ -7973,7 +8019,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI.as_str());
+        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
         let adapter = OpenAiLiveAdapter::new(session);
 
         // Drain Ready.
@@ -7994,7 +8040,7 @@ mod tests {
             system_prompt: None,
             // Mutated model — the swap target. Must be rejected.
             model_id: "gpt-realtime-mini-v2".to_string(),
-            provider_id: Provider::OpenAI.as_str().to_string(),
+            provider_id: Provider::OpenAI,
             audio_config: None,
             runtime_system_context: Vec::new(),
         };
@@ -8087,7 +8133,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI.as_str());
+        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -8106,7 +8152,7 @@ mod tests {
             visible_tools: Vec::new(),
             system_prompt: None,
             model_id: "gpt-realtime-mini-v2".to_string(),
-            provider_id: Provider::OpenAI.as_str().to_string(),
+            provider_id: Provider::OpenAI,
             audio_config: None,
             runtime_system_context: Vec::new(),
         };
@@ -8159,7 +8205,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI.as_str());
+        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -8179,7 +8225,7 @@ mod tests {
             system_prompt: None,
             model_id: "gpt-realtime-2".to_string(),
             // Mutated provider — must be rejected as RefreshProviderSwap.
-            provider_id: "anthropic".to_string(),
+            provider_id: Provider::Anthropic,
             audio_config: None,
             runtime_system_context: Vec::new(),
         };
@@ -8205,8 +8251,8 @@ mod tests {
                     from_provider,
                     to_provider,
                 } => {
-                    assert_eq!(from_provider, Provider::OpenAI.as_str());
-                    assert_eq!(to_provider, "anthropic");
+                    assert_eq!(from_provider, Provider::OpenAI);
+                    assert_eq!(to_provider, Provider::Anthropic);
                 }
                 other => panic!("expected RefreshProviderSwap typed variant, got {other:?}"),
             },
@@ -8234,7 +8280,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI.as_str());
+        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -8253,7 +8299,7 @@ mod tests {
             visible_tools: Vec::new(),
             system_prompt: None,
             model_id: "gpt-realtime-2".to_string(),
-            provider_id: Provider::OpenAI.as_str().to_string(),
+            provider_id: Provider::OpenAI,
             // 48kHz / stereo — incompatible with OpenAI Realtime's fixed
             // pcm/24kHz mono surface; must surface as
             // RefreshAudioConfigMismatch.
@@ -8385,7 +8431,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI.as_str());
+        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -8456,7 +8502,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI.as_str());
+        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -8535,7 +8581,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI.as_str());
+        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -8624,7 +8670,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI.as_str());
+        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -8707,7 +8753,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI.as_str());
+        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(

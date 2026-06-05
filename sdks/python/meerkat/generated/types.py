@@ -248,7 +248,7 @@ class MobListResult:
 class MobStatusResult:
     """One active mob row returned by `mob/list`."""
     mob_id: str
-    status: str
+    status: Literal['Creating', 'Running', 'Stopped', 'Completed', 'Destroyed']
 
 
 @dataclass
@@ -459,7 +459,7 @@ class MobRespawnParams:
 class MobRespawnResult:
     """Response payload for `mob/respawn`."""
     receipt: dict[str, Any]
-    status: str
+    status: Literal['completed', 'topology_restore_failed']
     failed_peer_ids: Optional[list[str]] = None
 
 
@@ -579,7 +579,7 @@ class MobAppendSystemContextResult:
     """Response payload for `mob/append_system_context`."""
     agent_identity: str
     mob_id: str
-    status: str
+    status: Literal['applied', 'staged', 'duplicate']
 
 
 @dataclass
@@ -712,9 +712,9 @@ class MobMemberStatusResult:
 @dataclass
 class MobSnapshotResult:
     """Response payload for `mob/snapshot`."""
-    members: list[Any]
+    members: list[MobMemberListEntryWire]
     mob_id: str
-    status: str
+    status: Literal['Creating', 'Running', 'Stopped', 'Completed', 'Destroyed']
 
 
 @dataclass
@@ -2095,9 +2095,9 @@ class WireLiveConfigRejectionReasonRefreshModelSwap(TypedDict, total=False):
     to_model: Required[str]
 
 class WireLiveConfigRejectionReasonRefreshProviderSwap(TypedDict, total=False):
-    from_provider: Required[str]
+    from_provider: Required[WireProvider]
     kind: Required[Literal['refresh_provider_swap']]
-    to_provider: Required[str]
+    to_provider: Required[WireProvider]
 
 class WireLiveConfigRejectionReasonRefreshAudioConfigMismatch(TypedDict, total=False):
     detail: Required[str]

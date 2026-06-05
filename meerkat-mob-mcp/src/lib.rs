@@ -32,7 +32,7 @@ use async_trait::async_trait;
 use meerkat_client::LlmClient;
 use meerkat_contracts::{
     MobDefinitionInput, MobLifecycleParams, MobSpawnManyResultEntry, WireMemberRef,
-    WireMobLifecycleAction,
+    WireMobLifecycleAction, WireMobLifecycleStatus, WireMobRespawnOutcome, WireMobWireAction,
 };
 use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
@@ -3166,7 +3166,7 @@ struct WireActionArgs {
     mob_id: String,
     agent_identity: String,
     peer: WireActionPeerTarget,
-    action: String,
+    action: WireMobWireAction,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3230,8 +3230,30 @@ fn runtime_binding_from_wire(
     }
 }
 
+/// Project the canonical mob lifecycle state into its wire mirror. Keeps the
+/// surface emitting a closed typed status rather than the bare `MobState` text.
+fn wire_mob_lifecycle_status(state: MobState) -> WireMobLifecycleStatus {
+    match state {
+        MobState::Creating => WireMobLifecycleStatus::Creating,
+        MobState::Running => WireMobLifecycleStatus::Running,
+        MobState::Stopped => WireMobLifecycleStatus::Stopped,
+        MobState::Completed => WireMobLifecycleStatus::Completed,
+        MobState::Destroyed => WireMobLifecycleStatus::Destroyed,
+    }
+}
+
 impl WireActionArgs {
-    fn resolve(self) -> Result<(String, AgentIdentity, meerkat_mob::PeerTarget, String), String> {
+    fn resolve(
+        self,
+    ) -> Result<
+        (
+            String,
+            AgentIdentity,
+            meerkat_mob::PeerTarget,
+            WireMobWireAction,
+        ),
+        String,
+    > {
         let action = self.action;
         let target = match self.peer {
             WireActionPeerTarget::Local(WireActionLocalPeerTarget { local }) => {
@@ -3247,7 +3269,7 @@ impl WireActionArgs {
                 ))
             }
             WireActionPeerTarget::External(WireActionExternalHandleTarget { external }) => {
-                if action == "wire" {
+                if matches!(action, WireMobWireAction::Wire) {
                     return Err("wire external peer requires external_binding".to_string());
                 }
                 let peer_name = PeerName::new(external.name)
@@ -3363,12 +3385,12 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                         .mob_status(&MobId::from(mob_id))
                         .await
                         .map_err(|e| map_mob_err(call, e))?;
-                    encode(call, json!({"status": status.as_str()}))
+                    encode(call, json!({"status": wire_mob_lifecycle_status(status)}))
                 } else {
                     let mobs = self.state.mob_list().await;
                     encode(
                         call,
-                        json!({"mobs": mobs.into_iter().map(|(id, status)| json!({"mob_id": id, "status": status.as_str()})).collect::<Vec<_>>() }),
+                        json!({"mobs": mobs.into_iter().map(|(id, status)| json!({"mob_id": id, "status": wire_mob_lifecycle_status(status)})).collect::<Vec<_>>() }),
                     )
                 }
             }
@@ -3529,23 +3551,17 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .resolve()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
                 let mob_id = MobId::from(mob_id);
-                match action.as_str() {
-                    "wire" => self
+                match action {
+                    WireMobWireAction::Wire => self
                         .state
                         .mob_wire(&mob_id, local, target)
                         .await
                         .map_err(|e| map_mob_err(call, e))?,
-                    "unwire" => self
+                    WireMobWireAction::Unwire => self
                         .state
                         .mob_unwire(&mob_id, local, target)
                         .await
                         .map_err(|e| map_mob_err(call, e))?,
-                    other => {
-                        return Err(ToolError::invalid_arguments(
-                            call.name,
-                            format!("unknown wire action: {other}"),
-                        ));
-                    }
                 }
                 encode(call, json!({"ok": true}))
             }
@@ -3565,7 +3581,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     Ok(receipt) => encode(
                         call,
                         json!({
-                            "status": "completed",
+                            "status": WireMobRespawnOutcome::Completed,
                             "receipt": receipt,
                         }),
                     ),
@@ -3575,7 +3591,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     }) => encode(
                         call,
                         json!({
-                            "status": "topology_restore_failed",
+                            "status": WireMobRespawnOutcome::TopologyRestoreFailed,
                             "receipt": receipt,
                             "failed_peer_ids": failed_peer_ids.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
                         }),
@@ -4157,7 +4173,7 @@ mod tests {
                 "external": { "name": "external-worker" }
             }))
             .expect("external handle should deserialize"),
-            action: "wire".to_string(),
+            action: WireMobWireAction::Wire,
         }
         .resolve()
         .expect_err("wire action must require external_binding");
@@ -4174,7 +4190,7 @@ mod tests {
             mob_id: "mob".to_string(),
             agent_identity: "worker".to_string(),
             peer: external_peer_target(ED25519_PUBLIC_KEY_7),
-            action: "wire".to_string(),
+            action: WireMobWireAction::Wire,
         }
         .resolve()
         .expect("canonical external peer binding should resolve as request");
@@ -4196,7 +4212,7 @@ mod tests {
                 "external": { "name": "external-worker" }
             }))
             .expect("external handle should deserialize"),
-            action: "unwire".to_string(),
+            action: WireMobWireAction::Unwire,
         }
         .resolve()
         .expect("external handle should be valid for unwire");
@@ -4891,6 +4907,7 @@ mod tests {
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-1".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
             )
             .await
@@ -4931,6 +4948,7 @@ mod tests {
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-1".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
             )
             .await
@@ -5005,6 +5023,7 @@ mod tests {
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-image".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
             )
             .await
@@ -5090,6 +5109,7 @@ mod tests {
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-archive".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
             )
             .await

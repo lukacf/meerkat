@@ -1002,6 +1002,7 @@ pub(crate) fn runtime_input_projection(
             _ => Vec::new(),
         },
         context_append: input_to_context_append(input),
+        peer_response_terminal: None,
     }
 }
 
@@ -1013,12 +1014,19 @@ pub(crate) fn runtime_input_projection_for_machine_batch(
         && let Ok(Some(context_append)) = peer_response_terminal_context_append(peer)
     {
         projection.context_append = Some(context_append);
+        // Carry the typed terminal-peer-response fact alongside the rendered
+        // context append so the realtime/live consumer reads the typed fact
+        // directly instead of re-parsing the flattened prose.
+        if let Ok(fact) = peer_response_terminal_fact(peer) {
+            projection.peer_response_terminal = fact;
+        }
     }
     projection
 }
 
 pub(crate) fn context_append_to_pending_system_context_append(
     append: &ConversationContextAppend,
+    peer_response_terminal: Option<&meerkat_core::PeerResponseTerminalFact>,
 ) -> meerkat_core::PendingSystemContextAppend {
     let text = render_core_context_for_pending_system_context(&append.content);
     meerkat_core::PendingSystemContextAppend {
@@ -1027,6 +1035,11 @@ pub(crate) fn context_append_to_pending_system_context_append(
         idempotency_key: Some(append.key.clone()),
         // Durable keyed context append (peer responses, etc.) — not a steer.
         source_kind: meerkat_core::session::SystemContextSource::Normal,
+        // Carry the typed `PeerResponseTerminalFact` so the realtime consumer
+        // reads it directly (mirrors the `source_kind` precedent that retired
+        // the `runtime:steer:` string prefix). The fact threads from the
+        // admitted `RuntimeInputProjection.peer_response_terminal` field.
+        peer_response_terminal: peer_response_terminal.cloned(),
         accepted_at: meerkat_core::time_compat::SystemTime::now(),
     }
 }
@@ -1036,9 +1049,12 @@ pub(crate) fn projection_to_pending_system_context_appends(
     projection: &crate::ingress_types::RuntimeInputProjection,
 ) -> Vec<meerkat_core::PendingSystemContextAppend> {
     if let Some(append) = projection.context_append.as_ref() {
-        return std::iter::once(context_append_to_pending_system_context_append(append))
-            .filter(|append| !append.text.trim().is_empty())
-            .collect();
+        return std::iter::once(context_append_to_pending_system_context_append(
+            append,
+            projection.peer_response_terminal.as_ref(),
+        ))
+        .filter(|append| !append.text.trim().is_empty())
+        .collect();
     }
 
     projection
@@ -1056,6 +1072,8 @@ pub(crate) fn projection_to_pending_system_context_appends(
                 source: Some(key.clone()),
                 idempotency_key: Some(key),
                 source_kind: meerkat_core::session::SystemContextSource::RuntimeSteer,
+                // A runtime steer is never a terminal-peer-response projection.
+                peer_response_terminal: None,
                 accepted_at: meerkat_core::time_compat::SystemTime::now(),
             }
         })
@@ -1318,6 +1336,7 @@ mod tests {
                     text: "terminal response is ready".into(),
                 },
             }),
+            peer_response_terminal: None,
         };
 
         let appends = projection_to_pending_system_context_appends(&input_id, &projection);
@@ -1430,6 +1449,7 @@ mod tests {
                 key: "empty-context".into(),
                 content: CoreRenderable::Text { text: "  ".into() },
             }),
+            peer_response_terminal: None,
         };
         assert!(
             projection_to_pending_system_context_appends(&input_id, &context_projection).is_empty()
@@ -1442,6 +1462,7 @@ mod tests {
             }),
             additional_appends: Vec::new(),
             context_append: None,
+            peer_response_terminal: None,
         };
         assert!(
             projection_to_pending_system_context_appends(&input_id, &append_projection).is_empty()

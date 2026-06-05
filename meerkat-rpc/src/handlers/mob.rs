@@ -1033,6 +1033,7 @@ pub async fn handle_append_system_context(
                 source: params.source,
                 idempotency_key: params.idempotency_key,
                 source_kind: meerkat_core::session::SystemContextSource::Normal,
+                peer_response_terminal: None,
             },
         )
         .await

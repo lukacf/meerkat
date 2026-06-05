@@ -3247,7 +3247,7 @@
             "type": "string"
           },
           "kind": {
-            "description": "Opaque provenance/display label for the evidence. NOT used to classify\nevidence for the completion-policy satisfaction decision — see\n[`WorkEvidenceRef::confirmation_kind`].",
+            "description": "Opaque provenance/display label for the evidence. It is parsed into the\ntyped confirmation classification at the ingress boundary only (see\n[`WorkEvidenceRef::confirmation_classification`]); no completion-policy\nsatisfaction decision re-reads this string. The typed\n[`WorkEvidenceRef::confirmation_kind`] is the authoritative carrier.",
             "type": "string"
           },
           "label": {
@@ -4195,7 +4195,7 @@
             "type": "string"
           },
           "kind": {
-            "description": "Opaque provenance/display label for the evidence. NOT used to classify\nevidence for the completion-policy satisfaction decision — see\n[`WorkEvidenceRef::confirmation_kind`].",
+            "description": "Opaque provenance/display label for the evidence. It is parsed into the\ntyped confirmation classification at the ingress boundary only (see\n[`WorkEvidenceRef::confirmation_classification`]); no completion-policy\nsatisfaction decision re-reads this string. The typed\n[`WorkEvidenceRef::confirmation_kind`] is the authoritative carrier.",
             "type": "string"
           },
           "label": {
@@ -10653,7 +10653,7 @@
             "type": "string"
           },
           "kind": {
-            "description": "Opaque provenance/display label for the evidence. NOT used to classify\nevidence for the completion-policy satisfaction decision — see\n[`WorkEvidenceRef::confirmation_kind`].",
+            "description": "Opaque provenance/display label for the evidence. It is parsed into the\ntyped confirmation classification at the ingress boundary only (see\n[`WorkEvidenceRef::confirmation_classification`]); no completion-policy\nsatisfaction decision re-reads this string. The typed\n[`WorkEvidenceRef::confirmation_kind`] is the authoritative carrier.",
             "type": "string"
           },
           "label": {
@@ -14920,6 +14920,17 @@
     "type": "string"
   },
   "MobAppendSystemContextResult": {
+    "$defs": {
+      "WireAppendSystemContextStatus": {
+        "description": "Outcome of a `mob/append_system_context` call on the wire. Mirrors\n`meerkat_core::AppendSystemContextStatus` so consumers reason about the\napplied/staged/duplicate distinction through a closed type rather than a\nfree-form status string.",
+        "enum": [
+          "applied",
+          "staged",
+          "duplicate"
+        ],
+        "type": "string"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Response payload for `mob/append_system_context`.",
     "properties": {
@@ -14930,7 +14941,7 @@
         "type": "string"
       },
       "status": {
-        "type": "string"
+        "$ref": "#/$defs/WireAppendSystemContextStatus"
       }
     },
     "required": [
@@ -17680,7 +17691,7 @@
             "type": "string"
           },
           "status": {
-            "type": "string"
+            "$ref": "#/$defs/WireMobLifecycleStatus"
           }
         },
         "required": [
@@ -17688,6 +17699,17 @@
           "status"
         ],
         "type": "object"
+      },
+      "WireMobLifecycleStatus": {
+        "description": "Lifecycle status of a mob on the wire. Mirrors\n`meerkat_mob::runtime::MobState` so surfaces report mob lifecycle through a\nclosed type rather than re-deriving meaning from free-form status text.\n\nVariants serialize to their PascalCase names (`\"Creating\"`, `\"Running\"`,\n...) to match the canonical `MobState::as_str()` projection that producers\nemit on the wire.",
+        "enum": [
+          "Creating",
+          "Running",
+          "Stopped",
+          "Completed",
+          "Destroyed"
+        ],
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -18512,6 +18534,14 @@
       "WireMemberRef": {
         "description": "Server-resolved opaque handle for a mob member.\n\nEncodes `{mob_id, agent_identity}` as a single base64url-encoded token\nthat callers treat as opaque. The server resolves the current\n`AgentRuntimeId` and fence token against the live mob roster on every\ndispatch — clients never reason about `generation` or `fence_token`\ndirectly.\n\nUse [`WireMemberRef::encode`] to produce a token and\n[`WireMemberRef::decode`] inside an RPC handler to recover the\n`(mob_id, agent_identity)` pair before resolving against the runtime.",
         "type": "string"
+      },
+      "WireMobRespawnOutcome": {
+        "description": "Outcome of a `mob/respawn` call. Mirrors the success vs\n`MobRespawnError::TopologyRestoreFailed` distinction as a closed type so SDK\nconsumers branch on a typed variant instead of re-deriving meaning from a\nfree-form status string.",
+        "enum": [
+          "completed",
+          "topology_restore_failed"
+        ],
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -18527,7 +18557,7 @@
         "$ref": "#/$defs/MobRespawnReceipt"
       },
       "status": {
-        "type": "string"
+        "$ref": "#/$defs/WireMobRespawnOutcome"
       }
     },
     "required": [
@@ -18600,18 +18630,117 @@
     "type": "object"
   },
   "MobSnapshotResult": {
+    "$defs": {
+      "MobMemberListEntryWire": {
+        "description": "Public roster entry returned by `mob/ensure_member`'s `Existed` outcome\n(and other surfaces that want a typed snapshot of a single member). Mirrors\nthe public-facing fields of `meerkat_mob::runtime::MobMemberListEntry`\nwithout leaking bridge-internal fields.",
+        "properties": {
+          "agent_identity": {
+            "type": "string"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_final": {
+            "type": "boolean"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "member_ref": {
+            "$ref": "#/$defs/WireMemberRef"
+          },
+          "role": {
+            "type": "string"
+          },
+          "runtime_mode": {
+            "$ref": "#/$defs/WireMobRuntimeMode"
+          },
+          "state": {
+            "$ref": "#/$defs/WireMemberState"
+          },
+          "status": {
+            "$ref": "#/$defs/WireMobMemberStatus"
+          },
+          "wired_to": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "agent_identity",
+          "member_ref",
+          "role",
+          "runtime_mode",
+          "state",
+          "status",
+          "is_final"
+        ],
+        "type": "object"
+      },
+      "WireMemberRef": {
+        "description": "Server-resolved opaque handle for a mob member.\n\nEncodes `{mob_id, agent_identity}` as a single base64url-encoded token\nthat callers treat as opaque. The server resolves the current\n`AgentRuntimeId` and fence token against the live mob roster on every\ndispatch — clients never reason about `generation` or `fence_token`\ndirectly.\n\nUse [`WireMemberRef::encode`] to produce a token and\n[`WireMemberRef::decode`] inside an RPC handler to recover the\n`(mob_id, agent_identity)` pair before resolving against the runtime.",
+        "type": "string"
+      },
+      "WireMemberState": {
+        "description": "Roster member lifecycle state for `MobMemberFilterWire`.",
+        "enum": [
+          "active",
+          "retiring"
+        ],
+        "type": "string"
+      },
+      "WireMobLifecycleStatus": {
+        "description": "Lifecycle status of a mob on the wire. Mirrors\n`meerkat_mob::runtime::MobState` so surfaces report mob lifecycle through a\nclosed type rather than re-deriving meaning from free-form status text.\n\nVariants serialize to their PascalCase names (`\"Creating\"`, `\"Running\"`,\n...) to match the canonical `MobState::as_str()` projection that producers\nemit on the wire.",
+        "enum": [
+          "Creating",
+          "Running",
+          "Stopped",
+          "Completed",
+          "Destroyed"
+        ],
+        "type": "string"
+      },
+      "WireMobMemberStatus": {
+        "description": "Execution status mirroring `meerkat_mob::runtime::MobMemberStatus`.",
+        "enum": [
+          "active",
+          "retiring",
+          "broken",
+          "completed",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "WireMobRuntimeMode": {
+        "enum": [
+          "autonomous_host",
+          "turn_driven"
+        ],
+        "type": "string"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Response payload for `mob/snapshot`.",
     "properties": {
       "members": {
-        "items": true,
+        "items": {
+          "$ref": "#/$defs/MobMemberListEntryWire"
+        },
         "type": "array"
       },
       "mob_id": {
         "type": "string"
       },
       "status": {
-        "type": "string"
+        "$ref": "#/$defs/WireMobLifecycleStatus"
       }
     },
     "required": [
@@ -18785,6 +18914,19 @@
     "type": "object"
   },
   "MobStatusResult": {
+    "$defs": {
+      "WireMobLifecycleStatus": {
+        "description": "Lifecycle status of a mob on the wire. Mirrors\n`meerkat_mob::runtime::MobState` so surfaces report mob lifecycle through a\nclosed type rather than re-deriving meaning from free-form status text.\n\nVariants serialize to their PascalCase names (`\"Creating\"`, `\"Running\"`,\n...) to match the canonical `MobState::as_str()` projection that producers\nemit on the wire.",
+        "enum": [
+          "Creating",
+          "Running",
+          "Stopped",
+          "Completed",
+          "Destroyed"
+        ],
+        "type": "string"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "One active mob row returned by `mob/list`.",
     "properties": {
@@ -18792,7 +18934,7 @@
         "type": "string"
       },
       "status": {
-        "type": "string"
+        "$ref": "#/$defs/WireMobLifecycleStatus"
       }
     },
     "required": [
@@ -30564,14 +30706,14 @@
           {
             "properties": {
               "from_provider": {
-                "type": "string"
+                "$ref": "#/$defs/WireProvider"
               },
               "kind": {
                 "const": "refresh_provider_swap",
                 "type": "string"
               },
               "to_provider": {
-                "type": "string"
+                "$ref": "#/$defs/WireProvider"
               }
             },
             "required": [
@@ -31486,14 +31628,14 @@
           {
             "properties": {
               "from_provider": {
-                "type": "string"
+                "$ref": "#/$defs/WireProvider"
               },
               "kind": {
                 "const": "refresh_provider_swap",
                 "type": "string"
               },
               "to_provider": {
-                "type": "string"
+                "$ref": "#/$defs/WireProvider"
               }
             },
             "required": [

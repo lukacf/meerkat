@@ -170,7 +170,7 @@ export interface MobListResult {
 
 export interface MobStatusResult {
   mob_id: string;
-  status: string;
+  status: "Creating" | "Running" | "Stopped" | "Completed" | "Destroyed";
 }
 
 export interface MobLifecycleParams {
@@ -332,7 +332,7 @@ export interface MobRespawnParams {
 export interface MobRespawnResult {
   failed_peer_ids?: string[];
   receipt: Record<string, unknown>;
-  status: string;
+  status: "completed" | "topology_restore_failed";
 }
 
 export interface MobWireResult {
@@ -419,7 +419,7 @@ export interface MobAppendSystemContextParams {
 export interface MobAppendSystemContextResult {
   agent_identity: string;
   mob_id: string;
-  status: string;
+  status: "applied" | "staged" | "duplicate";
 }
 
 export interface MobFlowsResult {
@@ -518,9 +518,9 @@ export interface MobMemberStatusResult {
 }
 
 export interface MobSnapshotResult {
-  members: unknown[];
+  members: MobMemberListEntryWire[];
   mob_id: string;
-  status: string;
+  status: "Creating" | "Running" | "Stopped" | "Completed" | "Destroyed";
 }
 
 export interface MobDestroyResult {
@@ -2232,9 +2232,9 @@ export interface WireLiveConfigRejectionReasonRefreshModelSwap {
 }
 
 export interface WireLiveConfigRejectionReasonRefreshProviderSwap {
-  from_provider: string;
+  from_provider: WireProvider;
   kind: "refresh_provider_swap";
-  to_provider: string;
+  to_provider: WireProvider;
 }
 
 export interface WireLiveConfigRejectionReasonRefreshAudioConfigMismatch {

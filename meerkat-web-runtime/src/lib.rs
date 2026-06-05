@@ -1348,6 +1348,7 @@ fn system_context_request_from_append(
         source: append.source.clone(),
         idempotency_key: append.idempotency_key.clone(),
         source_kind: append.source_kind,
+        peer_response_terminal: None,
     }
 }
 
@@ -1416,6 +1417,7 @@ pub async fn append_system_context(handle: u32, request_json: &str) -> Result<Js
                 idempotency_key: req.idempotency_key,
                 // JS-originated context appends are durable, never steers.
                 source_kind: meerkat_core::session::SystemContextSource::Normal,
+                peer_response_terminal: None,
             },
         )
         .await
@@ -1963,6 +1965,7 @@ pub async fn mob_append_system_context(
                 idempotency_key: req.idempotency_key,
                 // JS-originated context appends are durable, never steers.
                 source_kind: meerkat_core::session::SystemContextSource::Normal,
+                peer_response_terminal: None,
             },
         )
         .await
@@ -2543,6 +2546,7 @@ mod tests {
             source: append.source.clone(),
             idempotency_key: append.idempotency_key.clone(),
             source_kind: append.source_kind,
+            peer_response_terminal: None,
         }
     }
 
@@ -2718,6 +2722,7 @@ capabilities = [{capability_values}]
             idempotency_key: Some("ctx-initial".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: base_time,
+            peer_response_terminal: None,
         };
         let concurrent_pending = PendingSystemContextAppend {
             text: "concurrent".to_string(),
@@ -2725,6 +2730,7 @@ capabilities = [{capability_values}]
             idempotency_key: Some("ctx-concurrent".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: base_time + Duration::from_secs(1),
+            peer_response_terminal: None,
         };
 
         let starting_state =
@@ -2853,6 +2859,7 @@ capabilities = [{capability_values}]
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-worker-1".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
             )
             .await

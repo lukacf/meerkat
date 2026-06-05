@@ -1487,6 +1487,9 @@ impl AgentFactory {
         default_label: &str,
     ) -> Result<String, String> {
         let mut provider_bindings = Vec::new();
+        // The per-provider default is the binding carrying the typed
+        // `provider_default` marker — not a `default_<provider>` name match.
+        let mut typed_provider_default: Option<&str> = None;
         for (binding_id, binding) in &realm.bindings {
             let backend = realm
                 .backends
@@ -1516,6 +1519,9 @@ impl AgentFactory {
                 })?;
             if backend.provider == provider && auth.provider == provider {
                 provider_bindings.push(binding_id.as_str());
+                if binding.provider_default && typed_provider_default.is_none() {
+                    typed_provider_default = Some(binding_id.as_str());
+                }
             }
         }
 
@@ -1525,12 +1531,8 @@ impl AgentFactory {
             return Ok(default_binding.to_string());
         }
 
-        let provider_default_binding = format!("default_{}", provider.as_str());
-        if provider_bindings
-            .iter()
-            .any(|binding_id| *binding_id == provider_default_binding)
-        {
-            return Ok(provider_default_binding);
+        if let Some(typed_default) = typed_provider_default {
+            return Ok(typed_default.to_string());
         }
 
         match provider_bindings.as_slice() {
@@ -1675,7 +1677,7 @@ impl AgentFactory {
         let Some(selected_realm) = selected_realm else {
             return Self::resolve_realm_binding_for_provider(config, provider, None, None);
         };
-        if selected_realm.as_str() == "env_default" {
+        if selected_realm.is_env_default() {
             return Self::resolve_realm_binding_for_provider(config, provider, None, None);
         }
         if !config.realm.contains_key(selected_realm.as_str()) {
@@ -1698,7 +1700,7 @@ impl AgentFactory {
         let Some(selected_realm) = selected_realm else {
             return Self::resolve_realm_binding_for_provider(config, provider, None, None);
         };
-        if selected_realm.as_str() == "env_default" {
+        if selected_realm.is_env_default() {
             return Self::resolve_realm_binding_for_provider(config, provider, None, None);
         }
         if !config.realm.contains_key(selected_realm.as_str()) {

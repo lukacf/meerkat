@@ -140,6 +140,23 @@ slug_newtype!(
     "Opaque slug identifying an auth profile override on a connection."
 );
 
+/// The single owner of the synthetic env-var-default realm slug. The literal
+/// lives here once; `synthesize_env_default` mints it and [`RealmId::is_env_default`]
+/// recognizes it, so no other site recovers the "this is the env-var default
+/// realm" fact by comparing a raw `"env_default"` string.
+pub const ENV_DEFAULT_REALM_SLUG: &str = "env_default";
+
+impl RealmId {
+    /// True when this realm is the synthetic env-var-default realm (the realm
+    /// [`RealmConnectionSet::synthesize_env_default`] mints). Routing/selection
+    /// decisions consult this typed predicate instead of a `== "env_default"`
+    /// slug comparison.
+    #[must_use]
+    pub fn is_env_default(&self) -> bool {
+        self.as_str() == ENV_DEFAULT_REALM_SLUG
+    }
+}
+
 /// Origin discriminant for an [`AuthBindingRef`].
 ///
 /// Distinguishes a binding that names a durable, config-resolvable identity
@@ -1126,7 +1143,7 @@ impl RealmConnectionSet {
         let mut bindings = BTreeMap::new();
         bindings.insert("default".to_string(), binding);
         Self {
-            realm_id: RealmId::from_known_valid("env_default"),
+            realm_id: RealmId::from_known_valid(ENV_DEFAULT_REALM_SLUG),
             backends,
             auth_profiles,
             bindings,

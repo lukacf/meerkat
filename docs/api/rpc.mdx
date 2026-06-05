@@ -1494,16 +1494,25 @@ During turn execution, the server emits `session/event` notifications containing
 }
 ```
 
-Event types match the `AgentEvent` enum in `meerkat-core`:
+Event types match the `AgentEvent` enum in `meerkat-core/src/event.rs`
+(`agent_event_type` assigns each variant its stable wire name) and are emitted
+to `artifacts/schemas/events.json`. New variants must appear in both that enum
+and this table.
 
 | Event | Description |
 |-------|-------------|
 | `run_started` | Agent execution began |
 | `run_completed` | Agent run finished |
+| `extraction_succeeded` | Structured-output extraction succeeded after a completed run |
+| `extraction_failed` | Structured-output extraction failed after a completed run |
 | `run_failed` | Agent run failed |
 | `turn_started` | New LLM call within the turn |
+| `reasoning_delta` | Streaming reasoning/thinking chunk from the model |
+| `reasoning_complete` | Reasoning/thinking complete for this block |
 | `text_delta` | Streaming text chunk from LLM |
 | `text_complete` | Full text for this turn |
+| `server_tool_content` | Provider-executed tool content surfaced during a model turn |
+| `assistant_image_appended` | Canonical assistant image block appended to transcript history |
 | `tool_call_requested` | LLM wants to call a tool |
 | `tool_result_received` | Tool result processed |
 | `turn_completed` | LLM call finished |

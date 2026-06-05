@@ -72,27 +72,14 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
                 "Get full session history",
             )],
         ),
-        RestPathDescriptor::new(
-            "/sessions/{id}/transcript-revisions/{revision}",
-            vec![RestOperationDescriptor::new(
-                "get",
-                "Get retained transcript revision",
-            )],
-        ),
-        RestPathDescriptor::new(
-            "/sessions/{id}/rewrite-transcript",
-            vec![RestOperationDescriptor::new(
-                "post",
-                "Rewrite current session transcript",
-            )],
-        ),
-        RestPathDescriptor::new(
-            "/sessions/{id}/restore-transcript-revision",
-            vec![RestOperationDescriptor::new(
-                "post",
-                "Restore retained transcript revision",
-            )],
-        ),
+        // NOTE: the transcript-edit family (`transcript-revisions/{revision}`,
+        // `rewrite-transcript`, `restore-transcript-revision`) is deliberately
+        // NOT served by REST — it is exposed only via JSON-RPC
+        // (`session/rewrite_transcript` etc.) and SessionService. These paths
+        // were briefly catalogued (#739) then dropped from the axum router in
+        // the v0.6.27 rebase while the catalog entries lingered, advertising
+        // phantom 404 endpoints. Re-adding them here without a matching
+        // `router()` arm will fail `verify-rest-surface-alignment`.
         RestPathDescriptor::new(
             "/sessions/{id}/interrupt",
             vec![RestOperationDescriptor::new(
@@ -459,6 +446,11 @@ mod tests {
             assert!(paths.iter().any(|path| path == &expected));
         }
         for retired in [
+            // Transcript-edit family is RPC-only; never re-add to the REST
+            // catalog without a matching axum router() arm + handler.
+            "/sessions/{id}/transcript-revisions/{revision}",
+            "/sessions/{id}/rewrite-transcript",
+            "/sessions/{id}/restore-transcript-revision",
             "/realtime/open_info",
             "/realtime/status",
             "/realtime/capabilities",

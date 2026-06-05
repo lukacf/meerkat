@@ -5,6 +5,14 @@ use std::sync::Arc;
 
 use meerkat::AgentBuildConfig;
 use meerkat_contracts::SkillsParams;
+// RPC-surface request/response types now live in meerkat-contracts (single
+// source of truth, schema-emitted); the handlers consume them directly and
+// re-export them so existing `handlers::session::*` paths keep resolving.
+pub use meerkat_contracts::wire::{
+    ArchiveSessionParams, DeferredCreateResult, InjectSystemContextParams,
+    InjectSystemContextResult, ListSessionsParams, ListSessionsResult, ReadSessionHistoryParams,
+    ReadSessionParams,
+};
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::SessionQuery;
@@ -48,14 +56,6 @@ pub enum InitialTurn {
     RunImmediately,
     /// Create the session but defer the first turn.
     Deferred,
-}
-
-/// Result for deferred `session/create` (no turn executed).
-#[derive(Debug, Serialize)]
-pub struct DeferredCreateResult {
-    pub session_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_ref: Option<String>,
 }
 
 /// Parameters for `session/create`.
@@ -169,53 +169,6 @@ fn canonical_skill_ids(
     Ok(params.canonical_skill_keys())
 }
 
-/// Parameters for `session/list` (all optional).
-#[derive(Debug, Default, Deserialize)]
-pub struct ListSessionsParams {
-    /// Filter sessions by label key-value pairs (AND match).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub labels: Option<BTreeMap<String, String>>,
-    /// Maximum number of sessions to return.
-    #[serde(default)]
-    pub limit: Option<usize>,
-    /// Number of sessions to skip.
-    #[serde(default)]
-    pub offset: Option<usize>,
-}
-
-/// Parameters for `session/read`.
-#[derive(Debug, Deserialize)]
-pub struct ReadSessionParams {
-    pub session_id: String,
-}
-
-/// Parameters for `session/history`.
-#[derive(Debug, Deserialize)]
-pub struct ReadSessionHistoryParams {
-    pub session_id: String,
-    #[serde(default)]
-    pub offset: Option<usize>,
-    #[serde(default)]
-    pub limit: Option<usize>,
-}
-
-/// Parameters for `session/archive`.
-#[derive(Debug, Deserialize)]
-pub struct ArchiveSessionParams {
-    pub session_id: String,
-}
-
-/// Parameters for `session/inject_context`.
-#[derive(Debug, Deserialize)]
-pub struct InjectSystemContextParams {
-    pub session_id: String,
-    pub text: String,
-    #[serde(default)]
-    pub source: Option<String>,
-    #[serde(default)]
-    pub idempotency_key: Option<String>,
-}
-
 // ---------------------------------------------------------------------------
 // Response types
 // ---------------------------------------------------------------------------
@@ -223,23 +176,11 @@ pub struct InjectSystemContextParams {
 /// Result for `session/create` — uses canonical wire type from contracts.
 pub type CreateSessionResult = meerkat_contracts::WireRunResult;
 
-/// Result for `session/list` — uses canonical wire type from contracts.
-#[derive(Debug, Serialize)]
-pub struct ListSessionsResult {
-    pub sessions: Vec<meerkat_contracts::WireSessionSummary>,
-}
-
 /// Result for `session/read` — uses canonical wire type from contracts.
 pub type ReadSessionResult = meerkat_contracts::WireSessionInfo;
 
 /// Result for `session/history` — uses canonical wire type from contracts.
 pub type ReadSessionHistoryResult = meerkat_contracts::WireSessionHistory;
-
-/// Result for `session/inject_context`.
-#[derive(Debug, Serialize)]
-pub struct InjectSystemContextResult {
-    pub status: meerkat_core::AppendSystemContextStatus,
-}
 
 // ---------------------------------------------------------------------------
 // Handlers

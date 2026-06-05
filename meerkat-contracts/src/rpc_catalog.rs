@@ -471,13 +471,13 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "workgraph/list",
                 "List WorkGraph items",
                 "WorkItemFilter",
-                "WorkItemListResult",
+                "WorkGraphItemsResponse",
             ),
             RpcMethodDescriptor::typed(
                 "workgraph/ready",
                 "List ready WorkGraph items",
                 "ReadyWorkFilter",
-                "WorkItemListResult",
+                "WorkGraphItemsResponse",
             ),
             RpcMethodDescriptor::typed(
                 "workgraph/snapshot",
@@ -489,7 +489,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "workgraph/events",
                 "List WorkGraph events",
                 "WorkGraphEventFilter",
-                "WorkGraphEventsResult",
+                "WorkGraphEventsResponse",
             ),
             RpcMethodDescriptor::typed(
                 "workgraph/goal/status",

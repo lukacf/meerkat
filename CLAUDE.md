@@ -213,41 +213,7 @@ rkat-rpc
 
 The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/stdout. Unlike REST/MCP, it keeps agents alive between turns via `SessionRuntime` -- enabling fast multi-turn conversations, mid-turn cancellation, and event streaming without agent reconstruction overhead.
 
-**Methods:**
-
-| Method | Purpose |
-|--------|---------|
-| `initialize` | Handshake, returns server capabilities |
-| `session/create` | Create session + run first turn |
-| `session/list` | List active sessions |
-| `session/read` | Get session state |
-| `session/archive` | Remove session |
-| `turn/start` | Start a new turn on existing session |
-| `turn/interrupt` | Cancel in-flight turn |
-| `comms/send` | Push external event into session (comms feature) |
-| `comms/peers` | List discoverable peers (comms feature) |
-| `skills/list` | List skills with provenance |
-| `mcp/add` | Stage live MCP server addition |
-| `mcp/remove` | Stage live MCP server removal |
-| `mcp/reload` | Reload one or all MCP servers |
-| `mob/prefabs` | List built-in mob prefab templates |
-| `mob/spawn_helper` | Quick spawn-helper convenience |
-| `mob/fork_helper` | Quick fork-helper convenience |
-| `mob/force_cancel` | Force-cancel a mob member's in-flight turn |
-| `mob/tools` | List protocol-callable mob lifecycle tools |
-| `mob/call` | Invoke a mob lifecycle tool directly |
-| `capabilities/get` | List runtime capabilities |
-| `config/get` | Read config |
-| `config/set` | Replace config |
-| `config/patch` | Merge-patch config |
-| `live/open` | Open a live audio/text channel (requires `--live-ws`) |
-| `live/status` | Get live channel status |
-| `live/close` | Close a live channel |
-| `live/send_input` | Send input chunk (audio/text) to a live channel |
-| `live/commit_input` | Commit buffered input (turn boundary) |
-| `live/interrupt` | Interrupt assistant turn (barge-in) |
-| `live/truncate` | Truncate assistant output at playback cursor |
-| `live/refresh` | Apply mutable session config to open channel |
+**Methods:** The full callable method catalog is generated and documented in `docs/api/rpc.mdx` (gated by `scripts/verify_rpc_surface_alignment.py`, which checks it against the generated `meerkat_contracts::rpc_method_catalog`).
 
 **Notifications** (server -> client): `session/event` with `AgentEvent` payload, emitted during turns. `comms/stream_event` for scoped comms event streams (comms feature).
 

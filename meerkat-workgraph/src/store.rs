@@ -49,6 +49,7 @@ impl std::fmt::Display for WorkGraphStoreKind {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WorkGraphEventFilter {
     pub realm_id: Option<String>,
     pub namespace: Option<WorkNamespace>,

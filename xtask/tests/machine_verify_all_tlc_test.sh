@@ -24,14 +24,15 @@ if ! command -v tlc >/dev/null 2>&1; then
   exec "${xtask_bin}" machine-check-drift --all
 fi
 
-# `meerkat_mob_seam` TLC is skipped because its GENERATED composition model
-# (specs/compositions/meerkat_mob_seam/model.tla) does not currently parse:
-# `tlc` reports 12 "Unknown operator" semantic errors for mob-coordination
-# temporal predicates the composition emitter references but never defines
-# (mob__mob_coordination_work_intent_unexpired,
-#  mob__mob_coordination_resource_claim_{unexpired,active_at,inactive_at}, and the
-#  mob__entry_packet__-prefixed variant). The per-machine specs still model-check;
-# this is a composition-model codegen gap, NOT laziness and NOT a runtime defect.
-# TODO(LUC-524 follow-up): emit the missing mob-coordination operator definitions
-# into the composition model and drop this skip to restore cross-machine TLC.
+# `meerkat_mob_seam` composition TLC is skipped for a CI-time/memory-budget
+# reason, NOT a codegen defect. The earlier "Unknown operator" gap (mob
+# coordination temporal predicates referenced but not emitted) was RESOLVED by
+# the LUC-524 machine-authority work: the generated composition model
+# (specs/compositions/meerkat_mob_seam/model.tla) now parses cleanly under SANY
+# (zero unknown-operator/semantic errors). What remains is scale — the emitted
+# model is very large and a full ci.cfg state-space sweep does not yet fit the
+# CI budget. The per-machine specs still model-check, and `machine-check-drift`
+# (below + on the default cargo CI lane) keeps the generated kernels honest.
+# TODO(LUC-524 follow-up): land a bounded composition TLC config that fits the
+# CI budget and drop this skip to restore cross-machine model checking.
 exec "${xtask_bin}" machine-verify --all --skip-cargo-tests --skip-tlc-composition meerkat_mob_seam

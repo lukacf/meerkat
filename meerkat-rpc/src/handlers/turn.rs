@@ -140,11 +140,8 @@ impl<'de> Deserialize<'de> for StartTurnParams {
     }
 }
 
-/// Parameters for `turn/interrupt`.
-#[derive(Debug, Deserialize)]
-pub struct InterruptParams {
-    pub session_id: String,
-}
+/// Parameters for `turn/interrupt` — canonical wire type from contracts.
+pub use meerkat_contracts::wire::InterruptParams;
 
 // ---------------------------------------------------------------------------
 // Response types

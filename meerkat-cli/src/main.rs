@@ -3721,6 +3721,19 @@ async fn load_config(scope: &RuntimeScope) -> anyhow::Result<(Config, PathBuf)> 
     Ok((config, base_dir))
 }
 
+/// FROZEN historical snapshot of prior built-in CLI agent-model defaults.
+///
+/// This is intentionally NOT a mirror of the live model catalog. Its sole
+/// purpose is to detect a stale, previously-shipped default that a user still
+/// carries in their persisted `config.agent.model` and heal it by redirecting
+/// to the catalog-derived current default (see `resolve_cli_default_agent_model`
+/// → `best_available_default_model`). Because it must match what *older* CLI
+/// builds wrote, it deliberately retains retired model IDs that no longer exist
+/// in the catalog, so it cannot — and must not — be catalog-bound. Append the
+/// prior default here whenever the built-in default changes; never remove
+/// entries.
+///
+/// Covered by `test_resolve_cli_default_agent_model_heals_legacy_builtin_default`.
 const LEGACY_AGENT_MODEL_DEFAULTS: &[&str] = &["claude-opus-4-7"];
 
 fn model_provider(config: &Config, model: &str) -> Option<Provider> {
@@ -4621,6 +4634,22 @@ impl LoginProvider {
             .expect("login provider must have a catalog default model")
     }
 
+    /// FROZEN historical snapshot of prior built-in OAuth binding sample
+    /// models for this provider.
+    ///
+    /// This is intentionally NOT a mirror of the live model catalog. It exists
+    /// only to detect a stale `default_model` that an *older* CLI build wrote
+    /// into a synthesized OAuth binding and heal it by redirecting to the
+    /// catalog-derived current default (`sample_model` →
+    /// `catalog::default_model`; see `ensure_cli_interactive_oauth_config`).
+    /// Because it must match what prior builds persisted, it deliberately
+    /// retains retired model IDs (e.g. `claude-opus-4-6`) that no longer exist
+    /// in the catalog, so it cannot — and must not — be catalog-bound. Append
+    /// the prior sample model here whenever a provider's default changes; never
+    /// remove entries.
+    ///
+    /// Covered by `test_cli_interactive_oauth_config_heals_legacy_provider_default_models`
+    /// and `test_cli_interactive_oauth_config_heals_legacy_anthropic_opus_defaults`.
     fn legacy_sample_models(self) -> &'static [&'static str] {
         match self {
             Self::Anthropic => &["claude-opus-4-6", "claude-opus-4-7", "claude-sonnet-4-6"],

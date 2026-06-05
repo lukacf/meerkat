@@ -2777,6 +2777,1396 @@
     "title": "EventEnvelope",
     "type": "object"
   },
+  "ApprovalListResult": {
+    "$defs": {
+      "ApprovalActionKind": {
+        "description": "Typed action kind for the proposed action.",
+        "enum": [
+          "shell_command",
+          "file_write",
+          "file_delete",
+          "network_call",
+          "device_control",
+          "tool_call",
+          "other"
+        ],
+        "type": "string"
+      },
+      "ApprovalDecision": {
+        "description": "Allowed terminal decisions.",
+        "enum": [
+          "approve",
+          "deny"
+        ],
+        "type": "string"
+      },
+      "ApprovalDecisionRecord": {
+        "description": "Durable decision audit record.",
+        "properties": {
+          "actor": {
+            "$ref": "#/$defs/ApprovalPrincipalId"
+          },
+          "decided_at": {
+            "type": "string"
+          },
+          "decision": {
+            "$ref": "#/$defs/ApprovalDecision"
+          },
+          "provenance": true,
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "decision",
+          "actor",
+          "decided_at"
+        ],
+        "type": "object"
+      },
+      "ApprovalId": {
+        "description": "Durable approval id.",
+        "type": "string"
+      },
+      "ApprovalOwnerRef": {
+        "description": "Typed owner for an approval request.",
+        "oneOf": [
+          {
+            "properties": {
+              "owner_type": {
+                "const": "runtime",
+                "type": "string"
+              }
+            },
+            "required": [
+              "owner_type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "owner_type": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "owner_type",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "mob_id": {
+                "type": "string"
+              },
+              "owner_type": {
+                "const": "mob",
+                "type": "string"
+              }
+            },
+            "required": [
+              "owner_type",
+              "mob_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "owner_type": {
+                "const": "run",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "owner_type",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "owner_type": {
+                "const": "tool_call",
+                "type": "string"
+              },
+              "tool_call_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "owner_type",
+              "tool_call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "member_ref": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "owner_type": {
+                "const": "external_member",
+                "type": "string"
+              }
+            },
+            "required": [
+              "owner_type",
+              "mob_id",
+              "member_ref"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ApprovalPrincipalId": {
+        "description": "Principal identifier used for requester and decision actor projections.",
+        "type": "string"
+      },
+      "ApprovalProposedAction": {
+        "description": "Action proposed by the requester.",
+        "properties": {
+          "body": true,
+          "kind": {
+            "$ref": "#/$defs/ApprovalActionKind"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "summary"
+        ],
+        "type": "object"
+      },
+      "ApprovalRecord": {
+        "description": "Durable approval record.",
+        "properties": {
+          "allowed_decisions": {
+            "items": {
+              "$ref": "#/$defs/ApprovalDecision"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "approval_id": {
+            "$ref": "#/$defs/ApprovalId"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ApprovalDecisionRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "metadata": {
+            "$ref": "#/$defs/SurfaceMetadata"
+          },
+          "owner": {
+            "$ref": "#/$defs/ApprovalOwnerRef"
+          },
+          "proposed_action": {
+            "$ref": "#/$defs/ApprovalProposedAction"
+          },
+          "request_body": true,
+          "request_provenance": true,
+          "requester": {
+            "$ref": "#/$defs/ApprovalPrincipalId"
+          },
+          "resource": {
+            "$ref": "#/$defs/ApprovalResourceRef"
+          },
+          "risk": {
+            "$ref": "#/$defs/ApprovalRisk"
+          },
+          "status": {
+            "$ref": "#/$defs/ApprovalStatus"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "approval_id",
+          "status",
+          "requester",
+          "owner",
+          "resource",
+          "proposed_action",
+          "risk",
+          "allowed_decisions",
+          "created_at",
+          "updated_at",
+          "metadata"
+        ],
+        "type": "object"
+      },
+      "ApprovalResourceKind": {
+        "description": "Typed resource kind affected by an approval.",
+        "enum": [
+          "file",
+          "shell_command",
+          "tool_call",
+          "device",
+          "runtime",
+          "network",
+          "other"
+        ],
+        "type": "string"
+      },
+      "ApprovalResourceRef": {
+        "description": "Resource affected by an approval.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/ApprovalResourceKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "ApprovalRisk": {
+        "description": "Risk classification for an approval request.",
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "critical"
+        ],
+        "type": "string"
+      },
+      "ApprovalStatus": {
+        "description": "Approval record status.",
+        "enum": [
+          "pending",
+          "approved",
+          "denied",
+          "expired",
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "SurfaceMetadata": {
+        "description": "Opaque caller-owned metadata shared across public surfaces.",
+        "properties": {
+          "app_context": {
+            "description": "Caller-owned opaque application context."
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Caller-owned labels for filtering and projection.",
+            "type": "object"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`approval/list` result.",
+    "properties": {
+      "approvals": {
+        "items": {
+          "$ref": "#/$defs/ApprovalRecord"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "approvals"
+    ],
+    "title": "ApprovalListResult",
+    "type": "object"
+  },
+  "ApprovalRecord": {
+    "$defs": {
+      "ApprovalActionKind": {
+        "description": "Typed action kind for the proposed action.",
+        "enum": [
+          "shell_command",
+          "file_write",
+          "file_delete",
+          "network_call",
+          "device_control",
+          "tool_call",
+          "other"
+        ],
+        "type": "string"
+      },
+      "ApprovalDecision": {
+        "description": "Allowed terminal decisions.",
+        "enum": [
+          "approve",
+          "deny"
+        ],
+        "type": "string"
+      },
+      "ApprovalDecisionRecord": {
+        "description": "Durable decision audit record.",
+        "properties": {
+          "actor": {
+            "$ref": "#/$defs/ApprovalPrincipalId"
+          },
+          "decided_at": {
+            "type": "string"
+          },
+          "decision": {
+            "$ref": "#/$defs/ApprovalDecision"
+          },
+          "provenance": true,
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "decision",
+          "actor",
+          "decided_at"
+        ],
+        "type": "object"
+      },
+      "ApprovalId": {
+        "description": "Durable approval id.",
+        "type": "string"
+      },
+      "ApprovalOwnerRef": {
+        "description": "Typed owner for an approval request.",
+        "oneOf": [
+          {
+            "properties": {
+              "owner_type": {
+                "const": "runtime",
+                "type": "string"
+              }
+            },
+            "required": [
+              "owner_type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "owner_type": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "owner_type",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "mob_id": {
+                "type": "string"
+              },
+              "owner_type": {
+                "const": "mob",
+                "type": "string"
+              }
+            },
+            "required": [
+              "owner_type",
+              "mob_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "owner_type": {
+                "const": "run",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "owner_type",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "owner_type": {
+                "const": "tool_call",
+                "type": "string"
+              },
+              "tool_call_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "owner_type",
+              "tool_call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "member_ref": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "owner_type": {
+                "const": "external_member",
+                "type": "string"
+              }
+            },
+            "required": [
+              "owner_type",
+              "mob_id",
+              "member_ref"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ApprovalPrincipalId": {
+        "description": "Principal identifier used for requester and decision actor projections.",
+        "type": "string"
+      },
+      "ApprovalProposedAction": {
+        "description": "Action proposed by the requester.",
+        "properties": {
+          "body": true,
+          "kind": {
+            "$ref": "#/$defs/ApprovalActionKind"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "summary"
+        ],
+        "type": "object"
+      },
+      "ApprovalResourceKind": {
+        "description": "Typed resource kind affected by an approval.",
+        "enum": [
+          "file",
+          "shell_command",
+          "tool_call",
+          "device",
+          "runtime",
+          "network",
+          "other"
+        ],
+        "type": "string"
+      },
+      "ApprovalResourceRef": {
+        "description": "Resource affected by an approval.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/ApprovalResourceKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "ApprovalRisk": {
+        "description": "Risk classification for an approval request.",
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "critical"
+        ],
+        "type": "string"
+      },
+      "ApprovalStatus": {
+        "description": "Approval record status.",
+        "enum": [
+          "pending",
+          "approved",
+          "denied",
+          "expired",
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "SurfaceMetadata": {
+        "description": "Opaque caller-owned metadata shared across public surfaces.",
+        "properties": {
+          "app_context": {
+            "description": "Caller-owned opaque application context."
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Caller-owned labels for filtering and projection.",
+            "type": "object"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Durable approval record.",
+    "properties": {
+      "allowed_decisions": {
+        "items": {
+          "$ref": "#/$defs/ApprovalDecision"
+        },
+        "type": "array",
+        "uniqueItems": true
+      },
+      "approval_id": {
+        "$ref": "#/$defs/ApprovalId"
+      },
+      "created_at": {
+        "type": "string"
+      },
+      "decision": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ApprovalDecisionRecord"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "expires_at": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "metadata": {
+        "$ref": "#/$defs/SurfaceMetadata"
+      },
+      "owner": {
+        "$ref": "#/$defs/ApprovalOwnerRef"
+      },
+      "proposed_action": {
+        "$ref": "#/$defs/ApprovalProposedAction"
+      },
+      "request_body": true,
+      "request_provenance": true,
+      "requester": {
+        "$ref": "#/$defs/ApprovalPrincipalId"
+      },
+      "resource": {
+        "$ref": "#/$defs/ApprovalResourceRef"
+      },
+      "risk": {
+        "$ref": "#/$defs/ApprovalRisk"
+      },
+      "status": {
+        "$ref": "#/$defs/ApprovalStatus"
+      },
+      "updated_at": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "approval_id",
+      "status",
+      "requester",
+      "owner",
+      "resource",
+      "proposed_action",
+      "risk",
+      "allowed_decisions",
+      "created_at",
+      "updated_at",
+      "metadata"
+    ],
+    "title": "ApprovalRecord",
+    "type": "object"
+  },
+  "ArtifactDownloadResult": {
+    "$defs": {
+      "ArtifactContentHandle": {
+        "description": "Opaque content handle for an artifact.",
+        "oneOf": [
+          {
+            "$ref": "#/$defs/BlobRef",
+            "properties": {
+              "kind": {
+                "const": "blob",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "handle": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "opaque",
+                "type": "string"
+              },
+              "media_type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "handle",
+              "media_type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ArtifactHandle": {
+        "description": "Public artifact handle.",
+        "properties": {
+          "artifact_id": {
+            "$ref": "#/$defs/ArtifactId"
+          }
+        },
+        "required": [
+          "artifact_id"
+        ],
+        "type": "object"
+      },
+      "ArtifactId": {
+        "description": "Stable realm-local artifact identifier.",
+        "type": "string"
+      },
+      "ArtifactOwner": {
+        "description": "Ownership references for artifact projection.",
+        "properties": {
+          "mob_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tool_call_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ArtifactPayload": {
+        "properties": {
+          "artifact_id": {
+            "$ref": "#/$defs/ArtifactId"
+          },
+          "data": {
+            "description": "Base64-encoded bytes.",
+            "type": "string"
+          },
+          "hash": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "media_type",
+          "size_bytes",
+          "data"
+        ],
+        "type": "object"
+      },
+      "ArtifactRecord": {
+        "description": "Stable artifact record.",
+        "properties": {
+          "artifact_id": {
+            "$ref": "#/$defs/ArtifactId"
+          },
+          "artifact_type": {
+            "$ref": "#/$defs/ArtifactType"
+          },
+          "content_handle": {
+            "$ref": "#/$defs/ArtifactContentHandle"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "handle": {
+            "$ref": "#/$defs/ArtifactHandle"
+          },
+          "hash": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "metadata": {
+            "$ref": "#/$defs/SurfaceMetadata",
+            "default": {}
+          },
+          "owner": {
+            "$ref": "#/$defs/ArtifactOwner",
+            "default": {}
+          },
+          "producer": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provenance": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "type": "object"
+          },
+          "size_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "handle",
+          "artifact_type",
+          "title",
+          "media_type",
+          "size_bytes",
+          "content_handle",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "ArtifactType": {
+        "description": "Product-neutral artifact classification.",
+        "oneOf": [
+          {
+            "enum": [
+              "text",
+              "log",
+              "command_output",
+              "diff",
+              "patch",
+              "generated_file",
+              "test_report",
+              "screenshot",
+              "image",
+              "json",
+              "binary"
+            ],
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "other": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "other"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
+      "BlobRef": {
+        "description": "Durable image reference owned by transcript/runtime state.",
+        "properties": {
+          "blob_id": {
+            "$ref": "#/$defs/BlobId"
+          },
+          "media_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "blob_id",
+          "media_type"
+        ],
+        "type": "object"
+      },
+      "SurfaceMetadata": {
+        "description": "Opaque caller-owned metadata shared across public surfaces.",
+        "properties": {
+          "app_context": {
+            "description": "Caller-owned opaque application context."
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Caller-owned labels for filtering and projection.",
+            "type": "object"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "payload": {
+        "$ref": "#/$defs/ArtifactPayload"
+      },
+      "record": {
+        "$ref": "#/$defs/ArtifactRecord"
+      }
+    },
+    "required": [
+      "record",
+      "payload"
+    ],
+    "title": "ArtifactDownloadResult",
+    "type": "object"
+  },
+  "ArtifactListResult": {
+    "$defs": {
+      "ArtifactContentHandle": {
+        "description": "Opaque content handle for an artifact.",
+        "oneOf": [
+          {
+            "$ref": "#/$defs/BlobRef",
+            "properties": {
+              "kind": {
+                "const": "blob",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "handle": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "opaque",
+                "type": "string"
+              },
+              "media_type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "handle",
+              "media_type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ArtifactHandle": {
+        "description": "Public artifact handle.",
+        "properties": {
+          "artifact_id": {
+            "$ref": "#/$defs/ArtifactId"
+          }
+        },
+        "required": [
+          "artifact_id"
+        ],
+        "type": "object"
+      },
+      "ArtifactId": {
+        "description": "Stable realm-local artifact identifier.",
+        "type": "string"
+      },
+      "ArtifactOwner": {
+        "description": "Ownership references for artifact projection.",
+        "properties": {
+          "mob_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tool_call_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ArtifactRecord": {
+        "description": "Stable artifact record.",
+        "properties": {
+          "artifact_id": {
+            "$ref": "#/$defs/ArtifactId"
+          },
+          "artifact_type": {
+            "$ref": "#/$defs/ArtifactType"
+          },
+          "content_handle": {
+            "$ref": "#/$defs/ArtifactContentHandle"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "handle": {
+            "$ref": "#/$defs/ArtifactHandle"
+          },
+          "hash": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "metadata": {
+            "$ref": "#/$defs/SurfaceMetadata",
+            "default": {}
+          },
+          "owner": {
+            "$ref": "#/$defs/ArtifactOwner",
+            "default": {}
+          },
+          "producer": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provenance": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "type": "object"
+          },
+          "size_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "handle",
+          "artifact_type",
+          "title",
+          "media_type",
+          "size_bytes",
+          "content_handle",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "ArtifactType": {
+        "description": "Product-neutral artifact classification.",
+        "oneOf": [
+          {
+            "enum": [
+              "text",
+              "log",
+              "command_output",
+              "diff",
+              "patch",
+              "generated_file",
+              "test_report",
+              "screenshot",
+              "image",
+              "json",
+              "binary"
+            ],
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "other": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "other"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
+      "BlobRef": {
+        "description": "Durable image reference owned by transcript/runtime state.",
+        "properties": {
+          "blob_id": {
+            "$ref": "#/$defs/BlobId"
+          },
+          "media_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "blob_id",
+          "media_type"
+        ],
+        "type": "object"
+      },
+      "SurfaceMetadata": {
+        "description": "Opaque caller-owned metadata shared across public surfaces.",
+        "properties": {
+          "app_context": {
+            "description": "Caller-owned opaque application context."
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Caller-owned labels for filtering and projection.",
+            "type": "object"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "artifacts": {
+        "items": {
+          "$ref": "#/$defs/ArtifactRecord"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "artifacts"
+    ],
+    "title": "ArtifactListResult",
+    "type": "object"
+  },
+  "ArtifactRecord": {
+    "$defs": {
+      "ArtifactContentHandle": {
+        "description": "Opaque content handle for an artifact.",
+        "oneOf": [
+          {
+            "$ref": "#/$defs/BlobRef",
+            "properties": {
+              "kind": {
+                "const": "blob",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "handle": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "opaque",
+                "type": "string"
+              },
+              "media_type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "handle",
+              "media_type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ArtifactHandle": {
+        "description": "Public artifact handle.",
+        "properties": {
+          "artifact_id": {
+            "$ref": "#/$defs/ArtifactId"
+          }
+        },
+        "required": [
+          "artifact_id"
+        ],
+        "type": "object"
+      },
+      "ArtifactId": {
+        "description": "Stable realm-local artifact identifier.",
+        "type": "string"
+      },
+      "ArtifactOwner": {
+        "description": "Ownership references for artifact projection.",
+        "properties": {
+          "mob_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tool_call_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ArtifactType": {
+        "description": "Product-neutral artifact classification.",
+        "oneOf": [
+          {
+            "enum": [
+              "text",
+              "log",
+              "command_output",
+              "diff",
+              "patch",
+              "generated_file",
+              "test_report",
+              "screenshot",
+              "image",
+              "json",
+              "binary"
+            ],
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "other": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "other"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
+      "BlobRef": {
+        "description": "Durable image reference owned by transcript/runtime state.",
+        "properties": {
+          "blob_id": {
+            "$ref": "#/$defs/BlobId"
+          },
+          "media_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "blob_id",
+          "media_type"
+        ],
+        "type": "object"
+      },
+      "SurfaceMetadata": {
+        "description": "Opaque caller-owned metadata shared across public surfaces.",
+        "properties": {
+          "app_context": {
+            "description": "Caller-owned opaque application context."
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Caller-owned labels for filtering and projection.",
+            "type": "object"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Stable artifact record.",
+    "properties": {
+      "artifact_id": {
+        "$ref": "#/$defs/ArtifactId"
+      },
+      "artifact_type": {
+        "$ref": "#/$defs/ArtifactType"
+      },
+      "content_handle": {
+        "$ref": "#/$defs/ArtifactContentHandle"
+      },
+      "created_at": {
+        "type": "string"
+      },
+      "handle": {
+        "$ref": "#/$defs/ArtifactHandle"
+      },
+      "hash": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "media_type": {
+        "type": "string"
+      },
+      "metadata": {
+        "$ref": "#/$defs/SurfaceMetadata",
+        "default": {}
+      },
+      "owner": {
+        "$ref": "#/$defs/ArtifactOwner",
+        "default": {}
+      },
+      "producer": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "provenance": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "default": {},
+        "type": "object"
+      },
+      "size_bytes": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "title": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "artifact_id",
+      "handle",
+      "artifact_type",
+      "title",
+      "media_type",
+      "size_bytes",
+      "content_handle",
+      "created_at"
+    ],
+    "title": "ArtifactRecord",
+    "type": "object"
+  },
   "AttentionBindingRequest": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {
@@ -4390,6 +5780,35 @@
       "expected_revision"
     ],
     "title": "AttentionResumeRequest",
+    "type": "object"
+  },
+  "BlobPayload": {
+    "$defs": {
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Resolved blob bytes returned by the blob store.",
+    "properties": {
+      "blob_id": {
+        "$ref": "#/$defs/BlobId"
+      },
+      "data": {
+        "description": "Base64-encoded bytes.",
+        "type": "string"
+      },
+      "media_type": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "blob_id",
+      "media_type",
+      "data"
+    ],
+    "title": "BlobPayload",
     "type": "object"
   },
   "BridgeAck": {
@@ -10518,6 +11937,3204 @@
     "title": "ContractVersion",
     "type": "object"
   },
+  "DeferredCreateResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Result for deferred `session/create` (no turn executed).",
+    "properties": {
+      "session_id": {
+        "type": "string"
+      },
+      "session_ref": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "session_id"
+    ],
+    "title": "DeferredCreateResult",
+    "type": "object"
+  },
+  "EventsLatestCursorResult": {
+    "$defs": {
+      "ContractVersion": {
+        "description": "Semantic version for the Meerkat wire contract.\n\nStart at 0.1.0 — allow breaking changes during Phase 1-3 development.\nBump to 1.0.0 when the SDK Builder ships (Phase 5) and external\nconsumers exist. Before 1.0.0, minor bumps can be breaking.",
+        "properties": {
+          "major": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "minor": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "patch": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "major",
+          "minor",
+          "patch"
+        ],
+        "type": "object"
+      },
+      "EventReplayCursor": {
+        "description": "Cursor into a replayable event source.",
+        "properties": {
+          "scope": {
+            "$ref": "#/$defs/EventReplayScope"
+          },
+          "sequence": {
+            "description": "Monotonically increasing sequence within the replay source. Sequence 0\nis the stable empty-source cursor.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "scope",
+          "sequence"
+        ],
+        "type": "object"
+      },
+      "EventReplayScope": {
+        "description": "Authoritative event source scope for the generic replay surface.\n\nThis is intentionally a typed enum. Product concepts such as projects or\nthreads should be represented by opaque metadata on the owning runtime\nobjects, not by adding product-specific replay scopes here.",
+        "oneOf": [
+          {
+            "properties": {
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Result for `events/latest_cursor`.",
+    "properties": {
+      "contract_version": {
+        "$ref": "#/$defs/ContractVersion"
+      },
+      "cursor": {
+        "$ref": "#/$defs/EventReplayCursor"
+      }
+    },
+    "required": [
+      "contract_version",
+      "cursor"
+    ],
+    "title": "EventsLatestCursorResult",
+    "type": "object"
+  },
+  "EventsListSinceResult": {
+    "$defs": {
+      "AgentErrorClass": {
+        "enum": [
+          "llm",
+          "store",
+          "tool",
+          "mcp",
+          "session_not_found",
+          "budget",
+          "max_tokens",
+          "content_filtered",
+          "max_turns",
+          "cancelled",
+          "invalid_state",
+          "operation_not_found",
+          "depth_limit",
+          "concurrency_limit",
+          "config",
+          "internal",
+          "build",
+          "auth",
+          "callback_pending",
+          "structured_output",
+          "invalid_output_schema",
+          "hook",
+          "terminal",
+          "no_pending_boundary"
+        ],
+        "type": "string"
+      },
+      "AgentErrorReason": {
+        "oneOf": [
+          {
+            "properties": {
+              "reason_type": {
+                "const": "llm_rate_limited",
+                "type": "string"
+              },
+              "retry_after_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "reason_type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "max": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "reason_type": {
+                "const": "llm_context_exceeded",
+                "type": "string"
+              },
+              "requested": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "reason_type",
+              "max",
+              "requested"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason_type": {
+                "const": "llm_auth_error",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "model": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "llm_invalid_model",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "model"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "provider_error": true,
+              "provider_error_kind": {
+                "$ref": "#/$defs/LlmProviderErrorKind"
+              },
+              "provider_error_retryability": {
+                "$ref": "#/$defs/LlmProviderErrorRetryability"
+              },
+              "reason_type": {
+                "const": "llm_provider_error",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "provider_error_kind",
+              "provider_error_retryability",
+              "provider_error"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "duration_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "reason_type": {
+                "const": "llm_network_timeout",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "duration_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "reason_type": {
+                "const": "llm_call_timeout",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "hook_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/HookId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "point": {
+                "$ref": "#/$defs/HookPoint"
+              },
+              "reason_code": {
+                "$ref": "#/$defs/HookReasonCode"
+              },
+              "reason_type": {
+                "const": "hook_denied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "point",
+              "reason_code"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "hook_id": {
+                "$ref": "#/$defs/HookId"
+              },
+              "reason_type": {
+                "const": "hook_timeout",
+                "type": "string"
+              },
+              "timeout_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "reason_type",
+              "hook_id",
+              "timeout_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "hook_id": {
+                "$ref": "#/$defs/HookId"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "hook_execution_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "hook_id",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "hook_config_invalid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "attempts": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "structured_output_validation_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "attempts",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "invalid_output_schema",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "binding_key": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "auth_reauth_required",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "binding_key",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "args": true,
+              "reason_type": {
+                "const": "callback_pending",
+                "type": "string"
+              },
+              "tool_name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "tool_name",
+              "args"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "cause_kind": {
+                "$ref": "#/$defs/TurnTerminalCauseKind"
+              },
+              "outcome": {
+                "$ref": "#/$defs/TurnTerminalOutcome"
+              },
+              "reason_type": {
+                "const": "turn_terminal_cause",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "outcome",
+              "cause_kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "AgentErrorReport": {
+        "properties": {
+          "class": {
+            "$ref": "#/$defs/AgentErrorClass"
+          },
+          "message": {
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AgentErrorReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "class",
+          "message"
+        ],
+        "type": "object"
+      },
+      "AgentEvent": {
+        "description": "Events emitted during agent execution\n\nThese events form the streaming API for consumers.",
+        "oneOf": [
+          {
+            "description": "Agent run started",
+            "properties": {
+              "prompt": {
+                "$ref": "#/$defs/ContentInput"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "run_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "prompt"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Agent run completed successfully",
+            "properties": {
+              "extraction_required": {
+                "default": false,
+                "description": "Whether a separate extraction terminal event is expected after this\ncompleted main run.",
+                "type": "boolean"
+              },
+              "result": {
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "structured_output": {
+                "description": "Structured output from the completed run, when schema extraction\nproduced a typed value."
+              },
+              "terminal_cause_kind": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TurnTerminalCauseKind"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": {
+                "const": "run_completed",
+                "type": "string"
+              },
+              "usage": {
+                "$ref": "#/$defs/Usage"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "result",
+              "usage"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Structured-output extraction succeeded after a completed main run.",
+            "properties": {
+              "schema_warnings": {
+                "items": {
+                  "$ref": "#/$defs/SchemaWarning"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "structured_output": true,
+              "type": {
+                "const": "extraction_succeeded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "structured_output"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Structured-output extraction failed after a completed main run.",
+            "properties": {
+              "attempts": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "last_output": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "extraction_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "last_output",
+              "attempts",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Agent run failed",
+            "properties": {
+              "error": {
+                "description": "Display projection of `error_report.message`.",
+                "type": "string"
+              },
+              "error_class": {
+                "$ref": "#/$defs/AgentErrorClass"
+              },
+              "error_report": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AgentErrorReport"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "terminal_cause_kind": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TurnTerminalCauseKind"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": {
+                "const": "run_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "error_class",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Hook invocation started.",
+            "properties": {
+              "hook_id": {
+                "$ref": "#/$defs/HookId"
+              },
+              "point": {
+                "$ref": "#/$defs/HookPoint"
+              },
+              "type": {
+                "const": "hook_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "hook_id",
+              "point"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Hook invocation completed.",
+            "properties": {
+              "duration_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "hook_id": {
+                "$ref": "#/$defs/HookId"
+              },
+              "point": {
+                "$ref": "#/$defs/HookPoint"
+              },
+              "type": {
+                "const": "hook_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "hook_id",
+              "point",
+              "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Hook invocation failed.",
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "hook_id": {
+                "$ref": "#/$defs/HookId"
+              },
+              "point": {
+                "$ref": "#/$defs/HookPoint"
+              },
+              "type": {
+                "const": "hook_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "hook_id",
+              "point",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Hook denied an action.",
+            "properties": {
+              "hook_id": {
+                "$ref": "#/$defs/HookId"
+              },
+              "message": {
+                "type": "string"
+              },
+              "payload": true,
+              "point": {
+                "$ref": "#/$defs/HookPoint"
+              },
+              "reason_code": {
+                "$ref": "#/$defs/HookReasonCode"
+              },
+              "type": {
+                "const": "hook_denied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "hook_id",
+              "point",
+              "reason_code",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "New turn started (calling LLM)",
+            "properties": {
+              "turn_number": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "turn_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "turn_number"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Streaming reasoning/thinking from the model",
+            "properties": {
+              "delta": {
+                "type": "string"
+              },
+              "type": {
+                "const": "reasoning_delta",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "delta"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Reasoning/thinking complete for this block",
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "type": {
+                "const": "reasoning_complete",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Streaming text from the model",
+            "properties": {
+              "delta": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text_delta",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "delta"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Text generation complete for this turn",
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text_complete",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Provider-executed tool content surfaced during a model turn.",
+            "properties": {
+              "content": true,
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "server_tool_content",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "name",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Canonical assistant image block appended to transcript history.",
+            "properties": {
+              "image": {
+                "$ref": "#/$defs/AssistantImageEvent"
+              },
+              "type": {
+                "const": "assistant_image_appended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "image"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Model requested a tool call",
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/ToolCallArguments"
+              },
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "tool_call_requested",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "name",
+              "args"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Tool result received (injected into conversation)",
+            "properties": {
+              "content": {
+                "items": {
+                  "$ref": "#/$defs/ContentBlock"
+                },
+                "type": "array"
+              },
+              "id": {
+                "type": "string"
+              },
+              "is_error": {
+                "type": "boolean"
+              },
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "tool_result_received",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "name",
+              "is_error"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Turn completed",
+            "properties": {
+              "stop_reason": {
+                "$ref": "#/$defs/StopReason"
+              },
+              "type": {
+                "const": "turn_completed",
+                "type": "string"
+              },
+              "usage": {
+                "$ref": "#/$defs/Usage"
+              }
+            },
+            "required": [
+              "type",
+              "stop_reason",
+              "usage"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Starting tool execution",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "tool_execution_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Tool execution completed",
+            "properties": {
+              "content": {
+                "description": "Canonical typed tool-result content.",
+                "items": {
+                  "$ref": "#/$defs/ContentBlock"
+                },
+                "type": "array"
+              },
+              "duration_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "id": {
+                "type": "string"
+              },
+              "is_error": {
+                "type": "boolean"
+              },
+              "name": {
+                "type": "string"
+              },
+              "result": {
+                "description": "Legacy text projection retained for existing event consumers.",
+                "type": "string"
+              },
+              "type": {
+                "const": "tool_execution_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "name",
+              "result",
+              "is_error",
+              "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Tool execution timed out",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "timeout_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "tool_execution_timed_out",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "name",
+              "timeout_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Context compaction started.",
+            "properties": {
+              "estimated_history_tokens": {
+                "description": "Estimated total history tokens before compaction.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "input_tokens": {
+                "description": "Input tokens from the last LLM call that triggered compaction.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "message_count": {
+                "description": "Number of messages before compaction.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "compaction_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "input_tokens",
+              "estimated_history_tokens",
+              "message_count"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Context compaction completed successfully.",
+            "properties": {
+              "messages_after": {
+                "description": "Messages after compaction.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "messages_before": {
+                "description": "Messages before compaction.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "summary_tokens": {
+                "description": "Tokens consumed by the summary.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "compaction_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "summary_tokens",
+              "messages_before",
+              "messages_after"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Context compaction failed (non-fatal — agent continues with uncompacted history).",
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "type": {
+                "const": "compaction_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Budget warning (approaching limits)",
+            "properties": {
+              "budget_type": {
+                "$ref": "#/$defs/BudgetType"
+              },
+              "limit": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "percent": {
+                "format": "float",
+                "type": "number"
+              },
+              "type": {
+                "const": "budget_warning",
+                "type": "string"
+              },
+              "used": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "type",
+              "budget_type",
+              "used",
+              "limit",
+              "percent"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Retrying after error",
+            "properties": {
+              "attempt": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "delay_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "error": {
+                "type": "string"
+              },
+              "max_attempts": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "retry": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/LlmRetrySchedule"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": {
+                "const": "retrying",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "attempt",
+              "max_attempts",
+              "error",
+              "delay_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Skills resolved for this turn.",
+            "properties": {
+              "injection_bytes": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "skills": {
+                "items": {
+                  "$ref": "#/$defs/SkillKey"
+                },
+                "type": "array"
+              },
+              "type": {
+                "const": "skills_resolved",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skills",
+              "injection_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A skill reference could not be resolved.",
+            "properties": {
+              "error": {
+                "default": "",
+                "description": "Legacy display mirror for consumers still reading string errors.",
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/SkillResolutionFailureReason",
+                "default": {
+                  "message": "",
+                  "reason_type": "unknown"
+                },
+                "description": "Structured reason for the failure. Legacy payloads deserialize as `unknown`."
+              },
+              "reference": {
+                "default": "",
+                "description": "Legacy display mirror for consumers still reading string references.",
+                "type": "string"
+              },
+              "skill_key": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SkillKey"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Canonical structured skill identity/reference, when resolution had one."
+              },
+              "type": {
+                "const": "skill_resolution_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An interaction completed successfully (terminal event for tap subscribers).",
+            "properties": {
+              "interaction_id": {
+                "$ref": "#/$defs/InteractionId"
+              },
+              "result": {
+                "type": "string"
+              },
+              "structured_output": {
+                "description": "Structured output from the completed interaction, when schema\nextraction produced a typed value."
+              },
+              "type": {
+                "const": "interaction_complete",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "interaction_id",
+              "result"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An interaction reached an external callback boundary and is waiting for\ntool results before the session can continue.",
+            "properties": {
+              "args": true,
+              "interaction_id": {
+                "$ref": "#/$defs/InteractionId"
+              },
+              "tool_name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "interaction_callback_pending",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "interaction_id",
+              "tool_name",
+              "args"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An interaction failed (terminal event for tap subscribers).",
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "interaction_id": {
+                "$ref": "#/$defs/InteractionId"
+              },
+              "type": {
+                "const": "interaction_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "interaction_id",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Some streaming events were dropped due to channel backpressure.\nBest-effort marker — the terminal event is authoritative.",
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "type": {
+                "const": "stream_truncated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Live tool configuration changed for this session.",
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/ToolConfigChangedPayload"
+              },
+              "type": {
+                "const": "tool_config_changed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "payload"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A background shell job completed (or failed/cancelled/timed out).",
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "display_name": {
+                "type": "string"
+              },
+              "job_id": {
+                "type": "string"
+              },
+              "status": {
+                "description": "Legacy display mirror for consumers still rendering string status.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "terminal_status": {
+                "$ref": "#/$defs/BackgroundJobTerminalStatus"
+              },
+              "type": {
+                "const": "background_job_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "job_id",
+              "display_name",
+              "terminal_status",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A typed same-session transcript rewrite was durably committed.",
+            "properties": {
+              "record": {
+                "$ref": "#/$defs/TranscriptRewriteRecord"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "transcript_rewrite_committed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "record"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "AssistantImageEvent": {
+        "description": "Typed public event payload for a canonical assistant image block appended to history.",
+        "properties": {
+          "blob_ref": {
+            "$ref": "#/$defs/BlobRef"
+          },
+          "height": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "image_id": {
+            "$ref": "#/$defs/AssistantImageId"
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "meta": {
+            "$ref": "#/$defs/ProviderImageMetadata"
+          },
+          "revised_prompt": {
+            "$ref": "#/$defs/RevisedPromptDisposition"
+          },
+          "width": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "image_id",
+          "blob_ref",
+          "media_type",
+          "width",
+          "height",
+          "revised_prompt",
+          "meta"
+        ],
+        "type": "object"
+      },
+      "AssistantImageId": {
+        "type": "string"
+      },
+      "BackgroundJobTerminalStatus": {
+        "enum": [
+          "completed",
+          "failed",
+          "aborted",
+          "cancelled",
+          "retired",
+          "terminated"
+        ],
+        "type": "string"
+      },
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
+      "BlobRef": {
+        "description": "Durable image reference owned by transcript/runtime state.",
+        "properties": {
+          "blob_id": {
+            "$ref": "#/$defs/BlobId"
+          },
+          "media_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "blob_id",
+          "media_type"
+        ],
+        "type": "object"
+      },
+      "BudgetType": {
+        "description": "Type of budget being tracked",
+        "enum": [
+          "tokens",
+          "time",
+          "tool_calls"
+        ],
+        "type": "string"
+      },
+      "CapabilityId": {
+        "description": "Slug-validated capability identifier for skill requirements.\n\nReplaces the legacy `Vec<String>` capability lists with a typed\nnamespace. Parsed at construction, so callers cannot smuggle invalid\nidentifiers into descriptors or requirements.",
+        "type": "string"
+      },
+      "ContentBlock": {
+        "oneOf": [
+          {
+            "description": "Plain text content.",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded image content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Durable blob reference used by persisted history/runtime state.",
+                "properties": {
+                  "blob_id": {
+                    "$ref": "#/$defs/BlobId"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "media_type": {
+                "description": "MIME type (e.g. \"image/png\", \"image/jpeg\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded video content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "duration_ms": {
+                "description": "Caller-provided clip duration in milliseconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "media_type": {
+                "description": "MIME type (e.g. \"video/mp4\", \"video/webm\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "video",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ContentInput": {
+        "anyOf": [
+          {
+            "description": "Plain text input.",
+            "type": "string"
+          },
+          {
+            "description": "Multimodal content blocks (text + images).",
+            "items": {
+              "$ref": "#/$defs/ContentBlock"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Input content that can be either a plain text string or multimodal content blocks.\n\nDeserializes from either `\"text\"` or `[{type: \"text\", text: \"...\"}, ...]`.\nProvides `From<String>` and `From<&str>` for ergonomic construction."
+      },
+      "ContractVersion": {
+        "description": "Semantic version for the Meerkat wire contract.\n\nStart at 0.1.0 — allow breaking changes during Phase 1-3 development.\nBump to 1.0.0 when the SDK Builder ships (Phase 5) and external\nconsumers exist. Before 1.0.0, minor bumps can be breaking.",
+        "properties": {
+          "major": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "minor": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "patch": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "major",
+          "minor",
+          "patch"
+        ],
+        "type": "object"
+      },
+      "DeferredCatalogDelta": {
+        "description": "Additive hidden-catalog delta metadata for runtime notices.",
+        "properties": {
+          "added_hidden_names": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "pending_sources": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "removed_hidden_names": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "EventReplayCursor": {
+        "description": "Cursor into a replayable event source.",
+        "properties": {
+          "scope": {
+            "$ref": "#/$defs/EventReplayScope"
+          },
+          "sequence": {
+            "description": "Monotonically increasing sequence within the replay source. Sequence 0\nis the stable empty-source cursor.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "scope",
+          "sequence"
+        ],
+        "type": "object"
+      },
+      "EventReplayEnvelope": {
+        "description": "Typed replay event envelope.",
+        "properties": {
+          "agent_identity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cursor": {
+            "$ref": "#/$defs/EventReplayCursor"
+          },
+          "event": {
+            "$ref": "#/$defs/AgentEvent"
+          },
+          "event_id": {
+            "$ref": "#/$defs/EventReplayEventId"
+          },
+          "metadata": {
+            "$ref": "#/$defs/RuntimeMetadata"
+          },
+          "mob_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SessionId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source": {
+            "$ref": "#/$defs/EventReplayScope"
+          },
+          "timestamp_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "event_id",
+          "cursor",
+          "timestamp_ms",
+          "source",
+          "event"
+        ],
+        "type": "object"
+      },
+      "EventReplayEventId": {
+        "description": "Stable replay event id derived from the owning source and source sequence.",
+        "properties": {
+          "scope": {
+            "$ref": "#/$defs/EventReplayScope"
+          },
+          "sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "scope",
+          "sequence"
+        ],
+        "type": "object"
+      },
+      "EventReplayScope": {
+        "description": "Authoritative event source scope for the generic replay surface.\n\nThis is intentionally a typed enum. Product concepts such as projects or\nthreads should be represented by opaque metadata on the owning runtime\nobjects, not by adding product-specific replay scopes here.",
+        "oneOf": [
+          {
+            "properties": {
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ExternalToolDeltaPhase": {
+        "description": "Canonical lifecycle phase for external-tool boundary deltas.",
+        "enum": [
+          "pending",
+          "applied",
+          "draining",
+          "forced",
+          "failed"
+        ],
+        "type": "string"
+      },
+      "GeminiImageMetadata": {
+        "properties": {
+          "continuity_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_model"
+        ],
+        "type": "object"
+      },
+      "HookId": {
+        "description": "Stable identifier for a configured hook.",
+        "type": "string"
+      },
+      "HookPoint": {
+        "description": "Hook points available in V1.",
+        "enum": [
+          "run_started",
+          "run_completed",
+          "run_failed",
+          "pre_llm_request",
+          "post_llm_response",
+          "pre_tool_execution",
+          "post_tool_execution",
+          "turn_boundary"
+        ],
+        "type": "string"
+      },
+      "HookReasonCode": {
+        "description": "Typed reason codes for guardrail denials.",
+        "enum": [
+          "policy_violation",
+          "safety_violation",
+          "schema_violation",
+          "timeout",
+          "runtime_error"
+        ],
+        "type": "string"
+      },
+      "InteractionId": {
+        "description": "Unique identifier for an interaction.",
+        "type": "string"
+      },
+      "LlmProviderErrorKind": {
+        "enum": [
+          "invalid_request",
+          "content_filtered",
+          "server_error",
+          "server_overloaded",
+          "connection_reset",
+          "unknown",
+          "stream_parse_error",
+          "incomplete_response"
+        ],
+        "type": "string"
+      },
+      "LlmProviderErrorRetryability": {
+        "enum": [
+          "retryable",
+          "non_retryable"
+        ],
+        "type": "string"
+      },
+      "LlmRetryFailure": {
+        "description": "Typed recoverable LLM failure carried through retry authority.",
+        "properties": {
+          "duration_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/$defs/LlmRetryFailureKind"
+          },
+          "message": {
+            "description": "Human-readable diagnostic. The `kind` and numeric fields are the\nauthority payload; this string is a display projection.",
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "retry_after_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "provider",
+          "kind",
+          "message"
+        ],
+        "type": "object"
+      },
+      "LlmRetryFailureKind": {
+        "description": "Closed classifier for recoverable LLM failures.",
+        "enum": [
+          "rate_limited",
+          "network_timeout",
+          "call_timeout",
+          "retryable_provider_error"
+        ],
+        "type": "string"
+      },
+      "LlmRetryPlan": {
+        "description": "Typed retry delay plan selected for a recoverable LLM failure.",
+        "properties": {
+          "attempt": {
+            "description": "One-based retry attempt being scheduled.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "budget_capped": {
+            "type": "boolean"
+          },
+          "computed_delay_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_retries": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rate_limit_floor_applied": {
+            "type": "boolean"
+          },
+          "retry_after_hint_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "selected_delay_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "attempt",
+          "max_retries",
+          "computed_delay_ms",
+          "selected_delay_ms",
+          "rate_limit_floor_applied",
+          "budget_capped"
+        ],
+        "type": "object"
+      },
+      "LlmRetrySchedule": {
+        "description": "Recoverable LLM retry lifecycle payload accepted by turn authority.",
+        "properties": {
+          "failure": {
+            "$ref": "#/$defs/LlmRetryFailure"
+          },
+          "plan": {
+            "$ref": "#/$defs/LlmRetryPlan"
+          }
+        },
+        "required": [
+          "failure",
+          "plan"
+        ],
+        "type": "object"
+      },
+      "OpenAiImageMetadata": {
+        "properties": {
+          "image_generation_call_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_model"
+        ],
+        "type": "object"
+      },
+      "PromptText": {
+        "properties": {
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "Provider": {
+        "description": "Supported LLM providers.",
+        "enum": [
+          "anthropic",
+          "open_a_i",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
+      "ProviderImageMetadata": {
+        "oneOf": [
+          {
+            "properties": {
+              "provider": {
+                "const": "not_emitted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/OpenAiImageMetadata",
+            "properties": {
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/GeminiImageMetadata",
+            "properties": {
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "RevisedPromptDisposition": {
+        "oneOf": [
+          {
+            "properties": {
+              "disposition": {
+                "const": "not_requested",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "unsupported_by_backend",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "unchanged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "revised",
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/$defs/RevisedPromptSource"
+              },
+              "text": {
+                "$ref": "#/$defs/PromptText"
+              }
+            },
+            "required": [
+              "disposition",
+              "text",
+              "source"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "RevisedPromptSource": {
+        "enum": [
+          "provider",
+          "meerkat_projection"
+        ],
+        "type": "string"
+      },
+      "RuntimeMetadata": {
+        "description": "Runtime-carried metadata projection.\n\nThis type intentionally wraps surface metadata instead of adding semantic\nmeaning. Runtime-owned facts belong in typed runtime state, not in labels.",
+        "properties": {
+          "surface": {
+            "$ref": "#/$defs/SurfaceMetadata"
+          }
+        },
+        "type": "object"
+      },
+      "SchemaWarning": {
+        "description": "Warnings emitted during schema lowering.",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/$defs/Provider"
+          }
+        },
+        "required": [
+          "provider",
+          "path",
+          "message"
+        ],
+        "type": "object"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SkillResolutionFailureReason": {
+        "oneOf": [
+          {
+            "properties": {
+              "key": {
+                "$ref": "#/$defs/SkillKey"
+              },
+              "reason_type": {
+                "const": "not_found",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "key"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "capability": {
+                "$ref": "#/$defs/CapabilityId"
+              },
+              "key": {
+                "$ref": "#/$defs/SkillKey"
+              },
+              "reason_type": {
+                "const": "capability_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "key",
+              "capability"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "load",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "parse",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "existing_fingerprint": {
+                "type": "string"
+              },
+              "new_fingerprint": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "source_uuid_collision",
+                "type": "string"
+              },
+              "source_uuid": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "source_uuid",
+              "existing_fingerprint",
+              "new_fingerprint"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "existing_source_uuid": {
+                "type": "string"
+              },
+              "fingerprint": {
+                "type": "string"
+              },
+              "mutated_source_uuid": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "source_uuid_mutation_without_lineage",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "fingerprint",
+              "existing_source_uuid",
+              "mutated_source_uuid"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "event_id": {
+                "type": "string"
+              },
+              "event_kind": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "missing_skill_remaps",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "event_id",
+              "event_kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "from_skill_name": {
+                "type": "string"
+              },
+              "from_source_uuid": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "remap_without_lineage",
+                "type": "string"
+              },
+              "to_skill_name": {
+                "type": "string"
+              },
+              "to_source_uuid": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "from_source_uuid",
+              "from_skill_name",
+              "to_source_uuid",
+              "to_skill_name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "alias": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "unknown_skill_alias",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "alias"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason_type": {
+                "const": "remap_cycle",
+                "type": "string"
+              },
+              "skill_name": {
+                "type": "string"
+              },
+              "source_uuid": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "source_uuid",
+              "skill_name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "message"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
+        "type": "string"
+      },
+      "StopReason": {
+        "description": "Why the model stopped generating",
+        "oneOf": [
+          {
+            "const": "end_turn",
+            "description": "Model finished naturally",
+            "type": "string"
+          },
+          {
+            "const": "tool_use",
+            "description": "Model wants to call tools",
+            "type": "string"
+          },
+          {
+            "const": "max_tokens",
+            "description": "Hit max output tokens",
+            "type": "string"
+          },
+          {
+            "const": "stop_sequence",
+            "description": "Hit a stop sequence",
+            "type": "string"
+          },
+          {
+            "const": "content_filter",
+            "description": "Blocked by content filter",
+            "type": "string"
+          },
+          {
+            "const": "cancelled",
+            "description": "Request was cancelled",
+            "type": "string"
+          }
+        ]
+      },
+      "SurfaceMetadata": {
+        "description": "Opaque caller-owned metadata shared across public surfaces.",
+        "properties": {
+          "app_context": {
+            "description": "Caller-owned opaque application context."
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Caller-owned labels for filtering and projection.",
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "SystemTime": {
+        "properties": {
+          "nanos_since_epoch": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "secs_since_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "secs_since_epoch",
+          "nanos_since_epoch"
+        ],
+        "type": "object"
+      },
+      "ToolCallArguments": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "ToolConfigChangeDomain": {
+        "description": "Optional typed domain for tool-configuration change payloads.",
+        "enum": [
+          "tool_scope",
+          "deferred_catalog"
+        ],
+        "type": "string"
+      },
+      "ToolConfigChangeOperation": {
+        "description": "Operation kind for live tool configuration changes.",
+        "enum": [
+          "add",
+          "remove",
+          "reload"
+        ],
+        "type": "string"
+      },
+      "ToolConfigChangeStatus": {
+        "description": "Structured status data for live tool configuration change notifications.",
+        "oneOf": [
+          {
+            "properties": {
+              "base_changed": {
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "boundary_applied",
+                "type": "string"
+              },
+              "revision": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "visible_changed": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "kind",
+              "base_changed",
+              "visible_changed",
+              "revision"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "added_hidden_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "deferred_catalog_delta",
+                "type": "string"
+              },
+              "pending_source_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "removed_hidden_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "added_hidden_count",
+              "removed_hidden_count",
+              "pending_source_count"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "warning_failed_closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "detail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "external_tool_delta",
+                "type": "string"
+              },
+              "phase": {
+                "$ref": "#/$defs/ExternalToolDeltaPhase"
+              }
+            },
+            "required": [
+              "kind",
+              "phase"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolConfigChangedPayload": {
+        "description": "Payload for tool configuration change notifications.",
+        "properties": {
+          "applied_at_turn": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "deferred_catalog_delta": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DeferredCatalogDelta"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "domain": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ToolConfigChangeDomain"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "operation": {
+            "$ref": "#/$defs/ToolConfigChangeOperation"
+          },
+          "persisted": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          },
+          "status_info": {
+            "$ref": "#/$defs/ToolConfigChangeStatus"
+          },
+          "target": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "target",
+          "status",
+          "status_info",
+          "persisted"
+        ],
+        "type": "object"
+      },
+      "TranscriptRevisionBody": {
+        "description": "Immutable transcript revision body retained by the session-local graph.",
+        "properties": {
+          "created_at": {
+            "$ref": "#/$defs/SystemTime"
+          },
+          "messages": {
+            "items": true,
+            "type": "array"
+          },
+          "parent_revision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "revision",
+          "messages",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "TranscriptRewriteCommit": {
+        "description": "Immutable rewrite commit that advances a session transcript head.",
+        "properties": {
+          "actor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "committed_at": {
+            "$ref": "#/$defs/SystemTime"
+          },
+          "messages_after": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "messages_before": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "original_span_digest": {
+            "type": "string"
+          },
+          "parent_revision": {
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/TranscriptRewriteReason"
+          },
+          "replacement_digest": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "selection": {
+            "$ref": "#/$defs/TranscriptRewriteSelection"
+          }
+        },
+        "required": [
+          "parent_revision",
+          "revision",
+          "selection",
+          "original_span_digest",
+          "replacement_digest",
+          "messages_before",
+          "messages_after",
+          "reason",
+          "committed_at"
+        ],
+        "type": "object"
+      },
+      "TranscriptRewriteReason": {
+        "description": "Audit annotation carried with a transcript rewrite commit.\n\nThe free-form kind is for review, debugging, and provenance. It is not a\nsecond policy authority; rewrite admission is enforced by the typed\nselection, digest, parent-revision, and store-guard contracts.",
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "TranscriptRewriteRecord": {
+        "description": "Self-contained append-only transcript rewrite record.",
+        "properties": {
+          "commit": {
+            "$ref": "#/$defs/TranscriptRewriteCommit"
+          },
+          "parent_body": {
+            "$ref": "#/$defs/TranscriptRevisionBody"
+          },
+          "revision_body": {
+            "$ref": "#/$defs/TranscriptRevisionBody"
+          }
+        },
+        "required": [
+          "commit",
+          "parent_body",
+          "revision_body"
+        ],
+        "type": "object"
+      },
+      "TranscriptRewriteSelection": {
+        "description": "A concrete transcript span selected for same-session rewrite.",
+        "oneOf": [
+          {
+            "description": "Replace messages in `[start, end)`.",
+            "properties": {
+              "end": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "start": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "message_range",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "start",
+              "end"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "TurnTerminalCauseKind": {
+        "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",
+        "enum": [
+          "unknown",
+          "hook_denied",
+          "hook_failure",
+          "llm_failure",
+          "tool_failure",
+          "structured_output_validation_failed",
+          "budget_exhausted",
+          "time_budget_exceeded",
+          "retry_exhausted",
+          "turn_limit_reached",
+          "runtime_apply_failure",
+          "fatal_failure"
+        ],
+        "type": "string"
+      },
+      "TurnTerminalOutcome": {
+        "description": "Terminal outcome of a turn.",
+        "enum": [
+          "none",
+          "completed",
+          "failed",
+          "cancelled",
+          "budget_exhausted",
+          "time_budget_exceeded",
+          "structured_output_validation_failed"
+        ],
+        "type": "string"
+      },
+      "Usage": {
+        "description": "Token usage statistics",
+        "properties": {
+          "cache_creation_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cache_read_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "input_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input_tokens",
+          "output_tokens"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Result for `events/list_since`.",
+    "properties": {
+      "contract_version": {
+        "$ref": "#/$defs/ContractVersion"
+      },
+      "events": {
+        "items": {
+          "$ref": "#/$defs/EventReplayEnvelope"
+        },
+        "type": "array"
+      },
+      "from_cursor": {
+        "$ref": "#/$defs/EventReplayCursor"
+      },
+      "has_more": {
+        "type": "boolean"
+      },
+      "latest_cursor": {
+        "$ref": "#/$defs/EventReplayCursor"
+      },
+      "scope": {
+        "$ref": "#/$defs/EventReplayScope"
+      }
+    },
+    "required": [
+      "contract_version",
+      "scope",
+      "from_cursor",
+      "latest_cursor",
+      "has_more"
+    ],
+    "title": "EventsListSinceResult",
+    "type": "object"
+  },
+  "EventsSnapshotResult": {
+    "$defs": {
+      "ContractVersion": {
+        "description": "Semantic version for the Meerkat wire contract.\n\nStart at 0.1.0 — allow breaking changes during Phase 1-3 development.\nBump to 1.0.0 when the SDK Builder ships (Phase 5) and external\nconsumers exist. Before 1.0.0, minor bumps can be breaking.",
+        "properties": {
+          "major": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "minor": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "patch": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "major",
+          "minor",
+          "patch"
+        ],
+        "type": "object"
+      },
+      "EventReplayCursor": {
+        "description": "Cursor into a replayable event source.",
+        "properties": {
+          "scope": {
+            "$ref": "#/$defs/EventReplayScope"
+          },
+          "sequence": {
+            "description": "Monotonically increasing sequence within the replay source. Sequence 0\nis the stable empty-source cursor.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "scope",
+          "sequence"
+        ],
+        "type": "object"
+      },
+      "EventReplayScope": {
+        "description": "Authoritative event source scope for the generic replay surface.\n\nThis is intentionally a typed enum. Product concepts such as projects or\nthreads should be represented by opaque metadata on the owning runtime\nobjects, not by adding product-specific replay scopes here.",
+        "oneOf": [
+          {
+            "properties": {
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "EventsSnapshotBody": {
+        "description": "Snapshot payload for the first generic replay slice.",
+        "oneOf": [
+          {
+            "properties": {
+              "session": {
+                "$ref": "#/$defs/WireSessionInfo"
+              },
+              "type": {
+                "const": "session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "WireResolvedModelCapabilities": {
+        "description": "Stable resolved model/session/member capability projection.\n\nThis is the UI-facing capability shape for already-resolved identities.\nStatic catalog entries can expose the same bits, but callers should read\nthis projection from session/member surfaces when identity can change at\nruntime.",
+        "properties": {
+          "image_generation": {
+            "default": false,
+            "description": "Whether the resolved provider/session can use image generation.",
+            "type": "boolean"
+          },
+          "image_input": {
+            "default": false,
+            "description": "Whether user messages may include image input blocks.",
+            "type": "boolean"
+          },
+          "image_tool_results": {
+            "default": false,
+            "description": "Whether tool results may include image blocks for this model.",
+            "type": "boolean"
+          },
+          "inline_video": {
+            "default": false,
+            "description": "Whether user messages may include inline video blocks.",
+            "type": "boolean"
+          },
+          "realtime": {
+            "default": false,
+            "description": "Whether the resolved model can drive realtime transport.",
+            "type": "boolean"
+          },
+          "vision": {
+            "default": false,
+            "description": "Whether the model can reason over visual content.",
+            "type": "boolean"
+          },
+          "web_search": {
+            "default": false,
+            "description": "Whether provider-native web search is available for this model.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "WireSessionInfo": {
+        "description": "Canonical session info for wire protocol.",
+        "properties": {
+          "created_at": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "is_active": {
+            "type": "boolean"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "last_assistant_text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message_count": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "model": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "resolved_capabilities": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireResolvedModelCapabilities"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "session_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updated_at": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "session_id",
+          "created_at",
+          "updated_at",
+          "message_count",
+          "is_active",
+          "model",
+          "provider"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Result for `events/snapshot`.",
+    "properties": {
+      "contract_version": {
+        "$ref": "#/$defs/ContractVersion"
+      },
+      "cursor": {
+        "$ref": "#/$defs/EventReplayCursor"
+      },
+      "scope": {
+        "$ref": "#/$defs/EventReplayScope"
+      },
+      "snapshot": {
+        "$ref": "#/$defs/EventsSnapshotBody"
+      }
+    },
+    "required": [
+      "contract_version",
+      "scope",
+      "cursor",
+      "snapshot"
+    ],
+    "title": "EventsSnapshotResult",
+    "type": "object"
+  },
   "ExecutionPlacement": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Structured metadata for where a tool or shell command executed.\n\nThis type deliberately avoids policy enforcement. It records facts that were\nalready established by the owning shell/tool/runtime path.",
@@ -13897,6 +18514,102 @@
       "usage"
     ],
     "title": "WireRunResult",
+    "type": "object"
+  },
+  "InjectSystemContextResult": {
+    "$defs": {
+      "AppendSystemContextStatus": {
+        "description": "Outcome of an append-system-context request.",
+        "enum": [
+          "applied",
+          "staged",
+          "duplicate"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Result for `session/inject_context`.",
+    "properties": {
+      "status": {
+        "$ref": "#/$defs/AppendSystemContextStatus"
+      }
+    },
+    "required": [
+      "status"
+    ],
+    "title": "InjectSystemContextResult",
+    "type": "object"
+  },
+  "ListSessionsResult": {
+    "$defs": {
+      "WireSessionSummary": {
+        "description": "Canonical session summary for wire protocol.",
+        "properties": {
+          "created_at": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "is_active": {
+            "type": "boolean"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "message_count": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "session_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "total_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "updated_at": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "session_id",
+          "created_at",
+          "updated_at",
+          "message_count",
+          "total_tokens",
+          "is_active"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Result for `session/list`.",
+    "properties": {
+      "sessions": {
+        "items": {
+          "$ref": "#/$defs/WireSessionSummary"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "sessions"
+    ],
+    "title": "ListSessionsResult",
     "type": "object"
   },
   "LiveChannelParams": {
@@ -20551,6 +25264,1267 @@
     "title": "RuntimeStateResult",
     "type": "object"
   },
+  "Schedule": {
+    "$defs": {
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
+      "CalendarFieldSpec": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "any",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "values",
+                "type": "string"
+              },
+              "values": {
+                "items": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "values"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "CalendarTriggerSpec": {
+        "properties": {
+          "day_of_month": {
+            "$ref": "#/$defs/CalendarFieldSpec",
+            "default": {
+              "kind": "any"
+            }
+          },
+          "day_of_week": {
+            "$ref": "#/$defs/CalendarFieldSpec",
+            "default": {
+              "kind": "any"
+            }
+          },
+          "hour": {
+            "$ref": "#/$defs/CalendarFieldSpec",
+            "default": {
+              "kind": "any"
+            }
+          },
+          "minute": {
+            "$ref": "#/$defs/CalendarFieldSpec",
+            "default": {
+              "kind": "any"
+            }
+          },
+          "month": {
+            "$ref": "#/$defs/CalendarFieldSpec",
+            "default": {
+              "kind": "any"
+            }
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "year": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CalendarFieldSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "timezone"
+        ],
+        "type": "object"
+      },
+      "ContentBlock": {
+        "oneOf": [
+          {
+            "description": "Plain text content.",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded image content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Durable blob reference used by persisted history/runtime state.",
+                "properties": {
+                  "blob_id": {
+                    "$ref": "#/$defs/BlobId"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "media_type": {
+                "description": "MIME type (e.g. \"image/png\", \"image/jpeg\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded video content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "duration_ms": {
+                "description": "Caller-provided clip duration in milliseconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "media_type": {
+                "description": "MIME type (e.g. \"video/mp4\", \"video/webm\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "video",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ContentInput": {
+        "anyOf": [
+          {
+            "description": "Plain text input.",
+            "type": "string"
+          },
+          {
+            "description": "Multimodal content blocks (text + images).",
+            "items": {
+              "$ref": "#/$defs/ContentBlock"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Input content that can be either a plain text string or multimodal content blocks.\n\nDeserializes from either `\"text\"` or `[{type: \"text\", text: \"...\"}, ...]`.\nProvides `From<String>` and `From<&str>` for ergonomic construction."
+      },
+      "ForkContextSpec": {
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "full_history",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "count": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "last_messages",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "count"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "HelperOptionsSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "backend": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ScheduledMobBackendKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "role_name": {
+            "description": "Role name (profile key) for the helper in the mob roster.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runtime_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ScheduledMobRuntimeMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tool_access_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ToolAccessPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "IntervalTriggerSpec": {
+        "properties": {
+          "end_at_utc": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "every_seconds": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start_at_utc": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start_at_utc",
+          "every_seconds"
+        ],
+        "type": "object"
+      },
+      "MeerkatSchema": {
+        "description": "A Meerkat-native JSON schema."
+      },
+      "MisfirePolicy": {
+        "oneOf": [
+          {
+            "description": "Skip materially late pending occurrences instead of catching them up.\n\nThe scheduler applies a small internal grace window so normal tick\njitter does not immediately misfire on-time work.",
+            "properties": {
+              "type": {
+                "const": "skip",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Catch up overdue pending occurrences only while they remain within the\nconfigured lateness window.",
+            "properties": {
+              "type": {
+                "const": "catch_up_within",
+                "type": "string"
+              },
+              "window_seconds": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "type",
+              "window_seconds"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "MissingTargetPolicy": {
+        "enum": [
+          "skip",
+          "mark_misfired"
+        ],
+        "type": "string"
+      },
+      "MobTargetBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ScheduledMobAction"
+              },
+              "member_id": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "member",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "mob_id",
+              "member_id",
+              "action"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "flow_id": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "params": true,
+              "type": {
+                "const": "flow",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "mob_id",
+              "flow_id",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "member_id": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "options": {
+                "$ref": "#/$defs/HelperOptionsSpec",
+                "default": {}
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "type": {
+                "const": "spawn_helper",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "mob_id",
+              "member_id",
+              "prompt"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "fork_context": {
+                "$ref": "#/$defs/ForkContextSpec",
+                "default": {
+                  "type": "full_history"
+                }
+              },
+              "member_id": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "options": {
+                "$ref": "#/$defs/HelperOptionsSpec",
+                "default": {}
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "source_member_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "fork_helper",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "mob_id",
+              "source_member_id",
+              "member_id",
+              "prompt"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "OccurrenceId": {
+        "description": "Opaque identifier for a persisted occurrence.",
+        "type": "string"
+      },
+      "OutputSchema": {
+        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
+        "properties": {
+          "compat": {
+            "$ref": "#/$defs/SchemaCompat",
+            "default": "lossy",
+            "description": "Compatibility mode for provider lowering (lossy or strict)"
+          },
+          "format": {
+            "$ref": "#/$defs/SchemaFormat",
+            "default": "meerkat_v1",
+            "description": "Schema format version"
+          },
+          "name": {
+            "description": "Optional name for the schema (used by some providers)",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema": {
+            "$ref": "#/$defs/MeerkatSchema",
+            "description": "The JSON schema that the output must conform to"
+          },
+          "strict": {
+            "default": false,
+            "description": "Whether to enforce strict schema validation (provider-specific)",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "schema"
+        ],
+        "type": "object"
+      },
+      "OverlapPolicy": {
+        "enum": [
+          "allow_concurrent",
+          "skip_if_running"
+        ],
+        "type": "string"
+      },
+      "PeerMeta": {
+        "description": "Supplementary metadata attached to a peer for discovery.\n\nThe peer's routing name lives in `TrustedPeer.name` / `comms_name`.\n`PeerMeta` carries additional context: what the agent does and\narbitrary key/value labels.\n\n# Serde\n\nBoth fields use `skip_serializing_if`, so `PeerMeta::default()`\nserializes to `{}`.",
+        "properties": {
+          "description": {
+            "description": "What this agent does (e.g. \"Reviews pull requests for style issues\").",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Arbitrary key/value labels (e.g. `{\"lang\": \"rust\", \"team\": \"infra\"}`).\n\n`BTreeMap` keeps keys sorted for deterministic serialization.",
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "Provider": {
+        "description": "Supported LLM providers.",
+        "enum": [
+          "anthropic",
+          "open_a_i",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
+      "RenderClass": {
+        "description": "Standardized rendering class for injected ordinary work.\n\nThis metadata is for normalization/injection rendering, not for core\nruntime scheduling. It lets the system consistently frame peer messages,\nexternal events, tool-scope notices, and similar inputs when they are\nrendered into model-visible context.",
+        "enum": [
+          "user_prompt",
+          "peer_message",
+          "peer_request",
+          "peer_response",
+          "external_event",
+          "flow_step",
+          "continuation",
+          "system_notice",
+          "tool_scope_notice",
+          "ops_progress"
+        ],
+        "type": "string"
+      },
+      "RenderMetadata": {
+        "description": "Optional rendering metadata carried alongside ordinary work content.",
+        "properties": {
+          "class": {
+            "$ref": "#/$defs/RenderClass"
+          },
+          "salience": {
+            "$ref": "#/$defs/RenderSalience",
+            "default": "normal"
+          }
+        },
+        "required": [
+          "class"
+        ],
+        "type": "object"
+      },
+      "RenderSalience": {
+        "description": "Constrained salience metadata for injected ordinary work.\n\nThis is intentionally a small closed enum so call sites do not invent\narbitrary free-text urgency language.",
+        "enum": [
+          "background",
+          "normal",
+          "important",
+          "urgent"
+        ],
+        "type": "string"
+      },
+      "ScheduleConfig": {
+        "properties": {
+          "created_at_utc": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "deleted_at_utc": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "planning_horizon_days": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "planning_horizon_occurrences": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "updated_at_utc": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "planning_horizon_days",
+          "planning_horizon_occurrences",
+          "created_at_utc",
+          "updated_at_utc"
+        ],
+        "type": "object"
+      },
+      "ScheduleId": {
+        "description": "Opaque identifier for a persisted schedule.",
+        "type": "string"
+      },
+      "SchedulePhase": {
+        "enum": [
+          "active",
+          "paused",
+          "deleted"
+        ],
+        "type": "string"
+      },
+      "ScheduledMobAction": {
+        "oneOf": [
+          {
+            "properties": {
+              "content": {
+                "$ref": "#/$defs/ContentInput"
+              },
+              "render_metadata": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RenderMetadata"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": {
+                "const": "send",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "content"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ScheduledMobBackendKind": {
+        "enum": [
+          "session",
+          "external"
+        ],
+        "type": "string"
+      },
+      "ScheduledMobRuntimeMode": {
+        "enum": [
+          "autonomous_host",
+          "turn_driven"
+        ],
+        "type": "string"
+      },
+      "ScheduledSessionAction": {
+        "oneOf": [
+          {
+            "properties": {
+              "additional_instructions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "prompt": {
+                "$ref": "#/$defs/ContentInput"
+              },
+              "render_metadata": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RenderMetadata"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "skill_refs": {
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                },
+                "type": "array"
+              },
+              "system_prompt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "prompt",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "prompt"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "event_type": {
+                "type": "string"
+              },
+              "payload": true,
+              "render_metadata": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RenderMetadata"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": {
+                "const": "event",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "event_type",
+              "payload"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SchemaCompat": {
+        "description": "Compatibility mode for provider lowering.",
+        "enum": [
+          "lossy",
+          "strict"
+        ],
+        "type": "string"
+      },
+      "SchemaFormat": {
+        "description": "Schema format versions supported by Meerkat.",
+        "enum": [
+          "meerkat_v1"
+        ],
+        "type": "string"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "SessionMaterializationSpec": {
+        "properties": {
+          "additional_instructions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "app_context": true,
+          "backend": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "comms_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "config_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "instance_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "keep_alive": {
+            "default": false,
+            "type": "boolean"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "max_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "output_schema": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OutputSchema"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "peer_meta": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PeerMeta"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "preload_skills": {
+            "items": {
+              "$ref": "#/$defs/SkillKey"
+            },
+            "type": "array"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider_params": true,
+          "realm_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "structured_output_retries": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "system_prompt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "type": "object"
+      },
+      "SessionTargetBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ScheduledSessionAction"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "exact_session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "action"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ScheduledSessionAction"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "resumable_session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "action"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ScheduledSessionAction"
+              },
+              "bound_session_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SessionId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "create": {
+                "$ref": "#/$defs/SessionMaterializationSpec"
+              },
+              "type": {
+                "const": "materialize_on_demand_session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "create",
+              "action"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SkillRef": {
+        "description": "Structured skill reference for wire/surface input.\n\nPost-V4 this has exactly one variant — `Structured` — and is kept only as a\ntyped enum to leave room for future source-scoped variants (e.g. alias or\ncapability-scoped forms) without changing the trait surface. No legacy\nstring form, no slash-delimited path, no untagged fallback.",
+        "oneOf": [
+          {
+            "$ref": "#/$defs/SkillKey",
+            "properties": {
+              "kind": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
+        "type": "string"
+      },
+      "TargetBinding": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/SessionTargetBinding",
+            "properties": {
+              "target_kind": {
+                "const": "session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "target_kind"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/MobTargetBinding",
+            "properties": {
+              "target_kind": {
+                "const": "mob",
+                "type": "string"
+              }
+            },
+            "required": [
+              "target_kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolAccessPolicy": {
+        "description": "Tool access control for delegated branches",
+        "oneOf": [
+          {
+            "description": "Inherit all tools from parent",
+            "properties": {
+              "type": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Only allow specific tools",
+            "properties": {
+              "type": {
+                "const": "allow_list",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/ToolNameSet"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Block specific tools",
+            "properties": {
+              "type": {
+                "const": "deny_list",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/ToolNameSet"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolName": {
+        "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
+        "type": "string"
+      },
+      "ToolNameSet": {
+        "description": "Set of canonical tool names.",
+        "items": {
+          "$ref": "#/$defs/ToolName"
+        },
+        "type": "array",
+        "uniqueItems": true
+      },
+      "TriggerSpec": {
+        "oneOf": [
+          {
+            "properties": {
+              "due_at_utc": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "type": {
+                "const": "once",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "due_at_utc"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/IntervalTriggerSpec",
+            "properties": {
+              "type": {
+                "const": "interval",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/CalendarTriggerSpec",
+            "properties": {
+              "type": {
+                "const": "calendar",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "config": {
+        "$ref": "#/$defs/ScheduleConfig"
+      },
+      "misfire_policy": {
+        "$ref": "#/$defs/MisfirePolicy"
+      },
+      "missing_target_policy": {
+        "$ref": "#/$defs/MissingTargetPolicy"
+      },
+      "next_occurrence_ordinal": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "overlap_policy": {
+        "$ref": "#/$defs/OverlapPolicy"
+      },
+      "phase": {
+        "$ref": "#/$defs/SchedulePhase"
+      },
+      "planning_cursor_utc": {
+        "format": "date-time",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "schedule_id": {
+        "$ref": "#/$defs/ScheduleId"
+      },
+      "superseded_ack_ids": {
+        "items": {
+          "$ref": "#/$defs/OccurrenceId"
+        },
+        "type": "array",
+        "uniqueItems": true
+      },
+      "target": {
+        "$ref": "#/$defs/TargetBinding"
+      },
+      "trigger": {
+        "$ref": "#/$defs/TriggerSpec"
+      }
+    },
+    "required": [
+      "schedule_id",
+      "phase",
+      "revision",
+      "trigger",
+      "target",
+      "misfire_policy",
+      "overlap_policy",
+      "missing_target_policy",
+      "next_occurrence_ordinal",
+      "superseded_ack_ids",
+      "config"
+    ],
+    "title": "Schedule",
+    "type": "object"
+  },
   "ScheduleListResult": {
     "$defs": {
       "BlobId": {
@@ -23307,6 +29281,21 @@
       "occurrences"
     ],
     "title": "ScheduleOccurrencesResult",
+    "type": "object"
+  },
+  "ScheduleToolsResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Result for `schedule/tools`.",
+    "properties": {
+      "tools": {
+        "items": true,
+        "type": "array"
+      }
+    },
+    "required": [
+      "tools"
+    ],
+    "title": "ScheduleToolsResult",
     "type": "object"
   },
   "SessionExternalEventEnvelope": {

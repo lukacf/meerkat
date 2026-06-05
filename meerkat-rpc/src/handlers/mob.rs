@@ -2707,6 +2707,55 @@ mod tests {
         assert!(minimal_params.auth_binding.is_none());
     }
 
+    /// Generated-Artifact Theater (Dogma Rule 9) drift gate. The handler-local
+    /// `MobSpawnParams` and the canonical contracts wire `MobSpawnParams`
+    /// (`meerkat_contracts::MobSpawnParams`, which feeds `params.json` + SDK
+    /// codegen) are serde-equivalent by construction: identical field names and
+    /// identical enum reprs (domain `MobRuntimeMode`/`BudgetSplitPolicy`/... and
+    /// their `Wire*` twins share `#[serde]` tagging). Both carry
+    /// `#[serde(deny_unknown_fields)]`, so a field added to one but not the
+    /// other makes one of these two deserializations fail. This pins the two
+    /// representations against silent fork drift (the catalog/SDK describe the
+    /// wire shape; the handler must accept the same bytes).
+    #[test]
+    fn mob_spawn_params_stay_serde_equivalent_to_contracts_wire() {
+        let value = serde_json::json!({
+            "mob_id": "m1",
+            "profile": "worker",
+            "agent_identity": "w1",
+            "runtime_mode": "turn_driven",
+            "backend": "session",
+            "labels": {"team": "blue"},
+            "context": {"k": "v"},
+            "additional_instructions": ["be brief"],
+            "shell_env": {"FOO": "bar"},
+            "auto_wire_parent": true,
+            "launch_mode": { "mode": "fresh" },
+            "tool_access_policy": { "type": "allow_list", "value": ["grep", "read"] },
+            "budget_split_policy": { "type": "remaining" },
+            "inherited_tool_filter": { "Allow": ["grep", "read"] },
+            "override_profile": {
+                "model": "claude-sonnet-4-6",
+                "skills": [],
+                "tools": {},
+                "peer_description": "",
+                "external_addressable": false
+            },
+            "auth_binding": { "realm": "dev", "binding": "default_anthropic" },
+        });
+
+        let handler: MobSpawnParams = serde_json::from_value(value.clone())
+            .expect("handler-local MobSpawnParams must accept the full wire payload");
+        let wire: meerkat_contracts::MobSpawnParams = serde_json::from_value(value)
+            .expect("contracts wire MobSpawnParams must accept the identical payload");
+
+        // Shared scalar fields agree across the two representations.
+        assert_eq!(handler.mob_id, wire.mob_id);
+        assert_eq!(handler.profile, wire.profile);
+        assert_eq!(handler.agent_identity, wire.agent_identity);
+        assert_eq!(handler.auto_wire_parent, wire.auto_wire_parent);
+    }
+
     #[test]
     fn mob_spawn_params_reject_internal_override_profile_tool_bundles() {
         let value = serde_json::json!({

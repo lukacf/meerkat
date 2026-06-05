@@ -54,3 +54,25 @@ jobs:
             args+=(--base "${BASE_SHA}")
           fi
           scripts/cargo-agent-gate "${args[@]}" --committed
+
+      # Generation / drift ratchets (Dogma Rule 9). These previously ran only in
+      # the owner-gated BuildBuddy lane, so contributor PRs through this cargo
+      # lane could land schema/SDK/kernel/surface drift with green CI. Run them
+      # here so the ratchets bind every contributor, not just the owner.
+      - name: Verify version parity
+        run: make verify-version-parity
+
+      - name: Verify schema freshness
+        run: make verify-schema-freshness
+
+      - name: Verify SDK codegen freshness
+        run: make verify-sdk-codegen-freshness
+
+      - name: Verify RPC surface alignment
+        run: make verify-rpc-surface-alignment
+
+      - name: Verify REST surface alignment
+        run: make verify-rest-surface-alignment
+
+      - name: Verify generated machine kernels are not stale
+        run: make machine-check-drift

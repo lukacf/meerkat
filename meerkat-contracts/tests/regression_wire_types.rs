@@ -839,47 +839,84 @@ fn emitted_rpc_catalog_type_names_resolve_to_schema_artifacts() {
     std::fs::create_dir_all(&dir).expect("create schema tempdir");
     emit_all_schemas(&dir).expect("emit schemas");
 
-    let params: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(dir.join("params.json")).expect("params"))
-            .expect("parse params");
-    let wire_types: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(dir.join("wire-types.json")).expect("wire types"))
-            .expect("parse wire types");
+    // Union of every emitted flat type-map artifact. SDK codegen and JSON-RPC
+    // clients resolve a catalog `params_type` / `result_type` against this whole
+    // set, not just params.json + wire-types.json. A catalog type name with no
+    // emitted schema anywhere is Generated-Artifact Theater (Dogma Rule 9): the
+    // SDK cannot generate it and the named contract does not exist.
+    let mut defined: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for file in [
+        "params.json",
+        "wire-types.json",
+        "runtime-host.json",
+        "models.json",
+        "capabilities.json",
+        "errors.json",
+        "events.json",
+    ] {
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join(file)).expect(file)).expect(file);
+        if let Some(object) = value.as_object() {
+            for (name, schema) in object {
+                if schema.is_object() {
+                    defined.insert(name.clone());
+                }
+            }
+        }
+    }
+
     let rpc_methods: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.join("rpc-methods.json")).expect("rpc methods"))
             .expect("parse rpc methods");
-
-    let params = params.as_object().expect("params object");
-    let wire_types = wire_types.as_object().expect("wire-types object");
     let methods = rpc_methods["methods"].as_array().expect("methods array");
+
+    // Methods whose params embed deep `meerkat-core` domain graphs that do not
+    // yet derive `JsonSchema` (`ContentInput`, `ToolDef`, `PeerMeta`,
+    // `BudgetLimits`, hook/skill overlays). The request body is an open object
+    // in generated SDKs until these are promoted to contracts wire types. This
+    // allowlist must only SHRINK — adding a new entry is a regression and must
+    // be justified.
+    let unschematized_params: std::collections::BTreeSet<&str> =
+        ["CreateSessionParams", "StartTurnParams"]
+            .into_iter()
+            .collect();
+
+    let resolves = |type_name: &str| -> bool {
+        type_name
+            .split('|')
+            .map(str::trim)
+            .all(|part| part == "Value" || defined.contains(part))
+    };
+
+    let mut missing: Vec<String> = Vec::new();
     let mut checked = 0usize;
     for method in methods {
         let name = method["name"].as_str().expect("method name");
-        if !matches!(
-            name,
-            "session/rewrite_transcript"
-                | "session/transcript_revision"
-                | "session/restore_transcript_revision"
-        ) {
-            continue;
-        }
         checked += 1;
-        if let Some(params_type) = method.get("params_type").and_then(|value| value.as_str()) {
-            assert!(
-                params.contains_key(params_type),
-                "{name} references missing params schema {params_type}"
-            );
+        if let Some(params_type) = method.get("params_type").and_then(|value| value.as_str())
+            && !unschematized_params.contains(params_type)
+            && !resolves(params_type)
+        {
+            missing.push(format!("{name}: params_type `{params_type}`"));
         }
         if let Some(result_type) = method.get("result_type").and_then(|value| value.as_str())
-            && result_type != "Value"
+            && !resolves(result_type)
         {
-            assert!(
-                wire_types.contains_key(result_type),
-                "{name} references missing result schema {result_type}"
-            );
+            missing.push(format!("{name}: result_type `{result_type}`"));
         }
     }
-    assert_eq!(checked, 3, "expected to check all transcript edit RPCs");
+
+    assert!(
+        checked >= 100,
+        "expected to check the full RPC catalog, only saw {checked} methods"
+    );
+    assert!(
+        missing.is_empty(),
+        "rpc_catalog names types with no emitted schema artifact \
+         (Generated-Artifact Theater — define the type in meerkat-contracts so \
+         emit-schemas lands it, or fix the catalog name):\n  {}",
+        missing.join("\n  ")
+    );
     std::fs::remove_dir_all(&dir).expect("remove schema tempdir");
 }
 

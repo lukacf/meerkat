@@ -1072,16 +1072,28 @@ impl AgentMobToolSurface {
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         let authority_context = self.authority_context_snapshot();
         let mobs = self.state.mob_list().await;
-        let mob_list: Vec<serde_json::Value> = mobs
-            .into_iter()
-            .filter(|(id, _)| authority_context.can_manage_mob(id.as_str()))
-            .map(|(id, status)| {
-                json!({
-                    "mob_id": id,
-                    "status": status.as_str(),
-                })
-            })
-            .collect();
+        // Lower each per-mob visibility decision through MobMachine, exactly
+        // as the mutating-dispatch siblings do (see `ensure_mob_scope_authority`).
+        // MobMachine — not this surface — owns the Allow/Deny verdict; we extract
+        // only the raw `can_manage_mob` observation and mirror the machine's
+        // ruling. Fails closed: a mob whose handle cannot resolve, or whose
+        // admission errors or is Denied, is omitted.
+        let mut mob_list: Vec<serde_json::Value> = Vec::new();
+        for (id, status) in mobs {
+            let can_manage_mob = authority_context.can_manage_mob(id.as_str());
+            let Ok(handle) = self.state.handle_for(&id).await else {
+                continue;
+            };
+            match handle.resolve_current_mob_admission(can_manage_mob).await {
+                Ok(meerkat_mob::CurrentMobAdmission::Allowed) => {
+                    mob_list.push(json!({
+                        "mob_id": id,
+                        "status": status.as_str(),
+                    }));
+                }
+                Ok(meerkat_mob::CurrentMobAdmission::Denied) | Err(_) => {}
+            }
+        }
 
         Self::encode_result(call, json!({"mobs": mob_list}))
     }

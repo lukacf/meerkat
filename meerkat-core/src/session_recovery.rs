@@ -452,9 +452,14 @@ pub fn resolve_effective_turn_config(
             .output_schema
             .clone()
             .or(build_state.output_schema.clone()),
-        structured_output_retries: overrides
-            .structured_output_retries
-            .unwrap_or(metadata.structured_output_retries),
+        // Resumed sessions keep their persisted retry budget (override wins if
+        // present); wrap as explicit intent so the factory seam does not fall
+        // back to the live config default for an already-persisted session.
+        structured_output_retries: Some(
+            overrides
+                .structured_output_retries
+                .unwrap_or(metadata.structured_output_retries),
+        ),
         hooks_override: overrides
             .hooks_override
             .clone()
@@ -812,7 +817,7 @@ mod tests {
             build.provider_params,
             Some(json!({ "reasoning": { "effort": "medium" } }))
         );
-        assert_eq!(build.structured_output_retries, 9);
+        assert_eq!(build.structured_output_retries, Some(9));
         assert_eq!(build.comms_name.as_deref(), Some("peer-a"));
         assert_eq!(
             build.realm_id.as_ref().map(crate::RealmId::as_str),

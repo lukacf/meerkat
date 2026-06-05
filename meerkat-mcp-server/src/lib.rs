@@ -257,10 +257,6 @@ pub struct MeerkatRunInput {
     pub auth_binding: Option<meerkat_contracts::WireAuthBindingRef>,
 }
 
-fn default_structured_output_retries() -> u32 {
-    2
-}
-
 fn mcp_resume_requires_rebuild(input: &MeerkatResumeInput) -> bool {
     !input.tool_results.is_empty()
         || !input.tools.is_empty()
@@ -753,7 +749,7 @@ impl MeerkatMcpState {
             mob_state,
             mcp_adapters: Arc::new(Mutex::new(HashMap::new())),
             runtime_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            runtime_pre_admissions: Arc::new(Mutex::new(HashMap::new())),
+            runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
             runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
             session_event_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "mob")]
@@ -891,7 +887,7 @@ impl MeerkatMcpState {
             mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
             mcp_adapters: Arc::new(Mutex::new(HashMap::new())),
             runtime_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            runtime_pre_admissions: Arc::new(Mutex::new(HashMap::new())),
+            runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
             runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
             session_event_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "mob")]
@@ -3193,9 +3189,7 @@ async fn handle_meerkat_run(
         provider: create_provider,
         self_hosted_server_id: None,
         output_schema,
-        structured_output_retries: input
-            .structured_output_retries
-            .unwrap_or(default_structured_output_retries()),
+        structured_output_retries: input.structured_output_retries,
         hooks_override: input.hooks_override.clone().unwrap_or_default(),
         comms_name: input.comms_name.clone(),
         peer_meta: input.peer_meta.clone(),
@@ -3597,9 +3591,7 @@ async fn handle_meerkat_resume(
             provider: llm_binding.provider,
             self_hosted_server_id: llm_binding.self_hosted_server_id.clone(),
             output_schema: output_schema.clone(),
-            structured_output_retries: input
-                .structured_output_retries
-                .unwrap_or(default_structured_output_retries()),
+            structured_output_retries: input.structured_output_retries,
             hooks_override: input.hooks_override.clone().unwrap_or_default(),
             comms_name: input.comms_name.clone(),
             resume_session: Some(session.clone()),

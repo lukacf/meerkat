@@ -314,8 +314,10 @@ pub struct AgentBuildConfig {
     pub system_prompt: Option<String>,
     /// Optional output schema for structured extraction.
     pub output_schema: Option<OutputSchema>,
-    /// How many retries for structured output validation.
-    pub structured_output_retries: u32,
+    /// Structured-output retry budget *intent*. `None` inherits the canonical
+    /// default ([`meerkat_core::config::default_structured_output_retries`]);
+    /// the `AgentFactory` seam resolves it. Surfaces must not fabricate one.
+    pub structured_output_retries: Option<u32>,
     /// Run-scoped hook overrides.
     pub hooks_override: HookRunOverrides,
     /// Whether to keep the agent alive after the initial turn (enables comms drain loop).
@@ -605,7 +607,7 @@ impl AgentBuildConfig {
             max_tokens: None,
             system_prompt: None,
             output_schema: None,
-            structured_output_retries: 2,
+            structured_output_retries: None,
             hooks_override: HookRunOverrides::default(),
             keep_alive: false,
             comms_name: None,
@@ -2317,7 +2319,7 @@ impl AgentFactory {
             build_config.max_tokens = Some(metadata.max_tokens);
         }
         if !mask.structured_output_retries {
-            build_config.structured_output_retries = metadata.structured_output_retries;
+            build_config.structured_output_retries = Some(metadata.structured_output_retries);
         }
         if !mask.provider {
             build_config.provider = Some(metadata.provider);
@@ -4640,13 +4642,23 @@ impl AgentFactory {
             call_timeout_override: build_config.call_timeout_override.clone(),
         };
 
+        // Resolve the structured-output retry budget exactly once, here at the
+        // AgentFactory seam: build options carry intent (`Option<u32>`, `None`
+        // = inherit). The canonical owner is the deployment config field
+        // `config.agent.structured_output_retries` (whose own serde default is
+        // `meerkat_core::config::default_structured_output_retries`); surfaces
+        // never fabricate this default.
+        let resolved_structured_output_retries = build_config
+            .structured_output_retries
+            .unwrap_or(config.agent.structured_output_retries);
+
         // Persist the *override intent* (Inherit/Enable/Disable), not the resolved
         // effective bool. This ensures Inherit survives across save/resume cycles so
         // the session continues to follow future runtime defaults.
         let factory_metadata = if let Some(mut metadata) = resumed_session_metadata {
             metadata.model = model.clone();
             metadata.max_tokens = max_tokens;
-            metadata.structured_output_retries = build_config.structured_output_retries;
+            metadata.structured_output_retries = resolved_structured_output_retries;
             metadata.provider = provider;
             metadata.self_hosted_server_id = self_hosted_server_id.clone();
             metadata.provider_params = build_config.provider_params.clone();
@@ -4679,7 +4691,7 @@ impl AgentFactory {
                 schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: model.clone(),
                 max_tokens,
-                structured_output_retries: build_config.structured_output_retries,
+                structured_output_retries: resolved_structured_output_retries,
                 provider,
                 self_hosted_server_id: self_hosted_server_id.clone(),
                 provider_params: build_config.provider_params.clone(),
@@ -4727,7 +4739,7 @@ impl AgentFactory {
             .model(model.clone())
             .max_tokens_per_turn(max_tokens)
             .budget(budget_limits)
-            .structured_output_retries(build_config.structured_output_retries)
+            .structured_output_retries(resolved_structured_output_retries)
             .with_hook_run_overrides(build_config.hooks_override)
             .with_model_defaults_resolver(Arc::new(RegistryBackedDefaultsResolver {
                 registry: Arc::new(registry.clone()),

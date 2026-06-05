@@ -1867,10 +1867,6 @@ pub struct CreateSessionRequest {
     pub shell_env: Option<std::collections::HashMap<String, String>>,
 }
 
-fn default_structured_output_retries() -> u32 {
-    2
-}
-
 fn rest_continue_requires_rebuild(req: &ContinueSessionRequest) -> bool {
     req.model.is_some()
         || req.provider.is_some()
@@ -4346,9 +4342,7 @@ async fn create_session_inner(
             .then_some(initial_identity.provider),
         self_hosted_server_id: initial_identity.self_hosted_server_id.clone(),
         output_schema: req.output_schema,
-        structured_output_retries: req
-            .structured_output_retries
-            .unwrap_or(default_structured_output_retries()),
+        structured_output_retries: req.structured_output_retries,
         hooks_override: req.hooks_override.unwrap_or_default(),
         comms_name: req.comms_name.clone(),
         peer_meta: req.peer_meta.clone(),
@@ -5383,9 +5377,7 @@ async fn continue_session_inner(
             provider: llm_binding.provider,
             self_hosted_server_id: llm_binding.self_hosted_server_id,
             output_schema: req.output_schema,
-            structured_output_retries: req
-                .structured_output_retries
-                .unwrap_or(default_structured_output_retries()),
+            structured_output_retries: req.structured_output_retries,
             hooks_override: req.hooks_override.clone().unwrap_or_default(),
             comms_name: req.comms_name.clone(),
             peer_meta: req.peer_meta.clone(),

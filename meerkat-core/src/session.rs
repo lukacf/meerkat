@@ -3769,7 +3769,7 @@ pub struct SessionMetadata {
     pub schema_version: u32,
     pub model: String,
     pub max_tokens: u32,
-    #[serde(default = "default_structured_output_retries")]
+    #[serde(default = "crate::config::default_structured_output_retries")]
     pub structured_output_retries: u32,
     pub provider: Provider,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3824,10 +3824,6 @@ pub struct SessionMetadata {
     /// "no typed binding" rather than failing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mob_member_binding: Option<crate::MobMemberBinding>,
-}
-
-fn default_structured_output_retries() -> u32 {
-    2
 }
 
 fn default_session_metadata_schema_version() -> u32 {

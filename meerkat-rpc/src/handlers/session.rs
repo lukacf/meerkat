@@ -82,8 +82,8 @@ pub struct CreateSessionParams {
     #[serde(default)]
     pub output_schema: Option<serde_json::Value>,
     /// Max retries for structured output validation (default: 2).
-    #[serde(default = "default_structured_output_retries")]
-    pub structured_output_retries: u32,
+    #[serde(default)]
+    pub structured_output_retries: Option<u32>,
     /// Run-scoped hook overrides.
     #[serde(default)]
     pub hooks_override: Option<HookRunOverrides>,
@@ -156,10 +156,6 @@ pub struct CreateSessionParams {
     /// These are merged with globally registered tools at build time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_tools: Option<Vec<meerkat_core::ToolDef>>,
-}
-
-fn default_structured_output_retries() -> u32 {
-    2
 }
 
 fn canonical_skill_ids(
@@ -282,15 +278,16 @@ pub async fn handle_create(
     } else {
         None
     };
-    let model_name = params
-        .model
-        .clone()
-        .or(runtime_default_model)
-        .unwrap_or_else(|| {
-            meerkat_models::default_model("anthropic")
-                .unwrap_or("claude-sonnet-4-5")
-                .to_string()
-        });
+    let model_name = match params.model.clone().or(runtime_default_model) {
+        Some(model) => model,
+        None => {
+            return RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "no model specified and no default model configured for this runtime",
+            );
+        }
+    };
     let provider_was_explicit = params.provider.is_some();
     let provider = match params
         .provider

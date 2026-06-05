@@ -21534,10 +21534,12 @@
             ]
           },
           "structured_output_retries": {
-            "default": 0,
             "format": "uint32",
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "system_prompt": {
             "type": [
@@ -23015,10 +23017,12 @@
             ]
           },
           "structured_output_retries": {
-            "default": 0,
             "format": "uint32",
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "system_prompt": {
             "type": [

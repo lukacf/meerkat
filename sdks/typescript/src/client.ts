@@ -65,6 +65,7 @@ import {
   type McpRemoveParams,
   type MobSpawnManyFailureCause,
   type MobSpawnManyResultEntry,
+  type WireMobMemberStatus,
 } from "./generated/types.js";
 import { DeferredSession, Session } from "./session.js";
 import {
@@ -1338,25 +1339,21 @@ export class MeerkatClient {
     const mobs = (result.mobs as Array<Record<string, unknown>>) ?? [];
     return mobs.map((mob) => ({
       mobId: String(mob.mob_id ?? mob.mobId ?? ""),
-      status: String(mob.status ?? ""),
+      status: MeerkatClient.requireStringField(
+        mob,
+        "status",
+        "Invalid mob/list response entry: missing status",
+      ),
     }));
   }
 
   async mobStatus(mobId: string): Promise<{ mobId: string; status: string }> {
     const result = await this.request("mob/status", { mob_id: mobId });
-    const rawStatus = result.status;
-    const status = typeof rawStatus === "string"
-      ? rawStatus
-      : (typeof rawStatus === "object" && rawStatus !== null
-        ? Object.keys(rawStatus)[0]
-        : undefined);
-    if (!status) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid mob/status response: missing status",
-      );
-    }
-    return { mobId: String(result.mob_id ?? mobId), status };
+    const context = "Invalid mob/status response";
+    const record = MeerkatClient.requireRecord(result, "result", context);
+    const status = MeerkatClient.requireStringField(record, "status", context);
+    const responseMobId = MeerkatClient.requireStringField(record, "mob_id", context);
+    return { mobId: responseMobId, status };
   }
 
   async listMobMembers(mobId: string): Promise<MobMember[]> {
@@ -1377,7 +1374,11 @@ export class MeerkatClient {
       return {
         agentIdentity,
         memberRef,
-        profile: String(member.profile_name ?? member.profile ?? member.role ?? ""),
+        profile: MeerkatClient.requireStringField(
+          member,
+          "role",
+          "Invalid mob/members response: missing role",
+        ),
         peerId: member.peer_id != null ? String(member.peer_id) : undefined,
         externalPeerSpecs:
           member.external_peer_specs && typeof member.external_peer_specs === "object"
@@ -1397,7 +1398,13 @@ export class MeerkatClient {
               Object.entries(member.labels as Record<string, unknown>).map(([key, value]) => [key, String(value)]),
             )
           : undefined,
-        status: member.status != null ? String(member.status) : undefined,
+        status:
+          member.status != null
+            ? MeerkatClient.parseWireMobMemberStatus(
+                member.status,
+                "Invalid mob/members response: invalid member status",
+              )
+            : undefined,
         error: member.error != null ? String(member.error) : undefined,
         isFinal: member.is_final != null ? Boolean(member.is_final) : undefined,
       };
@@ -1599,7 +1606,19 @@ export class MeerkatClient {
       agent_identity: agentIdentity,
       initial_message: initialMessage,
     });
-    const status = String(result.status ?? "completed");
+    const respawnContext = "Invalid mob/respawn response";
+    const respawnRecord = MeerkatClient.requireRecord(result, "result", respawnContext);
+    const status = MeerkatClient.requireStringField(
+      respawnRecord,
+      "status",
+      respawnContext,
+    );
+    if (status !== "completed" && status !== "topology_restore_failed") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid mob/respawn response: invalid status",
+      );
+    }
     const rawFailed = Array.isArray(result.failed_peer_ids)
       ? result.failed_peer_ids
       : [];
@@ -1621,7 +1640,7 @@ export class MeerkatClient {
       );
     }
     return {
-      status: status === "topology_restore_failed" ? "topology_restore_failed" : "completed",
+      status,
       receipt: {
         agentIdentity:
           receipt.identity != null ? String(receipt.identity) : agentIdentity,
@@ -1679,7 +1698,10 @@ export class MeerkatClient {
         ? (result.peer_connectivity as Record<string, unknown>)
         : undefined;
     return {
-      status: String(result.status ?? "unknown"),
+      status: MeerkatClient.parseWireMobMemberStatus(
+        result.status,
+        "Invalid mob/member_status response: missing or invalid status",
+      ),
       outputPreview: result.output_preview != null ? String(result.output_preview) : undefined,
       error: result.error != null ? String(result.error) : undefined,
       tokensUsed: Number(result.tokens_used ?? 0),
@@ -1720,9 +1742,18 @@ export class MeerkatClient {
     members: unknown[];
   }> {
     const result = await this.request("mob/snapshot", { mob_id: mobId });
+    const snapshotRecord = MeerkatClient.requireRecord(
+      result,
+      "result",
+      "Invalid mob/snapshot response",
+    );
     return {
       mobId: String(result.mob_id ?? mobId),
-      status: String(result.status ?? "unknown"),
+      status: MeerkatClient.requireStringField(
+        snapshotRecord,
+        "status",
+        "Invalid mob/snapshot response: missing status",
+      ),
       members: Array.isArray(result.members) ? result.members : [],
     };
   }
@@ -2337,10 +2368,37 @@ export class MeerkatClient {
   }
 
   private static parseAttributedMobEvent(raw: Record<string, unknown>): AttributedMobEvent {
+    const context = "Invalid attributed mob event";
+    // The runtime wire shape (meerkat-mob AttributedEvent) carries a typed
+    // source `{ identity, generation }` (AgentRuntimeId) and a `role`
+    // (ProfileName) string — NOT free-form `source`/`profile` strings. Mirror
+    // the web SDK `parseAttributedEventItem`/`parseAttributedSource`: validate
+    // the source record (require non-empty `identity` + non-negative integer
+    // `generation`) and the `role` field, throwing on absence/malformation.
+    // The public `AttributedMobEvent` TS type exposes `source: string` /
+    // `profile: string`, so the validated `identity` is projected into
+    // `source` and the validated `role` into `profile`. Nothing is coalesced
+    // to "" — absent/unknown fields fail closed.
+    const source = MeerkatClient.requireRecord(raw.source, "source", context);
+    const identity = MeerkatClient.requireStringField(source, "identity", context);
+    const generation = MeerkatClient.requireNumberField(
+      source,
+      "generation",
+      context,
+    );
+    if (!Number.isInteger(generation) || generation < 0) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: source generation must be a non-negative integer`,
+      );
+    }
+    const role = MeerkatClient.requireStringField(raw, "role", context);
     return {
-      source: String(raw.source ?? ""),
-      profile: String(raw.profile ?? ""),
-      envelope: MeerkatClient.parseAgentEventEnvelope((raw.envelope ?? {}) as Record<string, unknown>),
+      source: identity,
+      profile: role,
+      envelope: MeerkatClient.parseAgentEventEnvelope(
+        MeerkatClient.requireRecord(raw.envelope, "envelope", context),
+      ),
     };
   }
 
@@ -3049,6 +3107,21 @@ export class MeerkatClient {
       throw new MeerkatError("INVALID_RESPONSE", `${context}: ${field} must be boolean`);
     }
     return value;
+  }
+
+  private static parseWireMobMemberStatus(
+    raw: unknown,
+    message: string,
+  ): WireMobMemberStatus {
+    if (
+      typeof raw === "string" &&
+      (["active", "retiring", "broken", "completed", "unknown"] as const).includes(
+        raw as WireMobMemberStatus,
+      )
+    ) {
+      return raw as WireMobMemberStatus;
+    }
+    throw new MeerkatError("INVALID_RESPONSE", message);
   }
 
   private static parseLiveRefreshResult(raw: unknown): LiveRefreshResult {

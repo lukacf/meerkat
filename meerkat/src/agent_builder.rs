@@ -144,7 +144,7 @@ impl AgentBuilder {
 
     /// Set maximum retries for structured output validation.
     pub fn structured_output_retries(mut self, retries: u32) -> Self {
-        self.build_config.structured_output_retries = retries;
+        self.build_config.structured_output_retries = Some(retries);
         self
     }
 

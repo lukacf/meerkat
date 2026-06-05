@@ -727,7 +727,13 @@ pub struct CliOverrides {
     pub override_config: Option<ConfigDelta>,
 }
 
-fn default_structured_output_retries() -> u32 {
+/// Canonical default for the structured-output validation retry budget.
+///
+/// This is the single owner of the default value. Surfaces (RPC/REST/MCP) and
+/// build options carry `Option<u32>` intent (`None` = inherit) and resolve
+/// against this owner at the `AgentFactory` seam — they must not define their
+/// own default constant.
+pub fn default_structured_output_retries() -> u32 {
     2
 }
 

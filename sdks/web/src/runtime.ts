@@ -150,8 +150,6 @@ export interface WasmModule {
     mobB: string,
     meerkatB: string,
   ) => Promise<void>;
-  comms_peers: (sessionId: string) => Promise<string>;
-  comms_send: (sessionId: string, paramsJson: string) => Promise<string>;
 }
 
 /** Entry point for the Meerkat WASM runtime in the browser. */

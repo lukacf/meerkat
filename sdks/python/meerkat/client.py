@@ -497,7 +497,10 @@ class MeerkatClient:
             Capability(
                 id=c.get("id", ""),
                 description=c.get("description", ""),
-                status=self._normalize_status(c.get("status", "Available")),
+                status=self._parse_wire_capability_status(
+                    c.get("status"),
+                    "Invalid capabilities/get response",
+                ),
             )
             for c in caps_result.get("capabilities", [])
         ]
@@ -1611,10 +1614,9 @@ class MeerkatClient:
         return {
             "agent_identity": resolved_identity,
             "member_ref": member_ref,
-            "handling_mode": (
-                receipt_handling_mode
-                if receipt_handling_mode in {"queue", "steer"}
-                else handling_mode
+            "handling_mode": self._parse_wire_handling_mode(
+                receipt_handling_mode,
+                "Invalid mob/member_send response: invalid handling_mode",
             ),
         }
 
@@ -1844,10 +1846,9 @@ class MeerkatClient:
                 "member_ref": member_ref,
             }
         return {
-            "status": (
-                "topology_restore_failed"
-                if result.get("status") == "topology_restore_failed"
-                else "completed"
+            "status": self._parse_wire_respawn_outcome(
+                result.get("status"),
+                "Invalid mob/respawn response: invalid status",
             ),
             "receipt": result["receipt"],
             **(
@@ -2366,10 +2367,9 @@ class MeerkatClient:
         return {
             "mob_id": str(result.get("mob_id", mob_id)),
             "agent_identity": resolved_identity,
-            "status": (
-                "duplicate"
-                if result.get("status") == "duplicate"
-                else "staged"
+            "status": self._parse_wire_append_system_context_status(
+                result.get("status"),
+                "Invalid mob/append_system_context response: invalid status",
             ),
         }
 
@@ -3358,14 +3358,42 @@ class MeerkatClient:
         return params
 
     @staticmethod
-    def _normalize_status(raw: Any) -> str:
-        if isinstance(raw, str):
+    def _parse_wire_capability_status(raw: Any, context: str) -> str:
+        # CapabilityStatus is an externally-tagged Rust enum: either the bare
+        # string "Available", or a single-key dict like
+        # {"DisabledByPolicy": {...}} / {"NotCompiled": {...}} /
+        # {"NotSupportedByProtocol": {...}}. We do NOT whitelist variants (the
+        # capability vocabulary evolves), but we fail closed on an absent or
+        # otherwise unparseable status rather than fabricating a permissive
+        # "Available" default.
+        if isinstance(raw, str) and raw:
             return raw
-        if isinstance(raw, dict):
-            # Rust can emit externally-tagged enums for status:
-            # {"DisabledByPolicy": {"description": "..."}}
-            return next(iter(raw), "Unknown")
-        return str(raw)
+        if isinstance(raw, dict) and raw:
+            first_key = next(iter(raw), None)
+            if isinstance(first_key, str) and first_key:
+                return first_key
+        raise MeerkatError(
+            "INVALID_RESPONSE",
+            f"{context}: missing or invalid capability status",
+        )
+
+    @staticmethod
+    def _parse_wire_handling_mode(raw: Any, context: str) -> str:
+        if isinstance(raw, str) and raw in {"queue", "steer"}:
+            return raw
+        raise MeerkatError("INVALID_RESPONSE", context)
+
+    @staticmethod
+    def _parse_wire_respawn_outcome(raw: Any, context: str) -> str:
+        if isinstance(raw, str) and raw in {"completed", "topology_restore_failed"}:
+            return raw
+        raise MeerkatError("INVALID_RESPONSE", context)
+
+    @staticmethod
+    def _parse_wire_append_system_context_status(raw: Any, context: str) -> str:
+        if isinstance(raw, str) and raw in {"staged", "duplicate"}:
+            return raw
+        raise MeerkatError("INVALID_RESPONSE", context)
 
     @staticmethod
     def _require_dict(raw: Any, field: str, context: str) -> dict[str, Any]:

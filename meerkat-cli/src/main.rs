@@ -4519,12 +4519,16 @@ impl LoginProvider {
         }
     }
 
-    fn config_provider(self) -> &'static str {
+    fn provider(self) -> meerkat_core::Provider {
         match self {
-            Self::Anthropic => "anthropic",
-            Self::OpenAi => "openai",
-            Self::Google => "gemini",
+            Self::Anthropic => meerkat_core::Provider::Anthropic,
+            Self::OpenAi => meerkat_core::Provider::OpenAI,
+            Self::Google => meerkat_core::Provider::Gemini,
         }
+    }
+
+    fn config_provider(self) -> &'static str {
+        self.provider().as_str()
     }
 
     fn backend_profile_id(self) -> &'static str {
@@ -4535,12 +4539,20 @@ impl LoginProvider {
         }
     }
 
-    fn backend_kind(self) -> &'static str {
+    fn normalized_backend_kind(self) -> meerkat_providers::NormalizedBackendKind {
+        use meerkat_core::provider_matrix::anthropic::AnthropicBackendKind;
+        use meerkat_core::provider_matrix::google::GoogleBackendKind;
+        use meerkat_core::provider_matrix::openai::OpenAiBackendKind;
+        use meerkat_providers::NormalizedBackendKind;
         match self {
-            Self::Anthropic => "anthropic_api",
-            Self::OpenAi => "chatgpt_backend",
-            Self::Google => "google_code_assist",
+            Self::Anthropic => NormalizedBackendKind::Anthropic(AnthropicBackendKind::AnthropicApi),
+            Self::OpenAi => NormalizedBackendKind::OpenAi(OpenAiBackendKind::ChatGptBackend),
+            Self::Google => NormalizedBackendKind::Google(GoogleBackendKind::GoogleCodeAssist),
         }
+    }
+
+    fn backend_kind(self) -> &'static str {
+        self.normalized_backend_kind().as_str()
     }
 
     fn backend_base_url(self) -> Option<&'static str> {
@@ -4766,17 +4778,24 @@ fn ensure_cli_interactive_oauth_config(provider: LoginProvider, config: &mut Con
     let mut changed = false;
 
     if let Some(backend) = section.backend.get_mut(backend_profile_id) {
-        if backend.provider == provider.config_provider()
-            && backend.backend_kind == provider.backend_kind()
+        // Gate the heal on typed identity: parse the config strings into the
+        // typed `Provider` / `NormalizedBackendKind` and compare typed values,
+        // not raw string equality.
+        let backend_provider = meerkat_core::Provider::parse_strict(&backend.provider);
+        let backend_kind = meerkat_providers::ProviderRuntimeCatalog::normalize_backend(
+            provider.provider(),
+            &backend.backend_kind,
+        )
+        .ok();
+        if backend_provider == Some(provider.provider())
+            && backend_kind == Some(provider.normalized_backend_kind())
             && let Some(base_url) = provider.backend_base_url()
         {
             let should_heal_base_url = backend.base_url.as_deref().is_none_or(str::is_empty)
                 || (provider == LoginProvider::OpenAi
-                    && backend
-                        .base_url
-                        .as_deref()
-                        .map(|url| url.trim_end_matches('/') == "https://chatgpt.com/backend-api")
-                        .unwrap_or(false));
+                    && backend.base_url.as_deref().is_some_and(|url| {
+                        meerkat_core::provider_matrix::openai::OpenAiBackendKind::is_legacy_chatgpt_base_url(url)
+                    }));
             if should_heal_base_url {
                 backend.base_url = Some(base_url.to_string());
                 changed = true;

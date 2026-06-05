@@ -53,6 +53,22 @@ impl OpenAiAuthMethod {
             Self::ExternalAuthorizer => "external_authorizer",
         }
     }
+
+    /// The persisted credential mode this auth method stores in the
+    /// `TokenStore`, or `None` for authorizer-backed methods that hold no
+    /// persisted secret. Typed owner of the auth-method -> persisted-mode
+    /// mapping (replaces the string-keyed `persisted_auth_mode_for_auth_method`
+    /// decision table).
+    pub fn persisted_auth_mode(self) -> Option<crate::auth::token_store::PersistedAuthMode> {
+        use crate::auth::token_store::PersistedAuthMode;
+        match self {
+            Self::ApiKey | Self::AzureApiKey => Some(PersistedAuthMode::ApiKey),
+            Self::StaticBearer => Some(PersistedAuthMode::StaticBearer),
+            Self::ManagedChatGptOauth => Some(PersistedAuthMode::ChatgptOauth),
+            Self::ExternalChatGptTokens => Some(PersistedAuthMode::ExternalTokens),
+            Self::ExternalAuthorizer => None,
+        }
+    }
 }
 
 #[cfg(test)]

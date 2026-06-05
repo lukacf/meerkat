@@ -293,6 +293,36 @@ impl RefreshFailureObservation {
             ..Self::default()
         }
     }
+
+    /// Whether this boundary observation classifies the refresh failure as
+    /// permanent — i.e. interactive user reauthorization is required rather
+    /// than a transient retry.
+    ///
+    /// This is the single owner of the reauth-vs-retry classification. It
+    /// mirrors the AuthMachine `refresh_failure_observation_permanent` guard
+    /// (`auth_machine.rs` `RefreshFailedPermanent`) so every boundary that
+    /// inspects a `RefreshFailureObservation` (lease lifecycle, MCP OAuth)
+    /// reaches the same verdict without re-deriving it from raw HTTP bodies.
+    pub fn requires_reauth(&self) -> bool {
+        if self.local_credential_unusable {
+            return true;
+        }
+        if matches!(self.http_status, Some(401 | 403)) {
+            return true;
+        }
+        matches!(
+            self.oauth_error_code.as_deref(),
+            Some(
+                "invalid_grant"
+                    | "invalid_client"
+                    | "unauthorized_client"
+                    | "invalid_scope"
+                    | "access_denied"
+                    | "permission_denied"
+                    | "expired_token"
+            )
+        )
+    }
 }
 
 impl RefreshError {

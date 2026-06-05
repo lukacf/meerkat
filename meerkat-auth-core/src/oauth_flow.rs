@@ -14,13 +14,13 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use meerkat_core::{AuthBindingRef, AuthProfile, BackendProfile, CredentialSourceSpec, Provider};
+use meerkat_llm_core::provider_runtime::binding::NormalizedBackendKind;
+use meerkat_llm_core::provider_runtime::catalog::ProviderRuntimeCatalog;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::auth_oauth::{OAuthEndpoints, OAuthTokenRequestFormat};
-use crate::auth_store::{
-    PersistedAuthMode, credential_source_uses_persisted_store, persisted_auth_mode_for_auth_method,
-};
+use crate::auth_store::{PersistedAuthMode, credential_source_uses_persisted_store};
 
 const DEFAULT_MAX_OUTSTANDING_FLOWS: usize = 1024;
 
@@ -113,11 +113,18 @@ impl OAuthProviderIdentity {
         }
     }
 
-    pub fn backend_kind(self) -> &'static str {
+    pub fn normalized_backend_kind(self) -> NormalizedBackendKind {
+        use meerkat_core::provider_matrix::anthropic::AnthropicBackendKind;
+        use meerkat_core::provider_matrix::google::GoogleBackendKind;
+        use meerkat_core::provider_matrix::openai::OpenAiBackendKind;
         match self {
-            Self::AnthropicClaudeAi | Self::AnthropicConsoleApiKey => "anthropic_api",
-            Self::OpenAiChatGpt => "chatgpt_backend",
-            Self::GoogleCodeAssist => "google_code_assist",
+            Self::AnthropicClaudeAi | Self::AnthropicConsoleApiKey => {
+                NormalizedBackendKind::Anthropic(AnthropicBackendKind::AnthropicApi)
+            }
+            Self::OpenAiChatGpt => NormalizedBackendKind::OpenAi(OpenAiBackendKind::ChatGptBackend),
+            Self::GoogleCodeAssist => {
+                NormalizedBackendKind::Google(GoogleBackendKind::GoogleCodeAssist)
+            }
         }
     }
 
@@ -277,11 +284,11 @@ pub enum OAuthTargetValidationError {
         actual: Provider,
     },
     #[error(
-        "OAuth target backend_kind '{backend_kind}' cannot store credential mode {expected_mode:?}; expected backend_kind '{expected_backend_kind}'"
+        "OAuth target backend_kind '{backend_kind}' cannot store credential mode {expected_mode:?}; expected backend_kind {expected_backend_kind:?}"
     )]
     BackendKindMismatch {
         backend_kind: String,
-        expected_backend_kind: &'static str,
+        expected_backend_kind: NormalizedBackendKind,
         expected_mode: PersistedAuthMode,
     },
     #[error("OAuth target provider mismatch: expected {expected:?}, got {actual:?}")]
@@ -319,7 +326,7 @@ pub fn validate_oauth_login_binding(
         auth_profile,
         identity.provider(),
         identity.auth_mode(),
-        identity.backend_kind(),
+        identity.normalized_backend_kind(),
     )
 }
 
@@ -334,7 +341,15 @@ pub fn validate_oauth_target_for_auth_mode(
             actual: auth_profile.provider,
         });
     }
-    match persisted_auth_mode_for_auth_method(&auth_profile.auth_method) {
+    // Parse the wire auth_method string into the typed NormalizedAuthMethod at
+    // the boundary, then ask the type for its persisted credential mode. The
+    // auth-method -> persisted-mode mapping lives on the typed enum, not on a
+    // string-keyed table re-derived per call.
+    let actual_mode =
+        ProviderRuntimeCatalog::normalize_auth(auth_profile.provider, &auth_profile.auth_method)
+            .ok()
+            .and_then(|method| method.persisted_auth_mode());
+    match actual_mode {
         Some(actual_mode) if actual_mode == expected_mode => {}
         _ => {
             return Err(OAuthTargetValidationError::AuthMethodMismatch {
@@ -356,7 +371,7 @@ pub fn validate_oauth_target_binding_for_auth_mode(
     auth_profile: &AuthProfile,
     expected_provider: Provider,
     expected_mode: PersistedAuthMode,
-    expected_backend_kind: &'static str,
+    expected_backend_kind: NormalizedBackendKind,
 ) -> Result<(), OAuthTargetValidationError> {
     validate_oauth_target_for_auth_mode(auth_profile, expected_provider, expected_mode)?;
     if backend_profile.provider != expected_provider {
@@ -365,7 +380,12 @@ pub fn validate_oauth_target_binding_for_auth_mode(
             actual: backend_profile.provider,
         });
     }
-    if backend_profile.backend_kind != expected_backend_kind {
+    // Normalize the wire backend_kind string into the typed NormalizedBackendKind
+    // and compare typed values, rather than gating on raw string inequality.
+    let actual_backend_kind =
+        ProviderRuntimeCatalog::normalize_backend(expected_provider, &backend_profile.backend_kind)
+            .ok();
+    if actual_backend_kind != Some(expected_backend_kind) {
         return Err(OAuthTargetValidationError::BackendKindMismatch {
             backend_kind: backend_profile.backend_kind.clone(),
             expected_backend_kind,

@@ -911,21 +911,6 @@ pub async fn handle_auth_profile_create(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let auth_mode = match parsed.auth_method.as_str() {
-        "api_key" => PersistedAuthMode::ApiKey,
-        "static_bearer" => PersistedAuthMode::StaticBearer,
-        other => {
-            return RpcResponse::error(
-                id,
-                error::INVALID_PARAMS,
-                format!(
-                    "auth_method '{other}' cannot be created via RPC. \
-                     OAuth methods use auth/login/start + auth/login/complete; \
-                     managed_store and external_resolver are configured via TOML."
-                ),
-            );
-        }
-    };
     let (auth_binding, _binding, auth_profile) = match resolve_binding_identity(
         runtime,
         &parsed.realm_id,
@@ -947,6 +932,26 @@ pub async fn handle_auth_profile_create(
             ),
         );
     }
+    // The persisted-mode mapping + "direct-secret only at create surfaces"
+    // predicate are owned by the typed enum (canonical table + createability),
+    // not a hand-maintained literal allowlist. Parse the wire auth_method at the
+    // boundary, then ask the type. OAuth-login-lifecycle modes and
+    // authorizer-backed methods (no persisted secret) are rejected here.
+    let auth_mode = match persisted_auth_mode_for_auth_method(&auth_profile.auth_method) {
+        Some(mode) if meerkat_core::persisted_auth_mode_is_directly_creatable(mode) => mode,
+        _ => {
+            return RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!(
+                    "auth_method '{}' cannot be created via RPC. \
+                     OAuth methods use auth/login/start + auth/login/complete; \
+                     managed_store and external_resolver are configured via TOML.",
+                    auth_profile.auth_method,
+                ),
+            );
+        }
+    };
     if let Some(r) = require_managed_store_source(id.clone(), &parsed.binding_id, &auth_profile) {
         return r;
     }
@@ -1595,7 +1600,9 @@ pub async fn handle_auth_login_provision_api_key(
         &auth_profile,
         Provider::Anthropic,
         PersistedAuthMode::OauthToApiKey,
-        "anthropic_api",
+        meerkat_providers::NormalizedBackendKind::Anthropic(
+            meerkat_core::provider_matrix::anthropic::AnthropicBackendKind::AnthropicApi,
+        ),
     ) {
         return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string());
     }

@@ -34,6 +34,20 @@ pub enum NormalizedBackendKind {
     SelfHosted(SelfHostedBackendKind),
 }
 
+impl NormalizedBackendKind {
+    /// The canonical wire string for this backend kind, delegating to the
+    /// per-provider matrix enum's `as_str`. The matrix owns the literal; this
+    /// is the typed-to-string projection used when materializing config.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAi(kind) => kind.as_str(),
+            Self::Anthropic(kind) => kind.as_str(),
+            Self::Google(kind) => kind.as_str(),
+            Self::SelfHosted(kind) => kind.as_str(),
+        }
+    }
+}
+
 /// Provider-tagged normalized auth method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NormalizedAuthMethod {
@@ -41,6 +55,25 @@ pub enum NormalizedAuthMethod {
     Anthropic(AnthropicAuthMethod),
     Google(GoogleAuthMethod),
     SelfHosted(SelfHostedAuthMethod),
+}
+
+impl NormalizedAuthMethod {
+    /// The persisted credential mode this auth method stores in the
+    /// `TokenStore`, or `None` for authorizer/ADC/SigV4-backed methods that
+    /// hold no persisted secret.
+    ///
+    /// Delegates to the per-provider `*AuthMethod::persisted_auth_mode`, which
+    /// is the typed owner of the auth-method -> persisted-mode mapping. This is
+    /// the canonical replacement for the string-keyed
+    /// `persisted_auth_mode_for_auth_method` decision table.
+    pub fn persisted_auth_mode(self) -> Option<meerkat_core::auth::token_store::PersistedAuthMode> {
+        match self {
+            Self::OpenAi(method) => method.persisted_auth_mode(),
+            Self::Anthropic(method) => method.persisted_auth_mode(),
+            Self::Google(method) => method.persisted_auth_mode(),
+            Self::SelfHosted(method) => method.persisted_auth_mode(),
+        }
+    }
 }
 
 // Plan §6.11 deleted the legacy marker enum. Credential material

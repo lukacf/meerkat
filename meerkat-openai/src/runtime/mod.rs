@@ -85,7 +85,7 @@ fn chatgpt_backend_base_url(configured: Option<&str>) -> String {
         return OpenAiBackendKind::ChatGptBackend.default_base_url().into();
     };
     let trimmed = raw.trim_end_matches('/');
-    if trimmed == "https://chatgpt.com/backend-api" {
+    if OpenAiBackendKind::is_legacy_chatgpt_base_url(trimmed) {
         OpenAiBackendKind::ChatGptBackend.default_base_url().into()
     } else {
         trimmed.to_string()

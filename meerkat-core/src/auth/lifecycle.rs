@@ -81,6 +81,17 @@ pub fn persisted_auth_mode_uses_oauth_login_lifecycle(mode: PersistedAuthMode) -
     )
 }
 
+/// Whether a credential of this mode can be created directly by writing a
+/// secret at the `auth/profile/create` surfaces (RPC/REST). Direct-secret
+/// modes (api key / static bearer) are creatable; OAuth-login-lifecycle modes
+/// must use the `auth/login/start` + `auth/login/complete` flow instead.
+///
+/// Single owner of the "direct-secret only at create surfaces" predicate over
+/// the typed [`PersistedAuthMode`].
+pub fn persisted_auth_mode_is_directly_creatable(mode: PersistedAuthMode) -> bool {
+    !persisted_auth_mode_uses_oauth_login_lifecycle(mode)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenLifecyclePublication {
     pub phase: Option<AuthLeasePhase>,
@@ -445,6 +456,30 @@ mod tests {
 
     fn marker_test_key() -> TokenKey {
         TokenKey::parse("dev", "default_openai").unwrap()
+    }
+
+    #[test]
+    fn direct_secret_modes_are_creatable_oauth_login_modes_are_not() {
+        // Direct-secret persisted modes are creatable at the auth/profile/create
+        // surfaces; OAuth-login-lifecycle modes are not.
+        for mode in [PersistedAuthMode::ApiKey, PersistedAuthMode::StaticBearer] {
+            assert!(
+                persisted_auth_mode_is_directly_creatable(mode),
+                "{mode:?} must be directly creatable"
+            );
+        }
+        for mode in [
+            PersistedAuthMode::ChatgptOauth,
+            PersistedAuthMode::ExternalTokens,
+            PersistedAuthMode::ClaudeAiOauth,
+            PersistedAuthMode::OauthToApiKey,
+            PersistedAuthMode::GoogleOauth,
+        ] {
+            assert!(
+                !persisted_auth_mode_is_directly_creatable(mode),
+                "{mode:?} (oauth-login lifecycle) must NOT be directly creatable"
+            );
+        }
     }
 
     #[test]

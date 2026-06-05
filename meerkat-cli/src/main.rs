@@ -7114,6 +7114,23 @@ fn open_mcp_auth_resolver(
     Ok(Some(Arc::new(open_mcp_oauth_authority(mode)?)))
 }
 
+/// Mint a certified `AuthMachine` lease handle for the `mcp-oauth` realm.
+///
+/// `meerkat-auth-core` sits below `meerkat-runtime` in the dep graph, so the
+/// MCP-OAuth authority cannot mint its own generated lease — the CLI (which
+/// owns the runtime) injects one, exactly as the provider-auth path does via
+/// `new_cli_auth_lease`. The lease realm is independent of the LLM provider
+/// auth bindings.
+#[cfg(feature = "mcp")]
+fn new_cli_mcp_oauth_auth_lease() -> anyhow::Result<meerkat_core::handles::GeneratedAuthLeaseHandle>
+{
+    let auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+    meerkat_runtime::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(
+        auth_lease,
+    )
+    .map_err(|reason| anyhow::anyhow!("MCP-OAuth auth lease certification failed: {reason}"))
+}
+
 #[cfg(feature = "mcp")]
 fn open_mcp_oauth_authority(
     mode: CliMcpAuthMode,
@@ -7123,7 +7140,10 @@ fn open_mcp_oauth_authority(
         .open()
         .map_err(|error| anyhow::anyhow!("Cannot open MCP OAuth TokenStore: {error}"))?;
     let browser: Arc<dyn meerkat_auth_core::BrowserOpener> = Arc::new(CliMcpBrowserOpener { mode });
-    Ok(meerkat_auth_core::McpOAuthAuthority::new(store, browser))
+    let auth_lease = new_cli_mcp_oauth_auth_lease()?;
+    Ok(meerkat_auth_core::McpOAuthAuthority::new(
+        store, browser, auth_lease,
+    ))
 }
 
 #[cfg(feature = "mcp")]

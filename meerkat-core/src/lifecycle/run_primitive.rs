@@ -2080,10 +2080,10 @@ mod tests {
                 kind: SystemNoticeKind::Comms,
                 body: Some("Peer request: checksum_token".to_string()),
                 blocks: vec![SystemNoticeBlock::Comms {
-                    kind: "peer_request".to_string(),
+                    kind: crate::types::CommsNoticeKind::Request,
                     direction: crate::types::SystemNoticeDirection::Incoming,
                     peer: Some(crate::types::SystemNoticePeer {
-                        id: crate::comms::PeerId::new().to_string(),
+                        id: crate::comms::PeerId::new(),
                         display_name: Some("worker-1".to_string()),
                     }),
                     request_id: Some(crate::time_compat::new_uuid_v7().to_string()),

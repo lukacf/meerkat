@@ -5493,10 +5493,10 @@ mod tests {
                 SystemNoticeKind::Comms,
                 None,
                 SystemNoticeBlock::Comms {
-                    kind: "message".to_string(),
+                    kind: meerkat_core::types::CommsNoticeKind::Message,
                     direction: SystemNoticeDirection::Incoming,
                     peer: Some(SystemNoticePeer {
-                        id: "peer-1".to_string(),
+                        id: meerkat_core::comms::PeerId::new(),
                         display_name: Some("operator".to_string()),
                     }),
                     request_id: None,

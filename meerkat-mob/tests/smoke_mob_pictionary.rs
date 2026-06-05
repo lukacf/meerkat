@@ -543,7 +543,7 @@ fn comms_content_from_peer<'a>(
             peer.id.as_str() == expected_peer_id
                 || peer.display_name.as_deref() == Some(expected_peer_id)
         });
-        if kind == "message" && matches_peer {
+        if *kind == meerkat_core::types::CommsNoticeKind::Message && matches_peer {
             Some(content.as_slice())
         } else {
             None
@@ -877,11 +877,16 @@ fn pictionary_history_page(texts: Vec<(&str, &str)>) -> meerkat_core::SessionHis
                     meerkat_core::types::SystemNoticeKind::Comms,
                     Some(text.to_string()),
                     meerkat_core::types::SystemNoticeBlock::Comms {
-                        kind: "message".to_string(),
+                        kind: meerkat_core::types::CommsNoticeKind::Message,
                         direction: meerkat_core::types::SystemNoticeDirection::Incoming,
                         peer: Some(meerkat_core::types::SystemNoticePeer {
-                            id: peer_id.to_string(),
-                            display_name: None,
+                            // The fixture identifies peers by their human-facing
+                            // comms label, which is not a UUID; carry it in the
+                            // presentation field and mint a canonical PeerId for
+                            // the typed routing identity. The matcher checks
+                            // `display_name`.
+                            id: meerkat_core::comms::PeerId::new(),
+                            display_name: Some(peer_id.to_string()),
                         }),
                         request_id: None,
                         intent: None,
@@ -1019,7 +1024,10 @@ async fn print_conversation(
                             peer, content, ..
                         } = block
                         {
-                            let peer_id = peer.as_ref().map(|peer| peer.id.as_str()).unwrap_or("?");
+                            let peer_id = peer
+                                .as_ref()
+                                .map(|peer| peer.id.as_str())
+                                .unwrap_or_else(|| "?".to_string());
                             let text = meerkat_core::types::text_content(content);
                             let display = if text.is_empty() && meerkat_core::has_images(content) {
                                 "[image received]".to_string()

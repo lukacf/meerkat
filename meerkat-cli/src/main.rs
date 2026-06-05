@@ -13501,7 +13501,7 @@ mod tests {
     #[test]
     fn cli_context_system_notice_projects_via_typed_notice() {
         let blocks = vec![meerkat_core::types::SystemNoticeBlock::Comms {
-            kind: "response_terminal".to_string(),
+            kind: meerkat_core::types::CommsNoticeKind::ResponseTerminal,
             direction: meerkat_core::types::SystemNoticeDirection::Incoming,
             peer: None,
             request_id: Some("req-1".to_string()),

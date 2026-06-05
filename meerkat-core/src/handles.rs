@@ -369,7 +369,7 @@ impl std::fmt::Display for PeerResponseTerminalTransportIdentity {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
-pub struct PeerResponseTerminalRouteIdentity(String);
+pub struct PeerResponseTerminalRouteIdentity(crate::comms::PeerId);
 
 impl PeerResponseTerminalRouteIdentity {
     pub fn parse(raw: impl Into<String>) -> Result<Self, PeerResponseTerminalFactError> {
@@ -382,11 +382,16 @@ impl PeerResponseTerminalRouteIdentity {
         }
         let peer_id = crate::comms::PeerId::parse(raw.trim())
             .map_err(|_| PeerResponseTerminalFactError::InvalidRouteIdentity)?;
-        Ok(Self(peer_id.to_string()))
+        Ok(Self(peer_id))
     }
 
-    pub fn as_str(&self) -> &str {
-        &self.0
+    /// The canonical typed routing identity.
+    pub fn peer_id(&self) -> crate::comms::PeerId {
+        self.0
+    }
+
+    pub fn as_str(&self) -> String {
+        self.0.as_str()
     }
 }
 

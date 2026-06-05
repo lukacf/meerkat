@@ -24206,6 +24206,9 @@
         ],
         "type": "object"
       },
+      "CommsNoticeKind": {
+        "type": "string"
+      },
       "ContentBlock": {
         "oneOf": [
           {
@@ -24406,6 +24409,10 @@
         ],
         "type": "object"
       },
+      "PeerId": {
+        "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
+        "type": "string"
+      },
       "PromptText": {
         "properties": {
           "content": {
@@ -24547,7 +24554,7 @@
                 ]
               },
               "kind": {
-                "type": "string"
+                "$ref": "#/$defs/CommsNoticeKind"
               },
               "payload": true,
               "peer": {
@@ -24836,7 +24843,7 @@
         ]
       },
       "SystemNoticePeer": {
-        "description": "Peer identity carried in a typed comms transcript block.",
+        "description": "Peer identity carried in a typed comms transcript block.\n\n`id` is the canonical routing identity ([`crate::comms::PeerId`]), serialized\nas a hyphenated UUID string on the wire; `display_name` is the presentation\nlabel. Keeping `id` typed lets the projection logic consume the identity\ndirectly instead of re-parsing a `String` back into a `PeerId`.",
         "properties": {
           "display_name": {
             "type": [
@@ -24845,7 +24852,7 @@
             ]
           },
           "id": {
-            "type": "string"
+            "$ref": "#/$defs/PeerId"
           }
         },
         "required": [
@@ -34511,6 +34518,9 @@
         ],
         "type": "object"
       },
+      "CommsNoticeKind": {
+        "type": "string"
+      },
       "ContentBlock": {
         "oneOf": [
           {
@@ -34711,6 +34721,10 @@
         ],
         "type": "object"
       },
+      "PeerId": {
+        "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
+        "type": "string"
+      },
       "PromptText": {
         "properties": {
           "content": {
@@ -34852,7 +34866,7 @@
                 ]
               },
               "kind": {
-                "type": "string"
+                "$ref": "#/$defs/CommsNoticeKind"
               },
               "payload": true,
               "peer": {
@@ -35141,7 +35155,7 @@
         ]
       },
       "SystemNoticePeer": {
-        "description": "Peer identity carried in a typed comms transcript block.",
+        "description": "Peer identity carried in a typed comms transcript block.\n\n`id` is the canonical routing identity ([`crate::comms::PeerId`]), serialized\nas a hyphenated UUID string on the wire; `display_name` is the presentation\nlabel. Keeping `id` typed lets the projection logic consume the identity\ndirectly instead of re-parsing a `String` back into a `PeerId`.",
         "properties": {
           "display_name": {
             "type": [
@@ -35150,7 +35164,7 @@
             ]
           },
           "id": {
-            "type": "string"
+            "$ref": "#/$defs/PeerId"
           }
         },
         "required": [
@@ -36292,6 +36306,9 @@
         ],
         "type": "object"
       },
+      "CommsNoticeKind": {
+        "type": "string"
+      },
       "ContentBlock": {
         "oneOf": [
           {
@@ -36492,6 +36509,10 @@
         ],
         "type": "object"
       },
+      "PeerId": {
+        "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
+        "type": "string"
+      },
       "PromptText": {
         "properties": {
           "content": {
@@ -36633,7 +36654,7 @@
                 ]
               },
               "kind": {
-                "type": "string"
+                "$ref": "#/$defs/CommsNoticeKind"
               },
               "payload": true,
               "peer": {
@@ -36922,7 +36943,7 @@
         ]
       },
       "SystemNoticePeer": {
-        "description": "Peer identity carried in a typed comms transcript block.",
+        "description": "Peer identity carried in a typed comms transcript block.\n\n`id` is the canonical routing identity ([`crate::comms::PeerId`]), serialized\nas a hyphenated UUID string on the wire; `display_name` is the presentation\nlabel. Keeping `id` typed lets the projection logic consume the identity\ndirectly instead of re-parsing a `String` back into a `PeerId`.",
         "properties": {
           "display_name": {
             "type": [
@@ -36931,7 +36952,7 @@
             ]
           },
           "id": {
-            "type": "string"
+            "$ref": "#/$defs/PeerId"
           }
         },
         "required": [
@@ -38516,6 +38537,9 @@
         ],
         "type": "object"
       },
+      "CommsNoticeKind": {
+        "type": "string"
+      },
       "ContentBlock": {
         "oneOf": [
           {
@@ -38716,6 +38740,10 @@
         ],
         "type": "object"
       },
+      "PeerId": {
+        "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
+        "type": "string"
+      },
       "PromptText": {
         "properties": {
           "content": {
@@ -38857,7 +38885,7 @@
                 ]
               },
               "kind": {
-                "type": "string"
+                "$ref": "#/$defs/CommsNoticeKind"
               },
               "payload": true,
               "peer": {
@@ -39146,7 +39174,7 @@
         ]
       },
       "SystemNoticePeer": {
-        "description": "Peer identity carried in a typed comms transcript block.",
+        "description": "Peer identity carried in a typed comms transcript block.\n\n`id` is the canonical routing identity ([`crate::comms::PeerId`]), serialized\nas a hyphenated UUID string on the wire; `display_name` is the presentation\nlabel. Keeping `id` typed lets the projection logic consume the identity\ndirectly instead of re-parsing a `String` back into a `PeerId`.",
         "properties": {
           "display_name": {
             "type": [
@@ -39155,7 +39183,7 @@
             ]
           },
           "id": {
-            "type": "string"
+            "$ref": "#/$defs/PeerId"
           }
         },
         "required": [

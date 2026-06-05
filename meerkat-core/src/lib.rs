@@ -311,10 +311,10 @@ pub use turn_execution_authority::{
     TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
 };
 pub use types::{
-    ArtifactRef, AssistantBlock, AssistantMessage, BlockAssistantMessage, ContentBlock,
-    ContentInput, ExtractionError, HandlingMode, ImageData, Message, OutputSchema, ProviderMeta,
-    RunResult, SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, SessionId, StopReason, SystemMessage,
-    SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage,
+    ArtifactRef, AssistantBlock, AssistantMessage, BlockAssistantMessage, CommsNoticeKind,
+    ContentBlock, ContentInput, ExtractionError, HandlingMode, ImageData, Message, OutputSchema,
+    ProviderMeta, RunResult, SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, SessionId, StopReason,
+    SystemMessage, SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage,
     SystemNoticePeer, SystemPromptMutationKind, ToolCall, ToolCallIter, ToolCallView, ToolDef,
     ToolIdentity, ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind,
     TranscriptSource, TranscriptUserRole, Usage, UserMessage, VideoData,

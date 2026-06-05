@@ -1148,11 +1148,115 @@ pub enum SystemNoticeDirection {
     Internal,
 }
 
+/// Closed comms-notice vocabulary carried by [`SystemNoticeBlock::Comms`].
+///
+/// This is the typed owner of the comms transcript-block discriminator that
+/// used to be a raw `kind: String` re-matched (with a silent fail-open arm) in
+/// [`SystemNoticeBlock::model_projection_text`]. It mirrors the runtime
+/// `PeerConvention` / `InputKind` vocabulary: a peer-to-peer message, a
+/// correlated request, an in-flight response progress update, and a terminal
+/// response.
+///
+/// Wire form is a plain string. The canonical tags match the strings the
+/// runtime producer has always emitted (`message`, `request`,
+/// `response_progress`, `response_terminal`); the `peer_`-prefixed forms emitted
+/// by other surfaces (`peer_request`, ...) deserialize into the same variants
+/// for back-read compatibility. Any genuinely-unknown wire value is captured
+/// explicitly as [`CommsNoticeKind::Other`] (NOT a silent fall-through) so the
+/// projection match stays exhaustive while remaining forward-compatible; an
+/// `Other` value round-trips to its original string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommsNoticeKind {
+    /// Simple peer-to-peer message (wire tag `message`).
+    Message,
+    /// Correlated request expecting a response (wire tag `request`, alias
+    /// `peer_request`).
+    Request,
+    /// Progress update for an in-flight response (wire tag `response_progress`,
+    /// alias `peer_response_progress`).
+    ResponseProgress,
+    /// Terminal response, completed or failed (wire tag `response_terminal`,
+    /// alias `peer_response_terminal`).
+    ResponseTerminal,
+    /// Forward-compatible escape hatch for an unrecognized wire kind. Projects
+    /// as a plain peer message but is matched explicitly, never silently.
+    Other(String),
+}
+
+impl CommsNoticeKind {
+    /// Canonical wire string for this kind.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Message => "message",
+            Self::Request => "request",
+            Self::ResponseProgress => "response_progress",
+            Self::ResponseTerminal => "response_terminal",
+            Self::Other(raw) => raw.as_str(),
+        }
+    }
+
+    /// Classify a wire string into the typed vocabulary, folding in the
+    /// `peer_`-prefixed aliases. Unrecognized values become
+    /// [`CommsNoticeKind::Other`].
+    #[must_use]
+    pub fn from_wire(raw: &str) -> Self {
+        match raw {
+            "message" => Self::Message,
+            "request" | "peer_request" => Self::Request,
+            "response_progress" | "peer_response_progress" => Self::ResponseProgress,
+            "response_terminal" | "peer_response_terminal" => Self::ResponseTerminal,
+            other => Self::Other(other.to_string()),
+        }
+    }
+}
+
+impl std::fmt::Display for CommsNoticeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for CommsNoticeKind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for CommsNoticeKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(Self::from_wire(&raw))
+    }
+}
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for CommsNoticeKind {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "CommsNoticeKind".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <String as schemars::JsonSchema>::json_schema(generator)
+    }
+}
+
 /// Peer identity carried in a typed comms transcript block.
+///
+/// `id` is the canonical routing identity ([`crate::comms::PeerId`]), serialized
+/// as a hyphenated UUID string on the wire; `display_name` is the presentation
+/// label. Keeping `id` typed lets the projection logic consume the identity
+/// directly instead of re-parsing a `String` back into a `PeerId`.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemNoticePeer {
-    pub id: String,
+    pub id: crate::comms::PeerId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
 }
@@ -1166,7 +1270,7 @@ pub struct SystemNoticePeer {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SystemNoticeBlock {
     Comms {
-        kind: String,
+        kind: CommsNoticeKind,
         direction: SystemNoticeDirection,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         peer: Option<SystemNoticePeer>,
@@ -1246,7 +1350,7 @@ pub enum SystemNoticeBlock {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SystemNoticeBlockKnown {
     Comms {
-        kind: String,
+        kind: CommsNoticeKind,
         direction: SystemNoticeDirection,
         #[serde(default)]
         peer: Option<SystemNoticePeer>,
@@ -1472,11 +1576,12 @@ impl SystemNoticeBlock {
                 content,
                 ..
             } => {
-                let peer_id = peer.as_ref().map(|peer| peer.id.as_str());
+                let peer_id = peer.as_ref().map(|peer| peer.id);
+                let peer_id_label = peer_id.map(|peer_id| peer_id.as_str());
                 let peer_label = peer
                     .as_ref()
                     .and_then(|peer| peer.display_name.as_deref())
-                    .or_else(|| peer.as_ref().map(|peer| peer.id.as_str()))
+                    .or(peer_id_label.as_deref())
                     .unwrap_or("peer");
                 let mut body_lines = Vec::new();
                 for block in content {
@@ -1486,15 +1591,20 @@ impl SystemNoticeBlock {
                     }
                 }
                 let body = body_lines.join("\n");
-                let mut lines = match kind.as_str() {
-                    "request" | "peer_request" => {
-                        let peer_id = peer_id.unwrap_or(peer_label);
+                // The carrier is the typed `CommsNoticeKind`, matched
+                // exhaustively. The peer identity is the canonical typed
+                // `PeerId`, so the correlated-request projection no longer
+                // re-parses a string and branches on Ok/Err; the only
+                // remaining fallback is the structural "no peer identity
+                // present" case.
+                let mut lines = match kind {
+                    CommsNoticeKind::Request => {
                         let params = payload.as_ref().unwrap_or(&Value::Null);
-                        match crate::comms::PeerId::parse(peer_id) {
-                            Ok(parsed_peer_id) => {
+                        match peer_id {
+                            Some(peer_id) => {
                                 let mut lines =
                                     vec![crate::interaction::format_peer_request_projection(
-                                        parsed_peer_id,
+                                        peer_id,
                                         Some(peer_label),
                                         request_id.as_deref().unwrap_or_default(),
                                         intent.as_deref().unwrap_or("request"),
@@ -1505,16 +1615,16 @@ impl SystemNoticeBlock {
                                 }
                                 lines
                             }
-                            Err(_) => {
+                            None => {
                                 vec![format!("Peer request from {peer_label}\n{body}")]
                             }
                         }
                     }
-                    "response_progress" | "peer_response_progress" => vec![format!(
+                    CommsNoticeKind::ResponseProgress => vec![format!(
                         "Peer response progress from {peer_label}\nRequest ID: {}",
                         request_id.as_deref().unwrap_or_default()
                     )],
-                    "response_terminal" | "peer_response_terminal" => {
+                    CommsNoticeKind::ResponseTerminal => {
                         let mut text = format!(
                             "Peer terminal response from {peer_label}\nRequest ID: {}",
                             request_id.as_deref().unwrap_or_default()
@@ -1527,14 +1637,17 @@ impl SystemNoticeBlock {
                         }
                         vec![text]
                     }
-                    _ => vec![crate::interaction::format_peer_message_projection(
-                        peer_label, &body,
-                    )],
+                    CommsNoticeKind::Message | CommsNoticeKind::Other(_) => {
+                        vec![crate::interaction::format_peer_message_projection(
+                            peer_label, &body,
+                        )]
+                    }
                 };
-                if !matches!(
-                    kind.as_str(),
-                    "request" | "peer_request" | "response_terminal" | "peer_response_terminal"
-                ) {
+                let appends_extras = !matches!(
+                    kind,
+                    CommsNoticeKind::Request | CommsNoticeKind::ResponseTerminal
+                );
+                if appends_extras {
                     if let Some(request_id) = request_id {
                         lines.push(format!("Request ID: {request_id}"));
                     }
@@ -1549,10 +1662,7 @@ impl SystemNoticeBlock {
                     }
                 }
                 if let Some(payload) = payload
-                    && !matches!(
-                        kind.as_str(),
-                        "request" | "peer_request" | "response_terminal" | "peer_response_terminal"
-                    )
+                    && appends_extras
                 {
                     lines.push(format!("Payload: {}", format_notice_payload(payload)));
                 }

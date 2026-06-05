@@ -212,10 +212,10 @@ fn test_system_notice_block_without_type_is_invalid() {
 #[test]
 fn peer_terminal_notice_projection_does_not_default_missing_status() {
     let block = SystemNoticeBlock::Comms {
-        kind: "peer_response_terminal".to_string(),
+        kind: CommsNoticeKind::ResponseTerminal,
         direction: SystemNoticeDirection::Incoming,
         peer: Some(SystemNoticePeer {
-            id: "peer-a".to_string(),
+            id: crate::comms::PeerId::new(),
             display_name: Some("Peer A".to_string()),
         }),
         request_id: Some("request-1".to_string()),
@@ -237,6 +237,99 @@ fn peer_terminal_notice_projection_does_not_default_missing_status() {
     );
     assert!(projection.contains("Request ID: request-1"));
     assert!(projection.contains("Result:"));
+}
+
+#[test]
+fn comms_notice_kind_wire_tags_match_legacy_strings() {
+    // Serialization must emit the exact strings persisted transcripts and SDK
+    // schemas already carry. The canonical (non-prefixed) forms are the wire
+    // contract.
+    let cases = [
+        (CommsNoticeKind::Message, "message"),
+        (CommsNoticeKind::Request, "request"),
+        (CommsNoticeKind::ResponseProgress, "response_progress"),
+        (CommsNoticeKind::ResponseTerminal, "response_terminal"),
+    ];
+    for (kind, tag) in cases {
+        assert_eq!(serde_json::to_value(&kind).unwrap(), json!(tag));
+        let parsed: CommsNoticeKind = serde_json::from_value(json!(tag)).unwrap();
+        assert_eq!(parsed, kind);
+    }
+}
+
+#[test]
+fn comms_notice_kind_accepts_legacy_peer_prefixed_aliases() {
+    // Other surfaces historically emitted `peer_`-prefixed kinds; they must
+    // still deserialize into the canonical typed vocabulary (back-read).
+    let aliases = [
+        ("peer_request", CommsNoticeKind::Request),
+        ("peer_response_progress", CommsNoticeKind::ResponseProgress),
+        ("peer_response_terminal", CommsNoticeKind::ResponseTerminal),
+    ];
+    for (alias, expected) in aliases {
+        let parsed: CommsNoticeKind = serde_json::from_value(json!(alias)).unwrap();
+        assert_eq!(parsed, expected);
+    }
+}
+
+#[test]
+fn comms_notice_kind_unknown_round_trips_via_other() {
+    // A genuinely-unknown wire kind is captured explicitly (never a silent
+    // fall-through) and round-trips back to its original string.
+    let parsed: CommsNoticeKind = serde_json::from_value(json!("brand_new_kind")).unwrap();
+    assert_eq!(parsed, CommsNoticeKind::Other("brand_new_kind".to_string()));
+    assert_eq!(
+        serde_json::to_value(&parsed).unwrap(),
+        json!("brand_new_kind")
+    );
+}
+
+#[test]
+fn comms_block_round_trips_through_wire_with_typed_peer_id() {
+    // The peer routing identity is typed but serializes as a hyphenated UUID
+    // string on the wire, so persisted transcripts stay byte-stable.
+    let peer_id = crate::comms::PeerId::new();
+    let block = SystemNoticeBlock::Comms {
+        kind: CommsNoticeKind::Request,
+        direction: SystemNoticeDirection::Incoming,
+        peer: Some(SystemNoticePeer {
+            id: peer_id,
+            display_name: Some("Analyst".to_string()),
+        }),
+        request_id: Some("request-9".to_string()),
+        intent: Some("checksum".to_string()),
+        status: None,
+        summary: None,
+        payload: None,
+        content: Vec::new(),
+    };
+
+    let value = serde_json::to_value(&block).unwrap();
+    assert_eq!(value["type"], "comms");
+    assert_eq!(value["kind"], "request");
+    assert_eq!(value["peer"]["id"], json!(peer_id.as_str()));
+
+    let parsed: SystemNoticeBlock = serde_json::from_value(value).unwrap();
+    assert_eq!(parsed, block);
+
+    // A legacy transcript carrying `peer_request` deserializes into the same
+    // typed Request variant.
+    let legacy: SystemNoticeBlock = serde_json::from_value(json!({
+        "type": "comms",
+        "kind": "peer_request",
+        "direction": "incoming",
+        "peer": { "id": peer_id.as_str(), "display_name": "Analyst" },
+        "request_id": "request-9",
+        "intent": "checksum"
+    }))
+    .unwrap();
+    assert!(matches!(
+        legacy,
+        SystemNoticeBlock::Comms {
+            kind: CommsNoticeKind::Request,
+            ..
+        }
+    ));
 }
 
 #[test]

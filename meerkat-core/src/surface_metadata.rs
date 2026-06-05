@@ -10,8 +10,81 @@ use std::collections::BTreeMap;
 /// Label prefix reserved for Meerkat-owned runtime facts.
 pub const MEERKAT_METADATA_PREFIX: &str = "meerkat.";
 
+/// Bare Meerkat namespace token (the prefix without the trailing dot).
+const MEERKAT_NAMESPACE_TOKEN: &str = "meerkat";
+
 /// Legacy mob discovery labels that are stamped by the mob runtime.
 pub const RESERVED_MOB_LABEL_KEYS: [&str; 3] = ["mob_id", "role", "meerkat_id"];
+
+/// Typed classification of *why* a metadata key is reserved for Meerkat.
+///
+/// This is the single owner of the reserved-key-space distinction. It replaces
+/// the prior scattered shape — a `key == "meerkat" || key.starts_with("meerkat.")`
+/// namespace test in [`is_reserved_meerkat_metadata_key`], a literal
+/// [`RESERVED_MOB_LABEL_KEYS`] membership test, and the
+/// `matches!(key, SESSION_*_KEY | …)` list in
+/// `session::is_session_authority_metadata_key` — with one typed classifier.
+///
+/// Callers still parse at their own boundary (label vs app-context vs
+/// authority), but the *classification* of a key is decided once, here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReservedMetadataKey {
+    /// The bare `meerkat` token or any `meerkat.`-prefixed key. Reserved so
+    /// callers cannot spoof Meerkat-owned runtime facts.
+    MeerkatNamespace,
+    /// A legacy mob discovery label (`mob_id`/`role`/`meerkat_id`) stamped by
+    /// the mob runtime.
+    MobDiscoveryLabel,
+    /// A canonical session-authority metadata key (the `session_*` state keys
+    /// owned by generated authority).
+    SessionAuthority,
+}
+
+impl ReservedMetadataKey {
+    /// Classify a metadata key, returning the reason it is reserved (or `None`
+    /// when the key is caller-owned).
+    ///
+    /// The Meerkat namespace and mob-label checks are case-insensitive (the
+    /// public surface treats label keys case-insensitively). The
+    /// session-authority keys are exact, case-sensitive constants.
+    #[must_use]
+    pub fn classify(key: &str) -> Option<Self> {
+        if Self::is_session_authority(key) {
+            return Some(Self::SessionAuthority);
+        }
+        let normalized = key.to_ascii_lowercase();
+        if normalized == MEERKAT_NAMESPACE_TOKEN || normalized.starts_with(MEERKAT_METADATA_PREFIX)
+        {
+            return Some(Self::MeerkatNamespace);
+        }
+        if RESERVED_MOB_LABEL_KEYS.contains(&normalized.as_str()) {
+            return Some(Self::MobDiscoveryLabel);
+        }
+        None
+    }
+
+    /// Whether `key` is one of the canonical session-authority state keys.
+    #[must_use]
+    pub fn is_session_authority(key: &str) -> bool {
+        matches!(
+            key,
+            crate::session::SESSION_METADATA_KEY
+                | crate::session::SESSION_BUILD_STATE_KEY
+                | crate::session::SESSION_SYSTEM_CONTEXT_STATE_KEY
+                | crate::session::SESSION_DEFERRED_TURN_STATE_KEY
+                | crate::session::SESSION_TOOL_VISIBILITY_STATE_KEY
+                | crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY
+                | crate::SESSION_REALTIME_TRANSCRIPT_STATE_KEY
+        )
+    }
+
+    /// Whether this classification belongs to the Meerkat namespace
+    /// (`meerkat`/`meerkat.*`) — the subset enforced for app-context keys.
+    #[must_use]
+    pub fn is_meerkat_namespace(self) -> bool {
+        matches!(self, Self::MeerkatNamespace)
+    }
+}
 
 /// Opaque caller-owned metadata shared across public surfaces.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,19 +168,21 @@ pub enum SurfaceMetadataError {
     ReservedAppContextKey { key: String },
 }
 
-/// Check whether a metadata key is reserved for Meerkat-owned facts.
+/// Check whether a metadata/app-context key is reserved for Meerkat-owned
+/// facts (the `meerkat`/`meerkat.*` namespace).
 #[must_use]
 pub fn is_reserved_meerkat_metadata_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    key == "meerkat" || key.starts_with(MEERKAT_METADATA_PREFIX)
+    ReservedMetadataKey::classify(key).is_some_and(ReservedMetadataKey::is_meerkat_namespace)
 }
 
-/// Check whether a label key is reserved for Meerkat-owned facts.
+/// Check whether a label key is reserved for Meerkat-owned facts (the Meerkat
+/// namespace or a mob discovery label).
 #[must_use]
 pub fn is_reserved_meerkat_label_key(key: &str) -> bool {
-    let normalized = key.to_ascii_lowercase();
-    RESERVED_MOB_LABEL_KEYS.contains(&normalized.as_str())
-        || is_reserved_meerkat_metadata_key(&normalized)
+    matches!(
+        ReservedMetadataKey::classify(key),
+        Some(ReservedMetadataKey::MeerkatNamespace | ReservedMetadataKey::MobDiscoveryLabel)
+    )
 }
 
 /// Validate caller-supplied labels.
@@ -215,5 +290,40 @@ mod tests {
             metadata.validate_public(),
             Err(SurfaceMetadataError::ReservedAppContextKey { .. })
         ));
+    }
+
+    #[test]
+    fn reserved_metadata_key_classifies_each_reserved_space() {
+        assert_eq!(
+            ReservedMetadataKey::classify("meerkat"),
+            Some(ReservedMetadataKey::MeerkatNamespace)
+        );
+        assert_eq!(
+            ReservedMetadataKey::classify("Meerkat.Runtime_Id"),
+            Some(ReservedMetadataKey::MeerkatNamespace)
+        );
+        assert_eq!(
+            ReservedMetadataKey::classify("mob_id"),
+            Some(ReservedMetadataKey::MobDiscoveryLabel)
+        );
+        assert_eq!(
+            ReservedMetadataKey::classify(crate::session::SESSION_BUILD_STATE_KEY),
+            Some(ReservedMetadataKey::SessionAuthority)
+        );
+        assert_eq!(
+            ReservedMetadataKey::classify(crate::SESSION_REALTIME_TRANSCRIPT_STATE_KEY),
+            Some(ReservedMetadataKey::SessionAuthority)
+        );
+        assert_eq!(ReservedMetadataKey::classify("client.thread_id"), None);
+    }
+
+    #[test]
+    fn reserved_key_helpers_delegate_to_classifier() {
+        assert!(is_reserved_meerkat_metadata_key("meerkat.runtime_id"));
+        // Mob labels are NOT meerkat-namespace; they are only reserved as labels.
+        assert!(!is_reserved_meerkat_metadata_key("mob_id"));
+        assert!(is_reserved_meerkat_label_key("mob_id"));
+        assert!(is_reserved_meerkat_label_key("meerkat.foo"));
+        assert!(!is_reserved_meerkat_label_key("client.thread_id"));
     }
 }

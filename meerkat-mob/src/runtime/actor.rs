@@ -324,6 +324,22 @@ pub(super) const MAX_PENDING_PEER_DELIVERIES: usize = 4;
 pub(super) static SPAWN_PROVISIONED_COMMAND_DELAY_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// Render a mob member's comms (peer) routing name from typed components
+/// through the single owner [`meerkat_core::MemberCommsName`].
+///
+/// The components here are already typed mob slugs (`MobId`/`ProfileName`/
+/// `AgentIdentity`), so construction succeeds; the join is owned by
+/// `MemberCommsName::Display` rather than an inline `format!`.
+pub(super) fn render_member_comms_name(mob_id: &str, role: &str, member: &str) -> String {
+    match meerkat_core::MemberCommsName::new(mob_id, role, member) {
+        Ok(name) => name.to_string(),
+        // Defensive only: inputs are pre-validated typed slugs. Preserve the
+        // raw join shape so a future slug-rule relaxation cannot silently drop
+        // a routing name.
+        Err(_) => format!("{mob_id}/{role}/{member}"),
+    }
+}
+
 fn observed_runtime_id(signal: &mob_dsl::MobMachineSignal) -> Option<&mob_dsl::AgentRuntimeId> {
     match signal {
         mob_dsl::MobMachineSignal::ObserveRuntimeReady {
@@ -7752,7 +7768,11 @@ impl MobActor {
                     )?;
                     let selected_runtime_mode =
                         normalize_runtime_mode_for_binding(selected_runtime_mode, &selected_binding);
-                    let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, agent_identity);
+                    let peer_name = render_member_comms_name(
+                        self.definition.id.as_str(),
+                        profile_name.as_str(),
+                        agent_identity.as_str(),
+                    );
                     let provision_request = ProvisionMemberRequest {
                         create_session: req,
                         binding: selected_binding,
@@ -7911,7 +7931,11 @@ impl MobActor {
             )?;
             let selected_runtime_mode =
                 normalize_runtime_mode_for_binding(selected_runtime_mode, &selected_binding);
-            let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, agent_identity);
+            let peer_name = render_member_comms_name(
+                self.definition.id.as_str(),
+                profile_name.as_str(),
+                agent_identity.as_str(),
+            );
             let provision_request = ProvisionMemberRequest {
                 create_session: req,
                 binding: selected_binding,
@@ -8465,7 +8489,11 @@ impl MobActor {
         });
         let initial_turn_prompt = initial_message.as_ref().map(|_| prompt.clone());
         let req = build::to_create_session_request(&config, prompt.clone());
-        let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, agent_identity);
+        let peer_name = render_member_comms_name(
+            self.definition.id.as_str(),
+            profile_name.as_str(),
+            agent_identity.as_str(),
+        );
         let mut provision_request = ProvisionMemberRequest {
             create_session: req,
             binding: selected_binding,
@@ -8848,8 +8876,11 @@ impl MobActor {
                         let public_key_bytes = runtime.public_key_bytes();
                         let descriptor = match public_key_bytes {
                             Some(_) => {
-                                let comms_name =
-                                    format!("{}/{}/{}", self.definition.id, profile_name, identity);
+                                let comms_name = render_member_comms_name(
+                                    self.definition.id.as_str(),
+                                    profile_name.as_str(),
+                                    identity.as_str(),
+                                );
                                 Some(
                                     self.provisioner
                                         .trusted_peer_spec_for_operation(
@@ -12807,9 +12838,10 @@ impl MobActor {
             config.auth_binding = Some(cref.clone());
         }
         let req = build::to_create_session_request(&config, prompt.clone());
-        let peer_name = format!(
-            "{}/{}/{}",
-            self.definition.id, snapshot.profile_name, agent_identity
+        let peer_name = render_member_comms_name(
+            self.definition.id.as_str(),
+            snapshot.profile_name.as_str(),
+            agent_identity.as_str(),
         );
         let mut provision_request = ProvisionMemberRequest {
             create_session: req,
@@ -18199,9 +18231,10 @@ impl MobActor {
 
     /// Generate the comms name for a roster entry.
     fn comms_name_for(&self, entry: &RosterEntry) -> String {
-        format!(
-            "{}/{}/{}",
-            self.definition.id, entry.role, entry.agent_identity
+        render_member_comms_name(
+            self.definition.id.as_str(),
+            entry.role.as_str(),
+            entry.agent_identity.as_str(),
         )
     }
 

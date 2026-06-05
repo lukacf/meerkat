@@ -121,18 +121,26 @@ impl AgentMobToolSurface {
     }
 
     fn synthetic_parent_peer_added_fields(parent_name: &str) -> (String, String, String) {
-        let mut parts = parent_name.split('/');
-        match (parts.next(), parts.next(), parts.next(), parts.next()) {
-            (Some(_mob_id), Some(role), Some(meerkat_id), None) => (
-                meerkat_id.to_string(),
-                role.to_string(),
-                format!("peer {role}"),
-            ),
-            _ => (
-                parent_name.to_string(),
-                "external".to_string(),
-                "external peer".to_string(),
-            ),
+        // Parse the parent's comms name through the single fail-closed authority.
+        // A well-formed member name yields its typed role; anything else is a
+        // typed `PeerRole::External` rather than the magic "external" string.
+        match parent_name.parse::<meerkat_core::MemberCommsName>() {
+            Ok(comms_name) => {
+                let role = meerkat_core::PeerRole::Member(comms_name.role().to_string());
+                (
+                    comms_name.member().to_string(),
+                    role.as_label().to_string(),
+                    format!("peer {}", role.as_label()),
+                )
+            }
+            Err(_) => {
+                let role = meerkat_core::PeerRole::External;
+                (
+                    parent_name.to_string(),
+                    role.as_label().to_string(),
+                    "external peer".to_string(),
+                )
+            }
         }
     }
 
@@ -667,7 +675,14 @@ impl AgentMobToolSurface {
         let Some(helper_peer_id) = entry.peer_id() else {
             return false;
         };
-        let helper_comms_name = format!("{}/{}/{}", mob_id, entry.role, identity);
+        let Ok(helper_comms_name) = meerkat_core::MemberCommsName::new(
+            mob_id.as_str(),
+            entry.role.as_str(),
+            identity.as_str(),
+        ) else {
+            return false;
+        };
+        let helper_comms_name = helper_comms_name.to_string();
         if helper_comms_name == *name {
             return false;
         }
@@ -4263,7 +4278,10 @@ mod tests {
             .real_comms(&helper_bridge_session_id)
             .await
             .expect("helper comms");
-        let helper_name = format!("{}/{}/{}", mob_id, "delegate", helper_id);
+        let helper_name =
+            meerkat_core::MemberCommsName::new(mob_id.as_str(), "delegate", helper_id.as_str())
+                .expect("delegate helper comms name")
+                .to_string();
 
         let parent_peers = CoreCommsRuntime::peers(&*parent_comms).await;
         assert!(

@@ -228,6 +228,7 @@ impl McpScheduleContext {
                 .or_else(|| Some(self.backend.clone())),
             config_generation: current_generation,
             auth_binding: None,
+            mob_member_binding: None,
             keep_alive: create.keep_alive,
             checkpointer: None,
             silent_comms_intents: Vec::new(),

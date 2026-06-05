@@ -534,6 +534,9 @@ pub fn resolve_effective_turn_config(
             Some(TurnMetadataOverride::Set(value)) => Some(value.clone()),
             None => metadata.auth_binding.clone(),
         },
+        // Durable mob-member identity is carried forward verbatim at resume so
+        // mob ownership routing keeps recognizing the member after restart.
+        mob_member_binding: metadata.mob_member_binding.clone(),
         keep_alive,
         checkpointer: context.checkpointer,
         silent_comms_intents: build_state.silent_comms_intents.clone(),
@@ -643,6 +646,7 @@ mod tests {
                 backend: Some("sqlite".to_string()),
                 config_generation: Some(7),
                 auth_binding: None,
+                mob_member_binding: None,
             })
             .expect("session metadata");
         session
@@ -1118,6 +1122,7 @@ mod tests {
                 backend: None,
                 config_generation: None,
                 auth_binding: None,
+                mob_member_binding: None,
             })
             .expect("session metadata");
 

@@ -79,6 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         backend: None,
         config_generation: None,
         auth_binding: None,
+        mob_member_binding: None,
     })?;
     session.set_build_state(meerkat_core::SessionBuildState::default())?;
 

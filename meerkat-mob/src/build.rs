@@ -21,7 +21,11 @@ use meerkat_core::types::SessionId;
 use std::sync::Arc;
 
 fn mob_realm_id(mob_id: &MobId) -> Result<RealmId, MobError> {
-    RealmId::parse(format!("mob.{mob_id}")).map_err(|e| {
+    // Shared dot-form realm helper (meerkat-core) — the single owner of the
+    // `mob.{id}` realm form. Producer (here) and consumer (mob-mcp ownership
+    // routing) derive the realm through the same helper, so the dot/colon
+    // divergence that previously broke `persisted_mob_binding` cannot recur.
+    meerkat_core::mob_realm_id(mob_id.as_str()).map_err(|e| {
         MobError::WiringError(format!(
             "mob id '{mob_id}' cannot be used as a realm identity: {e}"
         ))
@@ -141,8 +145,22 @@ pub async fn build_agent_config(
         )));
     }
 
-    // Comms name: "{mob_id}/{profile}/{meerkat_id}"
-    let comms_name = format!("{mob_id}/{profile_name}/{agent_identity}");
+    // Typed durable member identity + transport routing name. The comms name is
+    // rendered from the same typed binding via `MemberCommsName::Display`, so
+    // the `mob_id/role/member` join has exactly one owner.
+    let member_binding = meerkat_core::MobMemberBinding {
+        mob_id: mob_id.as_str().to_string(),
+        role: profile_name.as_str().to_string(),
+        member: agent_identity.as_str().to_string(),
+    };
+    let comms_name = member_binding
+        .comms_name()
+        .map_err(|e| {
+            MobError::WiringError(format!(
+                "mob member identity ({mob_id}/{profile_name}/{agent_identity}) is not a valid comms name: {e}"
+            ))
+        })?
+        .to_string();
 
     // Peer metadata with labels for discovery.
     // Application labels are applied first, then mob standard labels
@@ -169,6 +187,7 @@ pub async fn build_agent_config(
     config.comms_name = Some(comms_name);
     config.peer_meta = Some(peer_meta);
     config.realm_id = Some(realm_id.to_string());
+    config.mob_member_binding = Some(member_binding);
     match system_prompt_override {
         Some(crate::runtime::SpawnSystemPromptOverride::Replace(prompt)) => {
             config.system_prompt = Some(prompt);
@@ -704,6 +723,11 @@ mod tests {
                 backend: None,
                 config_generation: None,
                 auth_binding: None,
+                mob_member_binding: Some(meerkat_core::MobMemberBinding {
+                    mob_id: "test-mob".to_string(),
+                    role: "lead".to_string(),
+                    member: "lead-1".to_string(),
+                }),
             })
             .expect("session metadata");
         resumed_session
@@ -780,6 +804,15 @@ mod tests {
             config.comms_name.as_deref(),
             Some("test-mob/lead/lead-1"),
             "comms_name should be mob_id/profile/meerkat_id"
+        );
+        assert_eq!(
+            config.mob_member_binding,
+            Some(meerkat_core::MobMemberBinding {
+                mob_id: "test-mob".to_string(),
+                role: "lead".to_string(),
+                member: "lead-1".to_string(),
+            }),
+            "producer must stamp the typed durable mob member binding"
         );
     }
 
@@ -1790,6 +1823,15 @@ mod tests {
         assert_eq!(build.comms_name.as_deref(), Some("test-mob/lead/lead-1"));
         assert!(build.peer_meta.is_some());
         assert_eq!(build.realm_id.as_deref(), Some("mob.test-mob"));
+        assert_eq!(
+            build.mob_member_binding,
+            Some(meerkat_core::MobMemberBinding {
+                mob_id: "test-mob".to_string(),
+                role: "lead".to_string(),
+                member: "lead-1".to_string(),
+            }),
+            "typed durable member binding must flow into SessionBuildOptions"
+        );
         assert_eq!(
             build.override_builtins,
             meerkat_core::ToolCategoryOverride::Enable

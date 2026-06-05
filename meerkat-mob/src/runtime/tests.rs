@@ -450,6 +450,7 @@ fn factory_policy_session(mut session: Session, model: String, max_tokens: u32) 
                 backend: None,
                 config_generation: None,
                 auth_binding: None,
+                mob_member_binding: None,
             })
             .expect("test metadata serializes");
     }
@@ -1779,6 +1780,10 @@ impl SessionService for MockSessionService {
                 backend: build.and_then(|b| b.backend.clone()),
                 config_generation: build.and_then(|b| b.config_generation),
                 auth_binding: None,
+                // Mirror the real producer: carry the typed durable member
+                // binding so persisted-session ownership routing recognizes
+                // mob members exactly as production does.
+                mob_member_binding: build.and_then(|b| b.mob_member_binding.clone()),
             };
             session
                 .set_session_metadata(metadata)
@@ -13966,6 +13971,11 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: Some(meerkat_core::MobMemberBinding {
+                mob_id: "test-mob".to_string(),
+                role: "worker".to_string(),
+                member: "w-1".to_string(),
+            }),
         })
         .expect("resume metadata");
 

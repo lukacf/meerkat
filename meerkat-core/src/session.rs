@@ -802,16 +802,9 @@ impl ReservedSessionMetadataKey {
 }
 
 fn is_session_authority_metadata_key(key: &str) -> bool {
-    matches!(
-        key,
-        SESSION_METADATA_KEY
-            | SESSION_BUILD_STATE_KEY
-            | SESSION_SYSTEM_CONTEXT_STATE_KEY
-            | SESSION_DEFERRED_TURN_STATE_KEY
-            | SESSION_TOOL_VISIBILITY_STATE_KEY
-            | SESSION_TRANSCRIPT_HISTORY_STATE_KEY
-            | SESSION_REALTIME_TRANSCRIPT_STATE_KEY
-    )
+    // Single reserved-key authority: the typed classifier owns the
+    // session-authority key set (the `session_*` state constants).
+    crate::surface_metadata::ReservedMetadataKey::is_session_authority(key)
 }
 
 #[allow(clippy::panic)]
@@ -3729,6 +3722,20 @@ pub struct SessionMetadata {
     /// (backward compatible via `#[serde(default)]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<crate::AuthBindingRef>,
+    /// Typed durable identity of a mob member, when this session was created by
+    /// the mob runtime.
+    ///
+    /// This is the canonical owner of the `(mob_id, role, member)` identity
+    /// fact used by mob ownership routing on resume/restart. It replaces the
+    /// prior recovery-by-string-split of `comms_name` plus a realm
+    /// format-string check. `comms_name`/`realm_id`/`peer_meta` remain as the
+    /// transport routing name and discovery metadata.
+    ///
+    /// Older persisted sessions without the field deserialize as `None`
+    /// (backward compatible via `#[serde(default)]`), so old rows read as
+    /// "no typed binding" rather than failing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_member_binding: Option<crate::MobMemberBinding>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -6077,6 +6084,7 @@ mod tests {
                 backend: None,
                 config_generation: None,
                 auth_binding: None,
+                mob_member_binding: None,
             })
             .expect("typed metadata setter should route through generated authority");
         session

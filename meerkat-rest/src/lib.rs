@@ -4379,6 +4379,9 @@ async fn create_session_inner(
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
         auth_binding: None,
+        // REST is not a mob runtime. On resume the factory preserves the
+        // persisted mob_member_binding from the resumed session metadata.
+        mob_member_binding: None,
         keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
@@ -5413,6 +5416,7 @@ async fn continue_session_inner(
             backend: Some(state.backend.clone()),
             config_generation: state.config_runtime.get().await.ok().map(|s| s.generation),
             auth_binding: None,
+            mob_member_binding: None,
             keep_alive,
             checkpointer: None,
             silent_comms_intents: Vec::new(),

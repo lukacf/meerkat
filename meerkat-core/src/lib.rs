@@ -135,9 +135,9 @@ pub use peer_correlation::{
 pub use peer_meta::PeerMeta;
 pub use placement::{ExecutionPlacement, ExecutionPlacementIdentity, PlacementError};
 pub use surface_metadata::{
-    MEERKAT_METADATA_PREFIX, RESERVED_MOB_LABEL_KEYS, RuntimeMetadata, SurfaceMetadata,
-    SurfaceMetadataError, is_reserved_meerkat_label_key, is_reserved_meerkat_metadata_key,
-    validate_public_app_context, validate_public_labels,
+    MEERKAT_METADATA_PREFIX, RESERVED_MOB_LABEL_KEYS, ReservedMetadataKey, RuntimeMetadata,
+    SurfaceMetadata, SurfaceMetadataError, is_reserved_meerkat_label_key,
+    is_reserved_meerkat_metadata_key, validate_public_app_context, validate_public_labels,
 };
 
 pub use completion_feed::{
@@ -348,8 +348,9 @@ pub use auth::{
 pub use connection::{
     AuthBindingRef, AuthProfile, AuthProfileConfig, BackendProfile, BackendProfileConfig,
     BindingId, BindingOrigin, BindingPolicy, ConnectionTargetError, CredentialSourceSpec,
-    IdentityError, ProfileId, ProviderBinding, ProviderBindingConfig, ProviderBindingError,
-    RealmConfigSection, RealmConnectionSet, RealmId, ResolvedConnectionTarget,
+    IdentityError, MemberCommsName, MemberCommsNameError, MobMemberBinding, PeerRole, ProfileId,
+    ProviderBinding, ProviderBindingConfig, ProviderBindingError, RealmConfigSection,
+    RealmConnectionSet, RealmId, ResolvedConnectionTarget, mob_realm_id,
     resolve_auth_binding_candidates_for_provider, resolve_auth_binding_or_default_for_provider,
     resolve_realm_binding_target_for_provider,
 };

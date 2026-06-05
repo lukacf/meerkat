@@ -1310,6 +1310,7 @@ mod scenario_10_memory {
                 backend: None,
                 config_generation: None,
                 auth_binding: None,
+                mob_member_binding: None,
             })
             .expect("test metadata serializes");
         memory_session

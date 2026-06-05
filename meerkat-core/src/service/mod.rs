@@ -269,6 +269,10 @@ pub struct SessionBuildOptions {
     /// Realm-scoped auth binding (Phase 3 provider-auth redesign).
     /// Flows into `AgentBuildConfig.auth_binding` via `FactoryAgentBuilder`.
     pub auth_binding: Option<crate::AuthBindingRef>,
+    /// Typed durable mob-member identity. Set by the mob runtime when building a
+    /// member's session; flows into `AgentBuildConfig.mob_member_binding` and is
+    /// persisted onto `SessionMetadata.mob_member_binding`.
+    pub mob_member_binding: Option<crate::MobMemberBinding>,
     /// Whether this session runs as a keep-alive (long-running, interrupt-to-stop)
     /// agent. Surfaces use this to decide blocking vs fire-and-return semantics.
     pub keep_alive: bool,
@@ -1001,6 +1005,7 @@ impl Default for SessionBuildOptions {
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
             keep_alive: false,
             checkpointer: None,
             silent_comms_intents: Vec::new(),

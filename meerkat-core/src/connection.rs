@@ -203,6 +203,191 @@ impl AuthBindingRef {
     }
 }
 
+/// The realm identity a mob member binds to.
+///
+/// This is the single fail-closed owner of the `mob.{mob_id}` realm form.
+/// Both the producer (mob build) and the consumer (mob-mcp ownership routing)
+/// derive their realm string through this helper, so the dot/colon divergence
+/// that previously made `persisted_mob_binding` never match a real session is
+/// impossible: there is one form, validated once.
+pub fn mob_realm_id(mob_id: &str) -> Result<RealmId, IdentityError> {
+    RealmId::parse(format!("mob.{mob_id}"))
+}
+
+/// Error returned when a [`MemberCommsName`] fails to parse.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum MemberCommsNameError {
+    /// The name did not have exactly three `/`-separated components.
+    #[error(
+        "mob member comms name must have exactly three '/'-separated components (mob_id/role/member)"
+    )]
+    WrongComponentCount,
+    /// A component was empty or contained characters outside the identifier-safe set.
+    #[error(
+        "mob member comms name component {component:?} is invalid; \
+         each must start with an ASCII letter or '_' and contain only ASCII alphanumerics, '-', or '_'"
+    )]
+    InvalidComponent { component: String },
+}
+
+/// Validate one component of a [`MemberCommsName`].
+///
+/// Folds the former `is_valid_peer_name_component` rule (first char ASCII
+/// alphabetic or `_`; remaining chars ASCII alphanumeric / `-` / `_`). This is
+/// strictly tighter than [`validate_slug`], so any valid component is also a
+/// valid realm slug — which is why `mob.{component}` always parses.
+fn validate_member_comms_name_component(component: &str) -> Result<(), MemberCommsNameError> {
+    let mut chars = component.chars();
+    let Some(first) = chars.next() else {
+        return Err(MemberCommsNameError::InvalidComponent {
+            component: component.to_string(),
+        });
+    };
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return Err(MemberCommsNameError::InvalidComponent {
+            component: component.to_string(),
+        });
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err(MemberCommsNameError::InvalidComponent {
+            component: component.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Typed mob-member comms (peer) name: `mob_id/role/member`.
+///
+/// This is the single owner of the `{mob_id}/{role}/{member}` join, with one
+/// [`Display`](std::fmt::Display) (render) and one fail-closed
+/// [`FromStr`](std::str::FromStr) (parse, exactly three identifier-safe
+/// components). It replaces the scattered `format!("{}/{}/{}", ..)` producers
+/// and the hand-rolled `split('/')` consumers, so the routing-name shape is no
+/// longer recovered by string convention.
+///
+/// Identity and transport are separate facts: this is the transport routing
+/// *name* (a [`crate::comms::PeerName`]). Durable identity ownership lives in
+/// [`MobMemberBinding`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MemberCommsName {
+    mob_id: String,
+    role: String,
+    member: String,
+}
+
+impl MemberCommsName {
+    /// Construct from already-typed components, validating each.
+    pub fn new(
+        mob_id: impl Into<String>,
+        role: impl Into<String>,
+        member: impl Into<String>,
+    ) -> Result<Self, MemberCommsNameError> {
+        let mob_id = mob_id.into();
+        let role = role.into();
+        let member = member.into();
+        validate_member_comms_name_component(&mob_id)?;
+        validate_member_comms_name_component(&role)?;
+        validate_member_comms_name_component(&member)?;
+        Ok(Self {
+            mob_id,
+            role,
+            member,
+        })
+    }
+
+    pub fn mob_id(&self) -> &str {
+        &self.mob_id
+    }
+
+    pub fn role(&self) -> &str {
+        &self.role
+    }
+
+    pub fn member(&self) -> &str {
+        &self.member
+    }
+
+    /// The durable identity binding implied by this comms name.
+    pub fn to_member_binding(&self) -> MobMemberBinding {
+        MobMemberBinding {
+            mob_id: self.mob_id.clone(),
+            role: self.role.clone(),
+            member: self.member.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for MemberCommsName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}/{}", self.mob_id, self.role, self.member)
+    }
+}
+
+impl std::str::FromStr for MemberCommsName {
+    type Err = MemberCommsNameError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut parts = s.split('/');
+        match (parts.next(), parts.next(), parts.next(), parts.next()) {
+            (Some(mob_id), Some(role), Some(member), None) => Self::new(mob_id, role, member),
+            _ => Err(MemberCommsNameError::WrongComponentCount),
+        }
+    }
+}
+
+/// Typed role of a peer relative to a mob.
+///
+/// Replaces the magic `"external"` string the synthetic peer-added fallback
+/// previously invented when a peer name failed to parse as a member comms
+/// name. A peer is either a `Member` of a mob (carrying its parsed role) or
+/// `External`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerRole {
+    /// A peer that is a member of a mob, with its parsed role component.
+    Member(String),
+    /// A peer that is not a recognized mob member.
+    External,
+}
+
+impl PeerRole {
+    /// The wire/display label for this role.
+    pub fn as_label(&self) -> &str {
+        match self {
+            PeerRole::Member(role) => role.as_str(),
+            PeerRole::External => "external",
+        }
+    }
+}
+
+/// Durable, typed identity of a mob member, carried on
+/// [`SessionMetadata`](crate::session::SessionMetadata).
+///
+/// This is the canonical owner of the `(mob_id, role, member)` identity fact
+/// that ownership routing (`owns_persisted_bridge_session`) and outbound
+/// peer-added payloads previously recovered by splitting the untyped
+/// `comms_name` string and re-deriving the realm by format convention.
+///
+/// `comms_name`/`realm_id`/`peer_meta` remain on the metadata as the transport
+/// routing name and discovery metadata — identity and transport are separate
+/// facts. Old persisted rows written before this field existed deserialize as
+/// `None` (the field is `#[serde(default, skip_serializing_if)]` on the
+/// metadata), so back-read is safe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct MobMemberBinding {
+    pub mob_id: String,
+    pub role: String,
+    pub member: String,
+}
+
+impl MobMemberBinding {
+    /// The transport comms name implied by this binding.
+    pub fn comms_name(&self) -> Result<MemberCommsName, MemberCommsNameError> {
+        MemberCommsName::new(self.mob_id.clone(), self.role.clone(), self.member.clone())
+    }
+}
+
 /// Backend profile: where requests go and which backend contract applies.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1297,6 +1482,73 @@ pub struct ProviderBindingConfig {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn member_comms_name_round_trips_through_display_and_from_str() {
+        let name = MemberCommsName::new("team", "reviewer", "alice").unwrap();
+        assert_eq!(name.to_string(), "team/reviewer/alice");
+        let parsed = MemberCommsName::from_str("team/reviewer/alice").unwrap();
+        assert_eq!(parsed, name);
+        assert_eq!(parsed.mob_id(), "team");
+        assert_eq!(parsed.role(), "reviewer");
+        assert_eq!(parsed.member(), "alice");
+    }
+
+    #[test]
+    fn member_comms_name_from_str_is_fail_closed() {
+        // Wrong component count.
+        assert!(matches!(
+            MemberCommsName::from_str("team/reviewer"),
+            Err(MemberCommsNameError::WrongComponentCount)
+        ));
+        assert!(matches!(
+            MemberCommsName::from_str("team/reviewer/alice/extra"),
+            Err(MemberCommsNameError::WrongComponentCount)
+        ));
+        // Empty component.
+        assert!(matches!(
+            MemberCommsName::from_str("team//alice"),
+            Err(MemberCommsNameError::InvalidComponent { .. })
+        ));
+        // Leading digit / disallowed first char (folds is_valid_peer_name_component).
+        assert!(MemberCommsName::from_str("1team/reviewer/alice").is_err());
+        // Disallowed char.
+        assert!(MemberCommsName::from_str("te.am/reviewer/alice").is_err());
+        // Underscore-first is allowed.
+        assert!(MemberCommsName::from_str("_team/reviewer/alice").is_ok());
+    }
+
+    #[test]
+    fn member_comms_name_components_are_always_valid_realm_slugs() {
+        // The component rule is strictly tighter than validate_slug, so any
+        // valid comms name yields a parseable realm via the shared helper.
+        let name = MemberCommsName::new("team", "reviewer", "alice").unwrap();
+        assert!(mob_realm_id(name.mob_id()).is_ok());
+        assert_eq!(mob_realm_id("team").unwrap().as_str(), "mob.team");
+    }
+
+    #[test]
+    fn mob_member_binding_round_trips_to_comms_name() {
+        let binding = MobMemberBinding {
+            mob_id: "team".to_string(),
+            role: "reviewer".to_string(),
+            member: "alice".to_string(),
+        };
+        assert_eq!(
+            binding.comms_name().unwrap().to_string(),
+            "team/reviewer/alice"
+        );
+    }
+
+    #[test]
+    fn peer_role_external_label_is_typed_not_magic_string() {
+        assert_eq!(PeerRole::External.as_label(), "external");
+        assert_eq!(
+            PeerRole::Member("reviewer".to_string()).as_label(),
+            "reviewer"
+        );
+    }
 
     fn config_with_realms(toml_input: &str) -> Config {
         Config {

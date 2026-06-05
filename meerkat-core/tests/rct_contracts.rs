@@ -109,6 +109,11 @@ fn test_resume_metadata_contract() -> Result<(), Box<dyn std::error::Error>> {
         backend: None,
         config_generation: None,
         auth_binding: None,
+        mob_member_binding: Some(meerkat_core::MobMemberBinding {
+            mob_id: "team".to_string(),
+            role: "reviewer".to_string(),
+            member: "alice".to_string(),
+        }),
     };
 
     let json = serde_json::to_value(&metadata)?;
@@ -121,6 +126,17 @@ fn test_resume_metadata_contract() -> Result<(), Box<dyn std::error::Error>> {
         meerkat_core::ToolCategoryOverride::Enable
     );
     assert_eq!(parsed.comms_name.as_deref(), Some("agent-a"));
+    assert_eq!(parsed.mob_member_binding, metadata.mob_member_binding);
+
+    // Back-read safety: a row written before `mob_member_binding` existed (the
+    // field absent from JSON) must deserialize as `None`.
+    let mut legacy = serde_json::to_value(&metadata)?;
+    legacy
+        .as_object_mut()
+        .expect("metadata is a JSON object")
+        .remove("mob_member_binding");
+    let legacy_parsed: meerkat_core::SessionMetadata = serde_json::from_value(legacy)?;
+    assert_eq!(legacy_parsed.mob_member_binding, None);
     Ok(())
 }
 
@@ -271,6 +287,7 @@ fn test_inv_003_resume_preserves_metadata() -> Result<(), Box<dyn std::error::Er
         backend: None,
         config_generation: None,
         auth_binding: None,
+        mob_member_binding: None,
     };
 
     let encoded = serde_json::to_value(&metadata)?;

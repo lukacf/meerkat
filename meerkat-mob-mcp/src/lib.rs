@@ -183,26 +183,14 @@ pub struct KickoffMemberSnapshot {
 }
 
 fn persisted_mob_binding(session: &meerkat_core::Session) -> Option<meerkat_mob::MobId> {
+    // Read the typed durable identity directly. Old persisted rows written
+    // before `mob_member_binding` existed deserialize as `None` and are simply
+    // not owned (back-read safe) — they re-acquire a typed binding on the next
+    // build/resume. No comms_name string-split, no `mob:{id}` realm
+    // format-string, no magic-key peer_meta cross-check.
     let metadata = session.session_metadata()?;
-    let comms_name = metadata.comms_name.as_deref()?;
-    let mut parts = comms_name.split('/');
-    let mob_id = parts.next().filter(|part| !part.is_empty())?;
-    let profile = parts.next().filter(|part| !part.is_empty())?;
-    let meerkat_id = parts.next().filter(|part| !part.is_empty())?;
-    if parts.next().is_some() {
-        return None;
-    }
-    if metadata.realm_id.as_deref() != Some(&format!("mob:{mob_id}")) {
-        return None;
-    }
-    let peer_meta = metadata.peer_meta.as_ref()?;
-    if peer_meta.labels.get("mob_id").map(String::as_str) != Some(mob_id)
-        || peer_meta.labels.get("role").map(String::as_str) != Some(profile)
-        || peer_meta.labels.get("meerkat_id").map(String::as_str) != Some(meerkat_id)
-    {
-        return None;
-    }
-    Some(meerkat_mob::MobId::from(mob_id))
+    let binding = metadata.mob_member_binding.as_ref()?;
+    Some(meerkat_mob::MobId::from(binding.mob_id.as_str()))
 }
 
 /// Typed provenance of the shared realm-scoped profile store.
@@ -5389,6 +5377,9 @@ mod tests {
                 ..SessionTooling::default()
             },
             keep_alive: false,
+            // Spoof: a session that merely carries the comms_name shape but no
+            // typed durable binding must NOT be owned. Identity is the typed
+            // mob_member_binding, not the routing-name string.
             comms_name: Some("team/reviewer/alice".to_string()),
             peer_meta: None,
             realm_id: None,
@@ -5396,12 +5387,13 @@ mod tests {
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
         });
         svc.insert_persisted_session(spoofed).await;
 
         assert!(
             !state.owns_persisted_bridge_session(&spoofed_id).await,
-            "persisted session routing must verify real mob membership instead of trusting comms_name shape"
+            "persisted session routing must verify real mob membership via the typed binding, not the comms_name shape"
         );
     }
 
@@ -5426,6 +5418,8 @@ mod tests {
                 ..SessionTooling::default()
             },
             keep_alive: false,
+            // Transport routing name + discovery metadata (kept as-is); the
+            // realm now uses the canonical dot form via the shared helper.
             comms_name: Some("team/reviewer/alice".to_string()),
             peer_meta: Some(
                 PeerMeta::default()
@@ -5433,11 +5427,17 @@ mod tests {
                     .with_label("role", "reviewer")
                     .with_label("meerkat_id", "alice"),
             ),
-            realm_id: Some("mob:team".to_string()),
+            realm_id: Some("mob.team".to_string()),
             instance_id: None,
             backend: None,
             config_generation: None,
             auth_binding: None,
+            // Typed durable identity — this is what ownership routing reads.
+            mob_member_binding: Some(meerkat_core::MobMemberBinding {
+                mob_id: "team".to_string(),
+                role: "reviewer".to_string(),
+                member: "alice".to_string(),
+            }),
         });
         svc.insert_persisted_session(persisted).await;
 
@@ -5475,11 +5475,17 @@ mod tests {
                     .with_label("role", "reviewer")
                     .with_label("meerkat_id", "alice"),
             ),
-            realm_id: Some("mob:team".to_string()),
+            realm_id: Some("mob.team".to_string()),
             instance_id: None,
             backend: None,
             config_generation: None,
             auth_binding: None,
+            // Ownership routing reads the typed binding directly.
+            mob_member_binding: Some(meerkat_core::MobMemberBinding {
+                mob_id: "team".to_string(),
+                role: "reviewer".to_string(),
+                member: "alice".to_string(),
+            }),
         });
         svc.insert_persisted_session(persisted).await;
 

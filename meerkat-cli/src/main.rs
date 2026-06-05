@@ -8785,6 +8785,7 @@ async fn run_agent(
             blob_store_override: None,
             mob_tools: mob_tools_factory,
             auth_binding,
+            mob_member_binding: None,
         };
         build.apply_generated_create_only_mob_operator_access(
             meerkat_core::ToolCategoryOverride::from_effective(effective_mob),

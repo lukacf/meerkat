@@ -3235,6 +3235,7 @@ async fn handle_meerkat_run(
             .auth_binding
             .clone()
             .map(meerkat_core::AuthBindingRef::from),
+        mob_member_binding: None,
         keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
@@ -3646,6 +3647,7 @@ async fn handle_meerkat_resume(
                 .or_else(|| Some(state.backend.clone())),
             config_generation: current_generation,
             auth_binding: None,
+            mob_member_binding: stored_metadata.mob_member_binding.clone(),
             keep_alive,
             checkpointer: None,
             silent_comms_intents: Vec::new(),
@@ -4272,6 +4274,7 @@ mod tests {
                 backend: Some(state.backend.clone()),
                 config_generation: None,
                 auth_binding: None,
+                mob_member_binding: None,
             })
             .expect("session metadata should serialize");
         store.save(&session).await.expect("persisted session");
@@ -5716,6 +5719,7 @@ mod tests {
                 backend: Some(state.backend.clone()),
                 config_generation: None,
                 auth_binding: None,
+                mob_member_binding: None,
             })
             .expect("session metadata should serialize");
         store.save(&session).await.expect("persisted session");
@@ -6060,6 +6064,7 @@ mod tests {
                 backend: Some(state.backend.clone()),
                 config_generation: None,
                 auth_binding: None,
+                mob_member_binding: None,
             })
             .expect("session metadata should serialize");
         store.save(&session).await.expect("persisted session");
@@ -6147,6 +6152,7 @@ mod tests {
                 backend: Some(state.backend.clone()),
                 config_generation: None,
                 auth_binding: None,
+                mob_member_binding: None,
             })
             .expect("session metadata should serialize");
         store.save(&session).await.expect("persisted session");

@@ -421,6 +421,10 @@ pub struct AgentBuildConfig {
     /// legacy flat `(provider, api_key, base_url)` path runs (removed in
     /// Phase 6). `llm_client_override` beats both paths.
     pub auth_binding: Option<meerkat_core::AuthBindingRef>,
+    /// Typed durable mob-member identity, set by the mob runtime when building a
+    /// member's session. Persisted onto `SessionMetadata.mob_member_binding`,
+    /// where mob ownership routing reads it directly on resume/restart.
+    pub mob_member_binding: Option<meerkat_core::MobMemberBinding>,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn.
     pub silent_comms_intents: Vec<String>,
@@ -637,6 +641,7 @@ impl AgentBuildConfig {
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
             silent_comms_intents: Vec::new(),
             max_inline_peer_notifications: None,
             tool_dispatcher_override: None,
@@ -756,6 +761,7 @@ impl AgentBuildConfig {
         // Phase 3: auth_binding flows from SessionBuildOptions into
         // AgentBuildConfig so surfaces can drive binding selection per-request.
         self.auth_binding = build.auth_binding.clone();
+        self.mob_member_binding = build.mob_member_binding.clone();
         self.keep_alive = build.keep_alive;
         self.silent_comms_intents
             .clone_from(&build.silent_comms_intents);
@@ -809,6 +815,7 @@ impl AgentBuildConfig {
             backend: self.backend.clone(),
             config_generation: self.config_generation,
             auth_binding: self.auth_binding.clone(),
+            mob_member_binding: self.mob_member_binding.clone(),
             keep_alive: self.keep_alive,
             silent_comms_intents: self.silent_comms_intents.clone(),
             max_inline_peer_notifications: self.max_inline_peer_notifications,
@@ -2397,6 +2404,12 @@ impl AgentFactory {
         }
         if !mask.peer_meta {
             build_config.peer_meta = metadata.peer_meta.clone();
+        }
+        // Durable mob-member identity: preserve the persisted typed binding on
+        // resume unless the build already carries one. This is identity, not a
+        // turn override, so it has no mask bit; the caller keeps precedence.
+        if build_config.mob_member_binding.is_none() {
+            build_config.mob_member_binding = metadata.mob_member_binding.clone();
         }
 
         Ok(Some(metadata))
@@ -4658,6 +4671,7 @@ impl AgentFactory {
             metadata.backend = build_config.backend.clone();
             metadata.config_generation = build_config.config_generation;
             metadata.auth_binding = build_config.auth_binding.clone();
+            metadata.mob_member_binding = build_config.mob_member_binding.clone();
             metadata
         } else {
             SessionMetadata {
@@ -4688,6 +4702,7 @@ impl AgentFactory {
                 backend: build_config.backend.clone(),
                 config_generation: build_config.config_generation,
                 auth_binding: build_config.auth_binding.clone(),
+                mob_member_binding: build_config.mob_member_binding.clone(),
             }
         };
 
@@ -5450,6 +5465,7 @@ mod tests {
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
         }
     }
 
@@ -8447,6 +8463,7 @@ mod tests {
                 backend: None,
                 config_generation: None,
                 auth_binding: None,
+                mob_member_binding: None,
             })
             .expect("resume metadata");
 

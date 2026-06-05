@@ -1071,6 +1071,7 @@ async fn build_agent_with_resume_preserves_messages() {
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
         })
         .unwrap();
 
@@ -1144,6 +1145,7 @@ async fn build_agent_with_resume_uses_stored_metadata() {
         backend: None,
         config_generation: None,
         auth_binding: None,
+        mob_member_binding: None,
     };
     session.set_session_metadata(original_metadata).unwrap();
 
@@ -1235,6 +1237,7 @@ async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
         })
         .unwrap();
 
@@ -1325,6 +1328,7 @@ async fn build_agent_with_resume_preserves_persisted_system_prompt() {
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
         })
         .unwrap();
 
@@ -1383,6 +1387,7 @@ async fn build_agent_with_resume_preserves_explicit_inherit_tool_override() {
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
         })
         .unwrap();
 
@@ -1447,6 +1452,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id() {
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
         })
         .unwrap();
 
@@ -1530,6 +1536,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id_across_
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
         })
         .unwrap();
 
@@ -1870,6 +1877,7 @@ async fn test_resume_does_not_mutate_persisted_active_skills_when_current_surfac
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
         })
         .expect("resume metadata");
 
@@ -2024,6 +2032,7 @@ async fn resume_with_inherit_mob_allows_factory_default() {
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
         })
         .unwrap();
 
@@ -2081,6 +2090,7 @@ async fn resume_with_disable_mob_stays_disabled() {
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
         })
         .unwrap();
 
@@ -2137,6 +2147,7 @@ async fn resume_with_metadata_mob_enable_becomes_inherit() {
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
         })
         .unwrap();
 
@@ -2236,6 +2247,7 @@ async fn resumed_enable_mob_metadata_does_not_imply_operator_capabilities() {
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
         })
         .unwrap();
 
@@ -2295,6 +2307,7 @@ async fn resumed_enable_mob_metadata_does_not_mount_mob_surface() {
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
         })
         .unwrap();
 
@@ -2357,6 +2370,7 @@ async fn recovered_create_request_mob_metadata_enable_does_not_mint_operator_cap
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
         })
         .unwrap();
     session
@@ -2514,6 +2528,7 @@ async fn resumed_explicit_mob_override_generates_create_only_operator_capabiliti
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
         })
         .unwrap();
 
@@ -2599,6 +2614,7 @@ async fn resumed_explicit_mob_authority_is_not_erased_by_metadata() {
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
         })
         .unwrap();
     let expected_authority = create_test_authority();
@@ -2681,6 +2697,7 @@ async fn resumed_persisted_mob_authority_is_not_forwarded_as_behavior_authority(
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
         })
         .unwrap();
     session
@@ -3086,6 +3103,7 @@ fn session_metadata_projects_auth_binding_into_llm_identity() {
         backend: None,
         config_generation: None,
         auth_binding: Some(conn_ref.clone()),
+        mob_member_binding: None,
     };
     let identity = metadata.llm_identity();
     assert_eq!(identity.auth_binding, Some(conn_ref));

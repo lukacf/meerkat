@@ -21,7 +21,7 @@ use crate::ids::{
     WorkOrigin, WorkRef, WorkSpec,
 };
 use crate::roster::{Roster, RosterEntry};
-use crate::run::{FLOW_RUN_PROVENANCE_AGENT_ID, FlowRunConfig, MobRun};
+use crate::run::{FlowRunConfig, MobRun};
 use crate::storage::MobStorage;
 use crate::store::{MobEventStore, MobRunStore};
 #[cfg(target_arch = "wasm32")]
@@ -53,7 +53,7 @@ pub(crate) type RuntimeAdapterOption = Option<()>;
 pub(crate) const FLOW_SYSTEM_MEMBER_ID_PREFIX: &str = "__flow_system_";
 
 pub(crate) fn flow_system_member_id() -> MeerkatId {
-    MeerkatId::from(FLOW_RUN_PROVENANCE_AGENT_ID)
+    crate::ids::AgentIdentity::flow_system_provenance()
 }
 
 pub(crate) mod actor;

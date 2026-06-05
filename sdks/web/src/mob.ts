@@ -643,6 +643,11 @@ function parseMobMemberSnapshot(raw: unknown, mobId: string, agentIdentity: stri
   return result;
 }
 
+const WIRE_MOB_RESPAWN_OUTCOMES: readonly MobRespawnResult['status'][] = [
+  'completed',
+  'topology_restore_failed',
+];
+
 function parseMobRespawnResult(raw: unknown): MobRespawnResult {
   const result = requireRecord(raw, 'Invalid mob respawn response: malformed envelope') as Partial<
     WireMobRespawnResult
@@ -653,9 +658,10 @@ function parseMobRespawnResult(raw: unknown): MobRespawnResult {
     'status',
     'Invalid mob respawn response: missing status',
   );
-  if (status !== 'completed' && status !== 'topology_restore_failed') {
+  if (!WIRE_MOB_RESPAWN_OUTCOMES.includes(status as MobRespawnResult['status'])) {
     throw new Error('Invalid mob respawn response: invalid status');
   }
+  const respawnStatus = status as MobRespawnResult['status'];
   const receipt = requireRecord(result.receipt, 'Invalid mob respawn response: missing receipt');
   const memberRef = requireStringField(
     receipt,
@@ -668,7 +674,7 @@ function parseMobRespawnResult(raw: unknown): MobRespawnResult {
     'Invalid mob respawn response: receipt missing identity',
   );
   return {
-    status,
+    status: respawnStatus,
     receipt: {
       agent_identity: identity,
       member_ref: memberRef,

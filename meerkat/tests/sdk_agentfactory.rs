@@ -80,8 +80,8 @@ impl LlmClient for MockLlmClient {
         }
     }
 
-    fn provider(&self) -> &'static str {
-        "mock"
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Other
     }
 
     async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
@@ -292,8 +292,8 @@ impl LlmClient for ParamsCaptureClient {
         ]))
     }
 
-    fn provider(&self) -> &'static str {
-        "anthropic"
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Anthropic
     }
 
     async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {

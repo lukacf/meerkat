@@ -248,7 +248,7 @@ class MobListResult:
 class MobStatusResult:
     """One active mob row returned by `mob/list`."""
     mob_id: str
-    status: str
+    status: Literal['Creating', 'Running', 'Stopped', 'Completed', 'Destroyed']
 
 
 @dataclass
@@ -459,7 +459,7 @@ class MobRespawnParams:
 class MobRespawnResult:
     """Response payload for `mob/respawn`."""
     receipt: dict[str, Any]
-    status: str
+    status: Literal['completed', 'topology_restore_failed']
     failed_peer_ids: Optional[list[str]] = None
 
 
@@ -579,7 +579,7 @@ class MobAppendSystemContextResult:
     """Response payload for `mob/append_system_context`."""
     agent_identity: str
     mob_id: str
-    status: str
+    status: Literal['applied', 'staged', 'duplicate']
 
 
 @dataclass
@@ -670,21 +670,25 @@ class MobForceCancelResult:
 
 @dataclass
 class MobTurnStartParams:
-    """Request payload for `mob/turn_start`."""
+    """Request payload for `mob/turn_start`.
+
+`provider_params` and `auth_binding` carry the canonical Inherit/Set/Clear
+tri-state via [`WireTurnMetadataOverride`]. The legacy split wire form
+(`provider_params` + `clear_provider_params: bool`) is still accepted at the
+serde boundary and folded into the tri-state, rejecting a `set + clear`
+payload there."""
     agent_identity: str
     mob_id: str
     prompt: WireContentInput
     additional_instructions: Optional[list[str]] = None
-    auth_binding: Optional[WireAuthBindingRef] = None
-    clear_auth_binding: Optional[bool] = None
-    clear_provider_params: Optional[bool] = None
+    auth_binding: Optional[dict[str, Any]] = None
     flow_tool_overlay: Optional[PublicTurnToolOverlay] = None
     keep_alive: Optional[bool] = None
     max_tokens: Optional[int] = None
     model: Optional[str] = None
     output_schema: Optional[Any] = None
     provider: Optional[str] = None
-    provider_params: Optional[Any] = None
+    provider_params: Optional[dict[str, Any]] = None
     skill_refs: Optional[list[dict[str, Any]]] = None
     structured_output_retries: Optional[int] = None
     system_prompt: Optional[str] = None
@@ -708,9 +712,9 @@ class MobMemberStatusResult:
 @dataclass
 class MobSnapshotResult:
     """Response payload for `mob/snapshot`."""
-    members: list[Any]
+    members: list[MobMemberListEntryWire]
     mob_id: str
-    status: str
+    status: Literal['Creating', 'Running', 'Stopped', 'Completed', 'Destroyed']
 
 
 @dataclass
@@ -2091,9 +2095,9 @@ class WireLiveConfigRejectionReasonRefreshModelSwap(TypedDict, total=False):
     to_model: Required[str]
 
 class WireLiveConfigRejectionReasonRefreshProviderSwap(TypedDict, total=False):
-    from_provider: Required[str]
+    from_provider: Required[WireProvider]
     kind: Required[Literal['refresh_provider_swap']]
-    to_provider: Required[str]
+    to_provider: Required[WireProvider]
 
 class WireLiveConfigRejectionReasonRefreshAudioConfigMismatch(TypedDict, total=False):
     detail: Required[str]

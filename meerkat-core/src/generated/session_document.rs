@@ -134,8 +134,6 @@ pub enum PendingContinuationPublicTerminal {
 pub enum ResumeOverrideRejection {
     #[default]
     ProviderRequiresModel,
-    ClearAndSetProviderParams,
-    ClearAndSetAuthBinding,
     BuildOnlyAfterFirstTurn,
 }
 
@@ -317,10 +315,6 @@ pub enum SessionDocumentInput {
     AuthorizeSessionResumeOverrides {
         provider_override_present: bool,
         model_override_present: bool,
-        clear_provider_params: bool,
-        provider_params_override_present: bool,
-        clear_auth_binding: bool,
-        auth_binding_override_present: bool,
         has_build_only_overrides: bool,
         first_turn_phase: SessionFirstTurnPhase,
     },
@@ -517,8 +511,6 @@ enum SessionDocumentTransition {
     ResolvePendingContinuationWithBoundary,
     ResolvePendingContinuationWithoutBoundary,
     AuthorizeSessionResumeOverridesRejectProviderRequiresModel,
-    AuthorizeSessionResumeOverridesRejectClearAndSetProviderParams,
-    AuthorizeSessionResumeOverridesRejectClearAndSetAuthBinding,
     AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn,
     AuthorizeSessionResumeOverridesAcceptRecomputeProvider,
     AuthorizeSessionResumeOverridesAcceptUseOverride,
@@ -2237,10 +2229,6 @@ impl SessionDocumentMachineAuthority {
             SessionDocumentInput::AuthorizeSessionResumeOverrides {
                 provider_override_present,
                 model_override_present,
-                clear_provider_params,
-                provider_params_override_present,
-                clear_auth_binding,
-                auth_binding_override_present,
                 has_build_only_overrides,
                 first_turn_phase,
             } => {
@@ -2258,42 +2246,6 @@ impl SessionDocumentMachineAuthority {
                         provider_override_present,
                         model_override_present,
                     ) == false)
-                        && (resume_reject_clear_and_set_provider_params(
-                            clear_provider_params,
-                            provider_params_override_present,
-                        )))
-                {
-                    matches.push(SessionDocumentTransition::AuthorizeSessionResumeOverridesRejectClearAndSetProviderParams);
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((resume_reject_provider_requires_model(
-                        provider_override_present,
-                        model_override_present,
-                    ) == false)
-                        && (resume_reject_clear_and_set_provider_params(
-                            clear_provider_params,
-                            provider_params_override_present,
-                        ) == false)
-                        && (resume_reject_clear_and_set_auth_binding(
-                            clear_auth_binding,
-                            auth_binding_override_present,
-                        )))
-                {
-                    matches.push(SessionDocumentTransition::AuthorizeSessionResumeOverridesRejectClearAndSetAuthBinding);
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((resume_reject_provider_requires_model(
-                        provider_override_present,
-                        model_override_present,
-                    ) == false)
-                        && (resume_reject_clear_and_set_provider_params(
-                            clear_provider_params,
-                            provider_params_override_present,
-                        ) == false)
-                        && (resume_reject_clear_and_set_auth_binding(
-                            clear_auth_binding,
-                            auth_binding_override_present,
-                        ) == false)
                         && (resume_reject_build_only_after_first_turn(
                             has_build_only_overrides,
                             first_turn_phase,
@@ -2305,10 +2257,6 @@ impl SessionDocumentMachineAuthority {
                     && ((resume_overrides_admissible(
                         provider_override_present,
                         model_override_present,
-                        clear_provider_params,
-                        provider_params_override_present,
-                        clear_auth_binding,
-                        auth_binding_override_present,
                         has_build_only_overrides,
                         first_turn_phase,
                     )) && (resume_provider_recompute_from_model(
@@ -2322,10 +2270,6 @@ impl SessionDocumentMachineAuthority {
                     && ((resume_overrides_admissible(
                         provider_override_present,
                         model_override_present,
-                        clear_provider_params,
-                        provider_params_override_present,
-                        clear_auth_binding,
-                        auth_binding_override_present,
                         has_build_only_overrides,
                         first_turn_phase,
                     )) && (resume_provider_recompute_from_model(
@@ -2342,10 +2286,6 @@ impl SessionDocumentMachineAuthority {
                     && ((resume_overrides_admissible(
                         provider_override_present,
                         model_override_present,
-                        clear_provider_params,
-                        provider_params_override_present,
-                        clear_auth_binding,
-                        auth_binding_override_present,
                         has_build_only_overrides,
                         first_turn_phase,
                     )) && (resume_provider_recompute_from_model(
@@ -2363,18 +2303,6 @@ impl SessionDocumentMachineAuthority {
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
                             SessionDocumentEffect::SessionResumeOverridesRejected { reason: ResumeOverrideRejection::ProviderRequiresModel, },
-                        ])
-                    }
-                    SessionDocumentTransition::AuthorizeSessionResumeOverridesRejectClearAndSetProviderParams => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::SessionResumeOverridesRejected { reason: ResumeOverrideRejection::ClearAndSetProviderParams, },
-                        ])
-                    }
-                    SessionDocumentTransition::AuthorizeSessionResumeOverridesRejectClearAndSetAuthBinding => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::SessionResumeOverridesRejected { reason: ResumeOverrideRejection::ClearAndSetAuthBinding, },
                         ])
                     }
                     SessionDocumentTransition::AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn => {
@@ -2876,20 +2804,12 @@ impl SessionDocumentMachineAuthority {
         &mut self,
         provider_override_present: bool,
         model_override_present: bool,
-        clear_provider_params: bool,
-        provider_params_override_present: bool,
-        clear_auth_binding: bool,
-        auth_binding_override_present: bool,
         has_build_only_overrides: bool,
         first_turn_phase: SessionFirstTurnPhase,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
         self.apply_input(SessionDocumentInput::AuthorizeSessionResumeOverrides {
             provider_override_present,
             model_override_present,
-            clear_provider_params,
-            provider_params_override_present,
-            clear_auth_binding,
-            auth_binding_override_present,
             has_build_only_overrides,
             first_turn_phase,
         })
@@ -3009,20 +2929,6 @@ fn resume_reject_provider_requires_model(
     (provider_override_present) && (model_override_present == false)
 }
 
-fn resume_reject_clear_and_set_provider_params(
-    clear_provider_params: bool,
-    provider_params_override_present: bool,
-) -> bool {
-    (clear_provider_params) && (provider_params_override_present)
-}
-
-fn resume_reject_clear_and_set_auth_binding(
-    clear_auth_binding: bool,
-    auth_binding_override_present: bool,
-) -> bool {
-    (clear_auth_binding) && (auth_binding_override_present)
-}
-
 fn resume_reject_build_only_after_first_turn(
     has_build_only_overrides: bool,
     first_turn_phase: SessionFirstTurnPhase,
@@ -3033,23 +2939,11 @@ fn resume_reject_build_only_after_first_turn(
 fn resume_overrides_admissible(
     provider_override_present: bool,
     model_override_present: bool,
-    clear_provider_params: bool,
-    provider_params_override_present: bool,
-    clear_auth_binding: bool,
-    auth_binding_override_present: bool,
     has_build_only_overrides: bool,
     first_turn_phase: SessionFirstTurnPhase,
 ) -> bool {
     (resume_reject_provider_requires_model(provider_override_present, model_override_present)
         == false)
-        && (resume_reject_clear_and_set_provider_params(
-            clear_provider_params,
-            provider_params_override_present,
-        ) == false)
-        && (resume_reject_clear_and_set_auth_binding(
-            clear_auth_binding,
-            auth_binding_override_present,
-        ) == false)
         && (resume_reject_build_only_after_first_turn(has_build_only_overrides, first_turn_phase)
             == false)
 }

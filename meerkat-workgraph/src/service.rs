@@ -409,7 +409,7 @@ impl WorkGraphService {
                 )));
             }
         }
-        if is_reserved_confirmation_evidence_kind(&request.evidence.kind) {
+        if request.evidence.confirmation_classification().is_some() {
             return Err(WorkGraphError::InvalidInput(format!(
                 "reserved completion evidence kind {} requires trusted in-process host authority",
                 request.evidence.kind
@@ -818,7 +818,7 @@ impl WorkGraphService {
         allow_reserved_completion_evidence: bool,
     ) -> Result<WorkItem, WorkGraphError> {
         if !allow_reserved_completion_evidence
-            && is_reserved_confirmation_evidence_kind(&request.evidence.kind)
+            && request.evidence.confirmation_classification().is_some()
         {
             return Err(WorkGraphError::InvalidInput(format!(
                 "reserved completion evidence kind {} must be added through goal_confirm",
@@ -1220,11 +1220,11 @@ fn confirmation_evidence_for_policy(
     // The eligibility "is this confirming principal + supplied evidence kind
     // admissible for this completion policy" is owned by
     // WorkGraphLifecycleMachine, not this shell. We extract only pure typed
-    // observations (the typed evidence-kind observation parsed from the opaque
-    // evidence.kind string; the machine reads the completion policy + supervisor
-    // owner key + requested principal owner key + kind), drive the machine's
-    // confirmation-admission classifier, and mirror the verdict. On Admitted we
-    // proceed to stamp the canonicalized evidence (pure mechanical
+    // observations (the evidence-kind observation projected from the evidence's
+    // typed confirmation classification; the machine reads the completion policy
+    // + supervisor owner key + requested principal owner key + kind), drive the
+    // machine's confirmation-admission classifier, and mirror the verdict. On
+    // Admitted we proceed to stamp the canonicalized evidence (pure mechanical
     // canonicalization, not a verdict); each Denied* maps back to the exact same
     // InvalidInput rejection the shell previously produced. Fails closed.
     let supplied_evidence_kind = observe_confirmation_evidence_kind(&evidence);
@@ -1314,28 +1314,22 @@ fn confirmation_evidence_for_policy(
     Ok(evidence)
 }
 
-/// Pure typed extraction of the OPAQUE `evidence.kind` provenance string into
-/// the machine's confirmation-evidence observation. The recognized reserved
-/// confirmation literals map 1:1 onto a variant; an empty trimmed string is
-/// `Empty`; everything else is `Other`. This performs NO admission decision.
+/// Project the evidence's typed confirmation classification into the machine's
+/// confirmation-evidence observation. The reserved confirmation variants map 1:1
+/// onto the machine observation; an empty trimmed display string is `Empty`
+/// (used only by the self-attest empty-evidence denial); generic self-attested
+/// evidence with a non-empty display string is `Other`. This performs NO
+/// admission decision — it reads the typed classification, never re-classifies
+/// the opaque `evidence.kind` string at this decision point.
 fn observe_confirmation_evidence_kind(
     evidence: &WorkEvidenceRef,
 ) -> wg_dsl::WorkConfirmationEvidenceObservation {
-    if evidence.kind.trim().is_empty() {
-        return wg_dsl::WorkConfirmationEvidenceObservation::Empty;
-    }
-    match evidence.kind.as_str() {
-        "host_confirmation" => wg_dsl::WorkConfirmationEvidenceObservation::HostConfirmation,
-        "principal_confirmation" => {
-            wg_dsl::WorkConfirmationEvidenceObservation::PrincipalConfirmation
+    match evidence.confirmation_classification() {
+        Some(kind) => kind.to_confirmation_observation(),
+        None if evidence.kind.trim().is_empty() => {
+            wg_dsl::WorkConfirmationEvidenceObservation::Empty
         }
-        "supervisor_confirmation" => {
-            wg_dsl::WorkConfirmationEvidenceObservation::SupervisorConfirmation
-        }
-        "reviewer_confirmation" => {
-            wg_dsl::WorkConfirmationEvidenceObservation::ReviewerConfirmation
-        }
-        _ => wg_dsl::WorkConfirmationEvidenceObservation::Other,
+        None => wg_dsl::WorkConfirmationEvidenceObservation::Other,
     }
 }
 
@@ -1374,7 +1368,7 @@ fn reject_reserved_confirmation_evidence_refs(
 ) -> Result<(), WorkGraphError> {
     if let Some(evidence) = evidence_refs
         .iter()
-        .find(|evidence| is_reserved_confirmation_evidence_kind(&evidence.kind))
+        .find(|evidence| evidence.confirmation_classification().is_some())
     {
         return Err(WorkGraphError::InvalidInput(format!(
             "reserved completion evidence kind {} must be added through goal_confirm",
@@ -1393,16 +1387,6 @@ fn validate_completion_policy(policy: &WorkCompletionPolicy) -> Result<(), WorkG
         ));
     }
     Ok(())
-}
-
-fn is_reserved_confirmation_evidence_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "host_confirmation"
-            | "principal_confirmation"
-            | "supervisor_confirmation"
-            | "reviewer_confirmation"
-    )
 }
 
 fn attention_status_matches_at(

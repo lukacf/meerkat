@@ -45,6 +45,21 @@ impl GoogleAuthMethod {
             Self::ComputeAdc => "compute_adc",
         }
     }
+
+    /// The persisted credential mode this auth method stores in the
+    /// `TokenStore`, or `None` for ADC/authorizer-backed methods that hold no
+    /// persisted secret. Typed owner of the auth-method -> persisted-mode
+    /// mapping (replaces the string-keyed `persisted_auth_mode_for_auth_method`
+    /// decision table).
+    pub fn persisted_auth_mode(self) -> Option<crate::auth::token_store::PersistedAuthMode> {
+        use crate::auth::token_store::PersistedAuthMode;
+        match self {
+            Self::ApiKey | Self::ApiKeyExpress => Some(PersistedAuthMode::ApiKey),
+            Self::BearerApiKey => Some(PersistedAuthMode::StaticBearer),
+            Self::GoogleOauth => Some(PersistedAuthMode::GoogleOauth),
+            Self::ExternalAuthorizer | Self::Adc | Self::ComputeAdc => None,
+        }
+    }
 }
 
 #[cfg(test)]

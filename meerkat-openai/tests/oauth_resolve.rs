@@ -70,6 +70,7 @@ fn openai_realm_no_refresh(backend_kind: &str, auth_method: &str) -> RealmConnec
             auth_profile: "chatgpt_auth".into(),
             default_model: None,
             policy: Default::default(),
+            provider_default: false,
         },
     );
     RealmConnectionSet::from_config(
@@ -121,6 +122,7 @@ fn openai_realm_with_source(
             auth_profile: "chatgpt_auth".into(),
             default_model: None,
             policy: Default::default(),
+            provider_default: false,
         },
     );
     RealmConnectionSet::from_config(
@@ -140,6 +142,7 @@ fn default_auth_binding() -> AuthBindingRef {
         realm: RealmId::parse("dev").expect("valid realm"),
         binding: BindingId::parse("default_chatgpt").expect("valid binding"),
         profile: None,
+        origin: meerkat_core::BindingOrigin::Configured,
     }
 }
 

@@ -2559,9 +2559,7 @@ describe("Parity wrappers", () => {
         outputSchema: { type: "object" },
         structuredOutputRetries: 2,
         providerParams: { temperature: 0.2 },
-        clearProviderParams: true,
         authBinding: { realm: "dev", binding: "default_openai" },
-        clearAuthBinding: true,
       },
     );
     const append = await client.appendMobSystemContext("mob-1", "worker-1", "remember this");
@@ -2648,13 +2646,52 @@ describe("Parity wrappers", () => {
       system_prompt: "system",
       output_schema: { type: "object" },
       structured_output_retries: 2,
-      provider_params: { temperature: 0.2 },
-      clear_provider_params: true,
-      auth_binding: { realm: "dev", binding: "default_openai" },
-      clear_auth_binding: true,
+      provider_params: { action: "set", value: { temperature: 0.2 } },
+      auth_binding: {
+        action: "set",
+        value: { realm: "dev", binding: "default_openai" },
+      },
     });
     assert.equal(calls[4].params.after_cursor, 10);
     assert.equal(calls[4].params.limit, 5);
+  });
+
+  it("lowers mob_turn_start clear_* overrides to the tagged tri-state", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return { status: "started" };
+    };
+
+    // Clear coverage: `clear*` lowers to the tagged `clear` override.
+    await client.mobTurnStart("mob-1", "worker-1", "continue", {
+      clearProviderParams: true,
+      clearAuthBinding: true,
+    });
+    assert.deepEqual(calls[0].params, {
+      mob_id: "mob-1",
+      agent_identity: "worker-1",
+      prompt: "continue",
+      provider_params: { action: "clear" },
+      auth_binding: { action: "clear" },
+    });
+
+    // Inherit coverage: neither value nor clear -> the field is omitted.
+    await client.mobTurnStart("mob-1", "worker-1", "continue");
+    assert.equal(calls[1].params.provider_params, undefined);
+    assert.equal(calls[1].params.auth_binding, undefined);
+
+    // The illegal set + clear combination is rejected at the wrapper boundary,
+    // mirroring the wire serde boundary.
+    await assert.rejects(
+      () =>
+        client.mobTurnStart("mob-1", "worker-1", "continue", {
+          providerParams: { temperature: 0.2 },
+          clearProviderParams: true,
+        }),
+      (error) => error instanceof MeerkatError && error.code === "INVALID_ARGS",
+    );
   });
 
   it("rejects malformed mob spawn_many result envelopes", async () => {

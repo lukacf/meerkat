@@ -1660,6 +1660,7 @@ async fn test_append_system_context_stages_dedupes_and_conflicts_per_session() {
         source: Some("mob".to_string()),
         idempotency_key: Some("ctx-1".to_string()),
         source_kind: meerkat_core::session::SystemContextSource::Normal,
+        peer_response_terminal: None,
     };
 
     let first = service
@@ -1682,6 +1683,7 @@ async fn test_append_system_context_stages_dedupes_and_conflicts_per_session() {
                 source: Some("mob".to_string()),
                 idempotency_key: Some("ctx-1".to_string()),
                 source_kind: meerkat_core::session::SystemContextSource::Normal,
+                peer_response_terminal: None,
             },
         )
         .await
@@ -1739,6 +1741,7 @@ async fn test_staged_system_context_applies_at_next_llm_boundary() {
                 source: Some("mob".to_string()),
                 idempotency_key: Some("ctx-boundary".to_string()),
                 source_kind: meerkat_core::session::SystemContextSource::Normal,
+                peer_response_terminal: None,
             },
         )
         .await
@@ -1831,6 +1834,7 @@ async fn test_staged_system_context_is_not_replayed_on_later_turns() {
                 source: Some("mob".to_string()),
                 idempotency_key: Some("ctx-boundary-replay".to_string()),
                 source_kind: meerkat_core::session::SystemContextSource::Normal,
+                peer_response_terminal: None,
             },
         )
         .await
@@ -1907,6 +1911,7 @@ async fn test_staged_system_context_appended_during_active_turn_waits_for_next_t
                 source: Some("mob".to_string()),
                 idempotency_key: Some("ctx-during-active-turn".to_string()),
                 source_kind: meerkat_core::session::SystemContextSource::Normal,
+                peer_response_terminal: None,
             },
         )
         .await
@@ -1972,6 +1977,7 @@ async fn test_pre_llm_denied_turn_does_not_consume_staged_system_context() {
                 source: Some("mob".to_string()),
                 idempotency_key: Some("ctx-pre-llm-deny".to_string()),
                 source_kind: meerkat_core::session::SystemContextSource::Normal,
+                peer_response_terminal: None,
             },
         )
         .await

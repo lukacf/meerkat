@@ -2543,7 +2543,7 @@ mod tests {
 
         let entry = StepLedgerEntry {
             step_id,
-            agent_identity: AgentIdentity::from(crate::run::FLOW_RUN_PROVENANCE_AGENT_ID),
+            agent_identity: AgentIdentity::flow_system_provenance(),
             status: StepRunStatus::Dispatched,
             output: None,
             timestamp: Utc::now(),
@@ -2574,7 +2574,7 @@ mod tests {
                 &ledger_run_id,
                 StepLedgerEntry {
                     step_id: StepId::from("step-1"),
-                    agent_identity: AgentIdentity::from(crate::run::FLOW_RUN_PROVENANCE_AGENT_ID),
+                    agent_identity: AgentIdentity::flow_system_provenance(),
                     status: StepRunStatus::Dispatched,
                     output: None,
                     timestamp: Utc::now(),

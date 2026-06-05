@@ -450,6 +450,7 @@ fn factory_policy_session(mut session: Session, model: String, max_tokens: u32) 
                 backend: None,
                 config_generation: None,
                 auth_binding: None,
+                mob_member_binding: None,
             })
             .expect("test metadata serializes");
     }
@@ -1779,6 +1780,10 @@ impl SessionService for MockSessionService {
                 backend: build.and_then(|b| b.backend.clone()),
                 config_generation: build.and_then(|b| b.config_generation),
                 auth_binding: None,
+                // Mirror the real producer: carry the typed durable member
+                // binding so persisted-session ownership routing recognizes
+                // mob members exactly as production does.
+                mob_member_binding: build.and_then(|b| b.mob_member_binding.clone()),
             };
             session
                 .set_session_metadata(metadata)
@@ -4693,18 +4698,37 @@ async fn spawn_live_external_peer_with_transport(
                                 _ => serde_json::json!({ "ok": true }),
                             }
                         };
-                        if let Err(error) = responder_runtime
-                            .send(CommsCommand::PeerResponse {
-                                to,
-                                in_reply_to: candidate.interaction.id,
-                                status: meerkat_core::interaction::ResponseStatus::Completed,
-                                result: response,
-                                blocks: None,
-                                handling_mode: None,
-                            })
-                            .await
-                        {
-                            panic!("send live external peer response failed: {error}");
+                        // `trust_candidate_sender_for_reply` records trust for the
+                        // requester, but the registration of that peer in the
+                        // send path propagates asynchronously. Under slow
+                        // scheduling (notably the Linux CI executors) it can lag
+                        // this reply, surfacing a transient `PeerNotFound`. Wait
+                        // for the registration to land rather than racing it; any
+                        // other send error still fails immediately (no masking).
+                        let send_deadline =
+                            tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+                        loop {
+                            match responder_runtime
+                                .send(CommsCommand::PeerResponse {
+                                    to: to.clone(),
+                                    in_reply_to: candidate.interaction.id,
+                                    status: meerkat_core::interaction::ResponseStatus::Completed,
+                                    result: response.clone(),
+                                    blocks: None,
+                                    handling_mode: None,
+                                })
+                                .await
+                            {
+                                Ok(_) => break,
+                                Err(meerkat_core::comms::SendError::PeerNotFound(_))
+                                    if tokio::time::Instant::now() < send_deadline =>
+                                {
+                                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                                }
+                                Err(error) => {
+                                    panic!("send live external peer response failed: {error}");
+                                }
+                            }
                         }
                         responder_runtime.mark_interaction_complete(candidate.interaction.id.0);
                         for supervisor_pubkey in remove_supervisors_after_response {
@@ -13961,11 +13985,16 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                     .with_label("role", "worker")
                     .with_label("member_id", "w-1"),
             ),
-            realm_id: Some("mob.test-mob".to_string()),
+            realm_id: Some(meerkat_core::RealmId::parse("mob.test-mob").unwrap()),
             instance_id: None,
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: Some(meerkat_core::MobMemberBinding {
+                mob_id: "test-mob".to_string(),
+                role: "worker".to_string(),
+                member: "w-1".to_string(),
+            }),
         })
         .expect("resume metadata");
 
@@ -24953,8 +24982,9 @@ async fn test_spawn_rejects_reserved_flow_system_member_prefix() {
         .await
         .expect_err("reserved system member prefix should be rejected");
     assert!(
-        err.to_string().contains("reserved system prefix"),
-        "error should clearly explain reserved id prefix: {err}"
+        err.to_string()
+            .contains("reserved system identifier namespace"),
+        "error should clearly explain reserved id namespace: {err}"
     );
 }
 
@@ -27262,6 +27292,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
                         source: append.source,
                         idempotency_key: append.idempotency_key,
                         source_kind: meerkat_core::session::SystemContextSource::Normal,
+                        peer_response_terminal: None,
                     },
                 )
                 .await
@@ -27354,6 +27385,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
                         source: append.source,
                         idempotency_key: append.idempotency_key,
                         source_kind: meerkat_core::session::SystemContextSource::Normal,
+                        peer_response_terminal: None,
                     }),
             );
 
@@ -27385,6 +27417,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
                     source: append.source,
                     idempotency_key: append.idempotency_key,
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
             )
             .await

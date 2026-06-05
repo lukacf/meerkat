@@ -3531,7 +3531,7 @@ mod tests {
             visible_tools: vec![],
             system_prompt: None,
             model_id: "model-a".into(),
-            provider_id: "provider-a".into(),
+            provider_id: meerkat_core::Provider::Other,
             audio_config: None,
             runtime_system_context: vec![],
         };

@@ -25,31 +25,61 @@ pub(crate) struct ReqwestStreamableHttpClient {
     auth_challenge: AuthChallengeRecorder,
 }
 
+/// Typed record of an auth-class connection failure captured at the transport
+/// boundary. `status` is set on every `401`/`403` (regardless of whether a
+/// `www-authenticate` challenge is present); `challenge` carries the parsed
+/// challenge header when the server supplies one. The decision site reads these
+/// typed fields rather than re-classifying the failure from message text.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AuthChallengeState {
+    challenge: Option<String>,
+    status: Option<reqwest::StatusCode>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AuthChallengeRecorder {
-    inner: Arc<Mutex<Option<String>>>,
+    inner: Arc<Mutex<AuthChallengeState>>,
 }
 
 impl AuthChallengeRecorder {
     pub(crate) fn record(&self, response: &reqwest::Response) {
-        if matches!(
-            response.status(),
+        let status = response.status();
+        if !matches!(
+            status,
             reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
-        ) && let Some(header) = response.headers().get(WWW_AUTHENTICATE)
+        ) {
+            return;
+        }
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.status = Some(status);
+        if let Some(header) = response.headers().get(WWW_AUTHENTICATE)
             && let Ok(header) = header.to_str()
         {
-            *self
-                .inner
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(header.to_string());
+            inner.challenge = Some(header.to_string());
         }
     }
 
-    pub(crate) fn take(&self) -> Option<String> {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
+    /// Drain the captured auth-failure record (challenge text + typed status).
+    pub(crate) fn take(&self) -> AuthChallengeState {
+        std::mem::take(
+            &mut *self
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+}
+
+impl AuthChallengeState {
+    pub(crate) fn challenge(&self) -> Option<&str> {
+        self.challenge.as_deref()
+    }
+
+    pub(crate) fn status(&self) -> Option<reqwest::StatusCode> {
+        self.status
     }
 }
 

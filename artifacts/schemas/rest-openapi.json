@@ -1442,6 +1442,9 @@
         ],
         "type": "string"
       },
+      "CommsNoticeKind": {
+        "type": "string"
+      },
       "CommsPeerLifecycleParams": {
         "additionalProperties": false,
         "description": "Typed params for one-way peer lifecycle notifications.\n\nThis is the public wire projection of the topology-update payloads that\nused to travel as arbitrary JSON. `peer_spec` is the canonical typed\nidentity when the sender has it; `peer`, `role`, and `description` remain\ninert presentation metadata for older projections.",
@@ -5534,7 +5537,7 @@
                 ]
               },
               "kind": {
-                "type": "string"
+                "$ref": "#/components/schemas/CommsNoticeKind"
               },
               "payload": true,
               "peer": {
@@ -5823,7 +5826,7 @@
         ]
       },
       "SystemNoticePeer": {
-        "description": "Peer identity carried in a typed comms transcript block.",
+        "description": "Peer identity carried in a typed comms transcript block.\n\n`id` is the canonical routing identity ([`crate::comms::PeerId`]), serialized\nas a hyphenated UUID string on the wire; `display_name` is the presentation\nlabel. Keeping `id` typed lets the projection logic consume the identity\ndirectly instead of re-parsing a `String` back into a `PeerId`.",
         "properties": {
           "display_name": {
             "type": [
@@ -5832,7 +5835,7 @@
             ]
           },
           "id": {
-            "type": "string"
+            "$ref": "#/components/schemas/PeerId"
           }
         },
         "required": [

@@ -242,10 +242,14 @@ const publicMobTurnStartOptions: MobTurnStartOptions = {
   outputSchema: { type: "object" },
   structuredOutputRetries: 2,
   providerParams: { temperature: 0.2 },
-  clearProviderParams: true,
   authBinding: { realm: "dev", binding: "default_openai" },
+};
+
+const publicMobTurnStartOptionsClear: MobTurnStartOptions = {
+  clearProviderParams: true,
   clearAuthBinding: true,
 };
+void publicMobTurnStartOptionsClear;
 
 const publicMobTurnStartOptionsWithUnknown: MobTurnStartOptions = {
   model: "gpt-test",
@@ -255,8 +259,6 @@ const publicMobTurnStartOptionsWithUnknown: MobTurnStartOptions = {
 
 type MobTurnStartSupportedWireOptionKeys =
   | "additional_instructions"
-  | "clear_auth_binding"
-  | "clear_provider_params"
   | "auth_binding"
   | "flow_tool_overlay"
   | "keep_alive"
@@ -535,7 +537,7 @@ const generatedMobTurnStart: MobTurnStartParams = {
   agent_identity: "worker-1",
   prompt: [{ type: "text", text: "continue" }],
   model: "gpt-test",
-  clear_provider_params: true,
+  provider_params: { action: "clear" },
 };
 
 void generatedMobTurnStart;

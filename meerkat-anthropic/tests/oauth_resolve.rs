@@ -70,6 +70,7 @@ fn realm_with_oauth_binding_no_refresh(auth_method: &str) -> RealmConnectionSet 
             auth_profile: "claude_oauth".into(),
             default_model: None,
             policy: Default::default(),
+            provider_default: false,
         },
     );
     let section = RealmConfigSection {
@@ -117,6 +118,7 @@ fn realm_with_oauth_binding_source(
             auth_profile: "claude_oauth".into(),
             default_model: None,
             policy: Default::default(),
+            provider_default: false,
         },
     );
     let section = RealmConfigSection {
@@ -133,6 +135,7 @@ fn default_auth_binding() -> AuthBindingRef {
         realm: RealmId::parse("dev").expect("valid realm"),
         binding: BindingId::parse("default_claude").expect("valid binding"),
         profile: None,
+        origin: meerkat_core::BindingOrigin::Configured,
     }
 }
 

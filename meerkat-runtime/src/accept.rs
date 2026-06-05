@@ -120,7 +120,9 @@ impl MachineAdmissionAuthority {
 }
 
 /// Machine-owned resolution of an accepted input's semantic admission path.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Cannot derive `Eq`: `RuntimeInputProjection` carries a typed
+// `peer_response_terminal` fact whose render payload is a `serde_json::Value`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedAdmission {
     policy: PolicyDecision,
     handling_mode: HandlingMode,

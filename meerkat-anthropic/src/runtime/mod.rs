@@ -774,6 +774,7 @@ mod tests {
                 realm: meerkat_core::RealmId::parse("dev").unwrap(),
                 binding: meerkat_core::BindingId::parse("bedrock").unwrap(),
                 profile: None,
+                origin: meerkat_core::BindingOrigin::Configured,
             },
             &backend,
             &auth,

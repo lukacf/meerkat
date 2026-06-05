@@ -239,10 +239,15 @@ impl SessionRuntime {
         build_config.preload_skills = None;
         build_config.additional_instructions = (!create.additional_instructions.is_empty())
             .then(|| create.additional_instructions.clone());
-        build_config.realm_id = create
+        // Schedule specs carry the realm as a plain slug string; parse it once
+        // at this ingest boundary, falling back to the runtime's typed realm.
+        let spec_realm = create
             .realm_id
-            .clone()
-            .or_else(|| self.inner.realm_id().map(|r| r.as_str().to_string()));
+            .as_deref()
+            .map(meerkat_core::RealmId::parse)
+            .transpose()
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+        build_config.realm_id = spec_realm.or_else(|| self.inner.realm_id());
         build_config.instance_id = create
             .instance_id
             .clone()

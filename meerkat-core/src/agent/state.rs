@@ -4452,6 +4452,7 @@ mod tests {
                     source: Some("test:active-steer".to_string()),
                     idempotency_key: Some("test:active-steer".to_string()),
                     source_kind: crate::session::SystemContextSource::RuntimeSteer,
+                    peer_response_terminal: None,
                 },
                 crate::time_compat::SystemTime::now(),
             )

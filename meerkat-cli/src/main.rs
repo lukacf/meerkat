@@ -4036,6 +4036,7 @@ async fn handle_auth_command(
                 binding: meerkat_core::BindingId::parse(binding_id.clone())
                     .map_err(|e| anyhow::anyhow!("invalid binding id '{binding_id}': {e}"))?,
                 profile: None,
+                origin: meerkat_core::connection::BindingOrigin::Configured,
             };
             match registry.resolve(&realm_set, &auth_binding, &env).await {
                 Ok(conn) => {
@@ -4077,6 +4078,7 @@ async fn handle_auth_command(
                 binding: meerkat_core::BindingId::parse(binding_id)
                     .map_err(|e| anyhow::anyhow!("invalid binding id '{binding_id}': {e}"))?,
                 profile: None,
+                origin: meerkat_core::connection::BindingOrigin::Configured,
             };
             let token_store: Option<Arc<dyn meerkat_providers::auth_store::TokenStore>> =
                 if meerkat_providers::auth_store::credential_source_uses_persisted_store(
@@ -4150,6 +4152,7 @@ async fn handle_auth_command(
                         realm: key.realm.clone(),
                         binding: key.binding.clone(),
                         profile: key.profile.clone(),
+                        origin: meerkat_core::connection::BindingOrigin::Configured,
                     };
                     meerkat_core::clear_tokens_and_publish_lifecycle_released(
                         store.as_ref(),
@@ -4376,6 +4379,7 @@ async fn refresh_auth_profile(
         binding: meerkat_core::BindingId::parse(binding_id.clone())
             .map_err(|e| anyhow::anyhow!("invalid binding id '{binding_id}': {e}"))?,
         profile: None,
+        origin: meerkat_core::connection::BindingOrigin::Configured,
     };
     let connection = registry
         .resolve(&realm_set, &auth_binding, &env)
@@ -4515,12 +4519,16 @@ impl LoginProvider {
         }
     }
 
-    fn config_provider(self) -> &'static str {
+    fn provider(self) -> meerkat_core::Provider {
         match self {
-            Self::Anthropic => "anthropic",
-            Self::OpenAi => "openai",
-            Self::Google => "gemini",
+            Self::Anthropic => meerkat_core::Provider::Anthropic,
+            Self::OpenAi => meerkat_core::Provider::OpenAI,
+            Self::Google => meerkat_core::Provider::Gemini,
         }
+    }
+
+    fn config_provider(self) -> &'static str {
+        self.provider().as_str()
     }
 
     fn backend_profile_id(self) -> &'static str {
@@ -4531,12 +4539,20 @@ impl LoginProvider {
         }
     }
 
-    fn backend_kind(self) -> &'static str {
+    fn normalized_backend_kind(self) -> meerkat_providers::NormalizedBackendKind {
+        use meerkat_core::provider_matrix::anthropic::AnthropicBackendKind;
+        use meerkat_core::provider_matrix::google::GoogleBackendKind;
+        use meerkat_core::provider_matrix::openai::OpenAiBackendKind;
+        use meerkat_providers::NormalizedBackendKind;
         match self {
-            Self::Anthropic => "anthropic_api",
-            Self::OpenAi => "chatgpt_backend",
-            Self::Google => "google_code_assist",
+            Self::Anthropic => NormalizedBackendKind::Anthropic(AnthropicBackendKind::AnthropicApi),
+            Self::OpenAi => NormalizedBackendKind::OpenAi(OpenAiBackendKind::ChatGptBackend),
+            Self::Google => NormalizedBackendKind::Google(GoogleBackendKind::GoogleCodeAssist),
         }
+    }
+
+    fn backend_kind(self) -> &'static str {
+        self.normalized_backend_kind().as_str()
     }
 
     fn backend_base_url(self) -> Option<&'static str> {
@@ -4762,17 +4778,24 @@ fn ensure_cli_interactive_oauth_config(provider: LoginProvider, config: &mut Con
     let mut changed = false;
 
     if let Some(backend) = section.backend.get_mut(backend_profile_id) {
-        if backend.provider == provider.config_provider()
-            && backend.backend_kind == provider.backend_kind()
+        // Gate the heal on typed identity: parse the config strings into the
+        // typed `Provider` / `NormalizedBackendKind` and compare typed values,
+        // not raw string equality.
+        let backend_provider = meerkat_core::Provider::parse_strict(&backend.provider);
+        let backend_kind = meerkat_providers::ProviderRuntimeCatalog::normalize_backend(
+            provider.provider(),
+            &backend.backend_kind,
+        )
+        .ok();
+        if backend_provider == Some(provider.provider())
+            && backend_kind == Some(provider.normalized_backend_kind())
             && let Some(base_url) = provider.backend_base_url()
         {
             let should_heal_base_url = backend.base_url.as_deref().is_none_or(str::is_empty)
                 || (provider == LoginProvider::OpenAi
-                    && backend
-                        .base_url
-                        .as_deref()
-                        .map(|url| url.trim_end_matches('/') == "https://chatgpt.com/backend-api")
-                        .unwrap_or(false));
+                    && backend.base_url.as_deref().is_some_and(|url| {
+                        meerkat_core::provider_matrix::openai::OpenAiBackendKind::is_legacy_chatgpt_base_url(url)
+                    }));
             if should_heal_base_url {
                 backend.base_url = Some(base_url.to_string());
                 changed = true;
@@ -4816,6 +4839,7 @@ fn ensure_cli_interactive_oauth_config(provider: LoginProvider, config: &mut Con
                 auth_profile: auth_profile_id.to_string(),
                 default_model: Some(provider.sample_model().to_string()),
                 policy: meerkat_core::BindingPolicy::default(),
+                provider_default: false,
             },
         );
         changed = true;
@@ -4861,6 +4885,7 @@ fn resolve_configured_cli_interactive_oauth_target(
         binding: meerkat_core::BindingId::parse(binding_id)
             .map_err(|e| anyhow::anyhow!("invalid binding id '{binding_id}': {e}"))?,
         profile: None,
+        origin: meerkat_core::connection::BindingOrigin::Configured,
     };
     let (_, backend_profile, auth_profile) =
         realm_set.lookup_auth_binding(&auth_binding).map_err(|e| {
@@ -4911,6 +4936,7 @@ fn auth_binding_from_token_key(key: &meerkat_providers::auth_store::TokenKey) ->
         realm: key.realm.clone(),
         binding: key.binding.clone(),
         profile: key.profile.clone(),
+        origin: meerkat_core::connection::BindingOrigin::Configured,
     }
 }
 
@@ -5653,6 +5679,7 @@ async fn interactive_logout(profile_id: &str, scope: &RuntimeScope) -> anyhow::R
                 realm: key.realm.clone(),
                 binding: key.binding.clone(),
                 profile: key.profile.clone(),
+                origin: meerkat_core::connection::BindingOrigin::Configured,
             };
             meerkat_core::clear_tokens_and_publish_lifecycle_released(
                 store.as_ref(),
@@ -5968,6 +5995,7 @@ fn doctor_legacy_self_hosted_connection(
         auth_profile: auth.id.clone(),
         default_model: None,
         policy: Default::default(),
+        provider_default: false,
     };
 
     let mut backends = std::collections::BTreeMap::new();
@@ -5979,7 +6007,7 @@ fn doctor_legacy_self_hosted_connection(
 
     Ok((
         meerkat_core::RealmConnectionSet {
-            realm_id: SELF_HOSTED_LEGACY_REALM_ID.to_string(),
+            realm_id: realm_id.clone(),
             backends,
             auth_profiles,
             bindings,
@@ -5989,6 +6017,7 @@ fn doctor_legacy_self_hosted_connection(
             realm: realm_id,
             binding: binding_id,
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         },
     ))
 }
@@ -7369,6 +7398,7 @@ fn cli_terminal_pre_turn_context_appends(
             idempotency_key: Some(append.key.clone()),
             accepted_at,
             source_kind: meerkat_core::session::SystemContextSource::Normal,
+            peer_response_terminal: None,
         })
         .collect()
 }
@@ -8727,7 +8757,7 @@ async fn run_agent(
             workgraph_tools: None,
             mob_tool_authority_context: None,
             preload_skills,
-            realm_id: Some(scope.locator.realm.as_str().to_owned()),
+            realm_id: Some(scope.locator.realm.clone()),
             instance_id: scope.instance_id.clone(),
             backend: Some(manifest.backend.as_str().to_string()),
             config_generation: None,
@@ -8755,6 +8785,7 @@ async fn run_agent(
             blob_store_override: None,
             mob_tools: mob_tools_factory,
             auth_binding,
+            mob_member_binding: None,
         };
         build.apply_generated_create_only_mob_operator_access(
             meerkat_core::ToolCategoryOverride::from_effective(effective_mob),
@@ -9393,7 +9424,8 @@ async fn resume_session_with_llm_override(
         let recovery_overrides = meerkat_core::session_recovery::SurfaceSessionRecoveryOverrides {
             model: model_override,
             provider: provider.map(Provider::as_core),
-            provider_params: merged_provider_params,
+            provider_params: merged_provider_params
+                .map(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set),
             max_tokens,
             system_prompt,
             output_schema: parsed_output_schema,
@@ -9415,7 +9447,7 @@ async fn resume_session_with_llm_override(
             session,
             &recovery_overrides,
             meerkat_core::session_recovery::SurfaceSessionRecoveryContext {
-                realm_id: Some(scope.locator.realm.as_str().to_owned()),
+                realm_id: Some(scope.locator.realm.clone()),
                 instance_id: scope.instance_id.clone(),
                 backend: Some(manifest.backend.as_str().to_string()),
                 config_generation: stored_metadata.config_generation,
@@ -10104,6 +10136,15 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
 
+        // Schedule specs carry the realm as a plain slug string; parse it once
+        // at this ingest boundary into the typed carrier.
+        let realm_id = create
+            .realm_id
+            .as_deref()
+            .map(meerkat_core::RealmId::parse)
+            .transpose()
+            .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
+
         let build = SessionBuildOptions {
             provider: create.provider,
             output_schema: create.output_schema.clone(),
@@ -10115,7 +10156,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             preload_skills: materialized_preload_skills(&create.preload_skills),
             additional_instructions: (!create.additional_instructions.is_empty())
                 .then(|| create.additional_instructions.clone()),
-            realm_id: create.realm_id.clone(),
+            realm_id,
             instance_id: create.instance_id.clone(),
             backend: create.backend.clone(),
             keep_alive: create.keep_alive,
@@ -13470,7 +13511,7 @@ mod tests {
     #[test]
     fn cli_context_system_notice_projects_via_typed_notice() {
         let blocks = vec![meerkat_core::types::SystemNoticeBlock::Comms {
-            kind: "response_terminal".to_string(),
+            kind: meerkat_core::types::CommsNoticeKind::ResponseTerminal,
             direction: meerkat_core::types::SystemNoticeDirection::Incoming,
             peer: None,
             request_id: Some("req-1".to_string()),
@@ -13552,6 +13593,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").expect("realm id parses"),
             binding: meerkat_core::BindingId::parse("default_openai").expect("binding id parses"),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let tokens = PersistedTokens {
             auth_mode: PersistedAuthMode::ApiKey,
@@ -13869,6 +13911,7 @@ mod tests {
                 auth_profile: "openai_oauth".into(),
                 default_model: None,
                 policy: meerkat_core::BindingPolicy::default(),
+                provider_default: false,
             },
         );
         section.default_binding = Some("openai_oauth".into());
@@ -13967,6 +14010,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").expect("realm id parses"),
             binding: meerkat_core::BindingId::parse("openai_oauth").expect("binding id parses"),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         }
     }
 
@@ -14858,8 +14902,8 @@ default_model = "gemma"
             ]))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {
@@ -15546,6 +15590,7 @@ default_model = "gemma"
             realm: meerkat_core::RealmId::parse("test").expect("valid realm"),
             binding: meerkat_core::BindingId::parse("default").expect("valid binding"),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let auth_binding_err = run_resume_probe_error(
             "resume-auth-binding",
@@ -18946,6 +18991,7 @@ capabilities = ["definitely_missing_capability"]
             realm: meerkat_core::RealmId::parse("dev").expect("realm id parses"),
             binding: meerkat_core::BindingId::parse("default_openai").expect("binding id parses"),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let provider = meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
         let redirect_uri = "http://127.0.0.1:1455/callback";
@@ -19010,6 +19056,7 @@ capabilities = ["definitely_missing_capability"]
             realm: meerkat_core::RealmId::parse("dev").expect("realm id parses"),
             binding: meerkat_core::BindingId::parse("default_openai").expect("binding id parses"),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(&auth_binding);
         bindings
@@ -19888,6 +19935,7 @@ supports_reasoning = true
                 auth_profile: "google_oauth".to_string(),
                 default_model: Some("gemini-3.1-flash-lite-preview".to_string()),
                 policy: meerkat_core::BindingPolicy::default(),
+                provider_default: false,
             },
         );
         config.realm.insert("dev".to_string(), section);
@@ -19895,6 +19943,7 @@ supports_reasoning = true
             realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
             binding: meerkat_core::BindingId::parse("google_oauth").expect("valid binding"),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let selection = resolve_cli_auth_binding_selection(&config, &auth_binding)
             .expect("auth binding resolves");

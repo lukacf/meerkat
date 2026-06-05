@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use meerkat_core::connection::AuthBindingRef;
+use meerkat_core::connection::{AuthBindingRef, BindingOrigin};
 use meerkat_core::lifecycle::run_primitive::{
     AnthropicProviderTag, GeminiProviderTag, KeepAliveMode, KeepAlivePolicy, ModelId,
     OpenAiProviderTag, PeerResponseTerminalApplyIntent, ProviderParamsOverride, ProviderTag,
@@ -56,6 +56,7 @@ fn sample_metadata() -> RuntimeTurnMetadata {
             binding: meerkat_core::connection::BindingId::parse("default_anthropic")
                 .expect("valid binding"),
             profile: None,
+            origin: BindingOrigin::Configured,
         })),
         keep_alive: Some(KeepAlivePolicy {
             ttl: Duration::from_secs(60),
@@ -157,6 +158,7 @@ fn set_overrides_round_trip_with_explicit_action() {
         realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
         binding: meerkat_core::connection::BindingId::parse("default").expect("valid binding"),
         profile: None,
+        origin: BindingOrigin::Configured,
     };
     let meta = RuntimeTurnMetadata {
         provider_params: Some(TurnMetadataOverride::Set(provider_params.clone())),
@@ -343,6 +345,7 @@ fn merge_scalar_conflict_refuses_auth_binding() {
             realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
             binding: meerkat_core::connection::BindingId::parse("a").expect("valid binding"),
             profile: None,
+            origin: BindingOrigin::Configured,
         })),
         ..Default::default()
     };
@@ -351,6 +354,7 @@ fn merge_scalar_conflict_refuses_auth_binding() {
             realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
             binding: meerkat_core::connection::BindingId::parse("b").expect("valid binding"),
             profile: None,
+            origin: BindingOrigin::Configured,
         })),
         ..Default::default()
     };
@@ -395,6 +399,7 @@ fn merge_refuses_auth_binding_set_and_clear() {
         realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
         binding: meerkat_core::connection::BindingId::parse("default").expect("valid binding"),
         profile: None,
+        origin: BindingOrigin::Configured,
     };
     let mut left = RuntimeTurnMetadata {
         auth_binding: Some(TurnMetadataOverride::Set(auth_binding.clone())),

@@ -26,6 +26,7 @@ mod tests {
             realm: RealmId::parse("default").expect("default realm id"),
             binding: BindingId::parse("default_openai").expect("default openai binding"),
             profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
         }
     }
 
@@ -118,8 +119,8 @@ mod tests {
             Box::pin(futures::stream::iter(events))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {

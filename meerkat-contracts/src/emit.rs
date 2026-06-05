@@ -1995,19 +1995,73 @@ mod tests {
             "output_schema",
             "structured_output_retries",
             "provider_params",
-            "clear_provider_params",
             "auth_binding",
-            "clear_auth_binding",
         ] {
             assert!(
                 properties.contains_key(field),
                 "mob/turn_start params missing explicit turn override field {field}"
             );
         }
-        assert_eq!(
-            turn_start.get("additionalProperties"),
-            Some(&serde_json::Value::Bool(false)),
-            "mob/turn_start params must fail closed instead of accepting arbitrary flattened overrides"
+        // The legacy `clear_*: bool` split is gone: `provider_params` and
+        // `auth_binding` now carry the tri-state `WireTurnMetadataOverride`
+        // shape (a oneOf with a `set`/`clear` `action` discriminant). Confirm
+        // the `clear_*` siblings are no longer emitted and that each override
+        // property resolves to that tagged shape.
+        for legacy in ["clear_provider_params", "clear_auth_binding"] {
+            assert!(
+                !properties.contains_key(legacy),
+                "mob/turn_start params must not expose retired split field {legacy}"
+            );
+        }
+        let defs = turn_start
+            .pointer("/$defs")
+            .and_then(serde_json::Value::as_object)
+            .expect("MobTurnStartParams schema must expose $defs");
+        for field in ["provider_params", "auth_binding"] {
+            let ref_path = properties[field]
+                .pointer("/anyOf/0/$ref")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("{field} must reference a tri-state override schema"));
+            let def_name = ref_path.strip_prefix("#/$defs/").unwrap_or_else(|| {
+                panic!("{field} override $ref must point into $defs: {ref_path}")
+            });
+            let override_schema = defs
+                .get(def_name)
+                .unwrap_or_else(|| panic!("override def {def_name} must be emitted"));
+            let variants = override_schema
+                .pointer("/oneOf")
+                .and_then(serde_json::Value::as_array)
+                .unwrap_or_else(|| panic!("{field} override must be a oneOf tri-state"));
+            let actions: Vec<&str> = variants
+                .iter()
+                .filter_map(|variant| {
+                    variant
+                        .pointer("/properties/action/const")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .collect();
+            assert!(
+                actions.contains(&"set") && actions.contains(&"clear"),
+                "{field} override must expose set/clear `action` discriminant, got {actions:?}"
+            );
+        }
+        // `MobTurnStartParams` now folds the legacy split form via a custom
+        // `Deserialize` over an internal `deny_unknown_fields` shadow struct, so
+        // the derived schema no longer carries a top-level
+        // `additionalProperties: false` annotation. The fail-closed guarantee is
+        // preserved at the deserializer instead: arbitrary flattened overrides
+        // are rejected at the serde boundary.
+        let unknown = serde_json::json!({
+            "mob_id": "m1",
+            "agent_identity": "w1",
+            "prompt": "continue",
+            "unexpected_override": true
+        });
+        let err = serde_json::from_value::<crate::wire::MobTurnStartParams>(unknown)
+            .expect_err("mob/turn_start params must fail closed on unknown overrides");
+        assert!(
+            err.to_string().contains("unknown field"),
+            "unexpected error: {err}"
         );
 
         fs::remove_dir_all(&output_dir).unwrap();

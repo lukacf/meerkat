@@ -2067,7 +2067,7 @@ mod tests {
                 kind: meerkat_core::types::SystemNoticeKind::Comms,
                 body: Some("Peer message".to_string()),
                 blocks: vec![meerkat_core::types::SystemNoticeBlock::Comms {
-                    kind: "message".to_string(),
+                    kind: meerkat_core::types::CommsNoticeKind::Message,
                     direction: meerkat_core::types::SystemNoticeDirection::Incoming,
                     peer: None,
                     request_id: None,
@@ -2538,12 +2538,13 @@ mod tests {
                 data: "abc123".into(),
             },
         ];
+        let peer_id = "018f6f79-7a82-7c4e-a552-a3b86f963001";
         let input = Input::Peer(PeerInput {
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
-                    peer_id: "p".into(),
+                    peer_id: peer_id.into(),
                     display_identity: None,
                     runtime_id: None,
                 },
@@ -2575,7 +2576,10 @@ mod tests {
                 else {
                     return Err("expected comms block".into());
                 };
-                assert_eq!(peer.as_ref().map(|peer| peer.id.as_str()), Some("p"));
+                assert_eq!(
+                    peer.as_ref().map(|peer| peer.id),
+                    Some(meerkat_core::comms::PeerId::parse(peer_id).expect("valid peer id"))
+                );
                 assert_eq!(content, &blocks);
             }
             other => return Err(format!("expected typed content, got {other:?}")),
@@ -2594,12 +2598,13 @@ mod tests {
                 data: "abc123".into(),
             },
         ];
+        let peer_id = "018f6f79-7a82-7c4e-a552-a3b86f963002";
         let input = Input::Peer(PeerInput {
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
-                    peer_id: "peer-1".into(),
+                    peer_id: peer_id.into(),
                     display_identity: None,
                     runtime_id: None,
                 },
@@ -2629,7 +2634,10 @@ mod tests {
                 else {
                     return Err("expected comms block".into());
                 };
-                assert_eq!(peer.as_ref().map(|peer| peer.id.as_str()), Some("peer-1"));
+                assert_eq!(
+                    peer.as_ref().map(|peer| peer.id),
+                    Some(meerkat_core::comms::PeerId::parse(peer_id).expect("valid peer id"))
+                );
                 assert_eq!(content, &blocks);
             }
             other => return Err(format!("expected typed content, got {other:?}")),
@@ -2644,12 +2652,13 @@ mod tests {
             media_type: "image/png".into(),
             data: "abc123".into(),
         }];
+        let peer_id = "018f6f79-7a82-7c4e-a552-a3b86f963003";
         let input = Input::Peer(PeerInput {
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
-                    peer_id: "peer-1".into(),
+                    peer_id: peer_id.into(),
                     display_identity: None,
                     runtime_id: None,
                 },
@@ -2679,7 +2688,10 @@ mod tests {
                 else {
                     return Err("expected comms block".into());
                 };
-                assert_eq!(peer.as_ref().map(|peer| peer.id.as_str()), Some("peer-1"));
+                assert_eq!(
+                    peer.as_ref().map(|peer| peer.id),
+                    Some(meerkat_core::comms::PeerId::parse(peer_id).expect("valid peer id"))
+                );
                 assert_eq!(content, &blocks);
             }
             other => return Err(format!("expected typed content, got {other:?}")),
@@ -2693,12 +2705,13 @@ mod tests {
             media_type: "image/png".into(),
             data: "abc123".into(),
         }];
+        let peer_id = "018f6f79-7a82-7c4e-a552-a3b86f963004";
         let input = Input::Peer(PeerInput {
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
-                    peer_id: "peer-1".into(),
+                    peer_id: peer_id.into(),
                     display_identity: None,
                     runtime_id: None,
                 },
@@ -2728,7 +2741,10 @@ mod tests {
                 else {
                     return Err("expected comms block".into());
                 };
-                assert_eq!(peer.as_ref().map(|peer| peer.id.as_str()), Some("peer-1"));
+                assert_eq!(
+                    peer.as_ref().map(|peer| peer.id),
+                    Some(meerkat_core::comms::PeerId::parse(peer_id).expect("valid peer id"))
+                );
                 assert_eq!(
                     content.first(),
                     Some(&meerkat_core::types::ContentBlock::Text {

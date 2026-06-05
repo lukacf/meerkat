@@ -135,9 +135,9 @@ pub use peer_correlation::{
 pub use peer_meta::PeerMeta;
 pub use placement::{ExecutionPlacement, ExecutionPlacementIdentity, PlacementError};
 pub use surface_metadata::{
-    MEERKAT_METADATA_PREFIX, RESERVED_MOB_LABEL_KEYS, RuntimeMetadata, SurfaceMetadata,
-    SurfaceMetadataError, is_reserved_meerkat_label_key, is_reserved_meerkat_metadata_key,
-    validate_public_app_context, validate_public_labels,
+    MEERKAT_METADATA_PREFIX, RESERVED_MOB_LABEL_KEYS, ReservedMetadataKey, RuntimeMetadata,
+    SurfaceMetadata, SurfaceMetadataError, is_reserved_meerkat_label_key,
+    is_reserved_meerkat_metadata_key, validate_public_app_context, validate_public_labels,
 };
 
 pub use completion_feed::{
@@ -269,18 +269,19 @@ pub use service::{
 pub use session::{
     AuthorizedSessionToolVisibilityState, ConsumedDeferredTurnInputs, DeferredFirstTurnPhase,
     DeferredToolLoadAuthority, InheritedToolVisibilityAuthority, PendingDeferredPrompt,
-    PendingSystemContextAppend, PendingToolResultsMessage, SESSION_BUILD_STATE_KEY,
-    SESSION_DEFERRED_TURN_STATE_KEY, SESSION_METADATA_SCHEMA_VERSION,
-    SESSION_SYSTEM_CONTEXT_STATE_KEY, SESSION_TOOL_VISIBILITY_STATE_KEY,
-    SESSION_TRANSCRIPT_HISTORY_STATE_KEY, SESSION_VERSION, SYSTEM_CONTEXT_SEPARATOR,
-    SeenSystemContextKey, SeenSystemContextState, Session, SessionBuildState,
-    SessionDeferredTurnState, SessionLlmIdentity, SessionLlmIdentityOverride,
-    SessionLlmIdentityOverrideError, SessionLlmRequestPolicy, SessionMeta, SessionMetadata,
-    SessionSystemContextState, SessionToolVisibilityState, SessionTooling, SystemContextStageError,
-    SystemContextStateHandle, ToolCategoryOverride, ToolVisibilityWitness, TranscriptHistoryState,
-    TranscriptRevisionBody, TranscriptRewriteRecord, VIEW_IMAGE_TOOL_NAME, WitnessedToolFilter,
-    capability_base_filter_for_image_tool_results, resolve_session_llm_identity_override,
-    session_metadata_schema_version, session_version, transcript_messages_digest,
+    PendingSystemContextAppend, PendingToolResultsMessage, SESSION_ARCHIVED_LEGACY_KEY,
+    SESSION_BUILD_STATE_KEY, SESSION_DEFERRED_TURN_STATE_KEY, SESSION_LIFECYCLE_TERMINAL_KEY,
+    SESSION_METADATA_SCHEMA_VERSION, SESSION_SYSTEM_CONTEXT_STATE_KEY,
+    SESSION_TOOL_VISIBILITY_STATE_KEY, SESSION_TRANSCRIPT_HISTORY_STATE_KEY, SESSION_VERSION,
+    SYSTEM_CONTEXT_SEPARATOR, SeenSystemContextKey, SeenSystemContextState, Session,
+    SessionBuildState, SessionDeferredTurnState, SessionLifecycleTerminal, SessionLlmIdentity,
+    SessionLlmIdentityOverride, SessionLlmIdentityOverrideError, SessionLlmRequestPolicy,
+    SessionMeta, SessionMetadata, SessionSystemContextState, SessionToolVisibilityState,
+    SessionTooling, SystemContextStageError, SystemContextStateHandle, ToolCategoryOverride,
+    ToolVisibilityWitness, TranscriptHistoryState, TranscriptRevisionBody, TranscriptRewriteRecord,
+    VIEW_IMAGE_TOOL_NAME, WitnessedToolFilter, capability_base_filter_for_image_tool_results,
+    resolve_session_llm_identity_override, session_metadata_schema_version, session_version,
+    transcript_messages_digest,
 };
 pub use session_recovery::{
     BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RecoveredSessionBuild, SurfaceSessionRecoveryContext,
@@ -311,10 +312,10 @@ pub use turn_execution_authority::{
     TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
 };
 pub use types::{
-    ArtifactRef, AssistantBlock, AssistantMessage, BlockAssistantMessage, ContentBlock,
-    ContentInput, ExtractionError, HandlingMode, ImageData, Message, OutputSchema, ProviderMeta,
-    RunResult, SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, SessionId, StopReason, SystemMessage,
-    SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage,
+    ArtifactRef, AssistantBlock, AssistantMessage, BlockAssistantMessage, CommsNoticeKind,
+    ContentBlock, ContentInput, ExtractionError, HandlingMode, ImageData, Message, OutputSchema,
+    ProviderMeta, RunResult, SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, SessionId, StopReason,
+    SystemMessage, SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage,
     SystemNoticePeer, SystemPromptMutationKind, ToolCall, ToolCallIter, ToolCallView, ToolDef,
     ToolIdentity, ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind,
     TranscriptSource, TranscriptUserRole, Usage, UserMessage, VideoData,
@@ -333,7 +334,7 @@ pub use auth::{
     ProviderAuthMetadata, PublishedAuthStatus, RefreshFailureObservation, ResolvedAuthEnvelope,
     ResolvedAuthKind, TokenLifecycleClearError, clear_tokens_and_publish_lifecycle_released,
     lease_snapshot_expires_at_datetime, mark_tokens_lifecycle_published_for_transition,
-    oauth_status_projection_snapshot_from_newer_marker,
+    oauth_status_projection_snapshot_from_newer_marker, persisted_auth_mode_is_directly_creatable,
     persisted_auth_mode_uses_oauth_login_lifecycle, persisted_token_expires_at_epoch_secs,
     project_published_auth_status, publish_token_lifecycle_acquired,
     publish_token_lifecycle_released, restore_token_lifecycle_snapshot,
@@ -347,9 +348,10 @@ pub use auth::{
 };
 pub use connection::{
     AuthBindingRef, AuthProfile, AuthProfileConfig, BackendProfile, BackendProfileConfig,
-    BindingId, BindingPolicy, ConnectionTargetError, CredentialSourceSpec, IdentityError,
-    ProfileId, ProviderBinding, ProviderBindingConfig, ProviderBindingError, RealmConfigSection,
-    RealmConnectionSet, RealmId, ResolvedConnectionTarget,
+    BindingId, BindingOrigin, BindingPolicy, ConnectionTargetError, CredentialSourceSpec,
+    IdentityError, MemberCommsName, MemberCommsNameError, MobMemberBinding, PeerRole, ProfileId,
+    ProviderBinding, ProviderBindingConfig, ProviderBindingError, RealmConfigSection,
+    RealmConnectionSet, RealmId, ResolvedConnectionTarget, mob_realm_id,
     resolve_auth_binding_candidates_for_provider, resolve_auth_binding_or_default_for_provider,
     resolve_realm_binding_target_for_provider,
 };

@@ -57,7 +57,7 @@ use meerkat_core::session_document::{
     SessionDocumentMachineAuthority,
 };
 use meerkat_core::types::{RunResult, SessionId, ToolResult};
-use meerkat_core::{DeferredFirstTurnPhase, SessionDeferredTurnState};
+use meerkat_core::{DeferredFirstTurnPhase, SessionDeferredTurnState, SessionLifecycleTerminal};
 use meerkat_core::{InputId, RunId};
 use meerkat_runtime::identifiers::LogicalRuntimeId;
 #[cfg(test)]
@@ -84,7 +84,11 @@ use crate::projector::SessionProjector;
 /// wave-c plan) resolves unchanged.
 pub use crate::migrations;
 
-const SESSION_ARCHIVED_KEY: &str = "session_archived";
+/// Legacy raw-bool archival key, owned by `meerkat-core`. Only referenced by
+/// test fixtures that exercise the typed-owner legacy back-read; production no
+/// longer writes it (the producer uses `Session::set_lifecycle_terminal`).
+#[cfg(test)]
+use meerkat_core::SESSION_ARCHIVED_LEGACY_KEY as SESSION_ARCHIVED_KEY;
 
 fn runtime_driver_error_to_session_error(err: meerkat_runtime::RuntimeDriverError) -> SessionError {
     SessionError::Agent(AgentError::InternalError(err.to_string()))
@@ -266,8 +270,7 @@ fn runtime_backed_store_projection_can_recover_authority(session: &Session) -> b
 fn is_durable_session_sync_unsupported(err: &SessionError) -> bool {
     matches!(
         err,
-        SessionError::Agent(AgentError::ConfigError(message))
-            if message.contains("durable session snapshot synchronization is not supported")
+        SessionError::Agent(AgentError::DurableSnapshotSyncUnsupported)
     )
 }
 
@@ -1277,11 +1280,15 @@ fn view_from_authoritative_session(session: &Session) -> SessionView {
     }
 }
 
-fn metadata_marks_archived(metadata: &serde_json::Map<String, serde_json::Value>) -> bool {
-    metadata
-        .get(SESSION_ARCHIVED_KEY)
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
+/// Whether the session's typed lifecycle-terminal owner marks it archived.
+///
+/// Reads the typed [`Session::lifecycle_terminal`] fact, which itself folds the
+/// legacy raw `session_archived: true` bool for sessions persisted before the
+/// typed owner existed. This is the standalone-path terminality authority.
+fn session_marks_archived(session: &Session) -> bool {
+    session
+        .lifecycle_terminal()
+        .is_some_and(SessionLifecycleTerminal::is_archived)
 }
 
 enum LiveSessionAuthority {
@@ -1462,13 +1469,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         session: &Session,
     ) -> Result<bool, SessionError> {
         let Some(runtime_store) = self.runtime_store.as_ref() else {
-            return Ok(metadata_marks_archived(session.metadata()));
+            return Ok(session_marks_archived(session));
         };
 
         match Self::load_runtime_state_for_session(runtime_store, id).await? {
             Some(RuntimeState::Retired) => Ok(true),
             Some(_) => Ok(false),
-            None if metadata_marks_archived(session.metadata()) => {
+            None if session_marks_archived(session) => {
                 Err(SessionError::Agent(AgentError::InternalError(format!(
                     "runtime-backed archived projection for session {id} is missing machine lifecycle state"
                 ))))
@@ -3984,6 +3991,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         source: append.source,
                         idempotency_key: append.idempotency_key,
                         source_kind: append.source_kind,
+                        peer_response_terminal: append.peer_response_terminal,
                     },
                     append.accepted_at,
                 )
@@ -5076,7 +5084,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let mut saved_archived_snapshot = false;
         if let Some(session) = archived_snapshot.clone() {
             let mut session = session;
-            session.set_metadata(SESSION_ARCHIVED_KEY, serde_json::Value::Bool(true));
+            if let Err(err) = session.set_lifecycle_terminal(SessionLifecycleTerminal::Archived) {
+                if let Some(ref mut guard) = gate_guard {
+                    **guard = false;
+                }
+                return Err(SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to mark session {id} archived: {err}"
+                ))));
+            }
             match self.save_compatibility_projection_only(session).await {
                 Ok(_) => {
                     saved_archived_snapshot = true;
@@ -5448,10 +5463,9 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceHistoryExt for PersistentSe
                 "failed to read transcript head revision: {err}"
             )))
         })?;
-        let revision = if query.revision == "current" {
-            head_revision.clone()
-        } else {
-            query.revision
+        let revision = match meerkat_contracts::RevisionSelector::parse(query.revision) {
+            meerkat_contracts::RevisionSelector::Current => head_revision.clone(),
+            meerkat_contracts::RevisionSelector::Specific(id) => id.into_string(),
         };
         let has_transcript_history_state = session
             .transcript_history_state()
@@ -6128,6 +6142,22 @@ mod tests {
         Arc::new(MemoryBlobStore::new())
     }
 
+    #[test]
+    fn durable_sync_unsupported_matches_typed_variant_not_substring() {
+        // Typed variant from the default SessionAgent capability is detected.
+        let unsupported = SessionError::Agent(AgentError::DurableSnapshotSyncUnsupported);
+        assert!(is_durable_session_sync_unsupported(&unsupported));
+
+        // An unrelated ConfigError (even one whose text happens to mention the
+        // phrase) must NOT be classified as unsupported — the predicate is
+        // typed, not substring-based.
+        let config_error = SessionError::Agent(AgentError::ConfigError(
+            "durable session snapshot synchronization is not supported by this session agent"
+                .to_string(),
+        ));
+        assert!(!is_durable_session_sync_unsupported(&config_error));
+    }
+
     struct RecordingEventStore {
         events: Mutex<HashMap<SessionId, Vec<StoredEvent>>>,
         notify: tokio::sync::Notify,
@@ -6624,8 +6654,7 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionStore for BlockingArchiveSaveStore {
         async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
-            if self.block_archived_saves.load(Ordering::Acquire)
-                && metadata_marks_archived(session.metadata())
+            if self.block_archived_saves.load(Ordering::Acquire) && session_marks_archived(session)
             {
                 self.entered_archived_save.notify_waiters();
                 self.release_archived_save.notified().await;
@@ -7135,6 +7164,7 @@ mod tests {
                         backend: None,
                         config_generation: None,
                         auth_binding: None,
+                        mob_member_binding: None,
                     });
             metadata.apply_llm_identity(&identity);
             session.set_session_metadata(metadata).map_err(|err| {
@@ -8196,6 +8226,7 @@ mod tests {
                         backend: None,
                         config_generation: None,
                         auth_binding: None,
+                        mob_member_binding: None,
                     });
             metadata.apply_llm_identity(&identity);
             session.set_session_metadata(metadata).map_err(|err| {
@@ -8489,6 +8520,7 @@ mod tests {
                         backend: None,
                         config_generation: None,
                         auth_binding: None,
+                        mob_member_binding: None,
                     });
             metadata.apply_llm_identity(&identity);
             session.set_session_metadata(metadata).map_err(|err| {
@@ -8785,6 +8817,7 @@ mod tests {
                     source: append.source,
                     idempotency_key: append.idempotency_key,
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
                 append.accepted_at,
             )
@@ -10481,6 +10514,7 @@ mod tests {
             idempotency_key: Some("peer_response_terminal:test:req".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: meerkat_core::time_compat::SystemTime::now(),
+            peer_response_terminal: None,
         }];
         req.runtime.turn_metadata = Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
@@ -10618,6 +10652,7 @@ mod tests {
                     idempotency_key: Some("deferred-context-only-apply".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                    peer_response_terminal: None,
                 }],
                 vec![InputId::new()],
             )
@@ -10714,6 +10749,7 @@ mod tests {
                     idempotency_key: Some("deferred-reserved-context-apply".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                    peer_response_terminal: None,
                 }],
                 RunApplyBoundary::Immediate,
                 vec![InputId::new()],
@@ -11183,6 +11219,7 @@ mod tests {
                     idempotency_key: Some("req-123".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
+                                    peer_response_terminal: None,
                 },
             ))
             .expect("set durable system context state");
@@ -11252,6 +11289,7 @@ mod tests {
                     idempotency_key: Some("req-123".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
+                                    peer_response_terminal: None,
                 },
             ))
             .expect("set durable system context state");
@@ -11343,7 +11381,7 @@ mod tests {
             .expect("compatibility projection load should succeed")
             .expect("archive should persist the compatibility projection");
         assert!(
-            metadata_marks_archived(archived_projection.metadata()),
+            session_marks_archived(&archived_projection),
             "archive should mirror retired lifecycle into the compatibility projection"
         );
         assert_eq!(
@@ -11602,7 +11640,7 @@ mod tests {
             "archive must persist the compacted revision as durable truth"
         );
         assert!(
-            metadata_marks_archived(archived.metadata()),
+            session_marks_archived(&archived),
             "archive should mirror the retired lifecycle into the projection"
         );
         assert_eq!(
@@ -11797,6 +11835,7 @@ mod tests {
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-persistent-archive".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
             )
             .await
@@ -14317,6 +14356,7 @@ mod tests {
                     idempotency_key: Some("ctx-capacity".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                    peer_response_terminal: None,
                 }],
                 vec![InputId::new()],
             )
@@ -14343,6 +14383,7 @@ mod tests {
                     idempotency_key: Some("ctx-capacity-after-archive".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                    peer_response_terminal: None,
                 }],
                 vec![InputId::new()],
             )
@@ -14737,7 +14778,7 @@ mod tests {
             .await
             .expect("load archived snapshot")
             .expect("archived snapshot should exist");
-        assert!(metadata_marks_archived(stored.metadata()));
+        assert!(session_marks_archived(&stored));
 
         let stale_resume_for_authorized = stale_resume.clone();
         let rejected = service.create_session(resume_request(stale_resume)).await;
@@ -14896,6 +14937,7 @@ mod tests {
                         idempotency_key: Some("archive-race".to_string()),
                         source_kind: meerkat_core::session::SystemContextSource::Normal,
                         accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                        peer_response_terminal: None,
                     }],
                     vec![meerkat_core::lifecycle::InputId::new()],
                 )
@@ -15327,6 +15369,7 @@ mod tests {
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-persistent-live".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
             )
             .await
@@ -15377,6 +15420,7 @@ mod tests {
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-save-failure".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
             )
             .await
@@ -15426,6 +15470,7 @@ mod tests {
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-export-merge".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
                 meerkat_core::time_compat::SystemTime::now(),
             )
@@ -15466,6 +15511,7 @@ mod tests {
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-unknown".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
             )
             .await
@@ -15947,6 +15993,7 @@ mod tests {
                     source: Some("test".to_string()),
                     idempotency_key: Some("control-projection-failure".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
             )
             .await
@@ -16122,6 +16169,7 @@ mod tests {
                     source: Some("test".to_string()),
                     idempotency_key: Some("runtime-backed-ctx".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
             )
             .await
@@ -16173,6 +16221,7 @@ mod tests {
                     idempotency_key: Some("uncommitted".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                    peer_response_terminal: None,
                 }],
             )
             .await
@@ -16186,6 +16235,7 @@ mod tests {
                     source: Some("api".to_string()),
                     idempotency_key: Some("durable-pending".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
             )
             .await
@@ -16251,6 +16301,7 @@ mod tests {
                     source: Some("api".to_string()),
                     idempotency_key: Some("no-receipt-control-snapshot".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
             )
             .await
@@ -16344,6 +16395,7 @@ mod tests {
                     source: Some("api".to_string()),
                     idempotency_key: Some("runtime-base".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
             )
             .await
@@ -16411,6 +16463,7 @@ mod tests {
                     source: Some("api".to_string()),
                     idempotency_key: Some("persisted-runtime-append".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
             )
             .await
@@ -17422,6 +17475,7 @@ mod tests {
                     source: Some("api".to_string()),
                     idempotency_key: Some("store-base".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
             )
             .await
@@ -17589,6 +17643,7 @@ mod tests {
                         source: Some("api".to_string()),
                         idempotency_key: Some(format!("store-only-{mode}-append")),
                         source_kind: meerkat_core::session::SystemContextSource::Normal,
+                        peer_response_terminal: None,
                     },
                 )
                 .await
@@ -17656,7 +17711,7 @@ mod tests {
                 "{mode} stage rejection must not mutate the store-only projection"
             );
             assert_eq!(
-                metadata_marks_archived(raw.metadata()),
+                session_marks_archived(&raw),
                 !runtime_backed,
                 "{mode} archive lifecycle metadata should reflect runtime-less compatibility support"
             );
@@ -17725,7 +17780,7 @@ mod tests {
                 .expect("raw store load should succeed")
                 .expect("store-only projection should remain present");
             assert!(
-                !metadata_marks_archived(raw.metadata()),
+                !session_marks_archived(&raw),
                 "machine-routed archive rejection must not persist archived lifecycle metadata"
             );
             assert!(
@@ -17787,11 +17842,12 @@ mod tests {
                 keep_alive: false,
                 comms_name: None,
                 peer_meta: None,
-                realm_id: Some("realm-test".to_string()),
+                realm_id: Some(meerkat_core::RealmId::parse("realm-test").unwrap()),
                 instance_id: Some("instance-test".to_string()),
                 backend: Some("sqlite".to_string()),
                 config_generation: Some(7),
                 auth_binding: None,
+                mob_member_binding: None,
             })
             .expect("session metadata should serialize");
         store
@@ -17809,6 +17865,7 @@ mod tests {
                     idempotency_key: None,
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                    peer_response_terminal: None,
                 }],
                 vec![InputId::new()],
             )
@@ -17942,6 +17999,7 @@ mod tests {
                     idempotency_key: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                                    peer_response_terminal: None,
                 }],
                 vec![InputId::new()],
             )
@@ -18042,6 +18100,7 @@ mod tests {
             ),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: meerkat_core::time_compat::SystemTime::now(),
+            peer_response_terminal: None,
         }];
 
         let output = service
@@ -18126,6 +18185,7 @@ mod tests {
                     idempotency_key: Some("test".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                    peer_response_terminal: None,
                 }],
                 vec![InputId::new()],
             )
@@ -18287,6 +18347,7 @@ mod tests {
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
         };
         session.set_session_metadata(metadata).unwrap();
         let mut req = create_request(prompt, initial_turn);

@@ -321,6 +321,35 @@ def _skill_refs_to_wire(refs: list[SkillRef] | None) -> list[dict[str, str]] | N
     ]
 
 
+def _turn_metadata_override(
+    value: Any | None,
+    clear: bool | None,
+    *,
+    set_field: str,
+    clear_field: str,
+) -> dict[str, Any] | None:
+    """Lower an ergonomic ``value`` / ``clear`` pair to the canonical tagged
+    tri-state ``WireTurnMetadataOverride``.
+
+    * ``clear`` truthy  -> ``{"action": "clear"}`` (Clear)
+    * ``value`` provided -> ``{"action": "set", "value": value}`` (Set)
+    * neither            -> ``None`` (omitted = Inherit)
+
+    The illegal ``set + clear`` combination is rejected here, mirroring the
+    wire serde boundary which fails the same payload.
+    """
+    if clear and value is not None:
+        raise MeerkatError(
+            "INVALID_ARGS",
+            f"{clear_field} cannot be combined with {set_field}",
+        )
+    if clear:
+        return {"action": "clear"}
+    if value is not None:
+        return {"action": "set", "value": value}
+    return None
+
+
 class MeerkatClient:
     """Async client that manages a Meerkat agent runtime via rkat-rpc.
 
@@ -1873,10 +1902,18 @@ class MeerkatClient:
             system_prompt=system_prompt,
             output_schema=output_schema,
             structured_output_retries=structured_output_retries,
-            provider_params=provider_params,
-            clear_provider_params=clear_provider_params,
-            auth_binding=auth_binding,
-            clear_auth_binding=clear_auth_binding,
+            provider_params=_turn_metadata_override(
+                provider_params,
+                clear_provider_params,
+                set_field="provider_params",
+                clear_field="clear_provider_params",
+            ),
+            auth_binding=_turn_metadata_override(
+                auth_binding,
+                clear_auth_binding,
+                set_field="auth_binding",
+                clear_field="clear_auth_binding",
+            ),
         )
         return await self._request("mob/turn_start", _wire_value(params))
 

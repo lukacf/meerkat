@@ -1015,6 +1015,7 @@ fn pending_system_context_appends(
             idempotency_key: Some(append.key.clone()),
             accepted_at,
             source_kind: meerkat_core::session::SystemContextSource::Normal,
+            peer_response_terminal: None,
         })
         .collect()
 }
@@ -1297,7 +1298,7 @@ async fn apply_runtime_turn(
                             bindings,
                         )),
                         require_runtime_build_mode: true,
-                        realm_id: Some(context.realm.to_string()),
+                        realm_id: Some(context.realm.clone()),
                         instance_id: context.instance_id.clone(),
                         backend: Some(context.backend.clone()),
                         config_generation: current_generation,
@@ -1548,7 +1549,7 @@ async fn apply_runtime_turn(
                         bindings,
                     )),
                     require_runtime_build_mode: true,
-                    realm_id: Some(context.realm.to_string()),
+                    realm_id: Some(context.realm.clone()),
                     instance_id: context.instance_id.clone(),
                     backend: Some(context.backend.clone()),
                     config_generation: current_generation,
@@ -4373,11 +4374,14 @@ async fn create_session_inner(
         workgraph_tools: None,
         mob_tool_authority_context: None,
         preload_skills: req.preload_skills.clone(),
-        realm_id: Some(state.realm.to_string()),
+        realm_id: Some(state.realm.clone()),
         instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
         auth_binding: None,
+        // REST is not a mob runtime. On resume the factory preserves the
+        // persisted mob_member_binding from the resumed session metadata.
+        mob_member_binding: None,
         keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
@@ -5080,6 +5084,7 @@ async fn append_system_context(
         source: req.source,
         idempotency_key: req.idempotency_key,
         source_kind: meerkat_core::session::SystemContextSource::Normal,
+        peer_response_terminal: None,
     };
     let result = state
         .session_service
@@ -5406,11 +5411,12 @@ async fn continue_session_inner(
             workgraph_tools: None,
             mob_tool_authority_context: None,
             preload_skills: None,
-            realm_id: Some(state.realm.to_string()),
+            realm_id: Some(state.realm.clone()),
             instance_id: state.instance_id.clone(),
             backend: Some(state.backend.clone()),
             config_generation: state.config_runtime.get().await.ok().map(|s| s.generation),
             auth_binding: None,
+            mob_member_binding: None,
             keep_alive,
             checkpointer: None,
             silent_comms_intents: Vec::new(),
@@ -6912,7 +6918,7 @@ mod tests {
     #[test]
     fn rest_context_system_notice_projects_via_typed_notice() {
         let blocks = vec![meerkat_core::types::SystemNoticeBlock::Comms {
-            kind: "response_terminal".to_string(),
+            kind: meerkat_core::types::CommsNoticeKind::ResponseTerminal,
             direction: meerkat_core::types::SystemNoticeDirection::Incoming,
             peer: None,
             request_id: Some("req-1".to_string()),
@@ -7035,8 +7041,8 @@ mod tests {
             ]))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {
@@ -7078,8 +7084,8 @@ mod tests {
             })
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {
@@ -7105,8 +7111,8 @@ mod tests {
             })]))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {
@@ -7267,6 +7273,7 @@ mod tests {
             binding: meerkat_core::BindingId::parse("default_openai")
                 .expect("valid binding fixture"),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let provider = meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
         let redirect_uri = "http://127.0.0.1:1455/callback";

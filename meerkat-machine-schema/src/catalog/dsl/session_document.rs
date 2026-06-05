@@ -259,8 +259,6 @@ pub enum PendingContinuationPublicTerminal {
 pub enum ResumeOverrideRejection {
     #[default]
     ProviderRequiresModel,
-    ClearAndSetProviderParams,
-    ClearAndSetAuthBinding,
     BuildOnlyAfterFirstTurn,
 }
 
@@ -552,10 +550,6 @@ machine! {
             AuthorizeSessionResumeOverrides {
                 provider_override_present: bool,
                 model_override_present: bool,
-                clear_provider_params: bool,
-                provider_params_override_present: bool,
-                clear_auth_binding: bool,
-                auth_binding_override_present: bool,
                 has_build_only_overrides: bool,
                 first_turn_phase: Enum<SessionFirstTurnPhase>,
             },
@@ -818,20 +812,6 @@ machine! {
             provider_override_present && model_override_present == false
         }
 
-        helper resume_reject_clear_and_set_provider_params(
-            clear_provider_params: bool,
-            provider_params_override_present: bool
-        ) -> bool {
-            clear_provider_params && provider_params_override_present
-        }
-
-        helper resume_reject_clear_and_set_auth_binding(
-            clear_auth_binding: bool,
-            auth_binding_override_present: bool
-        ) -> bool {
-            clear_auth_binding && auth_binding_override_present
-        }
-
         helper resume_reject_build_only_after_first_turn(
             has_build_only_overrides: bool,
             first_turn_phase: Enum<SessionFirstTurnPhase>
@@ -840,29 +820,21 @@ machine! {
                 && phase_allows_initial_turn_overrides(first_turn_phase) == false
         }
 
-        // A resume request is admissible iff none of the four reject conditions
-        // fire. Used as the guard prefix for every accept branch.
+        // A resume request is admissible iff neither reject condition fires.
+        // Used as the guard prefix for every accept branch. The illegal
+        // "clear + set" provider_params/auth_binding fourth state is no longer
+        // representable at the shell seam (it carries a single
+        // `Option<TurnMetadataOverride<T>>`), so the machine no longer observes
+        // or rejects it.
         helper resume_overrides_admissible(
             provider_override_present: bool,
             model_override_present: bool,
-            clear_provider_params: bool,
-            provider_params_override_present: bool,
-            clear_auth_binding: bool,
-            auth_binding_override_present: bool,
             has_build_only_overrides: bool,
             first_turn_phase: Enum<SessionFirstTurnPhase>
         ) -> bool {
             resume_reject_provider_requires_model(
                 provider_override_present,
                 model_override_present
-            ) == false
-            && resume_reject_clear_and_set_provider_params(
-                clear_provider_params,
-                provider_params_override_present
-            ) == false
-            && resume_reject_clear_and_set_auth_binding(
-                clear_auth_binding,
-                auth_binding_override_present
             ) == false
             && resume_reject_build_only_after_first_turn(
                 has_build_only_overrides,
@@ -2530,10 +2502,6 @@ machine! {
             on input AuthorizeSessionResumeOverrides {
                 provider_override_present,
                 model_override_present,
-                clear_provider_params,
-                provider_params_override_present,
-                clear_auth_binding,
-                auth_binding_override_present,
                 has_build_only_overrides,
                 first_turn_phase
             }
@@ -2551,79 +2519,11 @@ machine! {
             }
         }
 
-        // Reject (priority 2): clear + set provider params.
-        transition AuthorizeSessionResumeOverridesRejectClearAndSetProviderParams {
-            on input AuthorizeSessionResumeOverrides {
-                provider_override_present,
-                model_override_present,
-                clear_provider_params,
-                provider_params_override_present,
-                clear_auth_binding,
-                auth_binding_override_present,
-                has_build_only_overrides,
-                first_turn_phase
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && resume_reject_provider_requires_model(
-                    provider_override_present,
-                    model_override_present
-                ) == false
-                && resume_reject_clear_and_set_provider_params(
-                    clear_provider_params,
-                    provider_params_override_present
-                )
-            }
-            update {}
-            to Ready
-            emit SessionResumeOverridesRejected {
-                reason: ResumeOverrideRejection::ClearAndSetProviderParams
-            }
-        }
-
-        // Reject (priority 3): clear + set auth binding.
-        transition AuthorizeSessionResumeOverridesRejectClearAndSetAuthBinding {
-            on input AuthorizeSessionResumeOverrides {
-                provider_override_present,
-                model_override_present,
-                clear_provider_params,
-                provider_params_override_present,
-                clear_auth_binding,
-                auth_binding_override_present,
-                has_build_only_overrides,
-                first_turn_phase
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && resume_reject_provider_requires_model(
-                    provider_override_present,
-                    model_override_present
-                ) == false
-                && resume_reject_clear_and_set_provider_params(
-                    clear_provider_params,
-                    provider_params_override_present
-                ) == false
-                && resume_reject_clear_and_set_auth_binding(
-                    clear_auth_binding,
-                    auth_binding_override_present
-                )
-            }
-            update {}
-            to Ready
-            emit SessionResumeOverridesRejected {
-                reason: ResumeOverrideRejection::ClearAndSetAuthBinding
-            }
-        }
-
-        // Reject (priority 4): build-only overrides after the first turn started.
+        // Reject (priority 2): build-only overrides after the first turn started.
         transition AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn {
             on input AuthorizeSessionResumeOverrides {
                 provider_override_present,
                 model_override_present,
-                clear_provider_params,
-                provider_params_override_present,
-                clear_auth_binding,
-                auth_binding_override_present,
                 has_build_only_overrides,
                 first_turn_phase
             }
@@ -2632,14 +2532,6 @@ machine! {
                 && resume_reject_provider_requires_model(
                     provider_override_present,
                     model_override_present
-                ) == false
-                && resume_reject_clear_and_set_provider_params(
-                    clear_provider_params,
-                    provider_params_override_present
-                ) == false
-                && resume_reject_clear_and_set_auth_binding(
-                    clear_auth_binding,
-                    auth_binding_override_present
                 ) == false
                 && resume_reject_build_only_after_first_turn(
                     has_build_only_overrides,
@@ -2659,10 +2551,6 @@ machine! {
             on input AuthorizeSessionResumeOverrides {
                 provider_override_present,
                 model_override_present,
-                clear_provider_params,
-                provider_params_override_present,
-                clear_auth_binding,
-                auth_binding_override_present,
                 has_build_only_overrides,
                 first_turn_phase
             }
@@ -2671,10 +2559,6 @@ machine! {
                 && resume_overrides_admissible(
                     provider_override_present,
                     model_override_present,
-                    clear_provider_params,
-                    provider_params_override_present,
-                    clear_auth_binding,
-                    auth_binding_override_present,
                     has_build_only_overrides,
                     first_turn_phase
                 )
@@ -2699,10 +2583,6 @@ machine! {
             on input AuthorizeSessionResumeOverrides {
                 provider_override_present,
                 model_override_present,
-                clear_provider_params,
-                provider_params_override_present,
-                clear_auth_binding,
-                auth_binding_override_present,
                 has_build_only_overrides,
                 first_turn_phase
             }
@@ -2711,10 +2591,6 @@ machine! {
                 && resume_overrides_admissible(
                     provider_override_present,
                     model_override_present,
-                    clear_provider_params,
-                    provider_params_override_present,
-                    clear_auth_binding,
-                    auth_binding_override_present,
                     has_build_only_overrides,
                     first_turn_phase
                 )
@@ -2740,10 +2616,6 @@ machine! {
             on input AuthorizeSessionResumeOverrides {
                 provider_override_present,
                 model_override_present,
-                clear_provider_params,
-                provider_params_override_present,
-                clear_auth_binding,
-                auth_binding_override_present,
                 has_build_only_overrides,
                 first_turn_phase
             }
@@ -2752,10 +2624,6 @@ machine! {
                 && resume_overrides_admissible(
                     provider_override_present,
                     model_override_present,
-                    clear_provider_params,
-                    provider_params_override_present,
-                    clear_auth_binding,
-                    auth_binding_override_present,
                     has_build_only_overrides,
                     first_turn_phase
                 )

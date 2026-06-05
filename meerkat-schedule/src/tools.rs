@@ -430,15 +430,39 @@ fn rewrite_current_session_target(mut args: Value, current_session_id: &SessionI
     args
 }
 
+/// Tool-host-only target kinds. The `current_session` pseudo-variant is a
+/// shortcut the host injects into the tool schema; it is not part of the
+/// persisted `TargetBinding`/`SessionTargetBinding` domain. Deserializing the
+/// raw target into this closed type replaces the
+/// `target["target_kind"] == "session" && target["type"] == "current_session"`
+/// string oracle with a typed parse-at-boundary classification.
+#[derive(Deserialize)]
+#[serde(tag = "target_kind", rename_all = "snake_case")]
+enum HostTargetProbe {
+    Session(HostSessionTargetProbe),
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum HostSessionTargetProbe {
+    CurrentSession,
+    #[serde(other)]
+    Other,
+}
+
+impl HostTargetProbe {
+    fn is_current_session(&self) -> bool {
+        matches!(self, Self::Session(HostSessionTargetProbe::CurrentSession))
+    }
+}
+
 fn rewrite_current_session_target_object(target: &mut Map<String, Value>, session_id: &SessionId) {
-    let is_current_session = target
-        .get("target_kind")
-        .and_then(Value::as_str)
-        .is_some_and(|kind| kind == "session")
-        && target
-            .get("type")
-            .and_then(Value::as_str)
-            .is_some_and(|target_type| target_type == "current_session");
+    let is_current_session =
+        serde_json::from_value::<HostTargetProbe>(Value::Object(target.clone()))
+            .map(|probe| probe.is_current_session())
+            .unwrap_or(false);
 
     if !is_current_session {
         return;

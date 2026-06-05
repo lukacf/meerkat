@@ -103,6 +103,7 @@ fn config_with_realm() -> Config {
                 auth_profile: auth_id.into(),
                 default_model: None,
                 policy: Default::default(),
+                provider_default: false,
             },
         );
     }
@@ -124,6 +125,7 @@ fn conn_ref(binding: &str) -> AuthBindingRef {
         realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
         binding: meerkat_core::BindingId::parse(binding).expect("valid binding"),
         profile: None,
+        origin: meerkat_core::BindingOrigin::Configured,
     }
 }
 
@@ -155,8 +157,8 @@ impl LlmClient for MockLlmClient {
         })]))
     }
 
-    fn provider(&self) -> &'static str {
-        "mock"
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Other
     }
 
     async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {

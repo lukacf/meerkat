@@ -82,7 +82,7 @@ struct RuntimeBackedScheduleSessionHost {
 fn materialized_build_options(
     template: &SessionBuildOptions,
     create: &SessionMaterializationSpec,
-) -> SessionBuildOptions {
+) -> Result<SessionBuildOptions, ScheduleDomainError> {
     let mut build = template.clone();
     build.provider = create.provider;
     build.output_schema = create.output_schema.clone();
@@ -93,7 +93,17 @@ fn materialized_build_options(
     if !create.preload_skills.is_empty() {
         build.preload_skills = Some(create.preload_skills.clone());
     }
-    build.realm_id = create.realm_id.clone();
+    // Schedule specs carry the realm as a plain slug string; parse it once at
+    // this surface ingest boundary into the typed carrier. A malformed slug
+    // fails closed (matching the CLI/MCP/REST/RPC schedule-host boundaries) —
+    // it must NOT silently materialize the session with no realm, which would
+    // collapse the credential/storage isolation boundary to env-default.
+    build.realm_id = create
+        .realm_id
+        .as_deref()
+        .map(meerkat_core::RealmId::parse)
+        .transpose()
+        .map_err(schedule_internal)?;
     build.instance_id = create.instance_id.clone();
     build.backend = create.backend.clone();
     build.config_generation = create.config_generation;
@@ -102,7 +112,7 @@ fn materialized_build_options(
     build.additional_instructions = (!create.additional_instructions.is_empty())
         .then(|| create.additional_instructions.clone())
         .or(build.additional_instructions);
-    build
+    Ok(build)
 }
 
 fn accepted_scheduled_input_from_runtime_handle(
@@ -255,10 +265,10 @@ impl RuntimeBackedScheduleSessionHost {
         &self,
         create: &SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
-    ) -> CreateSessionRequest {
-        let build = materialized_build_options(&self.build_template, create);
+    ) -> Result<CreateSessionRequest, ScheduleDomainError> {
+        let build = materialized_build_options(&self.build_template, create)?;
 
-        CreateSessionRequest {
+        Ok(CreateSessionRequest {
             model: create.model.clone(),
             prompt: ContentInput::Text(String::new()),
             render_metadata: None,
@@ -272,7 +282,7 @@ impl RuntimeBackedScheduleSessionHost {
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(build),
             labels: Some(create.labels.clone()),
-        }
+        })
     }
 }
 
@@ -310,7 +320,7 @@ impl SurfaceScheduleSessionHost for RuntimeBackedScheduleSessionHost {
         create: &SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError> {
-        let request = self.build_materialized_request(create, prompt_system_prompt);
+        let request = self.build_materialized_request(create, prompt_system_prompt)?;
         let keep_alive = request.build.as_ref().is_some_and(|build| build.keep_alive);
         let result = Box::pin(materialize_session(
             &self.service,
@@ -491,7 +501,8 @@ mod tests {
             app_context: None,
         };
 
-        let build = materialized_build_options(&SessionBuildOptions::default(), &create);
+        let build = materialized_build_options(&SessionBuildOptions::default(), &create)
+            .expect("valid realm slug");
 
         assert_eq!(build.preload_skills, Some(vec![key]));
     }

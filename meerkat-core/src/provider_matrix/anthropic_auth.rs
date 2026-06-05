@@ -62,6 +62,25 @@ impl AnthropicAuthMethod {
             Self::FoundryAzureAd => "foundry_azure_ad",
         }
     }
+
+    /// The persisted credential mode this auth method stores in the
+    /// `TokenStore`, or `None` for authorizer/SigV4-backed methods that hold
+    /// no persisted secret. Typed owner of the auth-method -> persisted-mode
+    /// mapping (replaces the string-keyed `persisted_auth_mode_for_auth_method`
+    /// decision table).
+    pub fn persisted_auth_mode(self) -> Option<crate::auth::token_store::PersistedAuthMode> {
+        use crate::auth::token_store::PersistedAuthMode;
+        match self {
+            Self::ApiKey | Self::FoundryApiKey => Some(PersistedAuthMode::ApiKey),
+            Self::StaticBearer | Self::BedrockBearer => Some(PersistedAuthMode::StaticBearer),
+            Self::ClaudeAiOauth => Some(PersistedAuthMode::ClaudeAiOauth),
+            Self::OauthToApiKey => Some(PersistedAuthMode::OauthToApiKey),
+            Self::ExternalAuthorizer
+            | Self::BedrockAwsSigv4
+            | Self::VertexGoogleAuth
+            | Self::FoundryAzureAd => None,
+        }
+    }
 }
 
 #[cfg(test)]

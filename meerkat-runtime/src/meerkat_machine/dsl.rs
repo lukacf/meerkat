@@ -356,6 +356,7 @@ impl TryFrom<AuthBindingRef> for meerkat_core::AuthBindingRef {
                 .as_deref()
                 .map(meerkat_core::ProfileId::parse)
                 .transpose()?,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         })
     }
 }

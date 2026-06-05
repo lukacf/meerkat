@@ -32,7 +32,7 @@ use async_trait::async_trait;
 use meerkat_client::LlmClient;
 use meerkat_contracts::{
     MobDefinitionInput, MobLifecycleParams, MobSpawnManyResultEntry, WireMemberRef,
-    WireMobLifecycleAction,
+    WireMobLifecycleAction, WireMobLifecycleStatus, WireMobRespawnOutcome, WireMobWireAction,
 };
 use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
@@ -183,26 +183,54 @@ pub struct KickoffMemberSnapshot {
 }
 
 fn persisted_mob_binding(session: &meerkat_core::Session) -> Option<meerkat_mob::MobId> {
+    // Read the typed durable identity directly. Old persisted rows written
+    // before `mob_member_binding` existed deserialize as `None` and are simply
+    // not owned (back-read safe) — they re-acquire a typed binding on the next
+    // build/resume. No comms_name string-split, no `mob:{id}` realm
+    // format-string, no magic-key peer_meta cross-check.
     let metadata = session.session_metadata()?;
-    let comms_name = metadata.comms_name.as_deref()?;
-    let mut parts = comms_name.split('/');
-    let mob_id = parts.next().filter(|part| !part.is_empty())?;
-    let profile = parts.next().filter(|part| !part.is_empty())?;
-    let meerkat_id = parts.next().filter(|part| !part.is_empty())?;
-    if parts.next().is_some() {
-        return None;
+    let binding = metadata.mob_member_binding.as_ref()?;
+    Some(meerkat_mob::MobId::from(binding.mob_id.as_str()))
+}
+
+/// Typed provenance of the shared realm-scoped profile store.
+///
+/// Replaces the former `(Option<Arc<dyn RealmProfileStore>>, explicit: bool)`
+/// pair: the variant itself encodes *why* the store has its current value, so
+/// the persistent-root auto-upgrade decision matches a variant instead of
+/// re-deriving intent from a parallel bool. Builder-local only; never
+/// serialized, persisted, or crossing any wire/surface boundary.
+enum RealmProfileStoreSelection {
+    /// Default in-memory store installed by the constructor. Eligible for
+    /// auto-upgrade to durable SQLite under a persistent storage root.
+    DefaultInMemory(Arc<dyn meerkat_mob::RealmProfileStore>),
+    /// Default store that has already been upgraded to durable SQLite under a
+    /// persistent storage root. Must not be upgraded again.
+    ///
+    /// Only constructed on non-wasm targets (the SQLite persistent-root upgrade
+    /// is `#[cfg(not(wasm32))]`); on wasm32 it is an unreachable arm.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    DefaultDurable(Arc<dyn meerkat_mob::RealmProfileStore>),
+    /// Caller-supplied store (or explicit `None` to disable). Must never be
+    /// overridden by the persistent-root auto-upgrade.
+    CallerSupplied(Option<Arc<dyn meerkat_mob::RealmProfileStore>>),
+}
+
+impl RealmProfileStoreSelection {
+    /// Resolved store, regardless of provenance.
+    fn store(&self) -> Option<&Arc<dyn meerkat_mob::RealmProfileStore>> {
+        match self {
+            Self::DefaultInMemory(store) | Self::DefaultDurable(store) => Some(store),
+            Self::CallerSupplied(opt) => opt.as_ref(),
+        }
     }
-    if metadata.realm_id.as_deref() != Some(&format!("mob:{mob_id}")) {
-        return None;
+
+    /// Whether this is the auto-upgradeable default in-memory store. Only
+    /// consulted by the non-wasm persistent-root auto-upgrade.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn is_default(&self) -> bool {
+        matches!(self, Self::DefaultInMemory(_))
     }
-    let peer_meta = metadata.peer_meta.as_ref()?;
-    if peer_meta.labels.get("mob_id").map(String::as_str) != Some(mob_id)
-        || peer_meta.labels.get("role").map(String::as_str) != Some(profile)
-        || peer_meta.labels.get("meerkat_id").map(String::as_str) != Some(meerkat_id)
-    {
-        return None;
-    }
-    Some(meerkat_mob::MobId::from(mob_id))
 }
 
 /// In-memory MCP state for multiple mobs.
@@ -217,14 +245,10 @@ pub struct MobMcpState {
     /// Per-session locks for single-flight implicit mob creation.
     implicit_mob_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     restore_lock: Mutex<bool>,
-    /// Shared realm-scoped profile store for cross-mob profile CRUD.
-    realm_profile_store: Option<Arc<dyn meerkat_mob::RealmProfileStore>>,
-    /// Whether the current realm profile store was explicitly supplied by the caller.
-    ///
-    /// Default constructor wiring installs an in-memory store so profile CRUD is
-    /// available on ephemeral surfaces. Persistent roots may upgrade that
-    /// default to SQLite, but must not override an explicit caller-owned store.
-    realm_profile_store_explicit: bool,
+    /// Shared realm-scoped profile store for cross-mob profile CRUD, together
+    /// with its provenance (single source of truth for the persistent-root
+    /// auto-upgrade decision).
+    realm_profile_store_selection: RealmProfileStoreSelection,
     /// Skill sources seeded from the owning mob definition.
     ///
     /// Realm profiles carry skill names, not the source bodies/paths. When an
@@ -254,8 +278,9 @@ impl MobMcpState {
             mobs: RwLock::new(BTreeMap::new()),
             implicit_mob_locks: Mutex::new(HashMap::new()),
             restore_lock: Mutex::new(false),
-            realm_profile_store: Some(Arc::new(meerkat_mob::InMemoryRealmProfileStore::new())),
-            realm_profile_store_explicit: false,
+            realm_profile_store_selection: RealmProfileStoreSelection::DefaultInMemory(Arc::new(
+                meerkat_mob::InMemoryRealmProfileStore::new(),
+            )),
             realm_skill_sources: BTreeMap::new(),
         }
     }
@@ -265,14 +290,13 @@ impl MobMcpState {
         mut self,
         store: Option<Arc<dyn meerkat_mob::RealmProfileStore>>,
     ) -> Self {
-        self.realm_profile_store = store;
-        self.realm_profile_store_explicit = true;
+        self.realm_profile_store_selection = RealmProfileStoreSelection::CallerSupplied(store);
         self
     }
 
     /// Returns a reference to the realm profile store, if configured.
     pub fn realm_profile_store(&self) -> Option<&Arc<dyn meerkat_mob::RealmProfileStore>> {
-        self.realm_profile_store.as_ref()
+        self.realm_profile_store_selection.store()
     }
 
     pub fn with_persistent_storage_root(mut self, runtime_root: Option<PathBuf>) -> Self {
@@ -280,12 +304,14 @@ impl MobMcpState {
             let mob_root = Self::persistent_mob_root(&root);
             // Auto-create realm profile store when persistent storage is available.
             #[cfg(not(target_arch = "wasm32"))]
-            if !self.realm_profile_store_explicit {
+            if self.realm_profile_store_selection.is_default() {
                 let db_path = mob_root.join(Self::REALM_PROFILE_STORE_FILE_NAME);
                 match meerkat_mob::SqliteRealmProfileStore::open(&db_path) {
                     Ok(store) => {
-                        self.realm_profile_store =
-                            Some(Arc::new(store) as Arc<dyn meerkat_mob::RealmProfileStore>);
+                        self.realm_profile_store_selection =
+                            RealmProfileStoreSelection::DefaultDurable(
+                                Arc::new(store) as Arc<dyn meerkat_mob::RealmProfileStore>
+                            );
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -342,7 +368,7 @@ impl MobMcpState {
                     skill_names.extend(profile.skills.iter().cloned());
                 }
                 ProfileBinding::RealmRef { realm_profile } => {
-                    let Some(store) = &self.realm_profile_store else {
+                    let Some(store) = self.realm_profile_store_selection.store() else {
                         continue;
                     };
                     let stored = store.get(realm_profile).await.map_err(|error| {
@@ -422,7 +448,7 @@ impl MobMcpState {
     }
 
     fn bind_realm_profile_store(&self, storage: MobStorage) -> MobStorage {
-        storage.with_realm_profile_store(self.realm_profile_store.clone())
+        storage.with_realm_profile_store(self.realm_profile_store_selection.store().cloned())
     }
 
     async fn storage_for_new_mob(
@@ -1784,7 +1810,7 @@ impl MobMcpState {
     fn require_realm_profile_store(
         &self,
     ) -> Result<&Arc<dyn meerkat_mob::RealmProfileStore>, meerkat_mob::MobError> {
-        self.realm_profile_store.as_ref().ok_or_else(|| {
+        self.realm_profile_store_selection.store().ok_or_else(|| {
             meerkat_mob::MobError::Internal("realm profile store not configured".to_string())
         })
     }
@@ -3134,7 +3160,7 @@ struct WireActionArgs {
     mob_id: String,
     agent_identity: String,
     peer: WireActionPeerTarget,
-    action: String,
+    action: WireMobWireAction,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3198,8 +3224,30 @@ fn runtime_binding_from_wire(
     }
 }
 
+/// Project the canonical mob lifecycle state into its wire mirror. Keeps the
+/// surface emitting a closed typed status rather than the bare `MobState` text.
+fn wire_mob_lifecycle_status(state: MobState) -> WireMobLifecycleStatus {
+    match state {
+        MobState::Creating => WireMobLifecycleStatus::Creating,
+        MobState::Running => WireMobLifecycleStatus::Running,
+        MobState::Stopped => WireMobLifecycleStatus::Stopped,
+        MobState::Completed => WireMobLifecycleStatus::Completed,
+        MobState::Destroyed => WireMobLifecycleStatus::Destroyed,
+    }
+}
+
 impl WireActionArgs {
-    fn resolve(self) -> Result<(String, AgentIdentity, meerkat_mob::PeerTarget, String), String> {
+    fn resolve(
+        self,
+    ) -> Result<
+        (
+            String,
+            AgentIdentity,
+            meerkat_mob::PeerTarget,
+            WireMobWireAction,
+        ),
+        String,
+    > {
         let action = self.action;
         let target = match self.peer {
             WireActionPeerTarget::Local(WireActionLocalPeerTarget { local }) => {
@@ -3215,7 +3263,7 @@ impl WireActionArgs {
                 ))
             }
             WireActionPeerTarget::External(WireActionExternalHandleTarget { external }) => {
-                if action == "wire" {
+                if matches!(action, WireMobWireAction::Wire) {
                     return Err("wire external peer requires external_binding".to_string());
                 }
                 let peer_name = PeerName::new(external.name)
@@ -3331,12 +3379,12 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                         .mob_status(&MobId::from(mob_id))
                         .await
                         .map_err(|e| map_mob_err(call, e))?;
-                    encode(call, json!({"status": status.as_str()}))
+                    encode(call, json!({"status": wire_mob_lifecycle_status(status)}))
                 } else {
                     let mobs = self.state.mob_list().await;
                     encode(
                         call,
-                        json!({"mobs": mobs.into_iter().map(|(id, status)| json!({"mob_id": id, "status": status.as_str()})).collect::<Vec<_>>() }),
+                        json!({"mobs": mobs.into_iter().map(|(id, status)| json!({"mob_id": id, "status": wire_mob_lifecycle_status(status)})).collect::<Vec<_>>() }),
                     )
                 }
             }
@@ -3497,23 +3545,17 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .resolve()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
                 let mob_id = MobId::from(mob_id);
-                match action.as_str() {
-                    "wire" => self
+                match action {
+                    WireMobWireAction::Wire => self
                         .state
                         .mob_wire(&mob_id, local, target)
                         .await
                         .map_err(|e| map_mob_err(call, e))?,
-                    "unwire" => self
+                    WireMobWireAction::Unwire => self
                         .state
                         .mob_unwire(&mob_id, local, target)
                         .await
                         .map_err(|e| map_mob_err(call, e))?,
-                    other => {
-                        return Err(ToolError::invalid_arguments(
-                            call.name,
-                            format!("unknown wire action: {other}"),
-                        ));
-                    }
                 }
                 encode(call, json!({"ok": true}))
             }
@@ -3533,7 +3575,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     Ok(receipt) => encode(
                         call,
                         json!({
-                            "status": "completed",
+                            "status": WireMobRespawnOutcome::Completed,
                             "receipt": receipt,
                         }),
                     ),
@@ -3543,7 +3585,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     }) => encode(
                         call,
                         json!({
-                            "status": "topology_restore_failed",
+                            "status": WireMobRespawnOutcome::TopologyRestoreFailed,
                             "receipt": receipt,
                             "failed_peer_ids": failed_peer_ids.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
                         }),
@@ -4125,7 +4167,7 @@ mod tests {
                 "external": { "name": "external-worker" }
             }))
             .expect("external handle should deserialize"),
-            action: "wire".to_string(),
+            action: WireMobWireAction::Wire,
         }
         .resolve()
         .expect_err("wire action must require external_binding");
@@ -4142,7 +4184,7 @@ mod tests {
             mob_id: "mob".to_string(),
             agent_identity: "worker".to_string(),
             peer: external_peer_target(ED25519_PUBLIC_KEY_7),
-            action: "wire".to_string(),
+            action: WireMobWireAction::Wire,
         }
         .resolve()
         .expect("canonical external peer binding should resolve as request");
@@ -4164,7 +4206,7 @@ mod tests {
                 "external": { "name": "external-worker" }
             }))
             .expect("external handle should deserialize"),
-            action: "unwire".to_string(),
+            action: WireMobWireAction::Unwire,
         }
         .resolve()
         .expect("external handle should be valid for unwire");
@@ -4859,6 +4901,7 @@ mod tests {
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-1".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
             )
             .await
@@ -4899,6 +4942,7 @@ mod tests {
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-1".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
             )
             .await
@@ -4973,6 +5017,7 @@ mod tests {
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-image".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
             )
             .await
@@ -5058,6 +5103,7 @@ mod tests {
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-archive".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
                 },
             )
             .await
@@ -5337,6 +5383,9 @@ mod tests {
                 ..SessionTooling::default()
             },
             keep_alive: false,
+            // Spoof: a session that merely carries the comms_name shape but no
+            // typed durable binding must NOT be owned. Identity is the typed
+            // mob_member_binding, not the routing-name string.
             comms_name: Some("team/reviewer/alice".to_string()),
             peer_meta: None,
             realm_id: None,
@@ -5344,12 +5393,13 @@ mod tests {
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
         });
         svc.insert_persisted_session(spoofed).await;
 
         assert!(
             !state.owns_persisted_bridge_session(&spoofed_id).await,
-            "persisted session routing must verify real mob membership instead of trusting comms_name shape"
+            "persisted session routing must verify real mob membership via the typed binding, not the comms_name shape"
         );
     }
 
@@ -5374,6 +5424,8 @@ mod tests {
                 ..SessionTooling::default()
             },
             keep_alive: false,
+            // Transport routing name + discovery metadata (kept as-is); the
+            // realm now uses the canonical dot form via the shared helper.
             comms_name: Some("team/reviewer/alice".to_string()),
             peer_meta: Some(
                 PeerMeta::default()
@@ -5381,11 +5433,17 @@ mod tests {
                     .with_label("role", "reviewer")
                     .with_label("meerkat_id", "alice"),
             ),
-            realm_id: Some("mob:team".to_string()),
+            realm_id: Some(meerkat_core::RealmId::parse("mob.team").unwrap()),
             instance_id: None,
             backend: None,
             config_generation: None,
             auth_binding: None,
+            // Typed durable identity — this is what ownership routing reads.
+            mob_member_binding: Some(meerkat_core::MobMemberBinding {
+                mob_id: "team".to_string(),
+                role: "reviewer".to_string(),
+                member: "alice".to_string(),
+            }),
         });
         svc.insert_persisted_session(persisted).await;
 
@@ -5423,11 +5481,17 @@ mod tests {
                     .with_label("role", "reviewer")
                     .with_label("meerkat_id", "alice"),
             ),
-            realm_id: Some("mob:team".to_string()),
+            realm_id: Some(meerkat_core::RealmId::parse("mob.team").unwrap()),
             instance_id: None,
             backend: None,
             config_generation: None,
             auth_binding: None,
+            // Ownership routing reads the typed binding directly.
+            mob_member_binding: Some(meerkat_core::MobMemberBinding {
+                mob_id: "team".to_string(),
+                role: "reviewer".to_string(),
+                member: "alice".to_string(),
+            }),
         });
         svc.insert_persisted_session(persisted).await;
 

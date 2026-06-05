@@ -650,6 +650,7 @@ fn pending_system_context_appends(
             // Durable keyed conversation context append — not a transient steer.
             source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: meerkat_core::time_compat::SystemTime::now(),
+            peer_response_terminal: None,
         })
         .collect()
 }
@@ -1179,8 +1180,8 @@ mod tests {
             }))
         }
 
-        fn provider(&self) -> &'static str {
-            "blocking-test"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
@@ -1233,8 +1234,8 @@ mod tests {
             Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
         }
 
-        fn provider(&self) -> &'static str {
-            "one-tool-then-ok-test"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {
@@ -1288,8 +1289,8 @@ mod tests {
             }))
         }
 
-        fn provider(&self) -> &'static str {
-            "terminal-failure-test"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {

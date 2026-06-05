@@ -34,21 +34,33 @@ pub use meerkat_core::auth::token_store::{
     TokenStore, TokenStoreError,
 };
 
+/// Thin parse-at-boundary shim for genuine string-edge callers (CLI / REST /
+/// RPC auth-status projection) that hold only a raw config `auth_method` string
+/// and no typed `NormalizedAuthMethod`.
+///
+/// The auth-method -> persisted-mode mapping itself is owned by the typed
+/// per-provider `*AuthMethod::persisted_auth_mode`; this shim only parses the
+/// (provider-agnostic, unambiguous) string into one of those typed enums and
+/// delegates. Callers that already hold a typed `NormalizedAuthMethod` (e.g.
+/// from a `ValidatedBinding`) must call `.persisted_auth_mode()` directly
+/// rather than round-tripping through this function.
 pub fn persisted_auth_mode_for_auth_method(auth_method: &str) -> Option<PersistedAuthMode> {
-    match auth_method {
-        "api_key" | "api_key_express" | "foundry_api_key" | "azure_api_key" => {
-            Some(PersistedAuthMode::ApiKey)
-        }
-        "static_bearer" | "bearer_api_key" | "bedrock_bearer" => {
-            Some(PersistedAuthMode::StaticBearer)
-        }
-        "managed_chatgpt_oauth" => Some(PersistedAuthMode::ChatgptOauth),
-        "external_chatgpt_tokens" => Some(PersistedAuthMode::ExternalTokens),
-        "claude_ai_oauth" => Some(PersistedAuthMode::ClaudeAiOauth),
-        "oauth_to_api_key" => Some(PersistedAuthMode::OauthToApiKey),
-        "google_oauth" => Some(PersistedAuthMode::GoogleOauth),
-        _ => None,
-    }
+    use meerkat_core::provider_matrix::{
+        AnthropicAuthMethod, GoogleAuthMethod, OpenAiAuthMethod, SelfHostedAuthMethod,
+    };
+    OpenAiAuthMethod::parse(auth_method)
+        .and_then(OpenAiAuthMethod::persisted_auth_mode)
+        .or_else(|| {
+            AnthropicAuthMethod::parse(auth_method)
+                .and_then(AnthropicAuthMethod::persisted_auth_mode)
+        })
+        .or_else(|| {
+            GoogleAuthMethod::parse(auth_method).and_then(GoogleAuthMethod::persisted_auth_mode)
+        })
+        .or_else(|| {
+            SelfHostedAuthMethod::parse(auth_method)
+                .and_then(SelfHostedAuthMethod::persisted_auth_mode)
+        })
 }
 
 pub fn credential_source_uses_persisted_store(source: &CredentialSourceSpec) -> bool {
@@ -129,6 +141,72 @@ mod tests {
             persisted_auth_mode_for_auth_method("azure_api_key"),
             Some(PersistedAuthMode::ApiKey)
         );
+    }
+
+    #[test]
+    fn shim_delegates_to_typed_owner_for_all_persistable_methods() {
+        // The boundary shim must map every direct-secret method string the
+        // typed owner recognizes — including the five (`api_key_express`,
+        // `foundry_api_key`, `azure_api_key`, `bearer_api_key`,
+        // `bedrock_bearer`) beyond the api_key/static_bearer literals — and
+        // the OAuth-login methods, exactly as the per-provider enums declare.
+        let cases = [
+            ("api_key", Some(PersistedAuthMode::ApiKey)),
+            ("api_key_express", Some(PersistedAuthMode::ApiKey)),
+            ("foundry_api_key", Some(PersistedAuthMode::ApiKey)),
+            ("azure_api_key", Some(PersistedAuthMode::ApiKey)),
+            ("static_bearer", Some(PersistedAuthMode::StaticBearer)),
+            ("bearer_api_key", Some(PersistedAuthMode::StaticBearer)),
+            ("bedrock_bearer", Some(PersistedAuthMode::StaticBearer)),
+            (
+                "managed_chatgpt_oauth",
+                Some(PersistedAuthMode::ChatgptOauth),
+            ),
+            (
+                "external_chatgpt_tokens",
+                Some(PersistedAuthMode::ExternalTokens),
+            ),
+            ("claude_ai_oauth", Some(PersistedAuthMode::ClaudeAiOauth)),
+            ("oauth_to_api_key", Some(PersistedAuthMode::OauthToApiKey)),
+            ("google_oauth", Some(PersistedAuthMode::GoogleOauth)),
+            // Authorizer / ADC / SigV4-backed methods hold no persisted secret.
+            ("external_authorizer", None),
+            ("adc", None),
+            ("compute_adc", None),
+            ("bedrock_aws_sigv4", None),
+            ("vertex_google_auth", None),
+            ("foundry_azure_ad", None),
+            ("none", None),
+            ("totally_unknown", None),
+        ];
+        for (method, expected) in cases {
+            assert_eq!(
+                persisted_auth_mode_for_auth_method(method),
+                expected,
+                "shim mapping for auth_method '{method}'"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_secret_methods_beyond_two_literals_are_creatable() {
+        use meerkat_core::persisted_auth_mode_is_directly_creatable;
+        // The five direct-secret methods that the old 2-literal RPC/REST
+        // allowlist silently made unreachable are now creatable.
+        for method in [
+            "api_key_express",
+            "foundry_api_key",
+            "azure_api_key",
+            "bearer_api_key",
+            "bedrock_bearer",
+        ] {
+            let mode = persisted_auth_mode_for_auth_method(method)
+                .unwrap_or_else(|| panic!("'{method}' must resolve a persisted mode"));
+            assert!(
+                persisted_auth_mode_is_directly_creatable(mode),
+                "'{method}' ({mode:?}) must be creatable at create surfaces"
+            );
+        }
     }
 
     #[test]

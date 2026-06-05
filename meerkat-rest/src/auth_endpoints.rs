@@ -92,6 +92,7 @@ async fn resolve_binding_identity(
         realm: realm_id.clone(),
         binding: binding_id.clone(),
         profile: profile_id.cloned(),
+        origin: meerkat_core::BindingOrigin::Configured,
     };
     let (binding, _, auth_profile) = realm.lookup_auth_binding(&auth_binding).map_err(|e| {
         (
@@ -717,7 +718,7 @@ pub async fn list_auth_profiles(
             (
                 StatusCode::OK,
                 Json(WireAuthProfilesList {
-                    realm_id: realm.realm_id,
+                    realm_id: realm.realm_id.to_string(),
                     auth_profiles: profiles,
                     backend_profiles: backends,
                     bindings,
@@ -761,7 +762,10 @@ pub async fn create_auth_profile(
             return (status, Json(serde_json::json!({ "error": msg }))).into_response();
         }
     };
-    if body.provider != auth_profile.provider.as_str() {
+    // Compare typed providers (parse the request string once at the boundary),
+    // not text round-tripped through `as_str()`. The sibling `complete_login`
+    // already compares typed `Provider` values.
+    if meerkat_core::Provider::parse_strict(&body.provider) != Some(auth_profile.provider) {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -792,17 +796,21 @@ pub async fn create_auth_profile(
     if let Err((status, msg)) = require_managed_store_source(&body.binding_id, &auth_profile) {
         return (status, Json(serde_json::json!({ "error": msg }))).into_response();
     }
-    let auth_mode = match body.auth_method.as_str() {
-        "api_key" => PersistedAuthMode::ApiKey,
-        "static_bearer" => PersistedAuthMode::StaticBearer,
-        other => {
+    // The persisted-mode mapping + "direct-secret only at create surfaces"
+    // predicate are owned by the typed enum (canonical table + createability),
+    // not a hand-maintained literal allowlist. OAuth-login-lifecycle modes and
+    // authorizer-backed methods (no persisted secret) are rejected here.
+    let auth_mode = match persisted_auth_mode_for_auth_method(&auth_profile.auth_method) {
+        Some(mode) if meerkat_core::persisted_auth_mode_is_directly_creatable(mode) => mode,
+        _ => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
                     "error": format!(
-                        "auth_method '{other}' cannot be created via the REST endpoint. \
+                        "auth_method '{}' cannot be created via the REST endpoint. \
                          OAuth methods use /auth/login/start + /auth/login/complete; \
-                         managed_store and external_resolver are configured via TOML."
+                         managed_store and external_resolver are configured via TOML.",
+                        auth_profile.auth_method,
                     ),
                 })),
             )
@@ -943,6 +951,7 @@ pub async fn test_auth_binding(
                 realm: body.realm_id.clone(),
                 binding: binding_id.clone(),
                 profile: body.profile_id.clone(),
+                origin: meerkat_core::BindingOrigin::Configured,
             };
             match state
                 .provider_registry
@@ -1803,6 +1812,7 @@ mod tests {
             realm: RealmId::parse("rest-test").unwrap(),
             binding: BindingId::parse("managed").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         }
     }
 
@@ -1811,6 +1821,7 @@ mod tests {
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         }
     }
 
@@ -1819,6 +1830,7 @@ mod tests {
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("default_google").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         }
     }
 
@@ -2117,6 +2129,7 @@ mod tests {
                 auth_profile: "openai_managed".into(),
                 default_model: None,
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         section.default_binding = Some("default_openai".into());
@@ -2153,6 +2166,7 @@ mod tests {
                 auth_profile: "openai_oauth".into(),
                 default_model: None,
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         section.default_binding = Some("default_openai".into());
@@ -2204,6 +2218,7 @@ mod tests {
                 auth_profile: "openai_external".into(),
                 default_model: None,
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         section.default_binding = Some("default_openai".into());
@@ -2240,6 +2255,7 @@ mod tests {
                 auth_profile: "google_api_key".into(),
                 default_model: None,
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         section.default_binding = Some("default_google".into());
@@ -2363,6 +2379,7 @@ mod tests {
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let snapshot = state
             .auth_lease
@@ -3550,6 +3567,7 @@ mod tests {
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         state
             .token_store
@@ -3655,6 +3673,7 @@ mod tests {
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let lease_key = LeaseKey::from_auth_binding(&auth_binding);
         let now = chrono::Utc::now().timestamp() as u64;
@@ -3891,6 +3910,7 @@ mod tests {
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let lease_key = LeaseKey::from_auth_binding(&auth_binding);
         let now = chrono::Utc::now().timestamp() as u64;
@@ -3939,6 +3959,7 @@ mod tests {
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let lease_key = LeaseKey::from_auth_binding(&auth_binding);
         let now = chrono::Utc::now().timestamp() as u64;

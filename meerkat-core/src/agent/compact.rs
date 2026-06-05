@@ -406,7 +406,7 @@ mod tests {
             SystemNoticeKind::Comms,
             None,
             SystemNoticeBlock::Comms {
-                kind: "message".to_string(),
+                kind: crate::types::CommsNoticeKind::Message,
                 direction: SystemNoticeDirection::Incoming,
                 peer: None,
                 request_id: None,

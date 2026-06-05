@@ -3991,6 +3991,42 @@ fn project_step_run_status(status: mob_dsl::StepRunStatus) -> flow_run::StepRunS
     }
 }
 
+/// Direct typed projection from the kernel-owned `flow_run::DependencyMode`
+/// back into the public `definition::DependencyMode`. Closed-enum to
+/// closed-enum, no string round-trip.
+fn dependency_mode_from_flow_run(mode: flow_run::DependencyMode) -> DependencyMode {
+    match mode {
+        flow_run::DependencyMode::All => DependencyMode::All,
+        flow_run::DependencyMode::Any => DependencyMode::Any,
+    }
+}
+
+/// Direct typed projection from the kernel-owned `flow_run::CollectionPolicyKind`
+/// back into the public `RunCollectionPolicyKind`. Closed-enum to closed-enum,
+/// no string round-trip.
+fn run_collection_policy_kind_from_flow_run(
+    policy: flow_run::CollectionPolicyKind,
+) -> RunCollectionPolicyKind {
+    match policy {
+        flow_run::CollectionPolicyKind::All => RunCollectionPolicyKind::All,
+        flow_run::CollectionPolicyKind::Any => RunCollectionPolicyKind::Any,
+        flow_run::CollectionPolicyKind::Quorum => RunCollectionPolicyKind::Quorum,
+    }
+}
+
+/// Direct typed projection from the kernel-owned `flow_run::StepRunStatus`
+/// back into the public `StepRunStatus`. Closed-enum to closed-enum, no
+/// string round-trip.
+fn step_run_status_from_flow_run(status: flow_run::StepRunStatus) -> StepRunStatus {
+    match status {
+        flow_run::StepRunStatus::Dispatched => StepRunStatus::Dispatched,
+        flow_run::StepRunStatus::Completed => StepRunStatus::Completed,
+        flow_run::StepRunStatus::Failed => StepRunStatus::Failed,
+        flow_run::StepRunStatus::Skipped => StepRunStatus::Skipped,
+        flow_run::StepRunStatus::Canceled => StepRunStatus::Canceled,
+    }
+}
+
 fn mob_run_status_to_machine(status: &MobRunStatus) -> mob_dsl::FlowRunStatus {
     match status {
         MobRunStatus::Pending => mob_dsl::FlowRunStatus::Pending,
@@ -4459,23 +4495,12 @@ impl MobRun {
 
     /// Typed view of the kernel-owned dependency mode map keyed by step id.
     pub fn step_dependency_modes(&self) -> Result<BTreeMap<StepId, DependencyMode>, MobError> {
-        self.flow_state
+        Ok(self
+            .flow_state
             .step_dependency_modes
             .iter()
-            .map(|(step_id, mode)| {
-                let mode = match mode.as_str() {
-                    "All" => DependencyMode::All,
-                    "Any" => DependencyMode::Any,
-                    _ => {
-                        return Err(MobError::Internal(format!(
-                            "flow_run step_dependency_modes unknown DependencyMode variant `{:?}` for {} step '{}'",
-                            mode, self.run_id, step_id
-                        )));
-                    }
-                };
-                Ok((step_id.clone(), mode))
-            })
-            .collect()
+            .map(|(step_id, mode)| (step_id.clone(), dependency_mode_from_flow_run(*mode)))
+            .collect())
     }
 
     /// Typed view of the kernel-owned condition-presence map keyed by step id.
@@ -4502,24 +4527,17 @@ impl MobRun {
     pub fn step_collection_policy_kinds(
         &self,
     ) -> Result<BTreeMap<StepId, RunCollectionPolicyKind>, MobError> {
-        self.flow_state
+        Ok(self
+            .flow_state
             .step_collection_policies
             .iter()
             .map(|(step_id, policy)| {
-                let policy = match policy.as_str() {
-                    "All" => RunCollectionPolicyKind::All,
-                    "Any" => RunCollectionPolicyKind::Any,
-                    "Quorum" => RunCollectionPolicyKind::Quorum,
-                    _ => {
-                        return Err(MobError::Internal(format!(
-                            "flow_run step_collection_policies unknown CollectionPolicyKind variant `{:?}` for {} step '{}'",
-                            policy, self.run_id, step_id
-                        )));
-                    }
-                };
-                Ok((step_id.clone(), policy))
+                (
+                    step_id.clone(),
+                    run_collection_policy_kind_from_flow_run(*policy),
+                )
             })
-            .collect()
+            .collect())
     }
 
     /// Typed view of the kernel-owned quorum-threshold map keyed by step id.
@@ -4539,10 +4557,7 @@ impl MobRun {
             let Some(value) = value else {
                 continue;
             };
-            statuses.insert(
-                step_key.clone(),
-                StepRunStatus::from_flow_run_status(value.as_str(), &self.run_id)?,
-            );
+            statuses.insert(step_key.clone(), step_run_status_from_flow_run(*value));
         }
 
         Ok(statuses)
@@ -5541,21 +5556,6 @@ pub enum StepRunStatus {
     Canceled,
 }
 
-impl StepRunStatus {
-    pub(crate) fn from_flow_run_status(value: &str, run_id: &RunId) -> Result<Self, MobError> {
-        match value {
-            "Dispatched" => Ok(Self::Dispatched),
-            "Completed" => Ok(Self::Completed),
-            "Failed" => Ok(Self::Failed),
-            "Skipped" => Ok(Self::Skipped),
-            "Canceled" => Ok(Self::Canceled),
-            other => Err(MobError::Internal(format!(
-                "unknown StepRunStatus variant `{other}` for {run_id}"
-            ))),
-        }
-    }
-}
-
 /// Flow-level failure log entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FailureLedgerEntry {
@@ -5610,7 +5610,7 @@ impl MobRunProvenanceAuthority {
         entry: &StepLedgerEntry,
     ) -> Result<(), MobError> {
         run.validate_flow_authority_projection_core()?;
-        if entry.agent_identity.as_str() != FLOW_RUN_PROVENANCE_AGENT_ID {
+        if !entry.agent_identity.is_flow_system_provenance() {
             return Err(MobError::Internal(format!(
                 "run '{}' step ledger authority only permits system provenance '{}', entry has '{}'",
                 run.run_id, FLOW_RUN_PROVENANCE_AGENT_ID, entry.agent_identity

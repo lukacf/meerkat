@@ -153,6 +153,7 @@ pub fn parse_auth_binding_user_input(raw: &str) -> Result<AuthBindingRef, CliErr
         realm,
         binding,
         profile,
+        origin: meerkat_core::connection::BindingOrigin::Configured,
     })
 }
 

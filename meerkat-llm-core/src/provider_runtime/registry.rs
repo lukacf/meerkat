@@ -205,7 +205,7 @@ impl ProviderRuntimeRegistry {
         let (binding, backend, auth) = realm
             .lookup_auth_binding(auth_binding)
             .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
-        if auth_binding.realm.as_str() != realm.realm_id {
+        if auth_binding.realm != realm.realm_id {
             return Err(ProviderAuthError::SourceResolutionFailed(format!(
                 "auth_binding realm '{}' does not match resolved realm '{}'",
                 auth_binding.realm, realm.realm_id
@@ -312,6 +312,7 @@ mod tests {
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("default").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         }
     }
 
@@ -350,11 +351,12 @@ mod tests {
                 auth_profile: "auth".into(),
                 default_model: None,
                 policy: BindingPolicy::default(),
+                provider_default: false,
             },
         );
 
         RealmConnectionSet {
-            realm_id: "dev".into(),
+            realm_id: RealmId::parse("dev").unwrap(),
             backends,
             auth_profiles,
             bindings,

@@ -274,6 +274,7 @@ mod tests {
                 auth_profile: "openai_oauth".to_string(),
                 default_model: Some("gpt-5.5".to_string()),
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         config.realm.insert("dev".to_string(), section);

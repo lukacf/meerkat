@@ -97,7 +97,7 @@ mod tests {
     use super::*;
     use meerkat_core::provider_matrix::{SelfHostedAuthMethod, SelfHostedBackendKind};
     use meerkat_core::{
-        AuthBindingRef, AuthProfile, BackendProfile, BindingId, BindingPolicy,
+        AuthBindingRef, AuthProfile, BackendProfile, BindingId, BindingOrigin, BindingPolicy,
         CredentialSourceSpec, RealmId,
     };
     use meerkat_llm_core::provider_runtime::ProviderRuntimeCatalog;
@@ -107,6 +107,7 @@ mod tests {
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("default").unwrap(),
             profile: None,
+            origin: BindingOrigin::Configured,
         }
     }
 

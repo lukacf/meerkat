@@ -24,6 +24,19 @@ impl SelfHostedAuthMethod {
             Self::StaticBearer => "static_bearer",
         }
     }
+
+    /// The persisted credential mode this auth method stores in the
+    /// `TokenStore`, or `None` for authless transports. Typed owner of the
+    /// auth-method -> persisted-mode mapping (replaces the string-keyed
+    /// `persisted_auth_mode_for_auth_method` decision table).
+    pub fn persisted_auth_mode(self) -> Option<crate::auth::token_store::PersistedAuthMode> {
+        use crate::auth::token_store::PersistedAuthMode;
+        match self {
+            Self::ApiKey => Some(PersistedAuthMode::ApiKey),
+            Self::StaticBearer => Some(PersistedAuthMode::StaticBearer),
+            Self::None => None,
+        }
+    }
 }
 
 #[cfg(test)]

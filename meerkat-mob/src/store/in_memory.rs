@@ -1396,7 +1396,7 @@ mod tests {
 
         let step_entry = StepLedgerEntry {
             step_id: step_id.clone(),
-            agent_identity: AgentIdentity::from(crate::run::FLOW_RUN_PROVENANCE_AGENT_ID),
+            agent_identity: AgentIdentity::flow_system_provenance(),
             status: StepRunStatus::Dispatched,
             output: None,
             timestamp: Utc::now(),
@@ -1427,7 +1427,7 @@ mod tests {
                 &run_id,
                 StepLedgerEntry {
                     step_id: step_id.clone(),
-                    agent_identity: AgentIdentity::from(crate::run::FLOW_RUN_PROVENANCE_AGENT_ID),
+                    agent_identity: AgentIdentity::flow_system_provenance(),
                     status: StepRunStatus::Dispatched,
                     output: None,
                     timestamp: Utc::now(),

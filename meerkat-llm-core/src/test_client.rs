@@ -46,8 +46,8 @@ impl LlmClient for TestClient {
         )))
     }
 
-    fn provider(&self) -> &'static str {
-        "test"
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Other
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {

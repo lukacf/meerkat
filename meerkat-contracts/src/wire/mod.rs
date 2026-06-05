@@ -121,12 +121,14 @@ pub use mob::{
     MobTopologyRuleInput, MobTopologySpecInput, MobTurnStartParams, MobUnwireParams,
     MobUnwireResult, MobWaitMembersResult, MobWaitParams, MobWireMembersBatchEdge,
     MobWireMembersBatchParams, MobWireMembersBatchResult, MobWireParams, MobWireResult,
-    MobWiringRulesInput, SupervisorRotationReportWire, WireAgentRuntimeId, WireBudgetSplitPolicy,
-    WireForkContext, WireHandlingMode, WireMemberLaunchMode, WireMemberRef, WireMemberRefError,
-    WireMemberState, WireMobBackendKind, WireMobLifecycleAction, WireMobMemberStatus,
-    WireMobProfile, WireMobReconcileStage, WireMobRuntimeMode, WireMobToolConfig, WireRenderClass,
-    WireRenderMetadata, WireRenderSalience, WireRuntimeBinding, WireToolAccessPolicy,
-    WireToolFilter, WireTrustedPeerIdentity, WireTrustedPeerSpec, WireWorkOrigin,
+    MobWiringRulesInput, SupervisorRotationReportWire, WireAgentRuntimeId,
+    WireAppendSystemContextStatus, WireBudgetSplitPolicy, WireForkContext, WireHandlingMode,
+    WireMemberLaunchMode, WireMemberRef, WireMemberRefError, WireMemberState, WireMobBackendKind,
+    WireMobLifecycleAction, WireMobLifecycleStatus, WireMobMemberStatus, WireMobProfile,
+    WireMobReconcileStage, WireMobRespawnOutcome, WireMobRuntimeMode, WireMobToolConfig,
+    WireMobWireAction, WireRenderClass, WireRenderMetadata, WireRenderSalience, WireRuntimeBinding,
+    WireToolAccessPolicy, WireToolFilter, WireTrustedPeerIdentity, WireTrustedPeerSpec,
+    WireWorkOrigin,
 };
 pub use models::{
     CatalogModelEntry, ModelsCatalogResponse, ProviderCatalog, WireModelBetaHeader,
@@ -160,12 +162,12 @@ pub use schedule::{
 };
 pub use session::{
     ForkSessionAtParams, ForkSessionReplaceParams, ReadSessionTranscriptRevisionParams,
-    RestoreSessionTranscriptRevisionParams, RewriteSessionTranscriptParams,
-    SessionStreamCloseParams, SessionStreamCloseResult, SessionStreamOpenParams,
-    SessionStreamOpenResult, TranscriptRewriteMessage, WireAssistantBlock, WireContentBlock,
-    WireContentInput, WireProviderMeta, WireSessionHistory, WireSessionInfo, WireSessionMessage,
-    WireSessionSummary, WireSessionTranscriptRevision, WireStopReason, WireToolCall,
-    WireToolResult, WireToolResultContent, WireTranscriptSource,
+    RestoreSessionTranscriptRevisionParams, RevisionId, RevisionSelector,
+    RewriteSessionTranscriptParams, SessionStreamCloseParams, SessionStreamCloseResult,
+    SessionStreamOpenParams, SessionStreamOpenResult, TranscriptRewriteMessage, WireAssistantBlock,
+    WireContentBlock, WireContentInput, WireProviderMeta, WireSessionHistory, WireSessionInfo,
+    WireSessionMessage, WireSessionSummary, WireSessionTranscriptRevision, WireStopReason,
+    WireToolCall, WireToolResult, WireToolResultContent, WireTranscriptSource,
 };
 pub use skills::{SkillEntry, SkillInspectResponse, SkillListResponse, SkillSourceProvenance};
 pub use supervisor_bridge::{

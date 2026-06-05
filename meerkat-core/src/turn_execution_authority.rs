@@ -224,6 +224,9 @@ impl TurnFailureSourceKind {
             AgentError::HookConfigInvalid { .. } => Self::HookConfigInvalid,
             AgentError::TerminalFailure { .. } => Self::TerminalFailure,
             AgentError::NoPendingBoundary => Self::NoPendingBoundary,
+            // Capability-unsupported sync; classified like the config-class it
+            // was previously represented as (a `ConfigError`).
+            AgentError::DurableSnapshotSyncUnsupported => Self::ConfigError,
         }
     }
 

@@ -188,6 +188,58 @@ pub struct ReadSessionTranscriptRevisionParams {
     pub limit: Option<usize>,
 }
 
+/// Canonical content-addressed transcript revision identity (e.g. a
+/// `sha256:...` digest). A newtype over the wire string so revision identity is
+/// never confused with the `"current"` head sentinel.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RevisionId(pub String);
+
+impl RevisionId {
+    /// The literal revision string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consume into the owned revision string.
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Display for RevisionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Wire sentinel that selects the session head revision.
+const REVISION_SELECTOR_CURRENT: &str = "current";
+
+/// Typed selector for a transcript revision lookup. The wire carries a bare
+/// string where `"current"` is an undocumented sentinel meaning "resolve to the
+/// session head". Parsing that string into this enum at the consumer boundary
+/// replaces the `revision == "current"` string oracle with a closed type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RevisionSelector {
+    /// Resolve to the current session head revision.
+    Current,
+    /// Use this literal content-addressed revision.
+    Specific(RevisionId),
+}
+
+impl RevisionSelector {
+    /// Parse the wire revision string into a typed selector. The `"current"`
+    /// sentinel selects the head; anything else is a specific revision id.
+    pub fn parse(revision: impl Into<String>) -> Self {
+        let revision = revision.into();
+        if revision == REVISION_SELECTOR_CURRENT {
+            Self::Current
+        } else {
+            Self::Specific(RevisionId(revision))
+        }
+    }
+}
+
 /// Canonical session info for wire protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

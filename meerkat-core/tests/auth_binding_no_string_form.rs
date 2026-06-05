@@ -10,7 +10,7 @@
 //! display will fail this test's serde and construction contracts.
 
 use meerkat_core::AuthBindingRef;
-use meerkat_core::connection::{BindingId, ProfileId, RealmId};
+use meerkat_core::connection::{BindingId, BindingOrigin, ProfileId, RealmId};
 
 #[test]
 fn auth_binding_constructs_from_typed_ids_only() {
@@ -18,6 +18,7 @@ fn auth_binding_constructs_from_typed_ids_only() {
         realm: RealmId::parse("dev").expect("valid"),
         binding: BindingId::parse("gpt5_default").expect("valid"),
         profile: None,
+        origin: BindingOrigin::Configured,
     };
     assert_eq!(c.realm.as_str(), "dev");
     assert_eq!(c.binding.as_str(), "gpt5_default");
@@ -30,6 +31,7 @@ fn auth_binding_serde_uses_struct_shape_not_string() {
         realm: RealmId::parse("prod").expect("valid"),
         binding: BindingId::parse("openai_main").expect("valid"),
         profile: Some(ProfileId::parse("ci").expect("valid")),
+        origin: BindingOrigin::Configured,
     };
     let s = serde_json::to_string(&c).expect("serialize");
     // Typed fields — realm/binding/profile — not a colon-joined scalar.

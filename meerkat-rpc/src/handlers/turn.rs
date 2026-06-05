@@ -2,6 +2,9 @@
 
 use std::sync::Arc;
 
+use meerkat_core::lifecycle::run_primitive::{
+    TurnMetadataOverride, legacy_override_from_split_fields, take_legacy_clear_bool,
+};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use tokio::sync::mpsc;
@@ -28,66 +31,113 @@ use meerkat_runtime::SessionServiceRuntimeExt;
 // ---------------------------------------------------------------------------
 
 /// Parameters for `turn/start`.
-#[derive(Debug, Deserialize)]
+///
+/// `provider_params` and `auth_binding` carry the canonical Inherit/Set/Clear
+/// tri-state via [`TurnMetadataOverride`]: `None` keeps the session's current
+/// value, `Some(Set)` overrides it, `Some(Clear)` removes it. The legacy split
+/// wire form (`provider_params` + `clear_provider_params: bool`) is still
+/// accepted at the serde boundary and folded into the tri-state, rejecting a
+/// `set + clear` payload there. This prevents cross-realm credential bleed in
+/// multi-tenant setups (deferral §2 / Dogma §10).
+#[derive(Debug)]
 pub struct StartTurnParams {
     pub session_id: String,
     pub prompt: ContentInput,
-    /// Structured refs for Skills V2.1.
-    #[serde(default)]
     pub skill_refs: Option<Vec<SkillRef>>,
-    /// Retired legacy string refs. Kept only to return a typed ingress error
-    /// when old clients send the field.
-    #[serde(default, deserialize_with = "reject_retired_skill_references")]
     pub skill_references: Option<Vec<String>>,
-    /// Optional per-turn tool visibility overlay.
-    #[serde(default)]
     pub flow_tool_overlay: Option<TurnToolOverlay>,
-    /// Additional instruction sections prepended as system notices for this turn.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<String>>,
-    /// Override keep-alive mode for this turn. Only applies to pending (deferred) sessions.
-    #[serde(default)]
     pub keep_alive: Option<bool>,
-    // -- Per-turn overrides ---------------------------------------------------
-    /// Override model. On pending sessions, sets the model before materialization.
-    /// On materialized sessions, hot-swaps the LLM client for the remainder of the session.
-    #[serde(default)]
     pub model: Option<String>,
-    /// Override provider. Typically inferred from model.
-    #[serde(default)]
     pub provider: Option<String>,
-    /// Override max_tokens. On pending sessions only.
-    #[serde(default)]
     pub max_tokens: Option<u32>,
-    /// Override system prompt. On pending sessions only.
-    #[serde(default)]
     pub system_prompt: Option<String>,
-    /// Override output schema. On pending sessions only.
-    #[serde(default)]
     pub output_schema: Option<serde_json::Value>,
-    /// Override structured output retries. On pending sessions only.
-    #[serde(default)]
     pub structured_output_retries: Option<u32>,
-    /// Override provider-specific parameters. Applied alongside model/provider override.
+    pub provider_params: Option<TurnMetadataOverride<serde_json::Value>>,
+    pub auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StartTurnParamsFields {
+    session_id: String,
+    prompt: ContentInput,
     #[serde(default)]
-    pub provider_params: Option<serde_json::Value>,
-    /// Clear durable provider-specific parameters. Omitted `provider_params`
-    /// inherits the current value; this flag explicitly disables it.
+    skill_refs: Option<Vec<SkillRef>>,
+    #[serde(default, deserialize_with = "reject_retired_skill_references")]
+    skill_references: Option<Vec<String>>,
     #[serde(default)]
-    pub clear_provider_params: bool,
-    /// Override realm-scoped auth binding for this turn (deferral
-    /// §2). On materialized sessions this scopes the hot-swap credential
-    /// fetch to a specific realm + binding — preventing cross-realm
-    /// credential bleed in multi-tenant setups. On pending sessions it
-    /// flows into `SessionBuildOptions.auth_binding`. Dogma §10
-    /// inherit/set: `None` keeps the session's current binding;
-    /// `Some(...)` sets a new one explicitly.
+    flow_tool_overlay: Option<TurnToolOverlay>,
     #[serde(default)]
-    pub auth_binding: Option<meerkat_core::AuthBindingRef>,
-    /// Clear the durable auth binding. Omitted `auth_binding`
-    /// inherits the current value; this flag explicitly disables it.
+    additional_instructions: Option<Vec<String>>,
     #[serde(default)]
-    pub clear_auth_binding: bool,
+    keep_alive: Option<bool>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    system_prompt: Option<String>,
+    #[serde(default)]
+    output_schema: Option<serde_json::Value>,
+    #[serde(default)]
+    structured_output_retries: Option<u32>,
+    #[serde(default)]
+    provider_params: Option<TurnMetadataOverride<serde_json::Value>>,
+    #[serde(default)]
+    auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
+}
+
+impl<'de> Deserialize<'de> for StartTurnParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let mut raw = serde_json::Value::deserialize(deserializer)?;
+        let (clear_provider_params, clear_auth_binding) = if let Some(object) = raw.as_object_mut()
+        {
+            (
+                take_legacy_clear_bool(object, "clear_provider_params", &[])?,
+                take_legacy_clear_bool(object, "clear_auth_binding", &[])?,
+            )
+        } else {
+            (false, false)
+        };
+        let fields: StartTurnParamsFields =
+            serde_json::from_value(raw).map_err(D::Error::custom)?;
+        let provider_params = legacy_override_from_split_fields(
+            fields.provider_params,
+            clear_provider_params,
+            "provider_params",
+            "clear_provider_params",
+        )?;
+        let auth_binding = legacy_override_from_split_fields(
+            fields.auth_binding,
+            clear_auth_binding,
+            "auth_binding",
+            "clear_auth_binding",
+        )?;
+        Ok(Self {
+            session_id: fields.session_id,
+            prompt: fields.prompt,
+            skill_refs: fields.skill_refs,
+            skill_references: fields.skill_references,
+            flow_tool_overlay: fields.flow_tool_overlay,
+            additional_instructions: fields.additional_instructions,
+            keep_alive: fields.keep_alive,
+            model: fields.model,
+            provider: fields.provider,
+            max_tokens: fields.max_tokens,
+            system_prompt: fields.system_prompt,
+            output_schema: fields.output_schema,
+            structured_output_retries: fields.structured_output_retries,
+            provider_params,
+            auth_binding,
+        })
+    }
 }
 
 /// Parameters for `turn/interrupt`.
@@ -128,10 +178,8 @@ pub struct TurnOverrides {
     pub system_prompt: Option<String>,
     pub output_schema: Option<serde_json::Value>,
     pub structured_output_retries: Option<u32>,
-    pub provider_params: Option<serde_json::Value>,
-    pub clear_provider_params: bool,
-    pub auth_binding: Option<meerkat_core::AuthBindingRef>,
-    pub clear_auth_binding: bool,
+    pub provider_params: Option<TurnMetadataOverride<serde_json::Value>>,
+    pub auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
 }
 
 impl TurnOverrides {
@@ -144,9 +192,7 @@ impl TurnOverrides {
             && self.output_schema.is_none()
             && self.structured_output_retries.is_none()
             && self.provider_params.is_none()
-            && !self.clear_provider_params
             && self.auth_binding.is_none()
-            && !self.clear_auth_binding
     }
 }
 
@@ -224,9 +270,7 @@ pub async fn handle_start(
         output_schema: params.output_schema,
         structured_output_retries: params.structured_output_retries,
         provider_params: params.provider_params,
-        clear_provider_params: params.clear_provider_params,
         auth_binding: params.auth_binding,
-        clear_auth_binding: params.clear_auth_binding,
     };
 
     let result = match runtime

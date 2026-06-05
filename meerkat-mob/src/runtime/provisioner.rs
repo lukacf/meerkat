@@ -1701,6 +1701,7 @@ fn pending_system_context_appends_for_runtime_executor(
             // Durable keyed conversation context append — not a transient steer.
             source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at,
+            peer_response_terminal: None,
         })
         .collect()
 }
@@ -2586,37 +2587,6 @@ impl ExternalBackend {
     }
 }
 
-fn is_valid_peer_name_component(component: &str) -> bool {
-    if component.is_empty() {
-        return false;
-    }
-    let mut chars = component.chars();
-    let first = chars.next().unwrap_or(' ');
-    if !first.is_ascii_alphabetic() && first != '_' {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-
-fn is_valid_external_peer_name(peer_name: &str) -> bool {
-    let mut parts = peer_name.split('/');
-    let Some(mob_id) = parts.next() else {
-        return false;
-    };
-    let Some(profile) = parts.next() else {
-        return false;
-    };
-    let Some(meerkat_id) = parts.next() else {
-        return false;
-    };
-    if parts.next().is_some() {
-        return false;
-    }
-    [mob_id, profile, meerkat_id]
-        .iter()
-        .all(|part| is_valid_peer_name_component(part))
-}
-
 #[cfg(feature = "runtime-adapter")]
 pub struct MultiBackendProvisioner {
     session: SessionBackend,
@@ -2956,7 +2926,7 @@ impl MultiBackendProvisioner {
                 .as_ref()
                 .map(super::bridge_protocol::BridgeBootstrapToken::as_str),
         )?;
-        if !is_valid_external_peer_name(&peer_name) {
+        if peer_name.parse::<meerkat_core::MemberCommsName>().is_err() {
             return Err(MobError::WiringError(format!(
                 "invalid external peer name '{peer_name}': expected '<mob>/<profile>/<meerkat>' using identifier-safe segments"
             )));

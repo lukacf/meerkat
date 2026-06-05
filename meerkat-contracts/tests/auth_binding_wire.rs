@@ -24,6 +24,7 @@ fn sample_auth_binding() -> meerkat_core::AuthBindingRef {
         binding: meerkat_core::connection::BindingId::parse("default_openai")
             .expect("valid binding"),
         profile: None,
+        origin: meerkat_core::connection::BindingOrigin::Configured,
     }
 }
 
@@ -58,6 +59,7 @@ fn sample_provider_binding() -> meerkat_core::ProviderBinding {
         auth_profile: "prod_env_key".to_string(),
         default_model: Some("gpt-5.2".to_string()),
         policy: Default::default(),
+        provider_default: false,
     }
 }
 
@@ -114,7 +116,7 @@ fn realm_connection_set_roundtrips_with_populated_maps() {
     bindings.insert("default".to_string(), sample_provider_binding());
 
     let realm = meerkat_core::RealmConnectionSet {
-        realm_id: "dev".to_string(),
+        realm_id: meerkat_core::connection::RealmId::parse("dev").expect("valid realm id"),
         backends,
         auth_profiles,
         bindings,

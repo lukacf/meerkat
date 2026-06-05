@@ -314,6 +314,7 @@ pub trait MobSessionService:
                     source: append.source,
                     idempotency_key: append.idempotency_key,
                     source_kind: append.source_kind,
+                    peer_response_terminal: None,
                 },
             )
             .await

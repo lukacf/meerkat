@@ -784,35 +784,36 @@ fn peer_notice_renderable(peer: &PeerInput) -> Option<CoreRenderable> {
         } => (peer_id.clone(), display_identity.clone()),
         _ => return None,
     };
+    use meerkat_core::types::CommsNoticeKind;
     let (kind, request_id, intent, status) = match &peer.convention {
-        Some(PeerConvention::Message) | None => ("message", None, None, None),
+        Some(PeerConvention::Message) | None => (CommsNoticeKind::Message, None, None, None),
         Some(PeerConvention::Request { request_id, intent }) => (
-            "request",
+            CommsNoticeKind::Request,
             Some(request_id.clone()),
             Some(intent.clone()),
             None,
         ),
         Some(PeerConvention::ResponseProgress { request_id, phase }) => (
-            "response_progress",
+            CommsNoticeKind::ResponseProgress,
             Some(request_id.clone()),
             None,
             Some(format!("{phase:?}")),
         ),
         Some(PeerConvention::ResponseTerminal { request_id, status }) => (
-            "response_terminal",
+            CommsNoticeKind::ResponseTerminal,
             Some(request_id.clone()),
             None,
             Some(format!("{status:?}")),
         ),
     };
     let summary = match kind {
-        "request" => intent.as_ref().map_or_else(
+        CommsNoticeKind::Request => intent.as_ref().map_or_else(
             || "Peer request".to_string(),
             |intent| format!("Peer request: {intent}"),
         ),
-        "response_progress" => "Peer response progress".to_string(),
-        "response_terminal" => "Peer response terminal".to_string(),
-        _ => "Peer message".to_string(),
+        CommsNoticeKind::ResponseProgress => "Peer response progress".to_string(),
+        CommsNoticeKind::ResponseTerminal => "Peer response terminal".to_string(),
+        CommsNoticeKind::Message | CommsNoticeKind::Other(_) => "Peer message".to_string(),
     };
     let content = if let Some(blocks) = peer.blocks.clone() {
         let body_already_in_blocks = blocks.iter().any(|block| {
@@ -834,16 +835,22 @@ fn peer_notice_renderable(peer: &PeerInput) -> Option<CoreRenderable> {
             text: peer.body.clone(),
         }]
     };
+    // The peer routing identity is the canonical typed `PeerId`. Production
+    // peer inputs always carry a hyphenated UUID here (the comms bridge stamps
+    // `canonical_peer_id_string()`); parse once at this producer boundary. A
+    // value that is not a valid `PeerId` cannot populate the typed identity, so
+    // the notice renders without a peer identity (degraded projection) rather
+    // than smuggling an unparseable string through the transcript.
+    let notice_peer = meerkat_core::comms::PeerId::parse(&peer_id)
+        .ok()
+        .map(|id| SystemNoticePeer { id, display_name });
     Some(CoreRenderable::SystemNotice {
         kind: SystemNoticeKind::Comms,
         body: Some(summary.clone()),
         blocks: vec![SystemNoticeBlock::Comms {
-            kind: kind.to_string(),
+            kind,
             direction: SystemNoticeDirection::Incoming,
-            peer: Some(SystemNoticePeer {
-                id: peer_id,
-                display_name,
-            }),
+            peer: notice_peer,
             request_id,
             intent,
             status,
@@ -975,10 +982,10 @@ fn peer_response_terminal_context_append(
             kind: SystemNoticeKind::Comms,
             body: Some("Peer terminal response context".to_string()),
             blocks: vec![SystemNoticeBlock::Comms {
-                kind: "response_terminal".to_string(),
+                kind: meerkat_core::types::CommsNoticeKind::ResponseTerminal,
                 direction: SystemNoticeDirection::Incoming,
                 peer: Some(SystemNoticePeer {
-                    id: fact.source.route_identity.to_string(),
+                    id: fact.source.route_identity.peer_id(),
                     display_name: Some(fact.source.display_identity.to_string()),
                 }),
                 request_id: Some(fact.correlation_id.to_string()),
@@ -1002,6 +1009,7 @@ pub(crate) fn runtime_input_projection(
             _ => Vec::new(),
         },
         context_append: input_to_context_append(input),
+        peer_response_terminal: None,
     }
 }
 
@@ -1013,12 +1021,19 @@ pub(crate) fn runtime_input_projection_for_machine_batch(
         && let Ok(Some(context_append)) = peer_response_terminal_context_append(peer)
     {
         projection.context_append = Some(context_append);
+        // Carry the typed terminal-peer-response fact alongside the rendered
+        // context append so the realtime/live consumer reads the typed fact
+        // directly instead of re-parsing the flattened prose.
+        if let Ok(fact) = peer_response_terminal_fact(peer) {
+            projection.peer_response_terminal = fact;
+        }
     }
     projection
 }
 
 pub(crate) fn context_append_to_pending_system_context_append(
     append: &ConversationContextAppend,
+    peer_response_terminal: Option<&meerkat_core::PeerResponseTerminalFact>,
 ) -> meerkat_core::PendingSystemContextAppend {
     let text = render_core_context_for_pending_system_context(&append.content);
     meerkat_core::PendingSystemContextAppend {
@@ -1027,6 +1042,11 @@ pub(crate) fn context_append_to_pending_system_context_append(
         idempotency_key: Some(append.key.clone()),
         // Durable keyed context append (peer responses, etc.) — not a steer.
         source_kind: meerkat_core::session::SystemContextSource::Normal,
+        // Carry the typed `PeerResponseTerminalFact` so the realtime consumer
+        // reads it directly (mirrors the `source_kind` precedent that retired
+        // the `runtime:steer:` string prefix). The fact threads from the
+        // admitted `RuntimeInputProjection.peer_response_terminal` field.
+        peer_response_terminal: peer_response_terminal.cloned(),
         accepted_at: meerkat_core::time_compat::SystemTime::now(),
     }
 }
@@ -1036,9 +1056,12 @@ pub(crate) fn projection_to_pending_system_context_appends(
     projection: &crate::ingress_types::RuntimeInputProjection,
 ) -> Vec<meerkat_core::PendingSystemContextAppend> {
     if let Some(append) = projection.context_append.as_ref() {
-        return std::iter::once(context_append_to_pending_system_context_append(append))
-            .filter(|append| !append.text.trim().is_empty())
-            .collect();
+        return std::iter::once(context_append_to_pending_system_context_append(
+            append,
+            projection.peer_response_terminal.as_ref(),
+        ))
+        .filter(|append| !append.text.trim().is_empty())
+        .collect();
     }
 
     projection
@@ -1056,6 +1079,8 @@ pub(crate) fn projection_to_pending_system_context_appends(
                 source: Some(key.clone()),
                 idempotency_key: Some(key),
                 source_kind: meerkat_core::session::SystemContextSource::RuntimeSteer,
+                // A runtime steer is never a terminal-peer-response projection.
+                peer_response_terminal: None,
                 accepted_at: meerkat_core::time_compat::SystemTime::now(),
             }
         })
@@ -1193,9 +1218,10 @@ mod tests {
 
     #[test]
     fn peer_message_blocks_preserve_typed_comms_content_without_prefix_injection() {
+        let peer_id = "018f6f79-7a82-7c4e-a552-a3b86f963005";
         let mut header = make_header();
         header.source = InputOrigin::Peer {
-            peer_id: "canonical-peer-id".into(),
+            peer_id: peer_id.into(),
             display_identity: Some("display-agent".into()),
             runtime_id: None,
         };
@@ -1223,7 +1249,7 @@ mod tests {
             peer_projection_from_peer_input(peer)
                 .and_then(|projection| projection.block_prefix_text())
                 .as_deref(),
-            Some("Peer message from canonical-peer-id")
+            Some(format!("Peer message from {peer_id}").as_str())
         );
 
         let projection = runtime_input_projection(&input);
@@ -1298,7 +1324,10 @@ mod tests {
             peer.as_ref().and_then(|peer| peer.display_name.as_deref()),
             Some("display-agent")
         );
-        assert_eq!(peer.as_ref().map(|peer| peer.id.as_str()), Some(route_id));
+        assert_eq!(
+            peer.as_ref().map(|peer| peer.id),
+            Some(meerkat_core::comms::PeerId::parse(route_id).expect("valid route id"))
+        );
     }
 
     #[test]
@@ -1318,6 +1347,7 @@ mod tests {
                     text: "terminal response is ready".into(),
                 },
             }),
+            peer_response_terminal: None,
         };
 
         let appends = projection_to_pending_system_context_appends(&input_id, &projection);
@@ -1430,6 +1460,7 @@ mod tests {
                 key: "empty-context".into(),
                 content: CoreRenderable::Text { text: "  ".into() },
             }),
+            peer_response_terminal: None,
         };
         assert!(
             projection_to_pending_system_context_appends(&input_id, &context_projection).is_empty()
@@ -1442,6 +1473,7 @@ mod tests {
             }),
             additional_appends: Vec::new(),
             context_append: None,
+            peer_response_terminal: None,
         };
         assert!(
             projection_to_pending_system_context_appends(&input_id, &append_projection).is_empty()

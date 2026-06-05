@@ -587,10 +587,28 @@ export interface MobTurnStartOptions {
   readonly systemPrompt?: MobTurnStartWireOptions["system_prompt"];
   readonly outputSchema?: MobTurnStartWireOptions["output_schema"];
   readonly structuredOutputRetries?: MobTurnStartWireOptions["structured_output_retries"];
-  readonly providerParams?: MobTurnStartWireOptions["provider_params"];
-  readonly clearProviderParams?: MobTurnStartWireOptions["clear_provider_params"];
-  readonly authBinding?: MobTurnStartWireOptions["auth_binding"];
-  readonly clearAuthBinding?: MobTurnStartWireOptions["clear_auth_binding"];
+  /**
+   * Provider params to set for this turn. Lowered to the canonical tagged
+   * tri-state `{ action: "set", value }` when building the wire payload.
+   */
+  readonly providerParams?: Record<string, unknown>;
+  /**
+   * Clear the inherited provider params for this turn. Lowered to the
+   * canonical tagged tri-state `{ action: "clear" }`. Combining this with
+   * `providerParams` is rejected, mirroring the wire serde boundary.
+   */
+  readonly clearProviderParams?: boolean;
+  /**
+   * Auth binding to set for this turn. Lowered to the canonical tagged
+   * tri-state `{ action: "set", value }` when building the wire payload.
+   */
+  readonly authBinding?: Record<string, unknown>;
+  /**
+   * Clear the inherited auth binding for this turn. Lowered to the canonical
+   * tagged tri-state `{ action: "clear" }`. Combining this with `authBinding`
+   * is rejected, mirroring the wire serde boundary.
+   */
+  readonly clearAuthBinding?: boolean;
 }
 
 export interface MobEventsOptions {

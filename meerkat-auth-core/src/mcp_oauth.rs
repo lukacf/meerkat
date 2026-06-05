@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 use crate::auth_oauth::{
     OAuthEndpoints, OAuthError, OAuthTokenRequestFormat, OAuthTokenResult, PkcePair,
     bind_loopback_callback, exchange_authorization_code_with_state, exchange_refresh_token,
+    oauth_refresh_observation,
 };
 use crate::auth_store::{PersistedAuthMode, PersistedTokens, TokenKey, TokenStore};
 
@@ -600,11 +601,11 @@ fn map_oauth_exchange_error(target: &McpAuthTarget, error: OAuthError) -> McpOAu
 }
 
 fn map_refresh_error(target: &McpAuthTarget, error: OAuthError) -> McpOAuthError {
-    if matches!(
-        &error,
-        OAuthError::TokenEndpoint { status: 400, body }
-            if body.contains("invalid_grant") || body.contains("invalid refresh")
-    ) {
+    // Route the OAuth error through the canonical boundary-observation
+    // classifier the AuthMachine + lease lifecycle already consume, then ask
+    // the typed observation whether reauth is required. One owner of the
+    // reauth-vs-retry decision instead of a substring match on the raw body.
+    if oauth_refresh_observation(&error).requires_reauth() {
         return McpOAuthError::ReauthRequired {
             server_name: target.server_name.clone(),
         };
@@ -983,7 +984,14 @@ mod tests {
         Form(body): Form<HashMap<String, String>>,
     ) -> impl IntoResponse {
         if *state.token_fails.lock() {
-            return (StatusCode::BAD_REQUEST, "invalid_grant").into_response();
+            // RFC 6749 §5.2 error response: a JSON body carrying the typed
+            // `error` code. The refresh-failure classifier parses this `error`
+            // field to decide reauth-vs-retry.
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid_grant" })),
+            )
+                .into_response();
         }
         state
             .token_requests

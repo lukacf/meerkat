@@ -85,7 +85,7 @@ fn chatgpt_backend_base_url(configured: Option<&str>) -> String {
         return OpenAiBackendKind::ChatGptBackend.default_base_url().into();
     };
     let trimmed = raw.trim_end_matches('/');
-    if trimmed == "https://chatgpt.com/backend-api" {
+    if OpenAiBackendKind::is_legacy_chatgpt_base_url(trimmed) {
         OpenAiBackendKind::ChatGptBackend.default_base_url().into()
     } else {
         trimmed.to_string()
@@ -623,6 +623,7 @@ mod tests {
             realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         }
     }
 

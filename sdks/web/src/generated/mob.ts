@@ -7,7 +7,7 @@ export type WireMemberRef = string;
 
 export interface MobStatusResult {
   mob_id: string;
-  status: string;
+  status: "Creating" | "Running" | "Stopped" | "Completed" | "Destroyed";
 }
 
 export interface MobListResult {
@@ -17,7 +17,7 @@ export interface MobListResult {
 export interface MobRespawnResult {
   failed_peer_ids?: string[];
   receipt: Record<string, unknown>;
-  status: string;
+  status: "completed" | "topology_restore_failed";
 }
 
 export interface MobEventsResult {
@@ -68,5 +68,5 @@ export interface MobMemberStatusResult {
 export interface MobAppendSystemContextResult {
   agent_identity: string;
   mob_id: string;
-  status: string;
+  status: "applied" | "staged" | "duplicate";
 }

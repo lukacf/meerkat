@@ -717,6 +717,7 @@ pub async fn handle_public_tools_call(
                         source: input.source,
                         idempotency_key: input.idempotency_key,
                         source_kind: meerkat_core::session::SystemContextSource::Normal,
+                        peer_response_terminal: None,
                     },
                 )
                 .await

@@ -675,6 +675,132 @@ async fn create_rejects_reserved_completion_evidence() {
 }
 
 #[tokio::test]
+async fn add_evidence_rejects_forged_typed_confirmation_kind() {
+    // The machine's add_evidence path honors the TYPED confirmation_kind field.
+    // A caller on the untrusted generic add-evidence path must not be able to
+    // smuggle a reserved confirmation through the typed field while keeping a
+    // benign `kind` display string that would have passed a string-only guard.
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-0000000001a0").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Needs host acceptance".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::HostConfirmed,
+            delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+
+    let err = service
+        .add_evidence(AddEvidenceRequest {
+            id: goal.item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: goal.item.revision,
+            evidence: WorkEvidenceRef {
+                // Benign display string that a string-only guard would admit.
+                kind: "review-note".to_string(),
+                id: "spoofed".to_string(),
+                label: None,
+                summary: None,
+                // Forged typed confirmation the machine would otherwise honor.
+                confirmation_kind: Some(meerkat_workgraph::WorkEvidenceKind::HostConfirmation),
+                confirming_owner_key: None,
+            },
+        })
+        .await
+        .expect_err("forged typed confirmation must be rejected on the generic add-evidence path");
+    assert!(matches!(
+        err,
+        meerkat_workgraph::WorkGraphError::InvalidInput(_)
+    ));
+}
+
+#[tokio::test]
+async fn create_rejects_forged_typed_confirmation_kind() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+
+    let err = service
+        .create(CreateWorkItemRequest {
+            title: "Spoofed typed evidence".to_string(),
+            completion_policy: WorkCompletionPolicy::HostConfirmed,
+            evidence_refs: vec![WorkEvidenceRef {
+                kind: "review-note".to_string(),
+                id: "spoofed".to_string(),
+                label: None,
+                summary: None,
+                confirmation_kind: Some(meerkat_workgraph::WorkEvidenceKind::HostConfirmation),
+                confirming_owner_key: None,
+            }],
+            ..CreateWorkItemRequest::default()
+        })
+        .await
+        .expect_err("forged typed confirmation cannot be seeded at creation");
+    assert!(matches!(
+        err,
+        meerkat_workgraph::WorkGraphError::InvalidInput(_)
+    ));
+}
+
+#[tokio::test]
+async fn public_self_attest_confirm_rejects_forged_typed_confirmation_kind() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-0000000001a1").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Public self-attest".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::SelfAttest,
+            delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create self-attest goal");
+
+    let err = service
+        .goal_confirm_public(GoalConfirmRequest {
+            binding_id: goal.attention.binding_id,
+            realm_id: None,
+            namespace: None,
+            expected_revision: goal.item.revision,
+            principal: None,
+            trusted_principal: None,
+            evidence: WorkEvidenceRef {
+                kind: "review-note".to_string(),
+                id: "spoofed".to_string(),
+                label: None,
+                summary: None,
+                confirmation_kind: Some(meerkat_workgraph::WorkEvidenceKind::HostConfirmation),
+                confirming_owner_key: None,
+            },
+        })
+        .await
+        .expect_err("public confirm cannot mint forged typed confirmation");
+    assert!(matches!(
+        err,
+        meerkat_workgraph::WorkGraphError::InvalidInput(_)
+    ));
+}
+
+#[tokio::test]
 async fn direct_completed_close_is_policy_gated() {
     let service = WorkGraphService::new(std::sync::Arc::new(
         meerkat_workgraph::MemoryWorkGraphStore::new(),

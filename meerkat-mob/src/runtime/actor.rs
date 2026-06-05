@@ -41,6 +41,61 @@ impl InitialTurnHandle {
     }
 }
 
+/// Typed flag set recording which physical wiring side(s) of a peer-only edge
+/// were successfully installed (local recipient, peer recipient, or both).
+///
+/// Drives best-effort rollback compensation: the wire rollback unwires only the
+/// sides that were installed, and the unwire rollback rewires only the sides
+/// that had been torn down. Replaces a hand-rolled `&[&str]` of `"local"` /
+/// `"peer"` literals re-classified by `.contains(...)`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct WiringSides {
+    local: bool,
+    peer: bool,
+}
+
+impl WiringSides {
+    /// No sides installed/torn down.
+    fn empty() -> Self {
+        Self {
+            local: false,
+            peer: false,
+        }
+    }
+
+    /// Only the local recipient side.
+    fn local() -> Self {
+        Self {
+            local: true,
+            peer: false,
+        }
+    }
+
+    /// Only the peer recipient side.
+    fn peer() -> Self {
+        Self {
+            local: false,
+            peer: true,
+        }
+    }
+
+    /// Both recipient sides.
+    fn both() -> Self {
+        Self {
+            local: true,
+            peer: true,
+        }
+    }
+
+    fn has_local(self) -> bool {
+        self.local
+    }
+
+    fn has_peer(self) -> bool {
+        self.peer
+    }
+}
+
 enum SubmitWorkDispatchCompletion {
     Completed,
     AwaitTurnAdmission {
@@ -268,6 +323,22 @@ pub(super) const MAX_PENDING_PEER_DELIVERIES: usize = 4;
 #[cfg(test)]
 pub(super) static SPAWN_PROVISIONED_COMMAND_DELAY_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+
+/// Render a mob member's comms (peer) routing name from typed components
+/// through the single owner [`meerkat_core::MemberCommsName`].
+///
+/// The components here are already typed mob slugs (`MobId`/`ProfileName`/
+/// `AgentIdentity`), so construction succeeds; the join is owned by
+/// `MemberCommsName::Display` rather than an inline `format!`.
+pub(super) fn render_member_comms_name(mob_id: &str, role: &str, member: &str) -> String {
+    match meerkat_core::MemberCommsName::new(mob_id, role, member) {
+        Ok(name) => name.to_string(),
+        // Defensive only: inputs are pre-validated typed slugs. Preserve the
+        // raw join shape so a future slug-rule relaxation cannot silently drop
+        // a routing name.
+        Err(_) => format!("{mob_id}/{role}/{member}"),
+    }
+}
 
 fn observed_runtime_id(signal: &mob_dsl::MobMachineSignal) -> Option<&mob_dsl::AgentRuntimeId> {
     match signal {
@@ -7495,12 +7566,9 @@ impl MobActor {
             _ => None,
         };
         let prepare_result = async {
-            if agent_identity
-                .as_str()
-                .starts_with(FLOW_SYSTEM_MEMBER_ID_PREFIX)
-            {
+            if agent_identity.is_system_reserved() {
                 return Err(MobError::WiringError(format!(
-                    "meerkat id '{agent_identity}' uses reserved system prefix '{FLOW_SYSTEM_MEMBER_ID_PREFIX}'"
+                    "meerkat id '{agent_identity}' uses reserved system identifier namespace"
                 )));
             }
             tracing::debug!(
@@ -7700,7 +7768,11 @@ impl MobActor {
                     )?;
                     let selected_runtime_mode =
                         normalize_runtime_mode_for_binding(selected_runtime_mode, &selected_binding);
-                    let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, agent_identity);
+                    let peer_name = render_member_comms_name(
+                        self.definition.id.as_str(),
+                        profile_name.as_str(),
+                        agent_identity.as_str(),
+                    );
                     let provision_request = ProvisionMemberRequest {
                         create_session: req,
                         binding: selected_binding,
@@ -7859,7 +7931,11 @@ impl MobActor {
             )?;
             let selected_runtime_mode =
                 normalize_runtime_mode_for_binding(selected_runtime_mode, &selected_binding);
-            let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, agent_identity);
+            let peer_name = render_member_comms_name(
+                self.definition.id.as_str(),
+                profile_name.as_str(),
+                agent_identity.as_str(),
+            );
             let provision_request = ProvisionMemberRequest {
                 create_session: req,
                 binding: selected_binding,
@@ -8336,12 +8412,9 @@ impl MobActor {
             continuity_intent,
         } = member_spec;
 
-        if agent_identity
-            .as_str()
-            .starts_with(FLOW_SYSTEM_MEMBER_ID_PREFIX)
-        {
+        if agent_identity.is_system_reserved() {
             return Err(MobError::WiringError(format!(
-                "meerkat id '{agent_identity}' uses reserved system prefix '{FLOW_SYSTEM_MEMBER_ID_PREFIX}'"
+                "meerkat id '{agent_identity}' uses reserved system identifier namespace"
             )));
         }
         if self.pending_spawns.contains_member(agent_identity) {
@@ -8416,7 +8489,11 @@ impl MobActor {
         });
         let initial_turn_prompt = initial_message.as_ref().map(|_| prompt.clone());
         let req = build::to_create_session_request(&config, prompt.clone());
-        let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, agent_identity);
+        let peer_name = render_member_comms_name(
+            self.definition.id.as_str(),
+            profile_name.as_str(),
+            agent_identity.as_str(),
+        );
         let mut provision_request = ProvisionMemberRequest {
             create_session: req,
             binding: selected_binding,
@@ -8799,8 +8876,11 @@ impl MobActor {
                         let public_key_bytes = runtime.public_key_bytes();
                         let descriptor = match public_key_bytes {
                             Some(_) => {
-                                let comms_name =
-                                    format!("{}/{}/{}", self.definition.id, profile_name, identity);
+                                let comms_name = render_member_comms_name(
+                                    self.definition.id.as_str(),
+                                    profile_name.as_str(),
+                                    identity.as_str(),
+                                );
                                 Some(
                                     self.provisioner
                                         .trusted_peer_spec_for_operation(
@@ -9451,7 +9531,7 @@ impl MobActor {
                         self.rollback_peer_only_wire(
                             &edge,
                             false,
-                            &["local"],
+                            WiringSides::local(),
                             &local,
                             &peer_meerkat_id,
                             local_spec,
@@ -9596,7 +9676,7 @@ impl MobActor {
                 self.rollback_peer_only_wire(
                     &edge,
                     dsl_added,
-                    &[],
+                    WiringSides::empty(),
                     &local,
                     &peer_meerkat_id,
                     local_spec,
@@ -9617,7 +9697,7 @@ impl MobActor {
                 self.rollback_peer_only_wire(
                     &edge,
                     dsl_added,
-                    &["local"],
+                    WiringSides::local(),
                     &local,
                     &peer_meerkat_id,
                     local_spec,
@@ -9640,7 +9720,7 @@ impl MobActor {
                     self.rollback_peer_only_wire(
                         &edge,
                         dsl_added,
-                        &["local", "peer"],
+                        WiringSides::both(),
                         &local,
                         &peer_meerkat_id,
                         local_spec,
@@ -9687,7 +9767,7 @@ impl MobActor {
                     self.rollback_peer_only_wire(
                         &edge,
                         dsl_added,
-                        &[],
+                        WiringSides::empty(),
                         &local,
                         &peer_meerkat_id,
                         local_spec,
@@ -9722,7 +9802,7 @@ impl MobActor {
                 self.rollback_peer_only_wire(
                     &edge,
                     dsl_added,
-                    &[],
+                    WiringSides::empty(),
                     &local,
                     &peer_meerkat_id,
                     local_spec,
@@ -9759,7 +9839,7 @@ impl MobActor {
                     self.rollback_peer_only_wire(
                         &edge,
                         dsl_added,
-                        &["peer"],
+                        WiringSides::peer(),
                         &local,
                         &peer_meerkat_id,
                         local_spec,
@@ -9802,7 +9882,7 @@ impl MobActor {
                     self.rollback_peer_only_wire(
                         &edge,
                         dsl_added,
-                        &[],
+                        WiringSides::empty(),
                         &local,
                         &peer_meerkat_id,
                         local_spec,
@@ -9837,7 +9917,7 @@ impl MobActor {
                 self.rollback_peer_only_wire(
                     &edge,
                     dsl_added,
-                    &[],
+                    WiringSides::empty(),
                     &local,
                     &peer_meerkat_id,
                     local_spec,
@@ -9873,7 +9953,7 @@ impl MobActor {
                     self.rollback_peer_only_wire(
                         &edge,
                         dsl_added,
-                        &["local"],
+                        WiringSides::local(),
                         &local,
                         &peer_meerkat_id,
                         local_spec,
@@ -10560,7 +10640,7 @@ impl MobActor {
         &mut self,
         edge: &mob_dsl::WiringEdge,
         dsl_added: bool,
-        installed_sides: &[&str],
+        installed_sides: WiringSides,
         _local_identity: &AgentIdentity,
         _peer_identity: &AgentIdentity,
         local_spec: &TrustedPeerDescriptor,
@@ -10580,7 +10660,7 @@ impl MobActor {
             );
             return;
         }
-        if installed_sides.contains(&"local")
+        if installed_sides.has_local()
             && let Err(error) = self
                 .unwire_peer_only_recipient(
                     local_spec,
@@ -10596,7 +10676,7 @@ impl MobActor {
                 "peer-only wire rollback: failed to unwire local recipient"
             );
         }
-        if installed_sides.contains(&"peer")
+        if installed_sides.has_peer()
             && let Err(error) = self
                 .unwire_peer_only_recipient(
                     peer_spec,
@@ -10618,7 +10698,7 @@ impl MobActor {
     async fn rollback_peer_only_unwire(
         &mut self,
         edge: &mob_dsl::WiringEdge,
-        sides_to_rewire: &[&str],
+        sides_to_rewire: WiringSides,
         _local_identity: &AgentIdentity,
         _peer_identity: &AgentIdentity,
         local_spec: &TrustedPeerDescriptor,
@@ -10634,7 +10714,7 @@ impl MobActor {
             );
             return;
         }
-        if sides_to_rewire.contains(&"local") {
+        if sides_to_rewire.has_local() {
             if let Err(error) = self
                 .wire_peer_only_recipient(
                     local_spec,
@@ -10651,7 +10731,7 @@ impl MobActor {
                 );
             }
         }
-        if sides_to_rewire.contains(&"peer") {
+        if sides_to_rewire.has_peer() {
             if let Err(error) = self
                 .wire_peer_only_recipient(
                     peer_spec,
@@ -10911,7 +10991,7 @@ impl MobActor {
             {
                 self.rollback_peer_only_unwire(
                     &edge,
-                    &[],
+                    WiringSides::empty(),
                     &local,
                     &peer_meerkat_id,
                     local_spec,
@@ -10933,7 +11013,7 @@ impl MobActor {
             {
                 self.rollback_peer_only_unwire(
                     &edge,
-                    &["local"],
+                    WiringSides::local(),
                     &local,
                     &peer_meerkat_id,
                     local_spec,
@@ -10958,7 +11038,7 @@ impl MobActor {
                 Err(error) => {
                     self.rollback_peer_only_unwire(
                         &edge,
-                        &["local", "peer"],
+                        WiringSides::both(),
                         &local,
                         &peer_meerkat_id,
                         local_spec,
@@ -12758,9 +12838,10 @@ impl MobActor {
             config.auth_binding = Some(cref.clone());
         }
         let req = build::to_create_session_request(&config, prompt.clone());
-        let peer_name = format!(
-            "{}/{}/{}",
-            self.definition.id, snapshot.profile_name, agent_identity
+        let peer_name = render_member_comms_name(
+            self.definition.id.as_str(),
+            snapshot.profile_name.as_str(),
+            agent_identity.as_str(),
         );
         let mut provision_request = ProvisionMemberRequest {
             create_session: req,
@@ -18150,9 +18231,10 @@ impl MobActor {
 
     /// Generate the comms name for a roster entry.
     fn comms_name_for(&self, entry: &RosterEntry) -> String {
-        format!(
-            "{}/{}/{}",
-            self.definition.id, entry.role, entry.agent_identity
+        render_member_comms_name(
+            self.definition.id.as_str(),
+            entry.role.as_str(),
+            entry.agent_identity.as_str(),
         )
     }
 

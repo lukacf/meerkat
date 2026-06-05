@@ -19,6 +19,9 @@ use meerkat_contracts::{
     MobWireMembersBatchParams, MobWireMembersBatchResult, SupervisorRotationReportWire,
     WireMemberState, WireMobBackendKind, WireMobMemberStatus, WireMobRuntimeMode,
 };
+use meerkat_core::lifecycle::run_primitive::{
+    TurnMetadataOverride, legacy_override_from_split_fields, take_legacy_clear_bool,
+};
 use meerkat_core::service::{AppendSystemContextRequest, TurnToolOverlay};
 use meerkat_core::skills::SkillRef;
 use meerkat_core::types::ContentInput;
@@ -1030,6 +1033,7 @@ pub async fn handle_append_system_context(
                 source: params.source,
                 idempotency_key: params.idempotency_key,
                 source_kind: meerkat_core::session::SystemContextSource::Normal,
+                peer_response_terminal: None,
             },
         )
         .await
@@ -1880,44 +1884,114 @@ pub async fn handle_profile_delete(
 /// Resolves `agent_identity` to the backing bridge session and delegates to
 /// the standard `turn/start` handler. This is the identity-first replacement
 /// for extracting `session_id` from spawn responses.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// `provider_params`/`auth_binding` carry the Inherit/Set/Clear tri-state via
+/// [`TurnMetadataOverride`]; the legacy split form (`clear_provider_params:
+/// bool`) is folded at the serde boundary, rejecting `set + clear`.
+#[derive(Debug)]
 pub struct MobTurnStartParams {
     pub mob_id: String,
     pub agent_identity: String,
     pub prompt: ContentInput,
-    #[serde(default)]
     pub skill_refs: Option<Vec<SkillRef>>,
+    pub skill_references: Option<Vec<String>>,
+    pub flow_tool_overlay: Option<TurnToolOverlay>,
+    pub additional_instructions: Option<Vec<String>>,
+    pub keep_alive: Option<bool>,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub max_tokens: Option<u32>,
+    pub system_prompt: Option<String>,
+    pub output_schema: Option<serde_json::Value>,
+    pub structured_output_retries: Option<u32>,
+    pub provider_params: Option<TurnMetadataOverride<serde_json::Value>>,
+    pub auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MobTurnStartParamsFields {
+    mob_id: String,
+    agent_identity: String,
+    prompt: ContentInput,
+    #[serde(default)]
+    skill_refs: Option<Vec<SkillRef>>,
     /// Retired legacy string refs. Kept only to preserve the typed ingress
     /// error returned by `turn/start` for older clients.
     #[serde(default, deserialize_with = "reject_retired_skill_references")]
-    pub skill_references: Option<Vec<String>>,
+    skill_references: Option<Vec<String>>,
     #[serde(default)]
-    pub flow_tool_overlay: Option<TurnToolOverlay>,
+    flow_tool_overlay: Option<TurnToolOverlay>,
     #[serde(default)]
-    pub additional_instructions: Option<Vec<String>>,
+    additional_instructions: Option<Vec<String>>,
     #[serde(default)]
-    pub keep_alive: Option<bool>,
+    keep_alive: Option<bool>,
     #[serde(default)]
-    pub model: Option<String>,
+    model: Option<String>,
     #[serde(default)]
-    pub provider: Option<String>,
+    provider: Option<String>,
     #[serde(default)]
-    pub max_tokens: Option<u32>,
+    max_tokens: Option<u32>,
     #[serde(default)]
-    pub system_prompt: Option<String>,
+    system_prompt: Option<String>,
     #[serde(default)]
-    pub output_schema: Option<serde_json::Value>,
+    output_schema: Option<serde_json::Value>,
     #[serde(default)]
-    pub structured_output_retries: Option<u32>,
+    structured_output_retries: Option<u32>,
     #[serde(default)]
-    pub provider_params: Option<serde_json::Value>,
+    provider_params: Option<TurnMetadataOverride<serde_json::Value>>,
     #[serde(default)]
-    pub clear_provider_params: bool,
-    #[serde(default)]
-    pub auth_binding: Option<meerkat_core::AuthBindingRef>,
-    #[serde(default)]
-    pub clear_auth_binding: bool,
+    auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
+}
+
+impl<'de> serde::Deserialize<'de> for MobTurnStartParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let mut raw = serde_json::Value::deserialize(deserializer)?;
+        let (clear_provider_params, clear_auth_binding) = if let Some(object) = raw.as_object_mut()
+        {
+            (
+                take_legacy_clear_bool(object, "clear_provider_params", &[])?,
+                take_legacy_clear_bool(object, "clear_auth_binding", &[])?,
+            )
+        } else {
+            (false, false)
+        };
+        let fields: MobTurnStartParamsFields =
+            serde_json::from_value(raw).map_err(D::Error::custom)?;
+        let provider_params = legacy_override_from_split_fields(
+            fields.provider_params,
+            clear_provider_params,
+            "provider_params",
+            "clear_provider_params",
+        )?;
+        let auth_binding = legacy_override_from_split_fields(
+            fields.auth_binding,
+            clear_auth_binding,
+            "auth_binding",
+            "clear_auth_binding",
+        )?;
+        Ok(Self {
+            mob_id: fields.mob_id,
+            agent_identity: fields.agent_identity,
+            prompt: fields.prompt,
+            skill_refs: fields.skill_refs,
+            skill_references: fields.skill_references,
+            flow_tool_overlay: fields.flow_tool_overlay,
+            additional_instructions: fields.additional_instructions,
+            keep_alive: fields.keep_alive,
+            model: fields.model,
+            provider: fields.provider,
+            max_tokens: fields.max_tokens,
+            system_prompt: fields.system_prompt,
+            output_schema: fields.output_schema,
+            structured_output_retries: fields.structured_output_retries,
+            provider_params,
+            auth_binding,
+        })
+    }
 }
 
 /// Handle `mob/turn_start` — resolve identity to session and delegate to turn/start.
@@ -2002,24 +2076,15 @@ pub async fn handle_mob_turn_start(
         "structured_output_retries",
         mob_params.structured_output_retries,
     );
+    // Forward the tri-state overrides as the canonical tagged form; the
+    // `turn/start` `StartTurnParams` boundary folds them back into the same
+    // `Option<TurnMetadataOverride<T>>`.
     insert_optional(
         &mut turn_params,
         "provider_params",
         mob_params.provider_params,
     );
-    if mob_params.clear_provider_params {
-        turn_params.insert(
-            "clear_provider_params".to_string(),
-            serde_json::Value::Bool(true),
-        );
-    }
     insert_optional(&mut turn_params, "auth_binding", mob_params.auth_binding);
-    if mob_params.clear_auth_binding {
-        turn_params.insert(
-            "clear_auth_binding".to_string(),
-            serde_json::Value::Bool(true),
-        );
-    }
     let raw_json = serde_json::to_string(&turn_params).unwrap_or_default();
     let raw_value = RawValue::from_string(raw_json).ok();
 
@@ -2712,12 +2777,10 @@ mod tests {
             "output_schema": { "type": "object" },
             "structured_output_retries": 2,
             "provider_params": { "temperature": 0.2 },
-            "clear_provider_params": true,
             "auth_binding": {
                 "realm": "dev",
                 "binding": "default_openai"
-            },
-            "clear_auth_binding": true
+            }
         });
         let params: MobTurnStartParams =
             serde_json::from_value(value).expect("known turn overrides deserialize");
@@ -2734,13 +2797,21 @@ mod tests {
         assert_eq!(params.model.as_deref(), Some("gpt-test"));
         assert_eq!(params.max_tokens, Some(128));
         assert_eq!(params.structured_output_retries, Some(2));
-        assert!(params.clear_provider_params);
-        assert!(params.clear_auth_binding);
+        assert_eq!(
+            params
+                .provider_params
+                .as_ref()
+                .and_then(|o| o.as_set())
+                .and_then(|v| v.get("temperature"))
+                .and_then(serde_json::Value::as_f64),
+            Some(0.2)
+        );
         assert_eq!(
             params
                 .auth_binding
                 .as_ref()
-                .expect("auth_binding")
+                .and_then(|o| o.as_set())
+                .expect("auth_binding set override")
                 .binding
                 .as_str(),
             "default_openai"

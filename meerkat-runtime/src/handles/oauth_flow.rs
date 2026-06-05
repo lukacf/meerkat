@@ -99,6 +99,7 @@ impl AuthLeaseReleaseObserver for OAuthPayloadReleaseObserver {
             realm: lease_key.realm.clone(),
             binding: lease_key.binding.clone(),
             profile: lease_key.profile.clone(),
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let Some(snapshot) =
             load_oauth_snapshot_for_release(&self.store, "collect_oauth_flow_payloads")?
@@ -136,6 +137,7 @@ impl AuthLeaseReleaseObserver for OAuthPayloadReleaseObserver {
             realm: released.lease_key.realm.clone(),
             binding: released.lease_key.binding.clone(),
             profile: released.lease_key.profile.clone(),
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let browser_flow_ids = released
             .browser_flow_ids
@@ -1695,6 +1697,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
             binding: meerkat_core::BindingId::parse("default_openai").expect("valid binding"),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         }
     }
 
@@ -1703,6 +1706,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
             binding: meerkat_core::BindingId::parse("secondary_openai").expect("valid binding"),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         }
     }
 

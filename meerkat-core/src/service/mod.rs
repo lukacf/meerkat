@@ -262,13 +262,17 @@ pub struct SessionBuildOptions {
     /// Agent-facing WorkGraph tools supplied by the embedding surface.
     pub workgraph_tools: Option<Arc<dyn AgentToolDispatcher>>,
     pub preload_skills: Option<Vec<crate::skills::SkillKey>>,
-    pub realm_id: Option<String>,
+    pub realm_id: Option<crate::RealmId>,
     pub instance_id: Option<String>,
     pub backend: Option<String>,
     pub config_generation: Option<u64>,
     /// Realm-scoped auth binding (Phase 3 provider-auth redesign).
     /// Flows into `AgentBuildConfig.auth_binding` via `FactoryAgentBuilder`.
     pub auth_binding: Option<crate::AuthBindingRef>,
+    /// Typed durable mob-member identity. Set by the mob runtime when building a
+    /// member's session; flows into `AgentBuildConfig.mob_member_binding` and is
+    /// persisted onto `SessionMetadata.mob_member_binding`.
+    pub mob_member_binding: Option<crate::MobMemberBinding>,
     /// Whether this session runs as a keep-alive (long-running, interrupt-to-stop)
     /// agent. Surfaces use this to decide blocking vs fire-and-return semantics.
     pub keep_alive: bool,
@@ -1001,6 +1005,7 @@ impl Default for SessionBuildOptions {
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
             keep_alive: false,
             checkpointer: None,
             silent_comms_intents: Vec::new(),
@@ -1183,7 +1188,9 @@ pub struct StartTurnRequest {
 }
 
 /// Request to append runtime system context to an existing session.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+// Cannot derive `Eq`: the typed `peer_response_terminal` fact carries a
+// `serde_json::Value` render payload, which is `PartialEq` but not `Eq`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppendSystemContextRequest {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1201,6 +1208,12 @@ pub struct AppendSystemContextRequest {
         skip_serializing_if = "crate::session::SystemContextSource::is_normal"
     )]
     pub source_kind: crate::session::SystemContextSource,
+    /// Typed terminal-peer-response fact this append carries, when the append
+    /// projects a [`crate::handles::PeerResponseTerminalFact`]. The producer
+    /// stamps the typed fact here; realtime/live consumers read it directly
+    /// instead of re-parsing the flattened prompt `text`/`source` string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_response_terminal: Option<crate::handles::PeerResponseTerminalFact>,
 }
 
 /// Result of appending runtime system context to a session.

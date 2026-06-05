@@ -487,8 +487,9 @@ impl WorkGraphMachine {
     /// `WorkGraphLifecycleMachine`, not the goal-confirm shell. The shell
     /// performs only pure typed extraction of the observations (the machine-owned
     /// completion policy + its supervisor owner key, the requested confirming
-    /// principal owner key + kind, and the typed evidence-kind observation parsed
-    /// from the opaque `evidence.kind` string), drives the machine's
+    /// principal owner key + kind, and the typed evidence-kind observation
+    /// projected from the evidence's typed confirmation classification), drives
+    /// the machine's
     /// `ClassifyConfirmationAdmission` input, and mirrors the emitted
     /// `ConfirmationAdmissionClassified` verdict. This function decides nothing
     /// and fails closed if the machine refuses or emits no verdict.

@@ -56,6 +56,7 @@ fn code_assist_realm_no_refresh() -> RealmConnectionSet {
             auth_profile: "google_oauth".into(),
             default_model: None,
             policy: Default::default(),
+            provider_default: false,
         },
     );
     RealmConnectionSet::from_config(
@@ -103,6 +104,7 @@ fn code_assist_realm_with_source(source: CredentialSourceSpec) -> RealmConnectio
             auth_profile: "google_oauth".into(),
             default_model: None,
             policy: Default::default(),
+            provider_default: false,
         },
     );
     RealmConnectionSet::from_config(
@@ -122,6 +124,7 @@ fn default_auth_binding() -> AuthBindingRef {
         realm: RealmId::parse("dev").expect("valid realm"),
         binding: BindingId::parse("default_code_assist").expect("valid binding"),
         profile: None,
+        origin: meerkat_core::BindingOrigin::Configured,
     }
 }
 

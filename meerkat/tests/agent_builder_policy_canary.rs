@@ -499,6 +499,7 @@ async fn public_facade_rejects_forged_session_runtime_binding_authority() {
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
         })
         .expect("seed durable session metadata");
     let runtime = meerkat_runtime::MeerkatMachine::ephemeral();

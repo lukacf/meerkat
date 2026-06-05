@@ -878,7 +878,7 @@ impl McpRuntimeIngressContext {
             SurfaceSessionRecoveryContext {
                 llm_client_override: None,
                 external_tools,
-                realm_id: Some(self.realm_id.to_string()),
+                realm_id: Some(self.realm_id.clone()),
                 instance_id: self.instance_id.clone(),
                 backend: Some(self.backend.clone()),
                 config_generation: current_generation,
@@ -937,7 +937,7 @@ impl McpRuntimeIngressContext {
             SurfaceSessionRecoveryContext {
                 llm_client_override: None,
                 external_tools,
-                realm_id: Some(self.realm_id.to_string()),
+                realm_id: Some(self.realm_id.clone()),
                 instance_id: self.instance_id.clone(),
                 backend: Some(self.backend.clone()),
                 config_generation: current_generation,
@@ -1169,6 +1169,7 @@ fn pending_system_context_appends(
             idempotency_key: Some(append.key.clone()),
             accepted_at,
             source_kind: meerkat_core::session::SystemContextSource::Normal,
+            peer_response_terminal: None,
         })
         .collect()
 }
@@ -1588,7 +1589,7 @@ mod tests {
     #[test]
     fn mcp_context_system_notice_projects_via_typed_notice() {
         let blocks = vec![meerkat_core::types::SystemNoticeBlock::Comms {
-            kind: "response_terminal".to_string(),
+            kind: meerkat_core::types::CommsNoticeKind::ResponseTerminal,
             direction: meerkat_core::types::SystemNoticeDirection::Incoming,
             peer: None,
             request_id: Some("req-1".to_string()),

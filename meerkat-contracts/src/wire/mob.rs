@@ -1,6 +1,9 @@
 //! Mob RPC wire contracts.
 
 use super::connection::WireAuthBindingRef;
+use super::runtime::{
+    WireTurnMetadataOverride, legacy_wire_override_from_split_fields, take_legacy_clear_bool,
+};
 use super::session::WireContentInput;
 use super::supervisor_bridge::BridgeBootstrapToken;
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -585,12 +588,29 @@ pub struct MobMemberParams {
     pub agent_identity: String,
 }
 
+/// Lifecycle status of a mob on the wire. Mirrors
+/// `meerkat_mob::runtime::MobState` so surfaces report mob lifecycle through a
+/// closed type rather than re-deriving meaning from free-form status text.
+///
+/// Variants serialize to their PascalCase names (`"Creating"`, `"Running"`,
+/// ...) to match the canonical `MobState::as_str()` projection that producers
+/// emit on the wire.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum WireMobLifecycleStatus {
+    Creating,
+    Running,
+    Stopped,
+    Completed,
+    Destroyed,
+}
+
 /// One active mob row returned by `mob/list`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobStatusResult {
     pub mob_id: String,
-    pub status: String,
+    pub status: WireMobLifecycleStatus,
 }
 
 /// Response payload for `mob/list`.
@@ -857,11 +877,23 @@ pub struct MobRespawnReceipt {
     pub member_ref: WireMemberRef,
 }
 
+/// Outcome of a `mob/respawn` call. Mirrors the success vs
+/// `MobRespawnError::TopologyRestoreFailed` distinction as a closed type so SDK
+/// consumers branch on a typed variant instead of re-deriving meaning from a
+/// free-form status string.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMobRespawnOutcome {
+    Completed,
+    TopologyRestoreFailed,
+}
+
 /// Response payload for `mob/respawn`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobRespawnResult {
-    pub status: String,
+    pub status: WireMobRespawnOutcome,
     pub receipt: MobRespawnReceipt,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_peer_ids: Vec<String>,
@@ -1544,6 +1576,18 @@ pub enum WireMobLifecycleAction {
     Destroy,
 }
 
+/// Typed wire/unwire action for the `mob_wire` agent tool. Replaces the prior
+/// `action: String` discriminator with an exhaustive enum so the agent-tool
+/// surface reasons about the wire/unwire distinction through the type system
+/// rather than string folklore (mirrors [`WireMobLifecycleAction`]).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMobWireAction {
+    Wire,
+    Unwire,
+}
+
 /// Request payload for `mob/lifecycle`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1578,13 +1622,36 @@ pub struct MobAppendSystemContextParams {
     pub idempotency_key: Option<String>,
 }
 
+/// Outcome of a `mob/append_system_context` call on the wire. Mirrors
+/// `meerkat_core::AppendSystemContextStatus` so consumers reason about the
+/// applied/staged/duplicate distinction through a closed type rather than a
+/// free-form status string.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireAppendSystemContextStatus {
+    Applied,
+    Staged,
+    Duplicate,
+}
+
+impl From<meerkat_core::AppendSystemContextStatus> for WireAppendSystemContextStatus {
+    fn from(status: meerkat_core::AppendSystemContextStatus) -> Self {
+        match status {
+            meerkat_core::AppendSystemContextStatus::Applied => Self::Applied,
+            meerkat_core::AppendSystemContextStatus::Staged => Self::Staged,
+            meerkat_core::AppendSystemContextStatus::Duplicate => Self::Duplicate,
+        }
+    }
+}
+
 /// Response payload for `mob/append_system_context`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobAppendSystemContextResult {
     pub mob_id: String,
     pub agent_identity: String,
-    pub status: String,
+    pub status: WireAppendSystemContextStatus,
 }
 
 /// Response payload for `mob/flows`.
@@ -1701,7 +1768,16 @@ pub struct MobForceCancelResult {
 }
 
 /// Request payload for `mob/turn_start`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+///
+/// `provider_params` and `auth_binding` carry the canonical Inherit/Set/Clear
+/// tri-state via [`WireTurnMetadataOverride`]. The legacy split wire form
+/// (`provider_params` + `clear_provider_params: bool`) is still accepted at the
+/// serde boundary and folded into the tri-state, rejecting a `set + clear`
+/// payload there.
+// `deny_unknown_fields` keeps the emitted JSON Schema's `additionalProperties:
+// false` aligned with the custom `Deserialize` (which fails closed on unknown
+// fields via its shadow struct). Serde's derived `Serialize` ignores it.
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MobTurnStartParams {
@@ -1729,13 +1805,91 @@ pub struct MobTurnStartParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_output_retries: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<Value>,
-    #[serde(default)]
-    pub clear_provider_params: bool,
+    pub provider_params: Option<WireTurnMetadataOverride<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_binding: Option<WireAuthBindingRef>,
+    pub auth_binding: Option<WireTurnMetadataOverride<WireAuthBindingRef>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MobTurnStartParamsFields {
+    mob_id: String,
+    agent_identity: String,
+    prompt: WireContentInput,
     #[serde(default)]
-    pub clear_auth_binding: bool,
+    skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
+    #[serde(default)]
+    flow_tool_overlay: Option<meerkat_core::service::PublicTurnToolOverlay>,
+    #[serde(default)]
+    additional_instructions: Option<Vec<String>>,
+    #[serde(default)]
+    keep_alive: Option<bool>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    system_prompt: Option<String>,
+    #[serde(default)]
+    output_schema: Option<Value>,
+    #[serde(default)]
+    structured_output_retries: Option<u32>,
+    #[serde(default)]
+    provider_params: Option<WireTurnMetadataOverride<Value>>,
+    #[serde(default)]
+    auth_binding: Option<WireTurnMetadataOverride<WireAuthBindingRef>>,
+}
+
+impl<'de> Deserialize<'de> for MobTurnStartParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let mut raw = Value::deserialize(deserializer)?;
+        let (clear_provider_params, clear_auth_binding) = if let Some(object) = raw.as_object_mut()
+        {
+            (
+                take_legacy_clear_bool(object, "clear_provider_params", &[])?,
+                take_legacy_clear_bool(object, "clear_auth_binding", &[])?,
+            )
+        } else {
+            (false, false)
+        };
+        let fields: MobTurnStartParamsFields =
+            serde_json::from_value(raw).map_err(D::Error::custom)?;
+        let provider_params = legacy_wire_override_from_split_fields(
+            fields.provider_params,
+            clear_provider_params,
+            "provider_params",
+            "clear_provider_params",
+        )?;
+        let auth_binding = legacy_wire_override_from_split_fields(
+            fields.auth_binding,
+            clear_auth_binding,
+            "auth_binding",
+            "clear_auth_binding",
+        )?;
+        Ok(Self {
+            mob_id: fields.mob_id,
+            agent_identity: fields.agent_identity,
+            prompt: fields.prompt,
+            skill_refs: fields.skill_refs,
+            flow_tool_overlay: fields.flow_tool_overlay,
+            additional_instructions: fields.additional_instructions,
+            keep_alive: fields.keep_alive,
+            model: fields.model,
+            provider: fields.provider,
+            max_tokens: fields.max_tokens,
+            system_prompt: fields.system_prompt,
+            output_schema: fields.output_schema,
+            structured_output_retries: fields.structured_output_retries,
+            provider_params,
+            auth_binding,
+        })
+    }
 }
 
 /// Response payload for `mob/member_status`.
@@ -1766,8 +1920,8 @@ pub struct MobMemberStatusResult {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobSnapshotResult {
     pub mob_id: String,
-    pub status: String,
-    pub members: Vec<Value>,
+    pub status: WireMobLifecycleStatus,
+    pub members: Vec<MobMemberListEntryWire>,
 }
 
 #[cfg(test)]

@@ -1129,6 +1129,7 @@ fn pending_system_context_appends(
             idempotency_key: Some(append.key.clone()),
             accepted_at,
             source_kind: meerkat_core::session::SystemContextSource::Normal,
+            peer_response_terminal: None,
         })
         .collect()
 }
@@ -2240,8 +2241,8 @@ mod tests {
             Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
         }
 
-        fn provider(&self) -> &'static str {
-            "test"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {

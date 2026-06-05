@@ -116,8 +116,9 @@ impl LlmClientAdapter {
             return tag;
         };
 
+        use meerkat_core::Provider;
         match self.client.provider() {
-            "anthropic" if params.thinking_budget_tokens.is_some() => match tag {
+            Provider::Anthropic if params.thinking_budget_tokens.is_some() => match tag {
                 Some(ProviderTag::Anthropic(mut tag)) => {
                     tag.thinking_budget_tokens = params.thinking_budget_tokens;
                     Some(ProviderTag::Anthropic(tag))
@@ -130,7 +131,7 @@ impl LlmClientAdapter {
                 )),
                 other => other,
             },
-            "gemini" | "google"
+            Provider::Gemini
                 if params.top_p.is_some() || params.thinking_budget_tokens.is_some() =>
             {
                 match tag {
@@ -153,7 +154,13 @@ impl LlmClientAdapter {
                     other => other,
                 }
             }
-            _ => tag,
+            // Explicit no-op arms: these providers (and the unmatched-guard
+            // Anthropic/Gemini cases) carry no generic override here.
+            Provider::Anthropic
+            | Provider::Gemini
+            | Provider::OpenAI
+            | Provider::SelfHosted
+            | Provider::Other => tag,
         }
     }
 }
@@ -192,7 +199,7 @@ impl AgentLlmClient for LlmClientAdapter {
                 .project_replay_messages(messages)
                 .map_err(|error| {
                     AgentError::llm(
-                        self.client.provider(),
+                        self.client.provider().as_str(),
                         error.failure_reason(),
                         error.to_string(),
                     )
@@ -339,7 +346,7 @@ impl AgentLlmClient for LlmClientAdapter {
                         }
                         LlmDoneOutcome::Error { error } => {
                             return Err(AgentError::llm(
-                                self.client.provider(),
+                                self.client.provider().as_str(),
                                 error.failure_reason(),
                                 error.to_string(),
                             ));
@@ -348,7 +355,7 @@ impl AgentLlmClient for LlmClientAdapter {
                 },
                 Err(e) => {
                     return Err(AgentError::llm(
-                        self.client.provider(),
+                        self.client.provider().as_str(),
                         e.failure_reason(),
                         e.to_string(),
                     ));
@@ -380,7 +387,7 @@ impl AgentLlmClient for LlmClientAdapter {
     }
 
     fn provider(&self) -> &'static str {
-        self.client.provider()
+        self.client.provider().as_str()
     }
 
     fn model(&self) -> &str {
@@ -454,8 +461,8 @@ mod tests {
             ]))
         }
 
-        fn provider(&self) -> &'static str {
-            "projection-test"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {
@@ -474,8 +481,8 @@ mod tests {
             Box::pin(stream::iter(self.events.clone()))
         }
 
-        fn provider(&self) -> &'static str {
-            "scripted-test"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {

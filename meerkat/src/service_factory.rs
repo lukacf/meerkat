@@ -885,7 +885,7 @@ mod tests {
             self.inner.stream(request)
         }
 
-        fn provider(&self) -> &'static str {
+        fn provider(&self) -> meerkat_core::Provider {
             self.inner.provider()
         }
 
@@ -1056,8 +1056,8 @@ mod tests {
             ]))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
@@ -1725,6 +1725,7 @@ mod tests {
                 realm: meerkat_core::RealmId::parse("default").expect("valid test realm"),
                 binding: meerkat_core::BindingId::parse(binding).expect("valid test binding"),
                 profile: None,
+                origin: meerkat_core::BindingOrigin::Configured,
             }),
             ..Default::default()
         };

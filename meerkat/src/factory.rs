@@ -406,7 +406,7 @@ pub struct AgentBuildConfig {
     /// `Some(vec![])` is normalized to `None`.
     pub preload_skills: Option<Vec<meerkat_core::skills::SkillKey>>,
     /// Realm identity for cross-surface storage sharing/isolation.
-    pub realm_id: Option<String>,
+    pub realm_id: Option<RealmId>,
     /// Optional process/agent instance identifier within a realm.
     pub instance_id: Option<String>,
     /// Backend pinned by the realm manifest (e.g. "sqlite", "jsonl").
@@ -421,6 +421,10 @@ pub struct AgentBuildConfig {
     /// legacy flat `(provider, api_key, base_url)` path runs (removed in
     /// Phase 6). `llm_client_override` beats both paths.
     pub auth_binding: Option<meerkat_core::AuthBindingRef>,
+    /// Typed durable mob-member identity, set by the mob runtime when building a
+    /// member's session. Persisted onto `SessionMetadata.mob_member_binding`,
+    /// where mob ownership routing reads it directly on resume/restart.
+    pub mob_member_binding: Option<meerkat_core::MobMemberBinding>,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn.
     pub silent_comms_intents: Vec<String>,
@@ -637,6 +641,7 @@ impl AgentBuildConfig {
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
             silent_comms_intents: Vec::new(),
             max_inline_peer_notifications: None,
             tool_dispatcher_override: None,
@@ -756,6 +761,7 @@ impl AgentBuildConfig {
         // Phase 3: auth_binding flows from SessionBuildOptions into
         // AgentBuildConfig so surfaces can drive binding selection per-request.
         self.auth_binding = build.auth_binding.clone();
+        self.mob_member_binding = build.mob_member_binding.clone();
         self.keep_alive = build.keep_alive;
         self.silent_comms_intents
             .clone_from(&build.silent_comms_intents);
@@ -809,6 +815,7 @@ impl AgentBuildConfig {
             backend: self.backend.clone(),
             config_generation: self.config_generation,
             auth_binding: self.auth_binding.clone(),
+            mob_member_binding: self.mob_member_binding.clone(),
             keep_alive: self.keep_alive,
             silent_comms_intents: self.silent_comms_intents.clone(),
             max_inline_peer_notifications: self.max_inline_peer_notifications,
@@ -1040,17 +1047,11 @@ impl meerkat_llm_core::ImageGenerationExecutor for RoutingImageGenerationExecuto
         request: meerkat_llm_core::ProviderImageGenerationRequest,
     ) -> Result<meerkat_llm_core::ProviderImageGenerationOutput, meerkat_llm_core::LlmError> {
         let provider = Self::provider_key(&request.execution_plan);
-        let executor = self
-            .executors
-            .get(provider)
-            .or_else(|| {
-                (provider == "gemini")
-                    .then(|| self.executors.get("google"))
-                    .flatten()
-            })
-            .ok_or_else(|| meerkat_llm_core::LlmError::InvalidRequest {
+        let executor = self.executors.get(provider).ok_or_else(|| {
+            meerkat_llm_core::LlmError::InvalidRequest {
                 message: format!("no image generation executor configured for provider {provider}"),
-            })?;
+            }
+        })?;
         executor.execute_image_generation(request).await
     }
 }
@@ -1445,17 +1446,13 @@ impl AgentFactory {
         config: &Config,
         provider: Provider,
         auth_binding: Option<&AuthBindingRef>,
-        preferred_realm: Option<&str>,
+        preferred_realm: Option<&RealmId>,
     ) -> Result<(RealmConnectionSet, String, AuthBindingRef), String> {
-        let preferred_realm = preferred_realm
-            .map(RealmId::parse)
-            .transpose()
-            .map_err(|e| e.to_string())?;
         let target = meerkat_core::resolve_auth_binding_or_default_for_provider(
             config,
             provider,
             auth_binding,
-            preferred_realm.as_ref(),
+            preferred_realm,
             true,
         )
         .map_err(|e| e.to_string())?;
@@ -1470,17 +1467,13 @@ impl AgentFactory {
         config: &Config,
         provider: Provider,
         auth_binding: Option<&AuthBindingRef>,
-        preferred_realm: Option<&str>,
+        preferred_realm: Option<&RealmId>,
     ) -> Result<Vec<meerkat_core::ResolvedConnectionTarget>, String> {
-        let preferred_realm = preferred_realm
-            .map(RealmId::parse)
-            .transpose()
-            .map_err(|e| e.to_string())?;
         meerkat_core::resolve_auth_binding_candidates_for_provider(
             config,
             provider,
             auth_binding,
-            preferred_realm.as_ref(),
+            preferred_realm,
             true,
         )
         .map_err(|e| e.to_string())
@@ -1494,6 +1487,9 @@ impl AgentFactory {
         default_label: &str,
     ) -> Result<String, String> {
         let mut provider_bindings = Vec::new();
+        // The per-provider default is the binding carrying the typed
+        // `provider_default` marker — not a `default_<provider>` name match.
+        let mut typed_provider_default: Option<&str> = None;
         for (binding_id, binding) in &realm.bindings {
             let backend = realm
                 .backends
@@ -1523,6 +1519,9 @@ impl AgentFactory {
                 })?;
             if backend.provider == provider && auth.provider == provider {
                 provider_bindings.push(binding_id.as_str());
+                if binding.provider_default && typed_provider_default.is_none() {
+                    typed_provider_default = Some(binding_id.as_str());
+                }
             }
         }
 
@@ -1532,12 +1531,8 @@ impl AgentFactory {
             return Ok(default_binding.to_string());
         }
 
-        let provider_default_binding = format!("default_{}", provider.as_str());
-        if provider_bindings
-            .iter()
-            .any(|binding_id| *binding_id == provider_default_binding)
-        {
-            return Ok(provider_default_binding);
+        if let Some(typed_default) = typed_provider_default {
+            return Ok(typed_default.to_string());
         }
 
         match provider_bindings.as_slice() {
@@ -1638,6 +1633,7 @@ impl AgentFactory {
             realm: selected_realm,
             binding,
             profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
         };
         Ok((realm, binding_id, auth_binding))
     }
@@ -1676,48 +1672,50 @@ impl AgentFactory {
     fn resolve_image_binding_for_provider(
         config: &Config,
         provider: Provider,
-        selected_realm: Option<&str>,
+        selected_realm: Option<&RealmId>,
     ) -> Result<(RealmConnectionSet, String, AuthBindingRef), String> {
         let Some(selected_realm) = selected_realm else {
             return Self::resolve_realm_binding_for_provider(config, provider, None, None);
         };
-        if selected_realm == "env_default" {
+        if selected_realm.is_env_default() {
             return Self::resolve_realm_binding_for_provider(config, provider, None, None);
         }
-        let selected_realm = RealmId::parse(selected_realm).map_err(|e| e.to_string())?;
         if !config.realm.contains_key(selected_realm.as_str()) {
             return Self::resolve_realm_binding_for_provider(
                 config,
                 provider,
                 None,
-                Some(selected_realm.as_str()),
+                Some(selected_realm),
             );
         }
-        Self::resolve_selected_image_binding_for_provider(config, provider, selected_realm)
+        Self::resolve_selected_image_binding_for_provider(config, provider, selected_realm.clone())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn resolve_web_search_binding_for_provider(
         config: &Config,
         provider: Provider,
-        selected_realm: Option<&str>,
+        selected_realm: Option<&RealmId>,
     ) -> Result<(RealmConnectionSet, String, AuthBindingRef), String> {
         let Some(selected_realm) = selected_realm else {
             return Self::resolve_realm_binding_for_provider(config, provider, None, None);
         };
-        if selected_realm == "env_default" {
+        if selected_realm.is_env_default() {
             return Self::resolve_realm_binding_for_provider(config, provider, None, None);
         }
-        let selected_realm = RealmId::parse(selected_realm).map_err(|e| e.to_string())?;
         if !config.realm.contains_key(selected_realm.as_str()) {
             return Self::resolve_realm_binding_for_provider(
                 config,
                 provider,
                 None,
-                Some(selected_realm.as_str()),
+                Some(selected_realm),
             );
         }
-        Self::resolve_selected_web_search_binding_for_provider(config, provider, selected_realm)
+        Self::resolve_selected_web_search_binding_for_provider(
+            config,
+            provider,
+            selected_realm.clone(),
+        )
     }
 
     #[cfg(all(
@@ -1772,7 +1770,7 @@ impl AgentFactory {
         config: &Config,
         registry: &ModelRegistry,
         search_provider: Provider,
-        selected_realm: Option<&str>,
+        selected_realm: Option<&RealmId>,
         runtime_build_mode: &RuntimeBuildMode,
     ) -> Result<Option<Arc<dyn meerkat_llm_core::WebSearchExecutor>>, BuildAgentError> {
         if !provider_web_search_enabled(config, search_provider) {
@@ -2403,6 +2401,12 @@ impl AgentFactory {
         if !mask.peer_meta {
             build_config.peer_meta = metadata.peer_meta.clone();
         }
+        // Durable mob-member identity: preserve the persisted typed binding on
+        // resume unless the build already carries one. This is identity, not a
+        // turn override, so it has no mask bit; the caller keeps precedence.
+        if build_config.mob_member_binding.is_none() {
+            build_config.mob_member_binding = metadata.mob_member_binding.clone();
+        }
 
         Ok(Some(metadata))
     }
@@ -2631,9 +2635,11 @@ impl AgentFactory {
         }
 
         if let Some(client) = build_config.llm_client_override.as_ref() {
-            return Ok((Provider::from_name(client.provider()), None));
+            return Ok((client.provider(), None));
         }
         if let Some(client) = build_config.agent_llm_client_override.as_ref() {
+            // `AgentLlmClient::provider()` still returns the display label;
+            // parse it back into the typed enum at this boundary.
             return Ok((Provider::from_name(client.provider()), None));
         }
 
@@ -2705,7 +2711,7 @@ impl AgentFactory {
         registry: &ModelRegistry,
         identity: &SessionLlmIdentity,
         auth_lease_handle: Option<meerkat_core::handles::GeneratedAuthLeaseHandle>,
-        preferred_realm: Option<&str>,
+        preferred_realm: Option<&RealmId>,
     ) -> Result<SelfHostedClientBuild, FactoryError> {
         #[cfg(not(feature = "openai"))]
         {
@@ -2788,7 +2794,7 @@ impl AgentFactory {
         config: &Config,
         identity: &SessionLlmIdentity,
         spec: &SelfHostedClientSpec,
-        preferred_realm: Option<&str>,
+        preferred_realm: Option<&RealmId>,
     ) -> Result<(RealmConnectionSet, AuthBindingRef, Option<AuthBindingRef>), FactoryError> {
         if let Some(auth_binding) = identity.auth_binding.as_ref() {
             let (realm, _binding_id, resolved_auth_binding) =
@@ -2834,14 +2840,9 @@ impl AgentFactory {
     #[cfg(feature = "openai")]
     fn configured_self_hosted_connection(
         config: &Config,
-        preferred_realm: Option<&str>,
+        preferred_realm: Option<&RealmId>,
     ) -> Result<Option<(RealmConnectionSet, AuthBindingRef)>, FactoryError> {
-        let preferred_realm = preferred_realm
-            .map(RealmId::parse)
-            .transpose()
-            .map_err(|err| FactoryError::ClientCreationFailed(err.to_string()))?;
-
-        if let Some(realm_id) = preferred_realm.as_ref()
+        if let Some(realm_id) = preferred_realm
             && config.realm.contains_key(realm_id.as_str())
         {
             let target = meerkat_core::resolve_realm_binding_target_for_provider(
@@ -2866,7 +2867,7 @@ impl AgentFactory {
             config,
             Provider::SelfHosted,
             None,
-            preferred_realm.as_ref(),
+            preferred_realm,
             false,
         ) {
             Ok(target) => Ok(Some((target.realm, target.auth_binding))),
@@ -2930,6 +2931,7 @@ impl AgentFactory {
             auth_profile: auth.id.clone(),
             default_model: Some(spec.remote_model.clone()),
             policy: Default::default(),
+            provider_default: false,
         };
 
         let mut backends = BTreeMap::new();
@@ -2941,7 +2943,7 @@ impl AgentFactory {
 
         Ok((
             RealmConnectionSet {
-                realm_id: SELF_HOSTED_LEGACY_REALM_ID.to_string(),
+                realm_id: realm_id.clone(),
                 backends,
                 auth_profiles,
                 bindings,
@@ -2951,6 +2953,7 @@ impl AgentFactory {
                 realm: realm_id,
                 binding: binding_id,
                 profile: None,
+                origin: meerkat_core::BindingOrigin::Configured,
             },
         ))
     }
@@ -3396,7 +3399,7 @@ impl AgentFactory {
                                     auth_binding: build_config.auth_binding.clone(),
                                 },
                                 auth_lease_handle,
-                                build_config.realm_id.as_deref(),
+                                build_config.realm_id.as_ref(),
                             )
                             .await
                             .map_err(BuildAgentError::LlmClient)?;
@@ -3429,7 +3432,7 @@ impl AgentFactory {
                             config,
                             provider,
                             build_config.auth_binding.as_ref(),
-                            build_config.realm_id.as_deref(),
+                            build_config.realm_id.as_ref(),
                         )
                         .map_err(BuildAgentError::ConnectionResolution)?;
                         for target in candidates {
@@ -3602,7 +3605,7 @@ impl AgentFactory {
                     Self::resolve_image_binding_for_provider(
                         config,
                         image_provider,
-                        build_config.realm_id.as_deref(),
+                        build_config.realm_id.as_ref(),
                     )
                 else {
                     continue;
@@ -3683,7 +3686,7 @@ impl AgentFactory {
                     config,
                     &registry,
                     provider,
-                    build_config.realm_id.as_deref(),
+                    build_config.realm_id.as_ref(),
                     &build_config.runtime_build_mode,
                 )
                 .await?
@@ -3927,8 +3930,12 @@ impl AgentFactory {
                     self.user_config_root.as_deref(),
                     comms_name,
                     build_config.peer_meta.clone(),
-                    // Realm ID is the comms inproc namespace boundary.
-                    build_config.realm_id.clone(),
+                    // Realm ID is the comms inproc namespace boundary (transport
+                    // string, not a typed realm carrier).
+                    build_config
+                        .realm_id
+                        .as_ref()
+                        .map(|realm| realm.as_str().to_string()),
                     session.id(),
                     silent_intents,
                     session_claim_handle,
@@ -3961,7 +3968,10 @@ impl AgentFactory {
             );
             let mut runtime = meerkat_comms::CommsRuntime::inproc_only_with_silent_intents(
                 comms_name,
-                build_config.realm_id.clone(),
+                build_config
+                    .realm_id
+                    .as_ref()
+                    .map(|realm| realm.as_str().to_string()),
                 silent_intents,
             )
             .map_err(|e| BuildAgentError::Comms(e.to_string()))?;
@@ -4196,9 +4206,12 @@ impl AgentFactory {
             let workgraph_dispatcher = match build_config.workgraph_tools.take() {
                 Some(dispatcher) => dispatcher,
                 None => {
+                    // WorkGraph store scope is a plain string key; map the
+                    // typed realm to its slug at this storage boundary.
                     let default_realm_id = build_config
                         .realm_id
-                        .clone()
+                        .as_ref()
+                        .map(|realm| realm.as_str().to_string())
                         .unwrap_or_else(|| "default".to_string());
                     #[cfg(not(target_arch = "wasm32"))]
                     {
@@ -4659,6 +4672,7 @@ impl AgentFactory {
             metadata.backend = build_config.backend.clone();
             metadata.config_generation = build_config.config_generation;
             metadata.auth_binding = build_config.auth_binding.clone();
+            metadata.mob_member_binding = build_config.mob_member_binding.clone();
             metadata
         } else {
             SessionMetadata {
@@ -4689,6 +4703,7 @@ impl AgentFactory {
                 backend: build_config.backend.clone(),
                 config_generation: build_config.config_generation,
                 auth_binding: build_config.auth_binding.clone(),
+                mob_member_binding: build_config.mob_member_binding.clone(),
             }
         };
 
@@ -5077,8 +5092,8 @@ mod tests {
             Box::pin(futures::stream::empty())
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
@@ -5451,6 +5466,7 @@ mod tests {
             backend: None,
             config_generation: None,
             auth_binding: None,
+            mob_member_binding: None,
         }
     }
 
@@ -5469,7 +5485,7 @@ mod tests {
         )
         .expect("env default binding should synthesize");
 
-        assert_eq!(realm.realm_id, "env_default");
+        assert_eq!(realm.realm_id.as_str(), "env_default");
         assert_eq!(binding_id, "default");
         assert_eq!(auth_binding.realm.as_str(), "env_default");
         assert_eq!(auth_binding.binding.as_str(), "default");
@@ -5489,6 +5505,7 @@ mod tests {
             realm: RealmId::parse("env_default").expect("valid realm"),
             binding: BindingId::parse("default").expect("valid binding"),
             profile: None,
+            origin: meerkat_core::BindingOrigin::SyntheticEnvDefault,
         };
         let err = AgentFactory::resolve_realm_binding_for_provider(
             &config,
@@ -5596,6 +5613,7 @@ mod tests {
             realm: RealmId::parse("env_default").expect("valid realm"),
             binding: BindingId::parse("default").expect("valid binding"),
             profile: None,
+            origin: meerkat_core::BindingOrigin::SyntheticEnvDefault,
         };
         let lease_key =
             meerkat_core::handles::LeaseKey::from_auth_binding(&env_default_auth_binding);
@@ -5694,6 +5712,7 @@ mod tests {
             realm: RealmId::parse("env_default").expect("valid realm"),
             binding: BindingId::parse("default").expect("valid binding"),
             profile: None,
+            origin: meerkat_core::BindingOrigin::SyntheticEnvDefault,
         };
         let lease_key =
             meerkat_core::handles::LeaseKey::from_auth_binding(&env_default_auth_binding);
@@ -5721,6 +5740,7 @@ mod tests {
             realm: RealmId::parse("session_a").expect("valid realm"),
             binding: meerkat_core::BindingId::parse("default_openai").expect("valid binding"),
             profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
         };
         let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
         let connection = ResolvedConnection {
@@ -5794,6 +5814,7 @@ mod tests {
                 auth_profile: "anthropic_env".to_string(),
                 default_model: None,
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         config.realm.insert("dev".to_string(), section);
@@ -5802,7 +5823,7 @@ mod tests {
             &config,
             Provider::Anthropic,
             None,
-            Some("dev"),
+            Some(&RealmId::parse("dev").unwrap()),
         )
         .expect("configured default binding should resolve");
 
@@ -5846,12 +5867,13 @@ mod tests {
                 auth_profile: "openai_key".to_string(),
                 default_model: Some("gpt-5.5".to_string()),
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         config.realm.insert("dev".to_string(), section);
 
         let mut build = AgentBuildConfig::new("gpt-5.4");
-        build.realm_id = Some("missing".to_string());
+        build.realm_id = Some(RealmId::parse("missing").unwrap());
         assert!(build.auth_binding.is_none());
 
         let agent = factory
@@ -5910,6 +5932,7 @@ mod tests {
                 auth_profile: "openai_key".to_string(),
                 default_model: Some("gpt-5.5".to_string()),
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         config.realm.insert("dev".to_string(), section);
@@ -5920,6 +5943,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("openai_oauth").unwrap(),
             profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
         });
         build.resume_override_mask.model = true;
 
@@ -6051,12 +6075,13 @@ mod tests {
                 auth_profile: "anthropic_key".to_string(),
                 default_model: Some("claude-opus-4-8".to_string()),
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         config.realm.insert("dev".to_string(), section);
 
         let mut build = AgentBuildConfig::new("gpt-5.4");
-        build.realm_id = Some("missing".to_string());
+        build.realm_id = Some(RealmId::parse("missing").unwrap());
         assert!(build.provider.is_none());
         assert!(build.auth_binding.is_none());
 
@@ -6110,6 +6135,7 @@ mod tests {
                 auth_profile: "anthropic_env".to_string(),
                 default_model: None,
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         config
@@ -6149,6 +6175,7 @@ mod tests {
                 auth_profile: "openai_env".to_string(),
                 default_model: None,
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         config.realm.insert("default".to_string(), default_section);
@@ -6156,7 +6183,7 @@ mod tests {
         let err = AgentFactory::resolve_image_binding_for_provider(
             &config,
             Provider::OpenAI,
-            Some("session_a"),
+            Some(&RealmId::parse("session_a").unwrap()),
         )
         .expect_err("image lookup must stay inside the selected realm");
 
@@ -6178,11 +6205,11 @@ mod tests {
         let (realm, binding_id, auth_binding) = AgentFactory::resolve_image_binding_for_provider(
             &config,
             Provider::OpenAI,
-            Some("session_missing"),
+            Some(&RealmId::parse("session_missing").unwrap()),
         )
         .expect("unconfigured storage realm may use configured default credentials");
 
-        assert_eq!(realm.realm_id, "default");
+        assert_eq!(realm.realm_id.as_str(), "default");
         assert_eq!(binding_id, "default_openai");
         assert_eq!(auth_binding.realm.as_str(), "default");
         assert_eq!(auth_binding.binding.as_str(), "default_openai");
@@ -6195,7 +6222,7 @@ mod tests {
             AgentFactory::resolve_image_binding_for_provider(&config, Provider::Gemini, None)
                 .expect("unscoped image lookup may use env_default");
 
-        assert_eq!(realm.realm_id, "env_default");
+        assert_eq!(realm.realm_id.as_str(), "env_default");
         assert_eq!(binding_id, "default");
         assert_eq!(auth_binding.realm.as_str(), "env_default");
         assert_eq!(auth_binding.binding.as_str(), "default");
@@ -6207,11 +6234,11 @@ mod tests {
         let (realm, binding_id, auth_binding) = AgentFactory::resolve_image_binding_for_provider(
             &config,
             Provider::Gemini,
-            Some("env_default"),
+            Some(&RealmId::parse("env_default").unwrap()),
         )
         .expect("explicit env_default image lookup may use env_default credentials");
 
-        assert_eq!(realm.realm_id, "env_default");
+        assert_eq!(realm.realm_id.as_str(), "env_default");
         assert_eq!(binding_id, "default");
         assert_eq!(auth_binding.realm.as_str(), "env_default");
         assert_eq!(auth_binding.binding.as_str(), "default");
@@ -6229,7 +6256,7 @@ mod tests {
             AgentFactory::resolve_image_binding_for_provider(&config, Provider::OpenAI, None)
                 .expect("unscoped image lookup may use the configured default realm");
 
-        assert_eq!(realm.realm_id, "default");
+        assert_eq!(realm.realm_id.as_str(), "default");
         assert_eq!(binding_id, "default_openai");
         assert_eq!(auth_binding.realm.as_str(), "default");
         assert_eq!(auth_binding.binding.as_str(), "default_openai");
@@ -6241,11 +6268,11 @@ mod tests {
         let (realm, binding_id, auth_binding) = AgentFactory::resolve_image_binding_for_provider(
             &config,
             Provider::OpenAI,
-            Some("workspace_derived"),
+            Some(&RealmId::parse("workspace_derived").unwrap()),
         )
         .expect("workspace storage realm without credential config may use env_default");
 
-        assert_eq!(realm.realm_id, "env_default");
+        assert_eq!(realm.realm_id.as_str(), "env_default");
         assert_eq!(binding_id, "default");
         assert_eq!(auth_binding.realm.as_str(), "env_default");
         assert_eq!(auth_binding.binding.as_str(), "default");
@@ -6433,6 +6460,7 @@ mod tests {
                 auth_profile: auth_id,
                 default_model: Some("gemma4:e2b".to_string()),
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         config.realm.insert(realm_id.to_string(), realm);
@@ -6675,7 +6703,7 @@ mod tests {
             .unwrap();
         let mut build = AgentBuildConfig::new("gemma-4-e2b");
         build.provider = Some(Provider::SelfHosted);
-        build.realm_id = Some("dev".to_string());
+        build.realm_id = Some(RealmId::parse("dev").unwrap());
         build.resume_session = Some(session);
         build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings.clone());
         build.override_builtins = ToolCategoryOverride::Disable;
@@ -7059,7 +7087,7 @@ mod tests {
         );
         let mut build = AgentBuildConfig::new("gemma-4-e2b");
         build.provider = Some(Provider::SelfHosted);
-        build.realm_id = Some("dev".to_string());
+        build.realm_id = Some(RealmId::parse("dev").unwrap());
         build.override_builtins = ToolCategoryOverride::Disable;
 
         let agent = factory.build_agent(build, &config).await.unwrap();
@@ -7178,7 +7206,7 @@ mod tests {
             .insert("dev".to_string(), RealmConfigSection::default());
         let mut build = AgentBuildConfig::new("gemma-4-e2b");
         build.provider = Some(Provider::SelfHosted);
-        build.realm_id = Some("dev".to_string());
+        build.realm_id = Some(RealmId::parse("dev").unwrap());
         build.override_builtins = ToolCategoryOverride::Disable;
 
         let err = match factory.build_agent(build, &config).await {
@@ -7298,6 +7326,7 @@ mod tests {
                 auth_profile: "local_auth".to_string(),
                 default_model: Some("gemma4:e2b".to_string()),
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         config.realm.insert("dev".to_string(), realm);
@@ -7305,6 +7334,7 @@ mod tests {
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("local_binding").unwrap(),
             profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
         };
         let mut build = AgentBuildConfig::new("gemma-4-e2b");
         build.provider = Some(Provider::SelfHosted);
@@ -7330,7 +7360,7 @@ mod tests {
         let err = AgentFactory::resolve_image_binding_for_provider(
             &config,
             Provider::OpenAI,
-            Some("default"),
+            Some(&RealmId::parse("default").unwrap()),
         )
         .expect_err("configured selected image lookup must not synthesize env_default");
 
@@ -7364,11 +7394,11 @@ mod tests {
         let (realm, binding_id, auth_binding) = AgentFactory::resolve_image_binding_for_provider(
             &config,
             Provider::OpenAI,
-            Some("session_a"),
+            Some(&RealmId::parse("session_a").unwrap()),
         )
         .expect("selected image lookup should pick the selected realm's OpenAI binding");
 
-        assert_eq!(realm.realm_id, "session_a");
+        assert_eq!(realm.realm_id.as_str(), "session_a");
         assert_eq!(binding_id, "default_openai");
         assert_eq!(auth_binding.realm.as_str(), "session_a");
         assert_eq!(auth_binding.binding.as_str(), "default_openai");
@@ -7438,7 +7468,7 @@ mod tests {
         let (realm, _binding_id, auth_binding) = AgentFactory::resolve_image_binding_for_provider(
             &config,
             Provider::OpenAI,
-            Some("session_a"),
+            Some(&RealmId::parse("session_a").unwrap()),
         )
         .expect("selected image lookup should resolve the selected OpenAI binding");
         let registry =
@@ -7514,10 +7544,10 @@ mod tests {
         let (realm, binding_id, auth_binding) = AgentFactory::resolve_image_binding_for_provider(
             &config,
             Provider::OpenAI,
-            Some("session_a"),
+            Some(&RealmId::parse("session_a").unwrap()),
         )
         .expect("selected image lookup should not fall back before validation");
-        assert_eq!(realm.realm_id, "session_a");
+        assert_eq!(realm.realm_id.as_str(), "session_a");
         assert_eq!(binding_id, "default_openai");
 
         let resolve_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -7552,7 +7582,7 @@ mod tests {
         let err = AgentFactory::resolve_image_binding_for_provider(
             &config,
             Provider::Gemini,
-            Some("default"),
+            Some(&RealmId::parse("default").unwrap()),
         )
         .expect_err("empty selected image realm must not synthesize env_default");
 
@@ -7647,7 +7677,7 @@ mod tests {
 
         let mut build = AgentBuildConfig::new("gpt-5.4");
         build.provider = Some(Provider::OpenAI);
-        build.realm_id = Some("default".to_string());
+        build.realm_id = Some(RealmId::parse("default").unwrap());
         build.override_builtins = ToolCategoryOverride::Disable;
         let mut config = Config::default();
         config
@@ -7850,7 +7880,7 @@ mod tests {
             .expect("session runtime bindings");
         let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
         build.provider = Some(Provider::Anthropic);
-        build.realm_id = Some("session_a".to_string());
+        build.realm_id = Some(RealmId::parse("session_a").unwrap());
         build.resume_session = Some(session);
         build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings.clone());
         build.override_builtins = ToolCategoryOverride::Disable;
@@ -7870,6 +7900,7 @@ mod tests {
             realm: RealmId::parse("session_a").unwrap(),
             binding: BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
         };
         let snapshot =
             bindings
@@ -7968,7 +7999,7 @@ mod tests {
             .expect("session runtime bindings");
         let mut build = AgentBuildConfig::new("gpt-5.4");
         build.provider = Some(Provider::OpenAI);
-        build.realm_id = Some("session_a".to_string());
+        build.realm_id = Some(RealmId::parse("session_a").unwrap());
         build.resume_session = Some(session);
         build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings.clone());
         build.override_builtins = ToolCategoryOverride::Disable;
@@ -7989,6 +8020,7 @@ mod tests {
             realm: RealmId::parse("session_a").unwrap(),
             binding: BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
         };
         let snapshot =
             bindings
@@ -8432,6 +8464,7 @@ mod tests {
                 backend: None,
                 config_generation: None,
                 auth_binding: None,
+                mob_member_binding: None,
             })
             .expect("resume metadata");
 
@@ -8847,8 +8880,8 @@ mod prompt_tests {
             })]))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {

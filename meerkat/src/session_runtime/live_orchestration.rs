@@ -142,7 +142,7 @@ pub fn build_live_projection_snapshot_for_runtime(
         // `Message::System` entry in `seed_messages`.
         system_prompt: extract_system_prompt_from_seed_messages_runtime(&open_config.seed_messages),
         model_id: open_config.llm_identity.model.clone(),
-        provider_id: open_config.llm_identity.provider.as_str().to_string(),
+        provider_id: open_config.llm_identity.provider,
         audio_config: None,
         // R3: forward typed runtime system-context so refresh snapshots
         // carry the same authoritative system instructions the open path
@@ -546,9 +546,7 @@ mod orchestrator {
             };
 
             let mut build = build_config.to_session_build_options();
-            build.realm_id = build
-                .realm_id
-                .or_else(|| self.realm_id.map(ToString::to_string));
+            build.realm_id = build.realm_id.or_else(|| self.realm_id.cloned());
             build.instance_id = build
                 .instance_id
                 .or_else(|| self.instance_id.map(ToString::to_string));
@@ -924,9 +922,7 @@ mod orchestrator {
                         model: Some(new_global_model.clone()),
                         provider: None,
                         provider_params: None,
-                        clear_provider_params: false,
                         auth_binding: None,
-                        clear_auth_binding: false,
                     };
                     if let Err(err) = self
                         .runtime_adapter

@@ -87,11 +87,19 @@ pub struct RuntimeInputSemantics {
 /// runtime loop consumes this admitted projection when constructing
 /// `RunPrimitive` so dequeue mechanics do not reinterpret peer conventions or
 /// terminal status payloads.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+// Cannot derive `Eq`: `peer_response_terminal` carries a typed fact whose
+// render payload is a `serde_json::Value`, which is `PartialEq` but not `Eq`.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RuntimeInputProjection {
     pub append: Option<ConversationAppend>,
     pub additional_appends: Vec<ConversationAppend>,
     pub context_append: Option<ConversationContextAppend>,
+    /// Typed terminal-peer-response fact this projection carries when the
+    /// admitted input is a peer terminal response. The producer threads the
+    /// typed [`meerkat_core::PeerResponseTerminalFact`] all the way to the
+    /// realtime/live consumer instead of re-deriving it from the flattened
+    /// `context_append` prose text.
+    pub peer_response_terminal: Option<meerkat_core::PeerResponseTerminalFact>,
 }
 
 impl RuntimeInputSemantics {

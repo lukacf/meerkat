@@ -343,7 +343,8 @@ pub enum PeerResponseTerminalFactError {
     InvalidCorrelationId { input: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct PeerResponseTerminalTransportIdentity(String);
 
 impl PeerResponseTerminalTransportIdentity {
@@ -366,8 +367,9 @@ impl std::fmt::Display for PeerResponseTerminalTransportIdentity {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PeerResponseTerminalRouteIdentity(String);
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct PeerResponseTerminalRouteIdentity(crate::comms::PeerId);
 
 impl PeerResponseTerminalRouteIdentity {
     pub fn parse(raw: impl Into<String>) -> Result<Self, PeerResponseTerminalFactError> {
@@ -380,11 +382,16 @@ impl PeerResponseTerminalRouteIdentity {
         }
         let peer_id = crate::comms::PeerId::parse(raw.trim())
             .map_err(|_| PeerResponseTerminalFactError::InvalidRouteIdentity)?;
-        Ok(Self(peer_id.to_string()))
+        Ok(Self(peer_id))
     }
 
-    pub fn as_str(&self) -> &str {
-        &self.0
+    /// The canonical typed routing identity.
+    pub fn peer_id(&self) -> crate::comms::PeerId {
+        self.0
+    }
+
+    pub fn as_str(&self) -> String {
+        self.0.as_str()
     }
 }
 
@@ -394,7 +401,8 @@ impl std::fmt::Display for PeerResponseTerminalRouteIdentity {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct PeerResponseTerminalDisplayIdentity(String);
 
 impl PeerResponseTerminalDisplayIdentity {
@@ -420,7 +428,8 @@ impl std::fmt::Display for PeerResponseTerminalDisplayIdentity {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct PeerResponseTerminalCorrelationId(PeerCorrelationId);
 
 impl PeerResponseTerminalCorrelationId {
@@ -451,7 +460,8 @@ impl std::fmt::Display for PeerResponseTerminalCorrelationId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct PeerResponseTerminalRenderPayload(Option<serde_json::Value>);
 
 impl PeerResponseTerminalRenderPayload {
@@ -470,8 +480,9 @@ impl From<Option<serde_json::Value>> for PeerResponseTerminalRenderPayload {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PeerResponseTerminalSource {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport_identity: Option<PeerResponseTerminalTransportIdentity>,
     pub route_identity: PeerResponseTerminalRouteIdentity,
     pub display_identity: PeerResponseTerminalDisplayIdentity,
@@ -505,7 +516,7 @@ impl PeerResponseTerminalSource {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PeerResponseTerminalFact {
     pub source: PeerResponseTerminalSource,
     pub correlation_id: PeerResponseTerminalCorrelationId,
@@ -540,6 +551,12 @@ impl PeerResponseTerminalFact {
 
     pub fn context_key(&self) -> String {
         peer_response_terminal_context_key(&self.source.route_identity, self.correlation_id)
+    }
+
+    /// Typed render payload accessor for surfaces that summarize the terminal
+    /// fact directly instead of re-parsing the flattened prompt text.
+    pub fn render_payload_value(&self) -> Option<&serde_json::Value> {
+        self.render_payload.as_ref()
     }
 }
 
@@ -2412,5 +2429,43 @@ mod tests {
             PeerResponseTerminalRouteIdentity::parse("analyst-rt"),
             Err(PeerResponseTerminalFactError::InvalidRouteIdentity)
         ));
+    }
+
+    #[test]
+    fn peer_terminal_fact_round_trips_through_serde() {
+        // The typed fact is now persisted on `PendingSystemContextAppend` and
+        // read back by the realtime consumer instead of re-parsing flattened
+        // prompt text, so it must survive a durable serde round-trip.
+        let fact = PeerResponseTerminalFact::new(
+            PeerResponseTerminalSource::parse(
+                Some("inproc://analyst"),
+                "550e8400-e29b-41d4-a716-446655440000",
+                "analyst-rt",
+            )
+            .expect("source"),
+            PeerResponseTerminalCorrelationId::parse("018f6f79-7a82-7c4e-a552-a3b86f9630f1")
+                .expect("correlation id"),
+            PeerResponseTerminalProjectionStatus::Completed,
+            PeerResponseTerminalRenderPayload::new(Some(serde_json::json!({
+                "request_intent": "checksum_token",
+                "token": "birch seventeen",
+            }))),
+        );
+
+        let json = serde_json::to_string(&fact).expect("serialize fact");
+        let decoded: PeerResponseTerminalFact =
+            serde_json::from_str(&json).expect("deserialize fact");
+        assert_eq!(decoded, fact);
+        assert_eq!(
+            decoded.context_key(),
+            "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
+        );
+        assert_eq!(
+            decoded
+                .render_payload_value()
+                .and_then(|payload| payload.get("token"))
+                .and_then(|token| token.as_str()),
+            Some("birch seventeen")
+        );
     }
 }

@@ -1,4 +1,438 @@
 {
+  "ApprovalDecideParams": {
+    "$defs": {
+      "ApprovalDecision": {
+        "description": "Allowed terminal decisions.",
+        "enum": [
+          "approve",
+          "deny"
+        ],
+        "type": "string"
+      },
+      "ApprovalId": {
+        "description": "Durable approval id.",
+        "type": "string"
+      },
+      "ApprovalPrincipalId": {
+        "description": "Principal identifier used for requester and decision actor projections.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`approval/decide` parameters.",
+    "properties": {
+      "actor": {
+        "$ref": "#/$defs/ApprovalPrincipalId"
+      },
+      "approval_id": {
+        "$ref": "#/$defs/ApprovalId"
+      },
+      "decision": {
+        "$ref": "#/$defs/ApprovalDecision"
+      },
+      "provenance": true,
+      "reason": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "approval_id",
+      "decision",
+      "actor"
+    ],
+    "title": "ApprovalDecideParams",
+    "type": "object"
+  },
+  "ApprovalGetParams": {
+    "$defs": {
+      "ApprovalId": {
+        "description": "Durable approval id.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`approval/get` parameters.",
+    "properties": {
+      "approval_id": {
+        "$ref": "#/$defs/ApprovalId"
+      }
+    },
+    "required": [
+      "approval_id"
+    ],
+    "title": "ApprovalGetParams",
+    "type": "object"
+  },
+  "ApprovalListParams": {
+    "$defs": {
+      "ApprovalListFilter": {
+        "description": "Filter for listing approvals.",
+        "properties": {
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ApprovalStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ApprovalStatus": {
+        "description": "Approval record status.",
+        "enum": [
+          "pending",
+          "approved",
+          "denied",
+          "expired",
+          "cancelled"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`approval/list` parameters.",
+    "properties": {
+      "filter": {
+        "$ref": "#/$defs/ApprovalListFilter",
+        "default": {}
+      }
+    },
+    "title": "ApprovalListParams",
+    "type": "object"
+  },
+  "ApprovalRequestParams": {
+    "$defs": {
+      "ApprovalActionKind": {
+        "description": "Typed action kind for the proposed action.",
+        "enum": [
+          "shell_command",
+          "file_write",
+          "file_delete",
+          "network_call",
+          "device_control",
+          "tool_call",
+          "other"
+        ],
+        "type": "string"
+      },
+      "ApprovalDecision": {
+        "description": "Allowed terminal decisions.",
+        "enum": [
+          "approve",
+          "deny"
+        ],
+        "type": "string"
+      },
+      "ApprovalOwnerRef": {
+        "description": "Typed owner for an approval request.",
+        "oneOf": [
+          {
+            "properties": {
+              "owner_type": {
+                "const": "runtime",
+                "type": "string"
+              }
+            },
+            "required": [
+              "owner_type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "owner_type": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "owner_type",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "mob_id": {
+                "type": "string"
+              },
+              "owner_type": {
+                "const": "mob",
+                "type": "string"
+              }
+            },
+            "required": [
+              "owner_type",
+              "mob_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "owner_type": {
+                "const": "run",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "owner_type",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "owner_type": {
+                "const": "tool_call",
+                "type": "string"
+              },
+              "tool_call_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "owner_type",
+              "tool_call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "member_ref": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "owner_type": {
+                "const": "external_member",
+                "type": "string"
+              }
+            },
+            "required": [
+              "owner_type",
+              "mob_id",
+              "member_ref"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ApprovalPrincipalId": {
+        "description": "Principal identifier used for requester and decision actor projections.",
+        "type": "string"
+      },
+      "ApprovalProposedAction": {
+        "description": "Action proposed by the requester.",
+        "properties": {
+          "body": true,
+          "kind": {
+            "$ref": "#/$defs/ApprovalActionKind"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "summary"
+        ],
+        "type": "object"
+      },
+      "ApprovalResourceKind": {
+        "description": "Typed resource kind affected by an approval.",
+        "enum": [
+          "file",
+          "shell_command",
+          "tool_call",
+          "device",
+          "runtime",
+          "network",
+          "other"
+        ],
+        "type": "string"
+      },
+      "ApprovalResourceRef": {
+        "description": "Resource affected by an approval.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/ApprovalResourceKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "ApprovalRisk": {
+        "description": "Risk classification for an approval request.",
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "critical"
+        ],
+        "type": "string"
+      },
+      "SurfaceMetadata": {
+        "description": "Opaque caller-owned metadata shared across public surfaces.",
+        "properties": {
+          "app_context": {
+            "description": "Caller-owned opaque application context."
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Caller-owned labels for filtering and projection.",
+            "type": "object"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`approval/request` parameters.",
+    "properties": {
+      "allowed_decisions": {
+        "items": {
+          "$ref": "#/$defs/ApprovalDecision"
+        },
+        "type": "array",
+        "uniqueItems": true
+      },
+      "expires_at": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "metadata": {
+        "$ref": "#/$defs/SurfaceMetadata"
+      },
+      "owner": {
+        "$ref": "#/$defs/ApprovalOwnerRef"
+      },
+      "proposed_action": {
+        "$ref": "#/$defs/ApprovalProposedAction"
+      },
+      "request_body": true,
+      "request_provenance": true,
+      "requester": {
+        "$ref": "#/$defs/ApprovalPrincipalId"
+      },
+      "resource": {
+        "$ref": "#/$defs/ApprovalResourceRef"
+      },
+      "risk": {
+        "$ref": "#/$defs/ApprovalRisk"
+      }
+    },
+    "required": [
+      "requester",
+      "owner",
+      "resource",
+      "proposed_action",
+      "risk",
+      "allowed_decisions"
+    ],
+    "title": "ApprovalRequestParams",
+    "type": "object"
+  },
+  "ArchiveSessionParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Parameters for `session/archive`.",
+    "properties": {
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id"
+    ],
+    "title": "ArchiveSessionParams",
+    "type": "object"
+  },
+  "ArtifactDownloadParams": {
+    "$defs": {
+      "ArtifactId": {
+        "description": "Stable realm-local artifact identifier.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "artifact_id": {
+        "$ref": "#/$defs/ArtifactId"
+      },
+      "expected_media_type": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "artifact_id"
+    ],
+    "title": "ArtifactDownloadParams",
+    "type": "object"
+  },
+  "ArtifactIdParams": {
+    "$defs": {
+      "ArtifactId": {
+        "description": "Stable realm-local artifact identifier.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "artifact_id": {
+        "$ref": "#/$defs/ArtifactId"
+      }
+    },
+    "required": [
+      "artifact_id"
+    ],
+    "title": "ArtifactIdParams",
+    "type": "object"
+  },
+  "ArtifactListParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "label_equals": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": "object"
+      },
+      "session_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "title": "ArtifactListParams",
+    "type": "object"
+  },
   "BindingIdParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for binding-scoped auth methods.",
@@ -21,6 +455,20 @@
       "binding_id"
     ],
     "title": "BindingIdParams",
+    "type": "object"
+  },
+  "BlobGetParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Parameters for `blob/get`.",
+    "properties": {
+      "blob_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "blob_id"
+    ],
+    "title": "BlobGetParams",
     "type": "object"
   },
   "CommsParams": {
@@ -1812,6 +2260,1194 @@
     "title": "CreateProfileParams",
     "type": "object"
   },
+  "CreateScheduleRequest": {
+    "$defs": {
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
+      "CalendarFieldSpec": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "any",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "values",
+                "type": "string"
+              },
+              "values": {
+                "items": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "values"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "CalendarTriggerSpec": {
+        "properties": {
+          "day_of_month": {
+            "$ref": "#/$defs/CalendarFieldSpec",
+            "default": {
+              "kind": "any"
+            }
+          },
+          "day_of_week": {
+            "$ref": "#/$defs/CalendarFieldSpec",
+            "default": {
+              "kind": "any"
+            }
+          },
+          "hour": {
+            "$ref": "#/$defs/CalendarFieldSpec",
+            "default": {
+              "kind": "any"
+            }
+          },
+          "minute": {
+            "$ref": "#/$defs/CalendarFieldSpec",
+            "default": {
+              "kind": "any"
+            }
+          },
+          "month": {
+            "$ref": "#/$defs/CalendarFieldSpec",
+            "default": {
+              "kind": "any"
+            }
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "year": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CalendarFieldSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "timezone"
+        ],
+        "type": "object"
+      },
+      "ContentBlock": {
+        "oneOf": [
+          {
+            "description": "Plain text content.",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded image content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Durable blob reference used by persisted history/runtime state.",
+                "properties": {
+                  "blob_id": {
+                    "$ref": "#/$defs/BlobId"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "media_type": {
+                "description": "MIME type (e.g. \"image/png\", \"image/jpeg\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded video content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "duration_ms": {
+                "description": "Caller-provided clip duration in milliseconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "media_type": {
+                "description": "MIME type (e.g. \"video/mp4\", \"video/webm\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "video",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ContentInput": {
+        "anyOf": [
+          {
+            "description": "Plain text input.",
+            "type": "string"
+          },
+          {
+            "description": "Multimodal content blocks (text + images).",
+            "items": {
+              "$ref": "#/$defs/ContentBlock"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Input content that can be either a plain text string or multimodal content blocks.\n\nDeserializes from either `\"text\"` or `[{type: \"text\", text: \"...\"}, ...]`.\nProvides `From<String>` and `From<&str>` for ergonomic construction."
+      },
+      "ForkContextSpec": {
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "full_history",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "count": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "last_messages",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "count"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "HelperOptionsSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "backend": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ScheduledMobBackendKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "role_name": {
+            "description": "Role name (profile key) for the helper in the mob roster.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runtime_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ScheduledMobRuntimeMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tool_access_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ToolAccessPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "IntervalTriggerSpec": {
+        "properties": {
+          "end_at_utc": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "every_seconds": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start_at_utc": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start_at_utc",
+          "every_seconds"
+        ],
+        "type": "object"
+      },
+      "MeerkatSchema": {
+        "description": "A Meerkat-native JSON schema."
+      },
+      "MisfirePolicy": {
+        "oneOf": [
+          {
+            "description": "Skip materially late pending occurrences instead of catching them up.\n\nThe scheduler applies a small internal grace window so normal tick\njitter does not immediately misfire on-time work.",
+            "properties": {
+              "type": {
+                "const": "skip",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Catch up overdue pending occurrences only while they remain within the\nconfigured lateness window.",
+            "properties": {
+              "type": {
+                "const": "catch_up_within",
+                "type": "string"
+              },
+              "window_seconds": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "type",
+              "window_seconds"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "MissingTargetPolicy": {
+        "enum": [
+          "skip",
+          "mark_misfired"
+        ],
+        "type": "string"
+      },
+      "MobTargetBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ScheduledMobAction"
+              },
+              "member_id": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "member",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "mob_id",
+              "member_id",
+              "action"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "flow_id": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "params": true,
+              "type": {
+                "const": "flow",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "mob_id",
+              "flow_id",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "member_id": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "options": {
+                "$ref": "#/$defs/HelperOptionsSpec",
+                "default": {}
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "type": {
+                "const": "spawn_helper",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "mob_id",
+              "member_id",
+              "prompt"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "fork_context": {
+                "$ref": "#/$defs/ForkContextSpec",
+                "default": {
+                  "type": "full_history"
+                }
+              },
+              "member_id": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "options": {
+                "$ref": "#/$defs/HelperOptionsSpec",
+                "default": {}
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "source_member_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "fork_helper",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "mob_id",
+              "source_member_id",
+              "member_id",
+              "prompt"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "OutputSchema": {
+        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
+        "properties": {
+          "compat": {
+            "$ref": "#/$defs/SchemaCompat",
+            "default": "lossy",
+            "description": "Compatibility mode for provider lowering (lossy or strict)"
+          },
+          "format": {
+            "$ref": "#/$defs/SchemaFormat",
+            "default": "meerkat_v1",
+            "description": "Schema format version"
+          },
+          "name": {
+            "description": "Optional name for the schema (used by some providers)",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema": {
+            "$ref": "#/$defs/MeerkatSchema",
+            "description": "The JSON schema that the output must conform to"
+          },
+          "strict": {
+            "default": false,
+            "description": "Whether to enforce strict schema validation (provider-specific)",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "schema"
+        ],
+        "type": "object"
+      },
+      "OverlapPolicy": {
+        "enum": [
+          "allow_concurrent",
+          "skip_if_running"
+        ],
+        "type": "string"
+      },
+      "PeerMeta": {
+        "description": "Supplementary metadata attached to a peer for discovery.\n\nThe peer's routing name lives in `TrustedPeer.name` / `comms_name`.\n`PeerMeta` carries additional context: what the agent does and\narbitrary key/value labels.\n\n# Serde\n\nBoth fields use `skip_serializing_if`, so `PeerMeta::default()`\nserializes to `{}`.",
+        "properties": {
+          "description": {
+            "description": "What this agent does (e.g. \"Reviews pull requests for style issues\").",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Arbitrary key/value labels (e.g. `{\"lang\": \"rust\", \"team\": \"infra\"}`).\n\n`BTreeMap` keeps keys sorted for deterministic serialization.",
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "Provider": {
+        "description": "Supported LLM providers.",
+        "enum": [
+          "anthropic",
+          "open_a_i",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
+      "RenderClass": {
+        "description": "Standardized rendering class for injected ordinary work.\n\nThis metadata is for normalization/injection rendering, not for core\nruntime scheduling. It lets the system consistently frame peer messages,\nexternal events, tool-scope notices, and similar inputs when they are\nrendered into model-visible context.",
+        "enum": [
+          "user_prompt",
+          "peer_message",
+          "peer_request",
+          "peer_response",
+          "external_event",
+          "flow_step",
+          "continuation",
+          "system_notice",
+          "tool_scope_notice",
+          "ops_progress"
+        ],
+        "type": "string"
+      },
+      "RenderMetadata": {
+        "description": "Optional rendering metadata carried alongside ordinary work content.",
+        "properties": {
+          "class": {
+            "$ref": "#/$defs/RenderClass"
+          },
+          "salience": {
+            "$ref": "#/$defs/RenderSalience",
+            "default": "normal"
+          }
+        },
+        "required": [
+          "class"
+        ],
+        "type": "object"
+      },
+      "RenderSalience": {
+        "description": "Constrained salience metadata for injected ordinary work.\n\nThis is intentionally a small closed enum so call sites do not invent\narbitrary free-text urgency language.",
+        "enum": [
+          "background",
+          "normal",
+          "important",
+          "urgent"
+        ],
+        "type": "string"
+      },
+      "ScheduledMobAction": {
+        "oneOf": [
+          {
+            "properties": {
+              "content": {
+                "$ref": "#/$defs/ContentInput"
+              },
+              "render_metadata": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RenderMetadata"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": {
+                "const": "send",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "content"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ScheduledMobBackendKind": {
+        "enum": [
+          "session",
+          "external"
+        ],
+        "type": "string"
+      },
+      "ScheduledMobRuntimeMode": {
+        "enum": [
+          "autonomous_host",
+          "turn_driven"
+        ],
+        "type": "string"
+      },
+      "ScheduledSessionAction": {
+        "oneOf": [
+          {
+            "properties": {
+              "additional_instructions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "prompt": {
+                "$ref": "#/$defs/ContentInput"
+              },
+              "render_metadata": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RenderMetadata"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "skill_refs": {
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                },
+                "type": "array"
+              },
+              "system_prompt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "prompt",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "prompt"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "event_type": {
+                "type": "string"
+              },
+              "payload": true,
+              "render_metadata": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RenderMetadata"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": {
+                "const": "event",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "event_type",
+              "payload"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SchemaCompat": {
+        "description": "Compatibility mode for provider lowering.",
+        "enum": [
+          "lossy",
+          "strict"
+        ],
+        "type": "string"
+      },
+      "SchemaFormat": {
+        "description": "Schema format versions supported by Meerkat.",
+        "enum": [
+          "meerkat_v1"
+        ],
+        "type": "string"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "SessionMaterializationSpec": {
+        "properties": {
+          "additional_instructions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "app_context": true,
+          "backend": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "comms_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "config_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "instance_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "keep_alive": {
+            "default": false,
+            "type": "boolean"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "max_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "output_schema": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OutputSchema"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "peer_meta": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PeerMeta"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "preload_skills": {
+            "items": {
+              "$ref": "#/$defs/SkillKey"
+            },
+            "type": "array"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider_params": true,
+          "realm_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "structured_output_retries": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "system_prompt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "type": "object"
+      },
+      "SessionTargetBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ScheduledSessionAction"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "exact_session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "action"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ScheduledSessionAction"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "resumable_session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "action"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ScheduledSessionAction"
+              },
+              "bound_session_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SessionId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "create": {
+                "$ref": "#/$defs/SessionMaterializationSpec"
+              },
+              "type": {
+                "const": "materialize_on_demand_session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "create",
+              "action"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SkillRef": {
+        "description": "Structured skill reference for wire/surface input.\n\nPost-V4 this has exactly one variant — `Structured` — and is kept only as a\ntyped enum to leave room for future source-scoped variants (e.g. alias or\ncapability-scoped forms) without changing the trait surface. No legacy\nstring form, no slash-delimited path, no untagged fallback.",
+        "oneOf": [
+          {
+            "$ref": "#/$defs/SkillKey",
+            "properties": {
+              "kind": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
+        "type": "string"
+      },
+      "TargetBinding": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/SessionTargetBinding",
+            "properties": {
+              "target_kind": {
+                "const": "session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "target_kind"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/MobTargetBinding",
+            "properties": {
+              "target_kind": {
+                "const": "mob",
+                "type": "string"
+              }
+            },
+            "required": [
+              "target_kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolAccessPolicy": {
+        "description": "Tool access control for delegated branches",
+        "oneOf": [
+          {
+            "description": "Inherit all tools from parent",
+            "properties": {
+              "type": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Only allow specific tools",
+            "properties": {
+              "type": {
+                "const": "allow_list",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/ToolNameSet"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Block specific tools",
+            "properties": {
+              "type": {
+                "const": "deny_list",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/ToolNameSet"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolName": {
+        "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
+        "type": "string"
+      },
+      "ToolNameSet": {
+        "description": "Set of canonical tool names.",
+        "items": {
+          "$ref": "#/$defs/ToolName"
+        },
+        "type": "array",
+        "uniqueItems": true
+      },
+      "TriggerSpec": {
+        "oneOf": [
+          {
+            "properties": {
+              "due_at_utc": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "type": {
+                "const": "once",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "due_at_utc"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/IntervalTriggerSpec",
+            "properties": {
+              "type": {
+                "const": "interval",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/CalendarTriggerSpec",
+            "properties": {
+              "type": {
+                "const": "calendar",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "description": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "labels": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": "object"
+      },
+      "misfire_policy": {
+        "$ref": "#/$defs/MisfirePolicy",
+        "default": {
+          "type": "skip"
+        }
+      },
+      "missing_target_policy": {
+        "$ref": "#/$defs/MissingTargetPolicy",
+        "default": "mark_misfired"
+      },
+      "name": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "overlap_policy": {
+        "$ref": "#/$defs/OverlapPolicy",
+        "default": "skip_if_running"
+      },
+      "planning_horizon_days": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "planning_horizon_occurrences": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "target": {
+        "$ref": "#/$defs/TargetBinding"
+      },
+      "trigger": {
+        "$ref": "#/$defs/TriggerSpec"
+      }
+    },
+    "required": [
+      "trigger",
+      "target"
+    ],
+    "title": "CreateScheduleRequest",
+    "type": "object"
+  },
   "DeviceCompleteParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `auth/login/device_complete`.",
@@ -1870,6 +3506,166 @@
       "binding_id"
     ],
     "title": "DeviceStartParams",
+    "type": "object"
+  },
+  "EventsLatestCursorParams": {
+    "$defs": {
+      "EventReplayScope": {
+        "description": "Authoritative event source scope for the generic replay surface.\n\nThis is intentionally a typed enum. Product concepts such as projects or\nthreads should be represented by opaque metadata on the owning runtime\nobjects, not by adding product-specific replay scopes here.",
+        "oneOf": [
+          {
+            "properties": {
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Parameters for `events/latest_cursor`.",
+    "properties": {
+      "scope": {
+        "$ref": "#/$defs/EventReplayScope"
+      }
+    },
+    "required": [
+      "scope"
+    ],
+    "title": "EventsLatestCursorParams",
+    "type": "object"
+  },
+  "EventsListSinceParams": {
+    "$defs": {
+      "EventReplayCursor": {
+        "description": "Cursor into a replayable event source.",
+        "properties": {
+          "scope": {
+            "$ref": "#/$defs/EventReplayScope"
+          },
+          "sequence": {
+            "description": "Monotonically increasing sequence within the replay source. Sequence 0\nis the stable empty-source cursor.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "scope",
+          "sequence"
+        ],
+        "type": "object"
+      },
+      "EventReplayScope": {
+        "description": "Authoritative event source scope for the generic replay surface.\n\nThis is intentionally a typed enum. Product concepts such as projects or\nthreads should be represented by opaque metadata on the owning runtime\nobjects, not by adding product-specific replay scopes here.",
+        "oneOf": [
+          {
+            "properties": {
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Parameters for `events/list_since`.",
+    "properties": {
+      "cursor": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/EventReplayCursor"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "limit": {
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "scope": {
+        "$ref": "#/$defs/EventReplayScope"
+      }
+    },
+    "required": [
+      "scope"
+    ],
+    "title": "EventsListSinceParams",
+    "type": "object"
+  },
+  "EventsSnapshotParams": {
+    "$defs": {
+      "EventReplayScope": {
+        "description": "Authoritative event source scope for the generic replay surface.\n\nThis is intentionally a typed enum. Product concepts such as projects or\nthreads should be represented by opaque metadata on the owning runtime\nobjects, not by adding product-specific replay scopes here.",
+        "oneOf": [
+          {
+            "properties": {
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Parameters for `events/snapshot`.",
+    "properties": {
+      "scope": {
+        "$ref": "#/$defs/EventReplayScope"
+      }
+    },
+    "required": [
+      "scope"
+    ],
+    "title": "EventsSnapshotParams",
     "type": "object"
   },
   "ForkSessionAtParams": {
@@ -2008,6 +3804,50 @@
     "title": "HelpRequest",
     "type": "object"
   },
+  "InjectSystemContextParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Parameters for `session/inject_context`.",
+    "properties": {
+      "idempotency_key": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "session_id": {
+        "type": "string"
+      },
+      "source": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "text": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "text"
+    ],
+    "title": "InjectSystemContextParams",
+    "type": "object"
+  },
+  "InterruptParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Parameters for `turn/interrupt`.",
+    "properties": {
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id"
+    ],
+    "title": "InterruptParams",
+    "type": "object"
+  },
   "ListSchedulesParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {
@@ -2038,6 +3878,42 @@
       }
     },
     "title": "ListSchedulesParams",
+    "type": "object"
+  },
+  "ListSessionsParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Parameters for `session/list` (all optional).",
+    "properties": {
+      "labels": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "description": "Filter sessions by label key-value pairs (AND match).",
+        "type": [
+          "object",
+          "null"
+        ]
+      },
+      "limit": {
+        "description": "Maximum number of sessions to return.",
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "offset": {
+        "description": "Number of sessions to skip.",
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      }
+    },
+    "title": "ListSessionsParams",
     "type": "object"
   },
   "LoginCompleteParams": {
@@ -9431,6 +11307,50 @@
     "title": "ProvisionApiKeyParams",
     "type": "object"
   },
+  "ReadSessionHistoryParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Parameters for `session/history`.",
+    "properties": {
+      "limit": {
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "offset": {
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id"
+    ],
+    "title": "ReadSessionHistoryParams",
+    "type": "object"
+  },
+  "ReadSessionParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Parameters for `session/read`.",
+    "properties": {
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id"
+    ],
+    "title": "ReadSessionParams",
+    "type": "object"
+  },
   "ReadSessionTranscriptRevisionParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
@@ -9464,6 +11384,39 @@
       "revision"
     ],
     "title": "ReadSessionTranscriptRevisionParams",
+    "type": "object"
+  },
+  "ReadyWorkFilter": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "labels": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "limit": {
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "namespace": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "title": "ReadyWorkFilter",
     "type": "object"
   },
   "RealmIdParams": {
@@ -11319,6 +13272,23 @@
     "title": "ScheduleOccurrencesParams",
     "type": "object"
   },
+  "ScheduleToolCallParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Parameters for `schedule/call`.",
+    "properties": {
+      "arguments": {
+        "default": null
+      },
+      "name": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "name"
+    ],
+    "title": "ScheduleToolCallParams",
+    "type": "object"
+  },
   "SessionPeerResponseTerminalParams": {
     "$defs": {
       "PeerCorrelationId": {
@@ -12710,6 +14680,190 @@
       "schedule_id"
     ],
     "title": "UpdateScheduleParams",
+    "type": "object"
+  },
+  "WorkGraphEventFilter": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "after_seq": {
+        "format": "int64",
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "all_namespaces": {
+        "default": false,
+        "type": "boolean"
+      },
+      "limit": {
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "namespace": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "title": "WorkGraphEventFilter",
+    "type": "object"
+  },
+  "WorkGraphIdParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Parameters identifying a single WorkGraph item by id within an optional\nrealm/namespace scope (`workgraph/get`).",
+    "properties": {
+      "id": {
+        "type": "string"
+      },
+      "namespace": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "id"
+    ],
+    "title": "WorkGraphIdParams",
+    "type": "object"
+  },
+  "WorkGraphSnapshotFilter": {
+    "$defs": {
+      "WorkStatus": {
+        "enum": [
+          "open",
+          "in_progress",
+          "blocked",
+          "completed",
+          "cancelled",
+          "failed"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "all_namespaces": {
+        "default": false,
+        "type": "boolean"
+      },
+      "include_terminal": {
+        "default": false,
+        "type": "boolean"
+      },
+      "labels": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "limit": {
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "namespace": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "statuses": {
+        "items": {
+          "$ref": "#/$defs/WorkStatus"
+        },
+        "type": "array"
+      }
+    },
+    "title": "WorkGraphSnapshotFilter",
+    "type": "object"
+  },
+  "WorkItemFilter": {
+    "$defs": {
+      "WorkStatus": {
+        "enum": [
+          "open",
+          "in_progress",
+          "blocked",
+          "completed",
+          "cancelled",
+          "failed"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "all_namespaces": {
+        "default": false,
+        "type": "boolean"
+      },
+      "include_terminal": {
+        "default": false,
+        "type": "boolean"
+      },
+      "labels": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "limit": {
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "namespace": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "statuses": {
+        "items": {
+          "$ref": "#/$defs/WorkStatus"
+        },
+        "type": "array"
+      }
+    },
+    "title": "WorkItemFilter",
     "type": "object"
   }
 }

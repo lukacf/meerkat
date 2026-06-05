@@ -261,146 +261,136 @@ const fn default_limit() -> usize {
     100
 }
 
-pub fn public_tool_names() -> &'static [&'static str] {
-    &[
-        "meerkat_mob_create",
-        "meerkat_mob_list",
-        "meerkat_mob_status",
-        "meerkat_mob_lifecycle",
-        "meerkat_mob_spawn",
-        "meerkat_mob_spawn_many",
-        "meerkat_mob_retire",
-        "meerkat_mob_respawn",
-        "meerkat_mob_wire",
-        "meerkat_mob_wire_members_batch",
-        "meerkat_mob_unwire",
-        "meerkat_mob_member_send",
-        "meerkat_mob_append_system_context",
-        "meerkat_mob_events",
-        "meerkat_mob_flows",
-        "meerkat_mob_flow_run",
-        "meerkat_mob_flow_status",
-        "meerkat_mob_flow_cancel",
-        "meerkat_mob_force_cancel",
-        "meerkat_mob_wait_kickoff",
-        "meerkat_mob_profile_create",
-        "meerkat_mob_profile_get",
-        "meerkat_mob_profile_list",
-        "meerkat_mob_profile_update",
-        "meerkat_mob_profile_delete",
-    ]
+/// Single source of truth for every public MCP tool exposed by this surface.
+///
+/// Each entry carries the advertised name, its description, and a function that
+/// produces the `inputSchema` JSON. Schemas mix two shapes: typed entries derive
+/// from `schema_for!` (via [`typed_schema`]); the four profile tools carry a
+/// hand-written inline JSON object. Both surfaces — [`public_tool_names`] (the
+/// routing roster gated on by the unified MCP server) and [`public_tools_list`]
+/// (the advertised catalog) — are derived from this table so they cannot drift.
+/// The dispatch match in [`handle_public_tools_call`] is pinned to this table by
+/// the `public_tool_surfaces_have_no_drift` parity test via `DISPATCH_TOOL_NAMES`.
+struct PublicTool {
+    name: &'static str,
+    description: &'static str,
+    schema: fn() -> Value,
 }
 
-pub fn public_tools_list() -> Vec<Value> {
-    vec![
-        tool(
-            "meerkat_mob_create",
-            "Create a mob from a typed public definition.",
-            schema_for!(MobCreateParams),
-        ),
-        tool_json(
-            "meerkat_mob_list",
-            "List active mobs.",
-            json!({ "type": "object", "properties": {}, "required": [] }),
-        ),
-        tool(
-            "meerkat_mob_status",
-            "Get lifecycle status for one mob.",
-            schema_for!(MeerkatMobIdInput),
-        ),
-        tool(
-            "meerkat_mob_lifecycle",
-            "Apply a lifecycle action to a mob.",
-            schema_for!(MobLifecycleParams),
-        ),
-        tool(
-            "meerkat_mob_spawn",
-            "Spawn one member into a mob.",
-            schema_for!(MeerkatMobSpawnInput),
-        ),
-        tool(
-            "meerkat_mob_spawn_many",
-            "Spawn multiple members into a mob.",
-            schema_for!(MeerkatMobSpawnManyInput),
-        ),
-        tool(
-            "meerkat_mob_retire",
-            "Retire a mob member.",
-            schema_for!(MeerkatMobMemberInput),
-        ),
-        tool(
-            "meerkat_mob_respawn",
-            "Respawn a mob member with topology restore.",
-            schema_for!(MeerkatMobRespawnInput),
-        ),
-        tool(
-            "meerkat_mob_wire",
-            "Wire a mob member to a local peer or typed external binding.",
-            schema_for!(MeerkatMobWireInput),
-        ),
-        tool(
-            "meerkat_mob_wire_members_batch",
-            "Wire multiple local mob-member pairs in one batch.",
-            schema_for!(MeerkatMobWireMembersBatchInput),
-        ),
-        tool(
-            "meerkat_mob_unwire",
-            "Remove a mob wiring relationship.",
-            schema_for!(MeerkatMobUnwireInput),
-        ),
-        tool(
-            "meerkat_mob_member_send",
-            "Deliver host-owned work to a specific mob member.",
-            schema_for!(MobMemberSendParams),
-        ),
-        tool(
-            "meerkat_mob_append_system_context",
-            "Stage system context for a specific mob member session.",
-            schema_for!(MeerkatMobAppendSystemContextInput),
-        ),
-        tool(
-            "meerkat_mob_events",
-            "Read mob event history by cursor.",
-            schema_for!(MeerkatMobEventsInput),
-        ),
-        tool(
-            "meerkat_mob_flows",
-            "List flows defined for a mob.",
-            schema_for!(MeerkatMobIdInput),
-        ),
-        tool(
-            "meerkat_mob_flow_run",
-            "Start a mob flow run.",
-            schema_for!(MeerkatMobFlowRunInput),
-        ),
-        tool(
-            "meerkat_mob_flow_status",
-            "Read status for a mob flow run.",
-            schema_for!(MeerkatMobRunIdInput),
-        ),
-        tool(
-            "meerkat_mob_flow_cancel",
-            "Cancel a mob flow run.",
-            schema_for!(MeerkatMobRunIdInput),
-        ),
-        tool(
-            "meerkat_mob_force_cancel",
-            "Force-cancel a mob member.",
-            schema_for!(MeerkatMobMemberInput),
-        ),
-        tool(
-            "meerkat_mob_wait_kickoff",
-            "Wait for autonomous kickoff turns to complete.",
-            schema_for!(MeerkatMobWaitKickoffInput),
-        ),
-        tool(
-            "meerkat_mob_wait_ready",
-            "Wait for mob members to become startup-ready for orchestration.",
-            schema_for!(MeerkatMobWaitReadyInput),
-        ),
-        tool_json(
-            "meerkat_mob_profile_create",
-            "Create a new realm profile for spawning mob members.",
+fn typed_schema<T: JsonSchema>() -> Value {
+    serde_json::to_value(schema_for!(T)).unwrap_or_else(|_| json!({ "type": "object" }))
+}
+
+static PUBLIC_TOOLS: &[PublicTool] = &[
+    PublicTool {
+        name: "meerkat_mob_create",
+        description: "Create a mob from a typed public definition.",
+        schema: typed_schema::<MobCreateParams>,
+    },
+    PublicTool {
+        name: "meerkat_mob_list",
+        description: "List active mobs.",
+        schema: || json!({ "type": "object", "properties": {}, "required": [] }),
+    },
+    PublicTool {
+        name: "meerkat_mob_status",
+        description: "Get lifecycle status for one mob.",
+        schema: typed_schema::<MeerkatMobIdInput>,
+    },
+    PublicTool {
+        name: "meerkat_mob_lifecycle",
+        description: "Apply a lifecycle action to a mob.",
+        schema: typed_schema::<MobLifecycleParams>,
+    },
+    PublicTool {
+        name: "meerkat_mob_spawn",
+        description: "Spawn one member into a mob.",
+        schema: typed_schema::<MeerkatMobSpawnInput>,
+    },
+    PublicTool {
+        name: "meerkat_mob_spawn_many",
+        description: "Spawn multiple members into a mob.",
+        schema: typed_schema::<MeerkatMobSpawnManyInput>,
+    },
+    PublicTool {
+        name: "meerkat_mob_retire",
+        description: "Retire a mob member.",
+        schema: typed_schema::<MeerkatMobMemberInput>,
+    },
+    PublicTool {
+        name: "meerkat_mob_respawn",
+        description: "Respawn a mob member with topology restore.",
+        schema: typed_schema::<MeerkatMobRespawnInput>,
+    },
+    PublicTool {
+        name: "meerkat_mob_wire",
+        description: "Wire a mob member to a local peer or typed external binding.",
+        schema: typed_schema::<MeerkatMobWireInput>,
+    },
+    PublicTool {
+        name: "meerkat_mob_wire_members_batch",
+        description: "Wire multiple local mob-member pairs in one batch.",
+        schema: typed_schema::<MeerkatMobWireMembersBatchInput>,
+    },
+    PublicTool {
+        name: "meerkat_mob_unwire",
+        description: "Remove a mob wiring relationship.",
+        schema: typed_schema::<MeerkatMobUnwireInput>,
+    },
+    PublicTool {
+        name: "meerkat_mob_member_send",
+        description: "Deliver host-owned work to a specific mob member.",
+        schema: typed_schema::<MobMemberSendParams>,
+    },
+    PublicTool {
+        name: "meerkat_mob_append_system_context",
+        description: "Stage system context for a specific mob member session.",
+        schema: typed_schema::<MeerkatMobAppendSystemContextInput>,
+    },
+    PublicTool {
+        name: "meerkat_mob_events",
+        description: "Read mob event history by cursor.",
+        schema: typed_schema::<MeerkatMobEventsInput>,
+    },
+    PublicTool {
+        name: "meerkat_mob_flows",
+        description: "List flows defined for a mob.",
+        schema: typed_schema::<MeerkatMobIdInput>,
+    },
+    PublicTool {
+        name: "meerkat_mob_flow_run",
+        description: "Start a mob flow run.",
+        schema: typed_schema::<MeerkatMobFlowRunInput>,
+    },
+    PublicTool {
+        name: "meerkat_mob_flow_status",
+        description: "Read status for a mob flow run.",
+        schema: typed_schema::<MeerkatMobRunIdInput>,
+    },
+    PublicTool {
+        name: "meerkat_mob_flow_cancel",
+        description: "Cancel a mob flow run.",
+        schema: typed_schema::<MeerkatMobRunIdInput>,
+    },
+    PublicTool {
+        name: "meerkat_mob_force_cancel",
+        description: "Force-cancel a mob member.",
+        schema: typed_schema::<MeerkatMobMemberInput>,
+    },
+    PublicTool {
+        name: "meerkat_mob_wait_kickoff",
+        description: "Wait for autonomous kickoff turns to complete.",
+        schema: typed_schema::<MeerkatMobWaitKickoffInput>,
+    },
+    PublicTool {
+        name: "meerkat_mob_wait_ready",
+        description: "Wait for mob members to become startup-ready for orchestration.",
+        schema: typed_schema::<MeerkatMobWaitReadyInput>,
+    },
+    PublicTool {
+        name: "meerkat_mob_profile_create",
+        description: "Create a new realm profile for spawning mob members.",
+        schema: || {
             json!({
                 "type": "object",
                 "properties": {
@@ -408,27 +398,31 @@ pub fn public_tools_list() -> Vec<Value> {
                     "profile": {"type": "object", "description": "Profile definition (model, skills, tools, etc.)"}
                 },
                 "required": ["name", "profile"]
-            }),
-        ),
-        tool_json(
-            "meerkat_mob_profile_get",
-            "Get a realm profile by name.",
+            })
+        },
+    },
+    PublicTool {
+        name: "meerkat_mob_profile_get",
+        description: "Get a realm profile by name.",
+        schema: || {
             json!({
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "Profile name to retrieve"}
                 },
                 "required": ["name"]
-            }),
-        ),
-        tool_json(
-            "meerkat_mob_profile_list",
-            "List all realm profiles.",
-            json!({ "type": "object", "properties": {}, "required": [] }),
-        ),
-        tool_json(
-            "meerkat_mob_profile_update",
-            "Update a realm profile with CAS revision check.",
+            })
+        },
+    },
+    PublicTool {
+        name: "meerkat_mob_profile_list",
+        description: "List all realm profiles.",
+        schema: || json!({ "type": "object", "properties": {}, "required": [] }),
+    },
+    PublicTool {
+        name: "meerkat_mob_profile_update",
+        description: "Update a realm profile with CAS revision check.",
+        schema: || {
             json!({
                 "type": "object",
                 "properties": {
@@ -437,11 +431,13 @@ pub fn public_tools_list() -> Vec<Value> {
                     "expected_revision": {"type": "integer", "description": "Expected current revision for CAS"}
                 },
                 "required": ["name", "profile", "expected_revision"]
-            }),
-        ),
-        tool_json(
-            "meerkat_mob_profile_delete",
-            "Delete a realm profile.",
+            })
+        },
+    },
+    PublicTool {
+        name: "meerkat_mob_profile_delete",
+        description: "Delete a realm profile.",
+        schema: || {
             json!({
                 "type": "object",
                 "properties": {
@@ -449,9 +445,20 @@ pub fn public_tools_list() -> Vec<Value> {
                     "expected_revision": {"type": "integer", "description": "Expected current revision for CAS"}
                 },
                 "required": ["name", "expected_revision"]
-            }),
-        ),
-    ]
+            })
+        },
+    },
+];
+
+pub fn public_tool_names() -> Vec<&'static str> {
+    PUBLIC_TOOLS.iter().map(|tool| tool.name).collect()
+}
+
+pub fn public_tools_list() -> Vec<Value> {
+    PUBLIC_TOOLS
+        .iter()
+        .map(|entry| tool_json(entry.name, entry.description, (entry.schema)()))
+        .collect()
 }
 
 pub fn wrap_public_tool_payload(payload: Value) -> Value {
@@ -463,6 +470,42 @@ pub fn wrap_public_tool_payload(payload: Value) -> Value {
         }]
     })
 }
+
+/// Tool names matched by the dispatch arms in [`handle_public_tools_call`].
+///
+/// This MUST mirror the match arms below exactly: adding, removing, or renaming
+/// an arm requires updating this slice. The `public_tool_surfaces_have_no_drift`
+/// parity test pins this slice against the [`PUBLIC_TOOLS`] table and the
+/// advertised [`public_tools_list`] catalog, so any drift fails the build.
+#[cfg(test)]
+const DISPATCH_TOOL_NAMES: &[&str] = &[
+    "meerkat_mob_create",
+    "meerkat_mob_list",
+    "meerkat_mob_status",
+    "meerkat_mob_lifecycle",
+    "meerkat_mob_spawn",
+    "meerkat_mob_spawn_many",
+    "meerkat_mob_retire",
+    "meerkat_mob_respawn",
+    "meerkat_mob_wire",
+    "meerkat_mob_wire_members_batch",
+    "meerkat_mob_unwire",
+    "meerkat_mob_member_send",
+    "meerkat_mob_append_system_context",
+    "meerkat_mob_events",
+    "meerkat_mob_flows",
+    "meerkat_mob_flow_run",
+    "meerkat_mob_flow_status",
+    "meerkat_mob_flow_cancel",
+    "meerkat_mob_force_cancel",
+    "meerkat_mob_wait_kickoff",
+    "meerkat_mob_wait_ready",
+    "meerkat_mob_profile_create",
+    "meerkat_mob_profile_get",
+    "meerkat_mob_profile_list",
+    "meerkat_mob_profile_update",
+    "meerkat_mob_profile_delete",
+];
 
 pub async fn handle_public_tools_call(
     state: &Arc<MobMcpState>,
@@ -866,14 +909,6 @@ pub async fn handle_public_tools_call(
     }
 }
 
-fn tool(name: &str, description: &str, schema: schemars::Schema) -> Value {
-    tool_json(
-        name,
-        description,
-        serde_json::to_value(schema).unwrap_or_else(|_| json!({ "type": "object" })),
-    )
-}
-
 fn tool_json(name: &str, description: &str, input_schema: Value) -> Value {
     json!({
         "name": name,
@@ -1025,6 +1060,55 @@ fn runtime_binding_from_wire(
 mod tests {
     use super::*;
     use crate::MobMcpState;
+    use std::collections::BTreeSet;
+
+    /// All three public-tool surfaces must agree on the exact same name set:
+    ///   (a) the [`PUBLIC_TOOLS`] source-of-truth table (via [`public_tool_names`]),
+    ///   (b) the advertised catalog names from [`public_tools_list`],
+    ///   (c) the dispatch arm names pinned in [`DISPATCH_TOOL_NAMES`].
+    /// Adding or removing any roster entry or match arm without updating the
+    /// others fails this test. `meerkat_mob_wait_ready` must be in all three.
+    #[test]
+    fn public_tool_surfaces_have_no_drift() {
+        let table_names: BTreeSet<String> = public_tool_names()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+
+        let advertised_names: BTreeSet<String> = public_tools_list()
+            .iter()
+            .map(|tool| {
+                tool["name"]
+                    .as_str()
+                    .expect("advertised tool entry must carry a string name")
+                    .to_string()
+            })
+            .collect();
+
+        let dispatch_names: BTreeSet<String> = DISPATCH_TOOL_NAMES
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+
+        assert_eq!(
+            table_names, advertised_names,
+            "roster/advertised name drift between PUBLIC_TOOLS and public_tools_list()"
+        );
+        assert_eq!(
+            table_names, dispatch_names,
+            "roster/dispatch name drift between PUBLIC_TOOLS and DISPATCH_TOOL_NAMES"
+        );
+
+        assert!(
+            table_names.contains("meerkat_mob_wait_ready"),
+            "meerkat_mob_wait_ready must be routable, advertised, and dispatched"
+        );
+        assert_eq!(
+            table_names.len(),
+            26,
+            "expected exactly 26 public tools across all surfaces"
+        );
+    }
 
     const ED25519_PUBLIC_KEY_7: &str = "ed25519:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
     const ED25519_PUBLIC_KEY_ZERO: &str = "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";

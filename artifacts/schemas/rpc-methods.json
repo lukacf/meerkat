@@ -360,13 +360,13 @@
       "description": "List WorkGraph items",
       "name": "workgraph/list",
       "params_type": "WorkItemFilter",
-      "result_type": "WorkItemListResult"
+      "result_type": "WorkGraphItemsResponse"
     },
     {
       "description": "List ready WorkGraph items",
       "name": "workgraph/ready",
       "params_type": "ReadyWorkFilter",
-      "result_type": "WorkItemListResult"
+      "result_type": "WorkGraphItemsResponse"
     },
     {
       "description": "Read a WorkGraph snapshot",
@@ -378,7 +378,7 @@
       "description": "List WorkGraph events",
       "name": "workgraph/events",
       "params_type": "WorkGraphEventFilter",
-      "result_type": "WorkGraphEventsResult"
+      "result_type": "WorkGraphEventsResponse"
     },
     {
       "description": "Read WorkGraph goal item and attention status",

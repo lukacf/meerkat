@@ -142,10 +142,8 @@ enum SessionOwner {
     Mob,
 }
 
-#[derive(Debug, Deserialize)]
-struct BlobGetParams {
-    blob_id: String,
-}
+// `blob/get` params are a canonical contracts wire type (schema-emitted).
+use meerkat_contracts::wire::BlobGetParams;
 
 // ---------------------------------------------------------------------------
 // NotificationSink

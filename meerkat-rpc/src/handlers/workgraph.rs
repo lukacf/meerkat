@@ -4,24 +4,14 @@ use std::sync::Arc;
 
 use meerkat::{
     AttentionListRequest, GoalStatusRequest, ReadyWorkFilter, WorkGraphError, WorkGraphEventFilter,
-    WorkGraphPublicErrorClass, WorkGraphSnapshotFilter, WorkItemFilter, WorkItemId, WorkNamespace,
+    WorkGraphIdParams, WorkGraphPublicErrorClass, WorkGraphSnapshotFilter, WorkItemFilter,
 };
-use serde::Deserialize;
 use serde_json::value::RawValue;
 
 use super::{RpcResponseExt, parse_params};
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
-
-#[derive(Debug, Deserialize)]
-pub struct WorkGraphIdParams {
-    pub id: WorkItemId,
-    #[serde(default)]
-    pub realm_id: Option<String>,
-    #[serde(default)]
-    pub namespace: Option<WorkNamespace>,
-}
 
 fn map_workgraph_error(id: Option<RpcId>, error: WorkGraphError) -> RpcResponse {
     let message = error.to_string();

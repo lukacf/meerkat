@@ -1560,6 +1560,18 @@ pub struct WorkGraphSnapshotFilter {
     pub limit: Option<usize>,
 }
 
+/// Parameters identifying a single WorkGraph item by id within an optional
+/// realm/namespace scope (`workgraph/get`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WorkGraphIdParams {
+    pub id: WorkItemId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realm_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<WorkNamespace>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WorkGraphSnapshot {

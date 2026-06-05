@@ -57,7 +57,6 @@ rkat session list [--limit N] [--offset N] [--label KEY=VALUE]
 rkat session show <ID>
 rkat session delete <ID>
 rkat session interrupt <ID>
-rkat live open|status|close session <SESSION-ID>
 rkat blob get <BLOB-ID> [--output <FILE>] [--json]
 rkat realm current|list|show|create|delete|prune ...
 rkat mcp add|login|remove|list|get ...
@@ -393,9 +392,11 @@ Core tools:
 
 - `meerkat_run` — create and run a new session
 - `meerkat_resume` — continue an existing session
+- `meerkat_help` — ask Meerkat usage help with the embedded platform skill
 - `meerkat_read` — get session details
 - `meerkat_history` — get committed transcript history
 - `meerkat_sessions` — list sessions
+- `meerkat_blob_get` — fetch a blob payload by id
 - `meerkat_interrupt` — cancel in-flight turn
 - `meerkat_archive` — archive (remove) a session
 - `meerkat_config` — get/set/patch config

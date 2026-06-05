@@ -318,6 +318,22 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "AgentEventEnvelope": schema_for!(meerkat_core::EventEnvelope<meerkat_core::AgentEvent>),
         "SessionStreamOpenResult": schema_for!(crate::wire::SessionStreamOpenResult),
         "SessionStreamCloseResult": schema_for!(crate::wire::SessionStreamCloseResult),
+        // RPC method result types previously declared handler-local in
+        // meerkat-rpc (catalog named them; no schema was emitted).
+        "ListSessionsResult": schema_for!(crate::wire::ListSessionsResult),
+        "InjectSystemContextResult": schema_for!(crate::wire::InjectSystemContextResult),
+        "DeferredCreateResult": schema_for!(crate::wire::DeferredCreateResult),
+        "ScheduleToolsResult": schema_for!(crate::wire::ScheduleToolsResult),
+        "ApprovalRecord": schema_for!(crate::wire::ApprovalRecord),
+        "ApprovalListResult": schema_for!(crate::wire::ApprovalListResult),
+        "ArtifactRecord": schema_for!(meerkat_core::ArtifactRecord),
+        "ArtifactListResult": schema_for!(crate::wire::ArtifactListResult),
+        "ArtifactDownloadResult": schema_for!(crate::wire::ArtifactDownloadResult),
+        "BlobPayload": schema_for!(meerkat_core::BlobPayload),
+        "EventsLatestCursorResult": schema_for!(crate::wire::EventsLatestCursorResult),
+        "EventsListSinceResult": schema_for!(crate::wire::EventsListSinceResult),
+        "EventsSnapshotResult": schema_for!(crate::wire::EventsSnapshotResult),
+        "Schedule": schema_for!(meerkat_schedule::Schedule),
     });
     write_pretty_json(output_dir.join("wire-types.json"), &wire_types)?;
 
@@ -384,6 +400,30 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "ListSchedulesParams": schema_for!(crate::wire::ListSchedulesParams),
         "ScheduleOccurrencesParams": schema_for!(crate::wire::ScheduleOccurrencesParams),
         "UpdateScheduleParams": schema_for!(crate::wire::UpdateScheduleParams),
+        "ScheduleToolCallParams": schema_for!(crate::wire::ScheduleToolCallParams),
+        "CreateScheduleRequest": schema_for!(meerkat_schedule::CreateScheduleRequest),
+        "ApprovalRequestParams": schema_for!(crate::wire::ApprovalRequestParams),
+        "ApprovalGetParams": schema_for!(crate::wire::ApprovalGetParams),
+        "ApprovalListParams": schema_for!(crate::wire::ApprovalListParams),
+        "ApprovalDecideParams": schema_for!(crate::wire::ApprovalDecideParams),
+        "ArtifactListParams": schema_for!(crate::wire::ArtifactListParams),
+        "ArtifactIdParams": schema_for!(crate::wire::ArtifactIdParams),
+        "ArtifactDownloadParams": schema_for!(crate::wire::ArtifactDownloadParams),
+        "BlobGetParams": schema_for!(crate::wire::BlobGetParams),
+        "EventsLatestCursorParams": schema_for!(crate::wire::EventsLatestCursorParams),
+        "EventsListSinceParams": schema_for!(crate::wire::EventsListSinceParams),
+        "EventsSnapshotParams": schema_for!(crate::wire::EventsSnapshotParams),
+        "ListSessionsParams": schema_for!(crate::wire::ListSessionsParams),
+        "ReadSessionParams": schema_for!(crate::wire::ReadSessionParams),
+        "ReadSessionHistoryParams": schema_for!(crate::wire::ReadSessionHistoryParams),
+        "ArchiveSessionParams": schema_for!(crate::wire::ArchiveSessionParams),
+        "InjectSystemContextParams": schema_for!(crate::wire::InjectSystemContextParams),
+        "InterruptParams": schema_for!(crate::wire::InterruptParams),
+        "WorkGraphIdParams": schema_for!(meerkat_workgraph::WorkGraphIdParams),
+        "WorkItemFilter": schema_for!(meerkat_workgraph::WorkItemFilter),
+        "ReadyWorkFilter": schema_for!(meerkat_workgraph::ReadyWorkFilter),
+        "WorkGraphSnapshotFilter": schema_for!(meerkat_workgraph::WorkGraphSnapshotFilter),
+        "WorkGraphEventFilter": schema_for!(meerkat_workgraph::WorkGraphEventFilter),
     });
     write_pretty_json(output_dir.join("params.json"), &params)?;
 
@@ -1187,21 +1227,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             ("/sessions/{id}", "get") => RestOperationContract::json("SessionDetailsResponse"),
             ("/sessions/{id}", "delete") => RestOperationContract::json("StatusResponse"),
             ("/sessions/{id}/history", "get") => RestOperationContract::json("WireSessionHistory"),
-            ("/sessions/{id}/transcript-revisions/{revision}", "get") => {
-                RestOperationContract::json("WireSessionTranscriptRevision")
-            }
-            ("/sessions/{id}/rewrite-transcript", "post") => {
-                RestOperationContract::with_json_request(
-                    "RestRewriteSessionTranscriptRequest",
-                    "SessionTranscriptRewriteResult",
-                )
-            }
-            ("/sessions/{id}/restore-transcript-revision", "post") => {
-                RestOperationContract::with_json_request(
-                    "RestRestoreSessionTranscriptRevisionRequest",
-                    "SessionTranscriptRewriteResult",
-                )
-            }
+            // The transcript-edit family is RPC-only; no REST routes serve it
+            // (see rest_catalog.rs). No OpenAPI path contracts are emitted for it.
             ("/sessions/{id}/interrupt", "post") => RestOperationContract::json("StatusResponse"),
             ("/sessions/{id}/system_context", "post") => RestOperationContract::with_json_request(
                 "RestAppendSystemContextRequest",

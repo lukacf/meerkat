@@ -208,6 +208,9 @@ jobs:
       - name: Verify RPC surface alignment
         run: make verify-rpc-surface-alignment
 
+      - name: Verify REST surface alignment
+        run: make verify-rest-surface-alignment
+
       - name: Verify SDK wrapper freshness
         run: make verify-sdk-wrapper-freshness
 

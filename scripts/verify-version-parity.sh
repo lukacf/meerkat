@@ -142,6 +142,55 @@ if $INTERNAL_OK; then
     green "  Internal deps: OK"
 fi
 
+# ── 4. Per-crate package version inheritance ───────────────────────────────
+# Every workspace member crate must inherit the workspace version via
+# `version.workspace = true` rather than hardcoding a literal version string.
+# A hardcoded literal (even one that currently matches) is a second source of
+# truth that silently drifts on the next bump. `cargo metadata --no-deps` only
+# lists THIS workspace's members, so standalone example workspaces are excluded.
+
+echo ""
+echo "Per-crate package version inheritance:"
+PER_CRATE_OK=true
+while IFS= read -r manifest; do
+    if grep -qE '^version[[:space:]]*=[[:space:]]*"' "$manifest"; then
+        ver=$(grep -E '^version[[:space:]]*=[[:space:]]*"' "$manifest" \
+            | sed -n 's/.*"\([^"]*\)".*/\1/p')
+        crate=$(basename "$(dirname "$manifest")")
+        red "  FAIL: $crate/Cargo.toml hardcodes version = \"$ver\" (use version.workspace = true)"
+        PER_CRATE_OK=false
+        FAIL=1
+    fi
+done < <("$CARGO" metadata --manifest-path "$ROOT/Cargo.toml" --no-deps --format-version 1 \
+    | jq -r '.packages[].manifest_path')
+
+if $PER_CRATE_OK; then
+    green "  Per-crate versions: OK"
+fi
+
+# ── 5. WASM runtime EXPECTED_VERSION ───────────────────────────────────────
+# `sdks/web/src/runtime.ts` hardcodes EXPECTED_VERSION and THROWS on a WASM
+# runtime version mismatch at init. It is written by bump-sdk-versions.sh but
+# was previously ungated, so it could silently drift if the bump step was
+# skipped. Bind it to the workspace version here (the gate that runs in CI).
+
+echo ""
+echo "WASM runtime EXPECTED_VERSION:"
+RUNTIME_TS="$ROOT/sdks/web/src/runtime.ts"
+if [ -f "$RUNTIME_TS" ]; then
+    EXPECTED_VERSION=$(grep -E "const EXPECTED_VERSION" "$RUNTIME_TS" \
+        | sed -n "s/.*'\([^']*\)'.*/\1/p")
+    echo "  runtime.ts EXPECTED_VERSION:  ${EXPECTED_VERSION:-<missing>}"
+    echo "  workspace version:            $CARGO_VER"
+    if [ "$EXPECTED_VERSION" != "$CARGO_VER" ]; then
+        red "FAIL: web SDK runtime.ts EXPECTED_VERSION ($EXPECTED_VERSION) != workspace version ($CARGO_VER)"
+        red "  Run: scripts/bump-sdk-versions.sh"
+        FAIL=1
+    else
+        green "  WASM EXPECTED_VERSION: OK"
+    fi
+fi
+
 # ── Summary ─────────────────────────────────────────────────────────────────
 
 echo ""

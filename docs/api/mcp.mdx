@@ -34,6 +34,10 @@ through the shared session service and waits for that admitted turn to finish,
 and `meerkat_resume` re-enters the same `session_id` instead of starting a
 second surface-local execution loop.
 
+The base MCP tool surface below is declared and dispatched in the
+`meerkat-mcp-server` crate (`meerkat-mcp-server/src/lib.rs`), which is the
+source of truth for tool names and availability.
+
 | Tool | Description |
 |------|-------------|
 | `meerkat_run` | Start a new agent session |

@@ -10,25 +10,15 @@ use meerkat_contracts::{
     ListSchedulesParams, ScheduleIdParams, ScheduleListResult, ScheduleOccurrencesParams,
     ScheduleOccurrencesResult, UpdateScheduleParams,
 };
-use serde::{Deserialize, Serialize};
+// `schedule/tools` + `schedule/call` request/response types are canonical
+// contracts wire types (single source of truth, schema-emitted).
+pub use meerkat_contracts::wire::{ScheduleToolCallParams, ScheduleToolsResult};
 use serde_json::{Value, value::RawValue};
 
 use super::{RpcResponseExt, parse_params};
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
-
-#[derive(Debug, Serialize)]
-pub struct ScheduleToolsResult {
-    pub tools: Vec<Value>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ScheduleToolCallParams {
-    pub name: String,
-    #[serde(default)]
-    pub arguments: Value,
-}
 
 fn parse_schedule_id(id: Option<RpcId>, raw: &str) -> Result<ScheduleId, Box<RpcResponse>> {
     ScheduleId::parse(raw).map_err(|error| {

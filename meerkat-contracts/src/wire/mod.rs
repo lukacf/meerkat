@@ -17,6 +17,7 @@ mod models;
 mod params;
 mod realtime;
 mod result;
+mod rpc_surface;
 pub mod runtime;
 mod schedule;
 mod session;
@@ -49,6 +50,11 @@ pub use connection::{
     WireAuthStatusDetail, WireBackendProfile, WireBindingIdentity, WireDeviceCompleteResult,
     WireDeviceStart, WireLoginReady, WireLoginStart, WireProviderBinding,
     WireProvisionApiKeyResult, WireRealmConnectionSet, WireRealmList, WireRealmSummary,
+};
+pub use rpc_surface::{
+    ArchiveSessionParams, BlobGetParams, DeferredCreateResult, InjectSystemContextParams,
+    InjectSystemContextResult, InterruptParams, ListSessionsParams, ListSessionsResult,
+    ReadSessionHistoryParams, ReadSessionParams, ScheduleToolCallParams, ScheduleToolsResult,
 };
 
 pub use artifact::{

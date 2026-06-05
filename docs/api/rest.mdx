@@ -64,9 +64,6 @@ This overview follows the generated OpenAPI artifact at
 | `GET` | `/sessions/{id}` | Fetch session metadata and usage |
 | `GET` | `/sessions/{id}/status` | Fetch current runtime state for a session |
 | `GET` | `/sessions/{id}/history` | Fetch committed session transcript messages |
-| `GET` | `/sessions/{id}/transcript-revisions/{revision}` | Fetch a retained transcript revision |
-| `POST` | `/sessions/{id}/rewrite-transcript` | Commit a same-session transcript rewrite |
-| `POST` | `/sessions/{id}/restore-transcript-revision` | Restore a retained transcript revision in place |
 | `POST` | `/sessions/{id}/system_context` | Append staged runtime system context |
 | `POST` | `/sessions/{id}/messages` | Continue an existing session |
 | `POST` | `/sessions/{id}/external-events` | Queue a runtime-backed external event |
@@ -397,56 +394,6 @@ Query parameters:
 ```
 
 History is returned oldest-to-newest and reflects the last committed session snapshot only.
-
-### GET /sessions/{id}/transcript-revisions/{revision}
-
-Fetch a retained transcript revision for the same session. The response uses the same
-message shape as `GET /sessions/{id}/history` and includes the requested revision id.
-
-### POST /sessions/{id}/rewrite-transcript
-
-Commit a same-session transcript rewrite against the current transcript head.
-
-```json Request
-{
-  "selection": {
-    "type": "message_range",
-    "start": 2,
-    "end": 3
-  },
-  "replacement": [
-    { "role": "assistant", "content": "Corrected answer" }
-  ],
-  "reason": {
-    "kind": "compaction",
-    "note": "remove accidental secret from transcript"
-  },
-  "expected_parent_revision": "rev-current",
-  "running_behavior": "reject"
-}
-```
-
-Returns the new transcript revision metadata. The rewrite is same-session only:
-it changes the durable session snapshot while preserving session identity.
-
-### POST /sessions/{id}/restore-transcript-revision
-
-Restore a retained transcript revision in place.
-
-```json Request
-{
-  "revision": "rev-earlier",
-  "reason": {
-    "kind": "restore",
-    "note": "restore before bad rewrite"
-  },
-  "expected_parent_revision": "rev-current",
-  "running_behavior": "reject"
-}
-```
-
-Returns the newly committed head revision that points back to the restored
-transcript content.
 
 ### GET /sessions
 

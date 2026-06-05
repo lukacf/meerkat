@@ -52,13 +52,11 @@ const minimalConfig: RuntimeConfig = {
 };
 
 const fullConfig: RuntimeConfig = {
-  apiKey: 'sk-fallback',
   anthropicApiKey: 'sk-ant',
   openaiApiKey: 'sk-oai',
   geminiApiKey: 'sk-gem',
   model: 'claude-sonnet-4-5',
   maxSessions: 16,
-  baseUrl: 'https://proxy.example.com',
   anthropicBaseUrl: 'https://proxy.example.com/anthropic',
   openaiBaseUrl: 'https://proxy.example.com/openai',
   geminiBaseUrl: 'https://proxy.example.com/gemini',

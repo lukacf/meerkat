@@ -896,7 +896,11 @@ fn provider_tool_defaults_for(
     provider: Provider,
     config: &Config,
     model_profile: Option<&meerkat_core::model_profile::ModelProfile>,
+    web_search_override: ToolCategoryOverride,
 ) -> Option<serde_json::Value> {
+    if matches!(web_search_override, ToolCategoryOverride::Disable) {
+        return None;
+    }
     if !model_profile.is_some_and(|profile| profile.supports_web_search) {
         return None;
     }
@@ -2550,10 +2554,17 @@ impl AgentFactory {
             .map_err(|e| FactoryError::ClientCreationFailed(e.to_string()))
     }
 
+    /// Build the per-request LLM policy for a (re)configured identity.
+    ///
+    /// `web_search` carries the session's persisted web-search disable intent
+    /// (`SessionMetadata.tooling.web_search`). It MUST be threaded through so a
+    /// model/provider hot-swap preserves a session's `--no-web-search` disable
+    /// instead of silently re-enabling the provider-native web-search body.
     pub fn request_policy_for_llm_identity(
         &self,
         config: &Config,
         identity: &SessionLlmIdentity,
+        web_search: ToolCategoryOverride,
     ) -> Result<meerkat_core::SessionLlmRequestPolicy, FactoryError> {
         let registry = config
             .model_registry()
@@ -2566,6 +2577,7 @@ impl AgentFactory {
                 identity.provider,
                 config,
                 model_profile.as_ref(),
+                web_search,
             ),
         })
     }
@@ -4746,8 +4758,12 @@ impl AgentFactory {
             }))
             .with_call_timeout_override(effective_call_timeout_override);
 
-        if let Some(defaults) = provider_tool_defaults_for(provider, config, model_profile.as_ref())
-        {
+        if let Some(defaults) = provider_tool_defaults_for(
+            provider,
+            config,
+            model_profile.as_ref(),
+            build_config.override_web_search,
+        ) {
             builder = builder.provider_tool_defaults(defaults);
         }
         if let Some(params) = build_config.provider_params.clone() {
@@ -5370,7 +5386,11 @@ mod tests {
         };
 
         let openai_policy = factory
-            .request_policy_for_llm_identity(&config, &openai_identity)
+            .request_policy_for_llm_identity(
+                &config,
+                &openai_identity,
+                ToolCategoryOverride::Inherit,
+            )
             .expect("OpenAI request policy");
         assert_eq!(
             openai_policy.provider_tool_defaults,
@@ -5379,11 +5399,77 @@ mod tests {
         );
 
         let mismatched_policy = factory
-            .request_policy_for_llm_identity(&config, &mismatched_identity)
+            .request_policy_for_llm_identity(
+                &config,
+                &mismatched_identity,
+                ToolCategoryOverride::Inherit,
+            )
             .expect("mismatched request policy should fail closed, not error");
         assert!(
             mismatched_policy.provider_tool_defaults.is_none(),
             "Anthropic policy must not reuse OpenAI model defaults from model id alone"
+        );
+
+        // A session that persisted a web-search disable intent must keep it
+        // across a model reconfigure: the provider-native body is suppressed
+        // even though the model profile would otherwise advertise it.
+        let disabled_policy = factory
+            .request_policy_for_llm_identity(
+                &config,
+                &openai_identity,
+                ToolCategoryOverride::Disable,
+            )
+            .expect("OpenAI request policy with web-search disabled");
+        assert!(
+            disabled_policy.provider_tool_defaults.is_none(),
+            "persisted web-search Disable must survive reconfigure and suppress the native body"
+        );
+    }
+
+    #[test]
+    fn provider_tool_defaults_suppressed_on_web_search_disable() {
+        let config = Config::default();
+        // Profile advertises web-search support and config enables the provider
+        // tool — without the override this would resolve the native body.
+        let profile = meerkat_core::model_profile::ModelProfile {
+            provider: Provider::OpenAI.as_str().to_string(),
+            model_family: "gpt-5".to_string(),
+            supports_temperature: false,
+            supports_thinking: false,
+            supports_reasoning: false,
+            inline_video: false,
+            vision: false,
+            image_input: false,
+            image_tool_results: false,
+            realtime: false,
+            supports_web_search: true,
+            image_generation: false,
+            params_schema: serde_json::json!({}),
+            beta_headers: Vec::new(),
+            call_timeout_secs: None,
+        };
+
+        let enabled = provider_tool_defaults_for(
+            Provider::OpenAI,
+            &config,
+            Some(&profile),
+            ToolCategoryOverride::Inherit,
+        );
+        assert_eq!(
+            enabled,
+            Some(serde_json::json!({"web_search": {"type": "web_search"}})),
+            "Inherit must leave owned web-search defaults intact"
+        );
+
+        let disabled = provider_tool_defaults_for(
+            Provider::OpenAI,
+            &config,
+            Some(&profile),
+            ToolCategoryOverride::Disable,
+        );
+        assert!(
+            disabled.is_none(),
+            "Disable must suppress the native web-search body even when profile+config would enable it"
         );
     }
 

@@ -1021,6 +1021,18 @@ impl ProviderParamsOverride {
         }
         serde_json::Value::Object(object)
     }
+
+    /// Clear any provider-native web-search / grounding tool body from this
+    /// override. Used when an extraction (deterministic, tool-free) turn must
+    /// suppress web search without re-deriving provider-native key names.
+    pub fn clear_web_search(&mut self) {
+        match self.provider_tag.as_mut() {
+            Some(ProviderTag::Anthropic(t)) => t.web_search = None,
+            Some(ProviderTag::OpenAi(t)) => t.web_search = None,
+            Some(ProviderTag::Gemini(t)) => t.google_search = None,
+            _ => {}
+        }
+    }
 }
 
 fn parse_reasoning_mode(value: &str) -> Option<ReasoningMode> {

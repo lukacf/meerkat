@@ -3085,11 +3085,6 @@ async fn handle_run_command(
     match (duration, provider_params, provider_params_json) {
         (Ok(dur), Ok(parsed_params), Ok(parsed_params_json)) => {
             let merged_provider_params = merge_provider_params(parsed_params, parsed_params_json)?;
-            let merged_provider_params = apply_no_web_search_provider_param(
-                resolved_provider,
-                merged_provider_params,
-                no_web_search,
-            )?;
             let mut limits = config.budget_limits();
             if let Some(max_duration) = dur {
                 limits.max_duration = Some(max_duration);
@@ -3111,6 +3106,7 @@ async fn handle_run_command(
                 stream,
                 stream_policy.clone(),
                 merged_provider_params,
+                no_web_search,
                 parsed_output_schema,
                 None,
                 comms_overrides,
@@ -3206,60 +3202,6 @@ fn merge_provider_params(
             "provider params must be JSON objects after parsing"
         )),
     }
-}
-
-fn provider_web_search_param_key(provider: Provider) -> Option<&'static str> {
-    match provider {
-        Provider::Anthropic | Provider::Openai => Some("web_search"),
-        Provider::Gemini => Some("google_search"),
-        Provider::SelfHosted => None,
-    }
-}
-
-fn apply_no_web_search_provider_param(
-    provider: Provider,
-    provider_params: Option<serde_json::Value>,
-    no_web_search: bool,
-) -> anyhow::Result<Option<serde_json::Value>> {
-    if !no_web_search {
-        return Ok(provider_params);
-    }
-
-    let Some(key) = provider_web_search_param_key(provider) else {
-        return Ok(provider_params);
-    };
-
-    let mut opt_out = serde_json::Map::new();
-    opt_out.insert(key.to_string(), serde_json::Value::Null);
-    let opt_out = Some(serde_json::Value::Object(opt_out));
-    merge_provider_params(opt_out, provider_params)
-}
-
-fn apply_no_web_search_resume_provider_params(
-    provider: Option<Provider>,
-    model_override_provider: Option<Provider>,
-    stored_provider: meerkat_core::Provider,
-    stored_provider_params: Option<&serde_json::Value>,
-    merged_provider_params: &mut Option<serde_json::Value>,
-    no_web_search: bool,
-) -> anyhow::Result<()> {
-    if !no_web_search {
-        return Ok(());
-    }
-
-    let Some(web_search_provider) = provider
-        .or(model_override_provider)
-        .or_else(|| Provider::from_core(stored_provider))
-    else {
-        return Ok(());
-    };
-
-    let base_params = merged_provider_params
-        .take()
-        .or_else(|| stored_provider_params.cloned());
-    *merged_provider_params =
-        apply_no_web_search_provider_param(web_search_provider, base_params, true)?;
-    Ok(())
 }
 
 fn looks_like_path(raw: &str) -> bool {
@@ -3727,11 +3669,12 @@ async fn load_config(scope: &RuntimeScope) -> anyhow::Result<(Config, PathBuf)> 
 /// purpose is to detect a stale, previously-shipped default that a user still
 /// carries in their persisted `config.agent.model` and heal it by redirecting
 /// to the catalog-derived current default (see `resolve_cli_default_agent_model`
-/// → `best_available_default_model`). Because it must match what *older* CLI
-/// builds wrote, it deliberately retains retired model IDs that no longer exist
-/// in the catalog, so it cannot — and must not — be catalog-bound. Append the
-/// prior default here whenever the built-in default changes; never remove
-/// entries.
+/// → `best_available_default_model`). Entries are prior *shipped CLI defaults*,
+/// not catalog membership claims: a listed model may still be a live catalog
+/// row (e.g. `claude-opus-4-7` remains a `Supported` Anthropic entry) — being
+/// here only means it was once the built-in default and should be healed when
+/// still persisted. Append the prior default here whenever the built-in default
+/// changes; never remove entries.
 ///
 /// Covered by `test_resolve_cli_default_agent_model_heals_legacy_builtin_default`.
 const LEGACY_AGENT_MODEL_DEFAULTS: &[&str] = &["claude-opus-4-7"];
@@ -3755,8 +3698,9 @@ fn provider_default_model(config: &Config, provider: Provider) -> Option<String>
 }
 
 fn best_available_default_model(config: &Config) -> String {
-    [Provider::Openai, Provider::Anthropic, Provider::Gemini]
-        .into_iter()
+    meerkat_core::model_profile::catalog::provider_priority()
+        .iter()
+        .filter_map(|core_p| Provider::from_core(*core_p))
         .find_map(|provider| provider_default_model(config, provider))
         .unwrap_or_else(|| config.agent.model.clone())
 }
@@ -4582,12 +4526,20 @@ impl LoginProvider {
         }
     }
 
-    fn oauth_auth_method(self) -> &'static str {
+    fn normalized_auth_method(self) -> meerkat_providers::NormalizedAuthMethod {
+        use meerkat_core::provider_matrix::anthropic::AnthropicAuthMethod;
+        use meerkat_core::provider_matrix::google::GoogleAuthMethod;
+        use meerkat_core::provider_matrix::openai::OpenAiAuthMethod;
+        use meerkat_providers::NormalizedAuthMethod;
         match self {
-            Self::Anthropic => "claude_ai_oauth",
-            Self::OpenAi => "managed_chatgpt_oauth",
-            Self::Google => "google_oauth",
+            Self::Anthropic => NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::ClaudeAiOauth),
+            Self::OpenAi => NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::ManagedChatGptOauth),
+            Self::Google => NormalizedAuthMethod::Google(GoogleAuthMethod::GoogleOauth),
         }
+    }
+
+    fn oauth_auth_method(self) -> &'static str {
+        self.normalized_auth_method().as_str()
     }
 
     fn oauth_alias(self) -> &'static str {
@@ -5304,14 +5256,23 @@ async fn noninteractive_login(
         );
     }
 
-    let backend =
-        backend_hint
-            .map(ToString::to_string)
-            .unwrap_or_else(|| match provider_lc.as_str() {
-                "anthropic" => "anthropic_api".to_string(),
-                "openai" => "openai_api".to_string(),
-                _ => "google_genai".to_string(),
-            });
+    let backend = match backend_hint {
+        Some(hint) => hint.to_string(),
+        None => {
+            let provider_enum =
+                meerkat_core::Provider::parse_strict(&provider_lc).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unknown provider '{provider}' — expected anthropic / openai / gemini"
+                    )
+                })?;
+            meerkat_providers::NormalizedBackendKind::default_for_provider(provider_enum)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("provider '{provider}' has no default backend kind")
+                })?
+                .as_str()
+                .to_string()
+        }
+    };
 
     let secret_value = match secret {
         Some(s) if !s.trim().is_empty() => s.trim().to_string(),
@@ -8506,6 +8467,7 @@ async fn run_agent(
     stream: bool,
     stream_policy: Option<stream_renderer::StreamRenderPolicy>,
     provider_params: Option<serde_json::Value>,
+    no_web_search: bool,
     output_schema: Option<OutputSchema>,
     structured_output_retries: Option<u32>,
     comms_overrides: CommsOverrides,
@@ -8548,6 +8510,7 @@ async fn run_agent(
             stream,
             stream_policy,
             provider_params,
+            no_web_search,
             output_schema,
             structured_output_retries,
             comms_overrides,
@@ -8781,7 +8744,11 @@ async fn run_agent(
             ),
             override_mob: meerkat_core::ToolCategoryOverride::Inherit,
             override_image_generation: meerkat_core::ToolCategoryOverride::Inherit,
-            override_web_search: meerkat_core::ToolCategoryOverride::Inherit,
+            override_web_search: if no_web_search {
+                meerkat_core::ToolCategoryOverride::Disable
+            } else {
+                meerkat_core::ToolCategoryOverride::Inherit
+            },
             schedule_tools: None,
             workgraph_tools: None,
             mob_tool_authority_context: None,
@@ -9214,7 +9181,7 @@ async fn resume_session_with_llm_override(
         let stream = resolve_stream_enabled(stream, no_stream, output.format.streams_by_default())?;
         let parsed_params = parse_provider_params(&params)?;
         let parsed_params_json = parse_provider_params_json(provider_params_json)?;
-        let mut merged_provider_params = merge_provider_params(parsed_params, parsed_params_json)?;
+        let merged_provider_params = merge_provider_params(parsed_params, parsed_params_json)?;
         let parsed_output_schema = output_schema
             .as_ref()
             .map(|s| parse_output_schema(s))
@@ -9271,24 +9238,6 @@ async fn resume_session_with_llm_override(
         } else {
             model
         };
-        let model_override_provider = if provider.is_none() {
-            model_override
-                .as_deref()
-                .map(|model_override| resolve_cli_provider(&config, model_override, None))
-                .transpose()?
-        } else {
-            None
-        };
-
-        apply_no_web_search_resume_provider_params(
-            provider,
-            model_override_provider,
-            stored_metadata.provider,
-            stored_metadata.provider_params.as_ref(),
-            &mut merged_provider_params,
-            no_web_search,
-        )?;
-
         let mut limits = build_state
             .budget_limits
             .clone()
@@ -9468,6 +9417,7 @@ async fn resume_session_with_llm_override(
             override_memory: explicit_tooling.map(|resolved| resolved.memory),
             override_workgraph: explicit_tooling.map(|resolved| resolved.workgraph),
             override_mob: explicit_tooling.map(|resolved| resolved.mob),
+            override_web_search: if no_web_search { Some(true) } else { None },
             preload_skills: resumed_preload_skills,
             app_context: parsed_app_context,
             ..Default::default()
@@ -18368,102 +18318,6 @@ capabilities = ["definitely_missing_capability"]
         Ok(())
     }
 
-    #[test]
-    fn test_no_web_search_provider_param_uses_provider_native_key()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let openai = apply_no_web_search_provider_param(
-            Provider::Openai,
-            Some(serde_json::json!({
-                "reasoning_effort": "high",
-                "web_search": {"type": "web_search"}
-            })),
-            true,
-        )?
-        .expect("OpenAI opt-out params");
-        assert_eq!(openai["reasoning_effort"], "high");
-        assert!(
-            openai
-                .get("web_search")
-                .is_some_and(serde_json::Value::is_null)
-        );
-
-        let gemini = apply_no_web_search_provider_param(Provider::Gemini, None, true)?
-            .expect("Gemini opt-out params");
-        assert!(
-            gemini
-                .get("google_search")
-                .is_some_and(serde_json::Value::is_null)
-        );
-        assert!(gemini.get("web_search").is_none());
-
-        let self_hosted = apply_no_web_search_provider_param(Provider::SelfHosted, None, true)?;
-        assert!(self_hosted.is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn test_no_web_search_resume_params_preserve_resume_precedence()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let stored = serde_json::json!({
-            "temperature": 0.1,
-            "web_search": {"type": "web_search"}
-        });
-        let mut inherited = None;
-        apply_no_web_search_resume_provider_params(
-            None,
-            None,
-            meerkat_core::Provider::OpenAI,
-            Some(&stored),
-            &mut inherited,
-            true,
-        )?;
-        let inherited = inherited.expect("stored params plus opt-out");
-        assert_eq!(inherited["temperature"], 0.1);
-        assert!(
-            inherited
-                .get("web_search")
-                .is_some_and(serde_json::Value::is_null)
-        );
-
-        let mut explicit = Some(serde_json::json!({"reasoning_effort": "high"}));
-        apply_no_web_search_resume_provider_params(
-            None,
-            None,
-            meerkat_core::Provider::OpenAI,
-            Some(&stored),
-            &mut explicit,
-            true,
-        )?;
-        let explicit = explicit.expect("explicit params plus opt-out");
-        assert_eq!(explicit["reasoning_effort"], "high");
-        assert!(explicit.get("temperature").is_none());
-        assert!(
-            explicit
-                .get("web_search")
-                .is_some_and(serde_json::Value::is_null)
-        );
-
-        let mut model_override = Some(serde_json::json!({"top_p": 0.8}));
-        apply_no_web_search_resume_provider_params(
-            None,
-            Some(Provider::Gemini),
-            meerkat_core::Provider::OpenAI,
-            Some(&stored),
-            &mut model_override,
-            true,
-        )?;
-        let model_override = model_override.expect("model override params plus opt-out");
-        assert_eq!(model_override["top_p"], 0.8);
-        assert!(model_override.get("web_search").is_none());
-        assert!(
-            model_override
-                .get("google_search")
-                .is_some_and(serde_json::Value::is_null)
-        );
-
-        Ok(())
-    }
-
     fn create_mobpack_fixture_dir(base: &std::path::Path) -> PathBuf {
         let mob_dir = base.join("fixture-mob");
         std::fs::create_dir_all(mob_dir.join("skills")).expect("create skills dir");
@@ -19703,9 +19557,17 @@ capabilities = ["definitely_missing_capability"]
     fn test_resolve_cli_default_agent_model_heals_legacy_builtin_default() {
         let mut config = Config::default();
         config.agent.model = "claude-opus-4-7".to_string();
+        // A legacy builtin default heals to the highest-priority available
+        // provider's configured model. Priority is owned by the catalog seam
+        // (`meerkat_core::model_profile::catalog::provider_priority()` —
+        // anthropic first), so even with a customized OpenAI model the heal
+        // resolves to anthropic, not whichever provider happened to be set.
         config.models.openai = "gpt-5.5-custom".to_string();
 
-        assert_eq!(resolve_cli_default_agent_model(&config), "gpt-5.5-custom");
+        assert_eq!(
+            resolve_cli_default_agent_model(&config),
+            config.models.anthropic
+        );
     }
 
     #[test]

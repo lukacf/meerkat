@@ -23,7 +23,10 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 
-use crate::image_generation::{GeminiImageOutputOptions, GeminiImageTurnPlan};
+use crate::image_generation::{
+    GeminiImageGenerationProfile, GeminiImageOutputOptions, GeminiImageTurnPlan,
+};
+use meerkat_core::image_generation::ImageGenerationProviderProfile;
 
 /// Extract the typed Gemini provider tag from a request.
 fn gemini_tag(request: &LlmRequest) -> Option<&GeminiProviderTag> {
@@ -1007,7 +1010,7 @@ impl ImageGenerationExecutor for GeminiClient {
         request: ProviderImageGenerationRequest,
     ) -> Result<ProviderImageGenerationOutput, LlmError> {
         match request.execution_plan.clone() {
-            plan if plan.provider.0 == "gemini" || plan.provider.0 == "google" => {
+            plan if GeminiImageGenerationProfile.matches_provider_id(&plan.provider.0) => {
                 if plan.backend != meerkat_core::ImageGenerationBackendKind::NativeModel {
                     return Err(LlmError::InvalidRequest {
                         message: format!(

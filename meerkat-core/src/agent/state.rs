@@ -1786,12 +1786,14 @@ where
                         {
                             obj.insert("structured_output".to_string(), output_schema.to_value());
                         }
-                        // Strip provider-native tool keys — extraction is deterministic, no tools.
-                        if let Some(obj) = params.as_object_mut() {
-                            obj.remove("web_search");
-                            obj.remove("google_search");
-                        }
-                        effective_provider_params = Some(params);
+                        // Strip the provider-native web-search/grounding body via the typed
+                        // ProviderTag owner — extraction is deterministic and tool-free.
+                        let mut typed = ProviderParamsOverride::from_legacy_provider_value(
+                            self.client.provider(),
+                            &params,
+                        );
+                        typed.clear_web_search();
+                        effective_provider_params = Some(typed.to_legacy_provider_value());
                     }
 
                     // No tools for extraction turn (empty slice)

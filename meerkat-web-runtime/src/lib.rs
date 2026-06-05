@@ -212,11 +212,7 @@ struct Credentials {
 }
 
 fn default_model() -> Option<String> {
-    Some(
-        meerkat_models::default_model("anthropic")
-            .unwrap_or("claude-sonnet-4-5")
-            .to_string(),
-    )
+    Some(meerkat_models::catalog::global_default_model().to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -295,14 +291,23 @@ fn populate_realm_from_api_keys(
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    // Deterministic order: anthropic first (historical default), then
-    // openai, gemini, everything else alphabetically.
-    entries.sort_by_key(|(k, _)| match *k {
-        "anthropic" => 0,
-        "openai" => 1,
-        "gemini" | "google" => 2,
-        _ => 3,
-    });
+    // Deterministic cross-provider order owned by the model catalog
+    // (`provider_priority()` == [Anthropic, OpenAI, Gemini]). Each provider's
+    // sort index is its position in that list; providers absent from the list
+    // (and unrecognized strings) sort last. The `google` alias normalizes to
+    // the Gemini identity before lookup.
+    let priority = meerkat_models::catalog::provider_priority();
+    let provider_rank = |key: &str| -> usize {
+        let canonical = if key == "google" { "gemini" } else { key };
+        match meerkat_core::Provider::parse_strict(canonical) {
+            Some(provider) => priority
+                .iter()
+                .position(|p| *p == provider)
+                .unwrap_or(priority.len()),
+            None => priority.len(),
+        }
+    };
+    entries.sort_by_key(|(k, _)| provider_rank(k));
 
     let mut section = meerkat_core::RealmConfigSection::from_inline_api_keys(&entries);
     if let Some(urls) = base_urls {
@@ -1091,7 +1096,7 @@ fn build_wasm_tool_dispatcher() -> Result<Arc<dyn meerkat_core::AgentToolDispatc
 /// Primary bootstrap: parse a mobpack and create service infrastructure.
 ///
 /// `mobpack_bytes`: tar.gz mobpack archive.
-/// `credentials_json`: `{ "anthropic_api_key"?: "...", "openai_api_key"?: "...", "gemini_api_key"?: "...", "model"?: "claude-sonnet-4-5" }`
+/// `credentials_json`: `{ "anthropic_api_key"?: "...", "openai_api_key"?: "...", "gemini_api_key"?: "...", "model"?: "<catalog default>" }`
 ///
 /// Stores an `EphemeralSessionService<FactoryAgentBuilder>` and a `MobMcpState`
 /// in a `thread_local! RuntimeState` for subsequent mob/comms calls.
@@ -1109,11 +1114,9 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
         creds.gemini_api_key.as_deref(),
     )?;
 
-    let model = creds.model.unwrap_or_else(|| {
-        meerkat_models::default_model("anthropic")
-            .unwrap_or("claude-sonnet-4-5")
-            .to_string()
-    });
+    let model = creds
+        .model
+        .unwrap_or_else(|| meerkat_models::catalog::global_default_model().to_string());
 
     let providers: Vec<String> = api_keys.keys().cloned().collect();
     let base_urls = build_provider_base_urls(
@@ -1150,7 +1153,7 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
 
 /// Advanced bare-bones bootstrap without a mobpack.
 ///
-/// `config_json`: `{ "anthropic_api_key"?: "...", "openai_api_key"?: "...", "gemini_api_key"?: "...", "model"?: "claude-sonnet-4-5", "max_sessions"?: 100000 }`
+/// `config_json`: `{ "anthropic_api_key"?: "...", "openai_api_key"?: "...", "gemini_api_key"?: "...", "model"?: "<catalog default>", "max_sessions"?: 100000 }`
 #[wasm_bindgen]
 pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
     init_tracing();
@@ -1164,11 +1167,9 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
         rt_config.gemini_api_key.as_deref(),
     )?;
 
-    let model = rt_config.model.unwrap_or_else(|| {
-        meerkat_models::default_model("anthropic")
-            .unwrap_or("claude-sonnet-4-5")
-            .to_string()
-    });
+    let model = rt_config
+        .model
+        .unwrap_or_else(|| meerkat_models::catalog::global_default_model().to_string());
     let max_sessions = rt_config.max_sessions;
 
     let providers: Vec<String> = api_keys.keys().cloned().collect();

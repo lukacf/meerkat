@@ -46,6 +46,21 @@ impl NormalizedBackendKind {
             Self::SelfHosted(kind) => kind.as_str(),
         }
     }
+
+    /// The default API-key backend kind for a provider — the canonical backend
+    /// used when no explicit backend hint is given (e.g. non-interactive API-key
+    /// login). Total over Provider; `Other` has no default. Owned here (the typed
+    /// matrix) so surfaces never hand-map a provider->backend-kind string with a
+    /// fail-open arm.
+    pub fn default_for_provider(provider: Provider) -> Option<Self> {
+        match provider {
+            Provider::Anthropic => Some(Self::Anthropic(AnthropicBackendKind::AnthropicApi)),
+            Provider::OpenAI => Some(Self::OpenAi(OpenAiBackendKind::OpenAiApi)),
+            Provider::Gemini => Some(Self::Google(GoogleBackendKind::GoogleGenAi)),
+            Provider::SelfHosted => Some(Self::SelfHosted(SelfHostedBackendKind::SelfHosted)),
+            Provider::Other => None,
+        }
+    }
 }
 
 /// Provider-tagged normalized auth method.
@@ -72,6 +87,17 @@ impl NormalizedAuthMethod {
             Self::Anthropic(method) => method.persisted_auth_mode(),
             Self::Google(method) => method.persisted_auth_mode(),
             Self::SelfHosted(method) => method.persisted_auth_mode(),
+        }
+    }
+
+    /// The canonical wire string for this auth method, delegating to the
+    /// per-provider matrix enum's as_str (the matrix owns the literal).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAi(m) => m.as_str(),
+            Self::Anthropic(m) => m.as_str(),
+            Self::Google(m) => m.as_str(),
+            Self::SelfHosted(m) => m.as_str(),
         }
     }
 }
@@ -369,5 +395,43 @@ mod tests {
         ));
 
         assert_eq!(lease.expires_at(), Some(expires_at));
+    }
+
+    #[test]
+    fn default_backend_kind_per_provider_is_typed() {
+        assert_eq!(
+            NormalizedBackendKind::default_for_provider(Provider::Anthropic),
+            Some(NormalizedBackendKind::Anthropic(
+                AnthropicBackendKind::AnthropicApi
+            ))
+        );
+        assert_eq!(
+            NormalizedBackendKind::default_for_provider(Provider::OpenAI),
+            Some(NormalizedBackendKind::OpenAi(OpenAiBackendKind::OpenAiApi))
+        );
+        assert_eq!(
+            NormalizedBackendKind::default_for_provider(Provider::Gemini),
+            Some(NormalizedBackendKind::Google(
+                GoogleBackendKind::GoogleGenAi
+            ))
+        );
+        assert_eq!(
+            NormalizedBackendKind::default_for_provider(Provider::SelfHosted),
+            Some(NormalizedBackendKind::SelfHosted(
+                SelfHostedBackendKind::SelfHosted
+            ))
+        );
+        assert_eq!(
+            NormalizedBackendKind::default_for_provider(Provider::Other),
+            None
+        );
+    }
+
+    #[test]
+    fn auth_method_as_str_delegates_to_matrix() {
+        assert_eq!(
+            NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::ClaudeAiOauth).as_str(),
+            "claude_ai_oauth"
+        );
     }
 }

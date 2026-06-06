@@ -1,4 +1,4 @@
-#![allow(clippy::panic, clippy::unwrap_used)]
+#![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 
 use chrono::Utc;
 use meerkat_core::lifecycle::{InputId, RunId};

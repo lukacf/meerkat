@@ -1519,6 +1519,10 @@ mod skill_activation_effect_tests {
     /// `NotFound` error carrying the requested key.
     struct FailingSkillEngine;
 
+    // Test mock mirrors the `SkillEngine` trait's `-> impl Future + Send`
+    // method shapes verbatim; the manual-future form keeps the mock aligned
+    // with the trait signatures it implements.
+    #[allow(clippy::manual_async_fn)]
     impl SkillEngine for FailingSkillEngine {
         fn inventory_section(&self) -> impl Future<Output = Result<String, SkillError>> + Send {
             async move { Ok(String::new()) }
@@ -1596,6 +1600,9 @@ mod skill_activation_effect_tests {
     /// single rendered skill keyed by the first requested key.
     struct SucceedingSkillEngine;
 
+    // Test mock mirrors the `SkillEngine` trait's `-> impl Future + Send`
+    // method shapes verbatim (see `FailingSkillEngine` above).
+    #[allow(clippy::manual_async_fn)]
     impl SkillEngine for SucceedingSkillEngine {
         fn inventory_section(&self) -> impl Future<Output = Result<String, SkillError>> + Send {
             async move { Ok(String::new()) }

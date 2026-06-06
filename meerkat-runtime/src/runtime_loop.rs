@@ -1066,6 +1066,10 @@ impl DetachedWakeCursorPlan {
         }
     }
 
+    /// Test-only convenience query: the runtime path itself matches on the
+    /// plan variants directly (see the `match` at the detached-wake site), so
+    /// this boolean projection exists only for the unit tests.
+    #[cfg(test)]
     fn advances_observed_cursor(self) -> bool {
         matches!(self, Self::AdvanceInjectedAndObserved)
     }

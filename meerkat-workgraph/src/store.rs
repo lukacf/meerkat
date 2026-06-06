@@ -1619,12 +1619,12 @@ mod tests {
 
     use crate::types::WorkEdge;
     use crate::{
-        AttentionDelegatedAuthority, AttentionProjectionPolicy, ClaimWorkItemRequest,
-        CreateWorkItemRequest, GoalAttentionTarget, GoalCreateRequest, GoalRequestCloseRequest,
-        GoalTerminalStatus, LinkWorkItemsRequest, MemoryWorkGraphStore, WorkAttentionMode,
-        WorkAttentionStatus, WorkCompletionPolicy, WorkEdgeKind, WorkGraphError, WorkGraphEvent,
-        WorkGraphEventFilter, WorkGraphEventKind, WorkGraphService, WorkGraphStore, WorkItemFilter,
-        WorkItemId, WorkNamespace, WorkOwner, WorkOwnerKey, WorkStatus,
+        AttentionDelegatedAuthority, AttentionProjectionPolicy, CreateWorkItemRequest,
+        GoalAttentionTarget, GoalCreateRequest, GoalRequestCloseRequest, GoalTerminalStatus,
+        LinkWorkItemsRequest, MemoryWorkGraphStore, WorkAttentionMode, WorkAttentionStatus,
+        WorkCompletionPolicy, WorkEdgeKind, WorkGraphError, WorkGraphEvent, WorkGraphEventFilter,
+        WorkGraphEventKind, WorkGraphService, WorkGraphStore, WorkItemFilter, WorkItemId,
+        WorkNamespace,
     };
 
     fn test_edge() -> WorkEdge {

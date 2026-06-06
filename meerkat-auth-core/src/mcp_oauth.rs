@@ -21,12 +21,16 @@ use crate::auth_oauth::{
     oauth_refresh_observation,
 };
 use crate::auth_store::{PersistedAuthMode, PersistedTokens, TokenKey, TokenStore};
+use meerkat_core::connection::{BindingId, RealmId};
+use meerkat_core::handles::{
+    AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, CredentialUseDisposition, GeneratedAuthLeaseHandle,
+    LeaseKey, OAuthLoginCredentialFacts,
+};
 
 const MCP_TOKEN_REALM: &str = "mcp-oauth";
 const CALLBACK_PATH: &str = "/mcp/oauth/callback";
 const CLIENT_NAME: &str = "Meerkat rkat";
 pub const MCP_INTERACTIVE_LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
-const REFRESH_SKEW_SECS: i64 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpAuthMode {
@@ -61,6 +65,27 @@ impl McpAuthTarget {
                 reason: error.to_string(),
             },
         )
+    }
+
+    /// The per-binding `AuthMachine` lease key for this MCP server, structurally
+    /// identical to [`token_key`](Self::token_key) (realm `mcp-oauth` + the
+    /// `<slug>-<digest>` binding slug). The credential-freshness / reauth
+    /// decision for MCP-OAuth bearer tokens is owned by the `AuthMachine` keyed
+    /// on this lease — the authority never re-derives expiry policy.
+    pub fn lease_key(&self) -> Result<LeaseKey, McpOAuthError> {
+        let mut hasher = Sha256::new();
+        hasher.update(self.server_name.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(self.server_url.as_bytes());
+        let digest = URL_SAFE_NO_PAD.encode(hasher.finalize());
+        let name_slug = slug_component(&self.server_name);
+        let to_err = |error: meerkat_core::connection::IdentityError| McpOAuthError::TokenKey {
+            server_name: self.server_name.clone(),
+            reason: error.to_string(),
+        };
+        let realm = RealmId::parse(MCP_TOKEN_REALM).map_err(to_err)?;
+        let binding = BindingId::parse(format!("{name_slug}-{}", &digest[..16])).map_err(to_err)?;
+        Ok(LeaseKey::new(realm, binding, None))
     }
 }
 
@@ -128,6 +153,8 @@ pub enum McpOAuthError {
     MissingStoredMetadata { server_name: String },
     #[error("MCP OAuth stored credentials for '{server_name}' require reauth")]
     ReauthRequired { server_name: String },
+    #[error("MCP OAuth credential lifecycle error for '{server_name}': {reason}")]
+    AuthLifecycle { server_name: String, reason: String },
 }
 
 #[derive(Clone)]
@@ -136,15 +163,26 @@ pub struct McpOAuthAuthority {
     token_store: Arc<dyn TokenStore>,
     browser: Arc<dyn BrowserOpener>,
     login_timeout: Duration,
+    /// Generated `AuthMachine` lease handle that owns the credential
+    /// freshness/refresh/reauth decision for the `mcp-oauth` realm. Injected by
+    /// the surface that owns the runtime (the CLI) — `meerkat-auth-core` sits
+    /// below `meerkat-runtime` in the dep graph and cannot mint a certified
+    /// handle itself.
+    auth_lease: GeneratedAuthLeaseHandle,
 }
 
 impl McpOAuthAuthority {
-    pub fn new(token_store: Arc<dyn TokenStore>, browser: Arc<dyn BrowserOpener>) -> Self {
+    pub fn new(
+        token_store: Arc<dyn TokenStore>,
+        browser: Arc<dyn BrowserOpener>,
+        auth_lease: GeneratedAuthLeaseHandle,
+    ) -> Self {
         Self {
             http: Client::new(),
             token_store,
             browser,
             login_timeout: MCP_INTERACTIVE_LOGIN_TIMEOUT,
+            auth_lease,
         }
     }
 
@@ -152,12 +190,14 @@ impl McpOAuthAuthority {
         token_store: Arc<dyn TokenStore>,
         browser: Arc<dyn BrowserOpener>,
         http: Client,
+        auth_lease: GeneratedAuthLeaseHandle,
     ) -> Self {
         Self {
             http,
             token_store,
             browser,
             login_timeout: MCP_INTERACTIVE_LOGIN_TIMEOUT,
+            auth_lease,
         }
     }
 
@@ -167,12 +207,14 @@ impl McpOAuthAuthority {
         browser: Arc<dyn BrowserOpener>,
         http: Client,
         login_timeout: Duration,
+        auth_lease: GeneratedAuthLeaseHandle,
     ) -> Self {
         Self {
             http,
             token_store,
             browser,
             login_timeout,
+            auth_lease,
         }
     }
 
@@ -281,51 +323,101 @@ impl McpOAuthAuthority {
         let Some(expires_at) = tokens.expires_at else {
             return Ok(tokens);
         };
-        if expires_at > Utc::now() + chrono::Duration::seconds(REFRESH_SKEW_SECS) {
-            return Ok(tokens);
-        }
-        let Some(refresh_token) = tokens.refresh_token.clone() else {
-            return Err(McpOAuthError::ReauthRequired {
+
+        // Route the cached-vs-refresh-vs-reauth decision through the injected
+        // per-binding `AuthMachine` lease for the `mcp-oauth` realm. The machine
+        // owns the freshness policy (observed expiry vs the canonical refresh
+        // window); this authority only feeds it the expiry and the pure
+        // OAuth-login facts, then mirrors the verdict. No local skew comparison.
+        let auth_lease = &self.auth_lease;
+        let lease_key = target.lease_key()?;
+        let now_secs = epoch_secs(Utc::now());
+        let lifecycle_err =
+            |error: meerkat_core::handles::DslTransitionError| McpOAuthError::AuthLifecycle {
                 server_name: target.server_name.clone(),
-            });
+                reason: error.to_string(),
+            };
+        // The handle is shared across calls and servers; reset this key's prior
+        // lease state, then record the current credential's expiry so the
+        // freshness verdict reflects THIS token. Release is best-effort: an
+        // untracked key has nothing to clear.
+        let _ = auth_lease.release_lease(&lease_key);
+        auth_lease
+            .acquire_lease(&lease_key, epoch_secs(expires_at))
+            .map_err(lifecycle_err)?;
+        auth_lease
+            .observe_credential_freshness(&lease_key, now_secs, AUTH_LEASE_TTL_REFRESH_WINDOW_SECS)
+            .map_err(lifecycle_err)?;
+        let facts = OAuthLoginCredentialFacts {
+            credential_present: tokens.primary_secret.is_some(),
+            force_refresh: false,
+            refresh_allowed: tokens.refresh_token.is_some(),
         };
-        let endpoints = OAuthEndpoints {
-            client_id: metadata.client.client_id.clone(),
-            authorize_url: metadata.discovery.authorization_endpoint.clone(),
-            token_url: metadata.discovery.token_endpoint.clone(),
-            device_code_url: None,
-            redirect_uri: metadata.client.redirect_uri.clone(),
-            scopes: metadata.discovery.scopes.clone(),
-            extra_authorize_params: Vec::new(),
-            token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
-            include_state_in_token_exchange: false,
-            extra_token_params: vec![("resource".to_string(), metadata.discovery.resource.clone())],
-            refresh_scopes: metadata.discovery.scopes.clone(),
-            extra_headers: Vec::new(),
-        };
-        let refreshed = exchange_refresh_token(
-            &self.http,
-            &endpoints,
-            &refresh_token,
-            metadata.client.client_secret.as_deref(),
-        )
-        .await
-        .map_err(|error| map_refresh_error(target, error))?;
-        let mut persisted = persisted_tokens_from_result(
-            &refreshed,
-            &metadata.discovery,
-            &metadata.client,
-            target,
-            Utc::now(),
-        )?;
-        if persisted.refresh_token.is_none() {
-            persisted.refresh_token = Some(refresh_token);
+        let disposition = auth_lease
+            .resolve_oauth_login_credential_disposition(&lease_key, facts)
+            .map_err(lifecycle_err)?;
+        match disposition {
+            // The machine authorizes the cached credential as fresh.
+            CredentialUseDisposition::Authorized => Ok(tokens),
+            // The machine asks for a refresh: run the OAuth refresh exchange.
+            CredentialUseDisposition::RefreshRequired => {
+                let Some(refresh_token) = tokens.refresh_token.clone() else {
+                    return Err(McpOAuthError::ReauthRequired {
+                        server_name: target.server_name.clone(),
+                    });
+                };
+                let endpoints = OAuthEndpoints {
+                    client_id: metadata.client.client_id.clone(),
+                    authorize_url: metadata.discovery.authorization_endpoint.clone(),
+                    token_url: metadata.discovery.token_endpoint.clone(),
+                    device_code_url: None,
+                    redirect_uri: metadata.client.redirect_uri.clone(),
+                    scopes: metadata.discovery.scopes.clone(),
+                    extra_authorize_params: Vec::new(),
+                    token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
+                    include_state_in_token_exchange: false,
+                    extra_token_params: vec![(
+                        "resource".to_string(),
+                        metadata.discovery.resource.clone(),
+                    )],
+                    refresh_scopes: metadata.discovery.scopes.clone(),
+                    extra_headers: Vec::new(),
+                };
+                let refreshed = exchange_refresh_token(
+                    &self.http,
+                    &endpoints,
+                    &refresh_token,
+                    metadata.client.client_secret.as_deref(),
+                )
+                .await
+                .map_err(|error| map_refresh_error(target, error))?;
+                let mut persisted = persisted_tokens_from_result(
+                    &refreshed,
+                    &metadata.discovery,
+                    &metadata.client,
+                    target,
+                    Utc::now(),
+                )?;
+                if persisted.refresh_token.is_none() {
+                    persisted.refresh_token = Some(refresh_token);
+                }
+                self.token_store
+                    .save(key, &persisted)
+                    .await
+                    .map_err(|error| McpOAuthError::TokenStore(error.to_string()))?;
+                Ok(persisted)
+            }
+            // Refresh is not permitted or the credential is otherwise unusable:
+            // the user must reauthenticate. (`LeaseAbsent`/`AlreadyRefreshing`
+            // cannot arise for a freshly acquired single-shot lease, but are
+            // handled exhaustively and fail closed to reauth.)
+            CredentialUseDisposition::RefreshDisallowed
+            | CredentialUseDisposition::ReauthRequired
+            | CredentialUseDisposition::LeaseAbsent
+            | CredentialUseDisposition::AlreadyRefreshing => Err(McpOAuthError::ReauthRequired {
+                server_name: target.server_name.clone(),
+            }),
         }
-        self.token_store
-            .save(key, &persisted)
-            .await
-            .map_err(|error| McpOAuthError::TokenStore(error.to_string()))?;
-        Ok(persisted)
     }
 
     async fn discover(
@@ -616,6 +708,12 @@ fn map_refresh_error(target: &McpAuthTarget, error: OAuthError) -> McpOAuthError
     }
 }
 
+/// Whole seconds since the Unix epoch, clamped to a non-negative `u64` for the
+/// `AuthMachine` lease lifecycle inputs.
+fn epoch_secs(time: DateTime<Utc>) -> u64 {
+    time.timestamp().max(0) as u64
+}
+
 fn resource_metadata_from_header(header: &str) -> Option<String> {
     auth_param(header, "resource_metadata")
 }
@@ -792,6 +890,17 @@ mod tests {
     use serde_json::Value;
     use std::collections::HashMap;
     use tokio::net::TcpListener;
+
+    /// A certified `AuthMachine` lease handle for tests. `meerkat-runtime` is a
+    /// dev-dependency, so tests can mint the same generated lease the CLI
+    /// injects in production (the lib cannot, to avoid a dep cycle).
+    fn test_auth_lease() -> GeneratedAuthLeaseHandle {
+        let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+        meerkat_runtime::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(
+            handle,
+        )
+        .expect("test auth lease must be certified by generated AuthMachine authority")
+    }
 
     #[derive(Debug, Clone, Copy, Default)]
     enum AuthorizeOutcome {
@@ -1072,7 +1181,8 @@ mod tests {
         let (base, state) = spawn_oauth_fixture().await;
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority = McpOAuthAuthority::with_http(store.clone(), browser, Client::new());
+        let authority =
+            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
         let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
         let token = authority
             .interactive_login(
@@ -1138,7 +1248,8 @@ mod tests {
         let (base, state) = spawn_oauth_fixture().await;
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority = McpOAuthAuthority::with_http(store.clone(), browser, Client::new());
+        let authority =
+            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
         let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
 
         let token = authority
@@ -1163,7 +1274,8 @@ mod tests {
         let (base, state) = spawn_oauth_fixture().await;
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority = McpOAuthAuthority::with_http(store.clone(), browser, Client::new());
+        let authority =
+            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
         let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
 
         authority
@@ -1195,7 +1307,8 @@ mod tests {
         let (base, state) = spawn_oauth_fixture().await;
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority = McpOAuthAuthority::with_http(store.clone(), browser, Client::new());
+        let authority =
+            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
         let original = McpAuthTarget::new("glean", format!("{base}/mcp"));
         let other = McpAuthTarget::new("glean", format!("{base}/other-mcp"));
 
@@ -1227,7 +1340,8 @@ mod tests {
         *state.include_registration_endpoint.lock() = false;
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority = McpOAuthAuthority::with_http(store.clone(), browser, Client::new());
+        let authority =
+            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
         let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
@@ -1252,7 +1366,8 @@ mod tests {
         *state.omit_token_endpoint_auth_method.lock() = true;
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority = McpOAuthAuthority::with_http(store.clone(), browser, Client::new());
+        let authority =
+            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
         let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
@@ -1277,7 +1392,8 @@ mod tests {
         *state.resource_override.lock() = Some(format!("{base}/other-mcp"));
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority = McpOAuthAuthority::with_http(store.clone(), browser, Client::new());
+        let authority =
+            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
         let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
@@ -1302,7 +1418,8 @@ mod tests {
         *state.resource_override.lock() = Some("/mcp".to_string());
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority = McpOAuthAuthority::with_http(store.clone(), browser, Client::new());
+        let authority =
+            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
         let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
@@ -1322,7 +1439,8 @@ mod tests {
         let (_base, state) = spawn_oauth_fixture().await;
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority = McpOAuthAuthority::with_http(store.clone(), browser, Client::new());
+        let authority =
+            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
         let target = McpAuthTarget::new("glean", "http://mcp.example.test/mcp");
 
         let result = authority.interactive_login(&target, None).await;
@@ -1347,7 +1465,8 @@ mod tests {
         *state.issuer_override.lock() = Some("https://issuer.example.invalid".to_string());
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority = McpOAuthAuthority::with_http(store.clone(), browser, Client::new());
+        let authority =
+            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
         let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
@@ -1372,7 +1491,8 @@ mod tests {
         *state.issuer_override.lock() = Some(format!("{base}/"));
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority = McpOAuthAuthority::with_http(store.clone(), browser, Client::new());
+        let authority =
+            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
         let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
@@ -1418,7 +1538,8 @@ mod tests {
         *state.token_fails.lock() = true;
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority = McpOAuthAuthority::with_http(store.clone(), browser, Client::new());
+        let authority =
+            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
         let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
@@ -1433,7 +1554,8 @@ mod tests {
         *state.authorize_outcome.lock() = AuthorizeOutcome::StateMismatch;
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority = McpOAuthAuthority::with_http(store.clone(), browser, Client::new());
+        let authority =
+            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
         let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
@@ -1448,7 +1570,8 @@ mod tests {
         *state.authorize_outcome.lock() = AuthorizeOutcome::Denied;
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority = McpOAuthAuthority::with_http(store.clone(), browser, Client::new());
+        let authority =
+            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
         let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
@@ -1469,6 +1592,7 @@ mod tests {
             browser,
             Client::new(),
             Duration::from_millis(10),
+            test_auth_lease(),
         );
         let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
 

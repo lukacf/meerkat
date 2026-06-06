@@ -374,6 +374,25 @@ pub fn image_generation_provider_defaults() -> &'static [ImageGenerationProvider
     })
 }
 
+/// The platform-wide default model when no provider/model is otherwise
+/// specified. The single global default owned by the catalog seam — surfaces
+/// must read this instead of hardcoding a model literal.
+pub fn global_default_model() -> &'static str {
+    DEFAULT_ANTHROPIC
+}
+
+/// Canonical cross-provider priority order, owned by the catalog seam. A
+/// surface that must pick "the best available provider" (e.g. when several
+/// API keys are present) consults this order instead of hand-coding its own.
+pub fn provider_priority() -> &'static [crate::Provider] {
+    const PRIORITY: &[crate::Provider] = &[
+        crate::Provider::Anthropic,
+        crate::Provider::OpenAI,
+        crate::Provider::Gemini,
+    ];
+    PRIORITY
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -553,6 +572,31 @@ mod tests {
             image_generation_provider_for_model("gemini-3.5-flash"),
             None,
             "Gemini text catalog rows are not image-generation model authority"
+        );
+    }
+
+    #[test]
+    fn global_default_and_provider_priority_are_catalog_owned() {
+        assert_eq!(global_default_model(), DEFAULT_ANTHROPIC);
+
+        let priority = provider_priority();
+        assert_eq!(
+            priority.len(),
+            3,
+            "provider priority must cover three providers"
+        );
+        assert_eq!(
+            priority.first(),
+            Some(&Provider::Anthropic),
+            "Anthropic must be the highest-priority provider"
+        );
+        assert!(
+            priority.contains(&Provider::OpenAI),
+            "provider priority must contain OpenAI"
+        );
+        assert!(
+            priority.contains(&Provider::Gemini),
+            "provider priority must contain Gemini"
         );
     }
 

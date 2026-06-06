@@ -247,8 +247,21 @@ impl SessionRuntimeLlmReconfigureHost {
         identity: &SessionLlmIdentity,
     ) -> Result<meerkat_core::SessionLlmRequestPolicy, RuntimeDriverError> {
         let config = self.load_config_for_hot_swap().await?;
+        // The session's persisted web-search disable intent
+        // (`SessionMetadata.tooling.web_search`) must survive a model hot-swap —
+        // otherwise reconfigure would silently re-enable the provider-native
+        // web-search body that `--no-web-search` suppressed. Read it from the
+        // live session metadata; fail closed to `Inherit` only when the metadata
+        // is genuinely unavailable.
+        let web_search = match self.service.export_live_session(session_id).await {
+            Ok(session) => session
+                .session_metadata()
+                .map(|metadata| metadata.tooling.web_search)
+                .unwrap_or(meerkat_core::ToolCategoryOverride::Inherit),
+            Err(_) => meerkat_core::ToolCategoryOverride::Inherit,
+        };
         self.factory
-            .request_policy_for_llm_identity(&config, identity)
+            .request_policy_for_llm_identity(&config, identity, web_search)
             .map_err(|e| {
                 RuntimeDriverError::Internal(format!(
                     "Failed to build LLM request policy for session {session_id} identity hot-swap: {e}"

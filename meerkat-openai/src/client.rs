@@ -29,9 +29,11 @@ use serde_json::value::RawValue;
 use std::collections::{HashMap, HashSet};
 
 use crate::image_generation::{
-    OpenAiImageOutputOptions, OpenAiImageProviderParams, OpenAiImagesApiEndpoint,
-    OpenAiImagesApiPlan, OpenAiImagesApiRequestShape, OpenAiResponsesImagePlan,
+    OpenAiImageGenerationProfile, OpenAiImageOutputOptions, OpenAiImageProviderParams,
+    OpenAiImagesApiEndpoint, OpenAiImagesApiPlan, OpenAiImagesApiRequestShape,
+    OpenAiResponsesImagePlan,
 };
+use meerkat_core::image_generation::ImageGenerationProviderProfile;
 
 /// Extract the typed OpenAI provider tag from a request.
 pub(crate) fn openai_tag(request: &LlmRequest) -> Option<&OpenAiProviderTag> {
@@ -1462,31 +1464,33 @@ impl ImageGenerationExecutor for OpenAiClient {
         request: ProviderImageGenerationRequest,
     ) -> Result<ProviderImageGenerationOutput, LlmError> {
         match request.execution_plan.clone() {
-            plan if plan.provider.0 == "openai" => match plan.backend {
-                meerkat_core::ImageGenerationBackendKind::HostedTool => {
-                    let provider_plan: OpenAiResponsesImagePlan =
-                        serde_json::from_value(plan.provider_plan).map_err(|err| {
-                            LlmError::InvalidRequest {
-                                message: format!("invalid OpenAI hosted image plan: {err}"),
-                            }
-                        })?;
-                    self.execute_hosted_responses_image(request, provider_plan)
-                        .await
+            plan if OpenAiImageGenerationProfile.matches_provider_id(&plan.provider.0) => {
+                match plan.backend {
+                    meerkat_core::ImageGenerationBackendKind::HostedTool => {
+                        let provider_plan: OpenAiResponsesImagePlan =
+                            serde_json::from_value(plan.provider_plan).map_err(|err| {
+                                LlmError::InvalidRequest {
+                                    message: format!("invalid OpenAI hosted image plan: {err}"),
+                                }
+                            })?;
+                        self.execute_hosted_responses_image(request, provider_plan)
+                            .await
+                    }
+                    meerkat_core::ImageGenerationBackendKind::ProviderApi => {
+                        let provider_plan: OpenAiImagesApiPlan =
+                            serde_json::from_value(plan.provider_plan).map_err(|err| {
+                                LlmError::InvalidRequest {
+                                    message: format!("invalid OpenAI Images API plan: {err}"),
+                                }
+                            })?;
+                        let model = request.model.clone();
+                        self.execute_images_api(request, model, provider_plan).await
+                    }
+                    other => Err(LlmError::InvalidRequest {
+                        message: format!("OpenAI image executor cannot run backend {other:?}"),
+                    }),
                 }
-                meerkat_core::ImageGenerationBackendKind::ProviderApi => {
-                    let provider_plan: OpenAiImagesApiPlan =
-                        serde_json::from_value(plan.provider_plan).map_err(|err| {
-                            LlmError::InvalidRequest {
-                                message: format!("invalid OpenAI Images API plan: {err}"),
-                            }
-                        })?;
-                    let model = request.model.clone();
-                    self.execute_images_api(request, model, provider_plan).await
-                }
-                other => Err(LlmError::InvalidRequest {
-                    message: format!("OpenAI image executor cannot run backend {other:?}"),
-                }),
-            },
+            }
             other => Err(LlmError::InvalidRequest {
                 message: format!("OpenAI image executor cannot run plan {other:?}"),
             }),

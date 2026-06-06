@@ -229,13 +229,21 @@ where
         let handle = self.tool_scope.handle();
         let revision = handle.stage_external_filter(filter)?;
         let _ = handle.staged_revision();
-        if let Ok(visibility_state) = self.tool_scope.authorized_visibility_state() {
-            if let Err(err) = self.session.set_tool_visibility_state(visibility_state) {
-                tracing::warn!(
-                    error = %err,
-                    "failed to persist staged canonical tool visibility state"
-                );
-            }
+        if self.tool_scope.owns_durable_visibility_projection() {
+            let visibility_state =
+                self.tool_scope
+                    .authorized_visibility_state()
+                    .map_err(|err| ToolScopeStageError::Owner {
+                        message: err.to_string(),
+                    })?;
+            self.session
+                .set_tool_visibility_state(visibility_state)
+                .map_err(|err| ToolScopeStageError::DurableProjectionPersist {
+                    message: err.to_string(),
+                })?;
+            // Only remove the legacy fallback AFTER the canonical write
+            // committed — a failed canonical persist must never destroy the
+            // legacy recovery source (which would leave both sources gone).
             self.session
                 .remove_metadata(EXTERNAL_TOOL_FILTER_METADATA_KEY);
         }

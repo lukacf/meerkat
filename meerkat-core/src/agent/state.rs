@@ -6230,6 +6230,99 @@ mod tests {
         );
     }
 
+    /// Dispatcher whose tool catalog carries callback provenance so that
+    /// filter staging through a generated visibility owner can mint valid
+    /// identity witnesses (the generated owner requires filter witnesses).
+    struct ProvenancedToolDispatcher {
+        tools: Arc<[Arc<ToolDef>]>,
+    }
+
+    impl ProvenancedToolDispatcher {
+        fn new(tool_names: &[&str]) -> Self {
+            let tools = tool_names
+                .iter()
+                .map(|name| {
+                    Arc::new(ToolDef {
+                        name: (*name).into(),
+                        description: format!("{name} tool"),
+                        input_schema: serde_json::json!({ "type": "object" }),
+                        provenance: Some(crate::ToolProvenance {
+                            kind: crate::ToolSourceKind::Callback,
+                            source_id: (*name).into(),
+                        }),
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into();
+            Self { tools }
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for ProvenancedToolDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::new(
+                call.id.to_string(),
+                format!("dispatched {}", call.name),
+                false,
+            )
+            .into())
+        }
+    }
+
+    #[tokio::test]
+    async fn generated_authority_stage_persists_projection_and_clears_legacy_only_on_success() {
+        let client = Arc::new(VisibilityRecordingLlmClient::new());
+        let tools = Arc::new(ProvenancedToolDispatcher::new(&["visible", "secret"]));
+        let visibility_owner: Arc<dyn crate::tool_scope::ToolVisibilityOwner> =
+            Arc::new(crate::tool_scope::GeneratedTestToolVisibilityOwner::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(
+                crate::tool_scope::generated_test_tool_visibility_owner_from(visibility_owner),
+            )
+            .build_standalone(client, tools, Arc::new(NoopStore))
+            .await;
+
+        // Seed the legacy fallback recovery source. The canonical persist must
+        // remove it ONLY after the durable projection write commits.
+        agent.session_mut().set_metadata(
+            EXTERNAL_TOOL_FILTER_METADATA_KEY,
+            serde_json::to_value(ToolFilter::Deny(
+                ["secret".to_string()].into_iter().collect(),
+            ))
+            .expect("legacy filter should serialize"),
+        );
+
+        agent
+            .stage_external_tool_filter(ToolFilter::Deny(
+                ["secret".to_string()].into_iter().collect(),
+            ))
+            .expect("generated authority staging must persist canonical visibility");
+
+        assert!(
+            agent
+                .session()
+                .tool_visibility_state()
+                .expect("visibility state should decode")
+                .is_some(),
+            "successful generated-authority staging must persist the canonical visibility projection"
+        );
+        assert!(
+            !agent
+                .session()
+                .metadata()
+                .contains_key(EXTERNAL_TOOL_FILTER_METADATA_KEY),
+            "successful canonical persist must clear the legacy fallback source"
+        );
+    }
+
     #[tokio::test]
     async fn run_loop_fails_closed_on_tool_scope_boundary_failure() {
         let client = Arc::new(SingleTurnVisibilityClient::new());

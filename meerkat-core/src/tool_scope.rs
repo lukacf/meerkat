@@ -196,6 +196,8 @@ pub enum ToolScopeStageError {
     LockPoisoned,
     #[error("Tool visibility owner error: {message}")]
     Owner { message: String },
+    #[error("failed to persist durable tool visibility projection: {message}")]
+    DurableProjectionPersist { message: String },
 }
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]

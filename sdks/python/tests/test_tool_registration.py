@@ -30,6 +30,23 @@ async def test_register_tool_propagates_server_rejection() -> None:
 
 
 @pytest.mark.asyncio
+async def test_register_tool_records_server_rejection_as_state() -> None:
+    """A server rejection is recorded as caller-inspectable state, keyed by
+    tool name, in addition to being re-raised."""
+    client = MeerkatClient()
+
+    async def reject(_method: str, _params: object) -> object:
+        raise MeerkatError("TOOL_REJECTED", "server rejected tools/register")
+
+    client._request = reject  # type: ignore[assignment]
+
+    with pytest.raises(MeerkatError):
+        await client._register_tool_with_server("t", "", None)
+
+    assert client._tool_registration_errors["t"].code == "TOOL_REJECTED"
+
+
+@pytest.mark.asyncio
 async def test_register_tool_swallows_benign_disconnect() -> None:
     """Clean shutdown / disconnect codes return None without raising."""
     client = MeerkatClient()

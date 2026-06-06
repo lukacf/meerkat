@@ -143,7 +143,10 @@ async fn registered_machine() -> (MeerkatMachine, SessionId, LogicalRuntimeId) {
     let machine = MeerkatMachine::ephemeral();
     let session_id = SessionId::new();
     let runtime_id = LogicalRuntimeId::for_session(&session_id);
-    machine.register_session(session_id.clone()).await;
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     (machine, session_id, runtime_id)
 }
 

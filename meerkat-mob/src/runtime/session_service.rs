@@ -106,7 +106,14 @@ async fn retire_runtime_session_for_archive(
     match meerkat_runtime::RuntimeControlPlane::retire(runtime_adapter, &runtime_id).await {
         Ok(_) => Ok(()),
         Err(meerkat_runtime::RuntimeControlPlaneError::NotFound(_)) => {
-            runtime_adapter.register_session(session_id.clone()).await;
+            runtime_adapter
+                .register_session(session_id.clone())
+                .await
+                .map_err(|error| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                        "machine archive register before retire failed: {error}"
+                    )))
+                })?;
             if runtime_adapter
                 .meerkat_machine_archive_snapshot(session_id)
                 .await

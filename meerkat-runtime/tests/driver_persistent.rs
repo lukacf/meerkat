@@ -157,7 +157,10 @@ async fn persist_destroyed_runtime_lifecycle(
     let session_id = SessionId::new();
     let runtime_id = LogicalRuntimeId::for_session(&session_id);
     let adapter = MeerkatMachine::persistent(store as Arc<dyn RuntimeStore>, memory_blob_store());
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     meerkat_runtime::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
         .await
         .expect("generated destroy should persist lifecycle");

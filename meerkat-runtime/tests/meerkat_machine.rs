@@ -407,7 +407,10 @@ impl RuntimeStore for HarnessRuntimeStore {
 async fn ephemeral_adapter_accept_and_query() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("hello");
     let outcome = adapter.accept_input(&sid, input).await.unwrap();
@@ -424,7 +427,10 @@ async fn ephemeral_adapter_accept_and_query() {
 async fn accept_input_without_wake_keeps_idle_runtime_idle() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("queued-only");
     let input_id = input.header().id.clone();
@@ -451,7 +457,10 @@ async fn persistent_adapter_accept() {
     let store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
     let adapter = Arc::new(MeerkatMachine::persistent(store, memory_blob_store()));
     let sid = SessionId::new();
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("hello");
     let outcome = adapter.accept_input(&sid, input).await.unwrap();
@@ -466,7 +475,10 @@ async fn lifecycle_commit_failure_preserves_generated_retire_authority() {
         memory_blob_store(),
     ));
     let sid = SessionId::new();
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
     let runtime_id = LogicalRuntimeId::for_session(&sid);
 
     let input = make_prompt("retire rollback");
@@ -511,7 +523,10 @@ async fn destroy_lifecycle_commit_failure_restores_staged_session_dsl_state() {
         memory_blob_store(),
     ));
     let sid = SessionId::new();
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
     let runtime_id = LogicalRuntimeId::for_session(&sid);
 
     let input = make_prompt("destroy rollback");
@@ -618,7 +633,10 @@ async fn destroy_does_not_publish_destroyed_while_lifecycle_commit_is_in_flight(
         memory_blob_store(),
     ));
     let sid = SessionId::new();
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
     let runtime_id = LogicalRuntimeId::for_session(&sid);
 
     let (outcome, handle) = adapter
@@ -877,7 +895,10 @@ async fn cold_reregister_preserves_canonical_destroyed_runtime_state() {
         Arc::clone(&store) as Arc<dyn RuntimeStore>,
         memory_blob_store(),
     ));
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
     let runtime_id = LogicalRuntimeId::for_session(&sid);
     meerkat_runtime::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
@@ -888,7 +909,10 @@ async fn cold_reregister_preserves_canonical_destroyed_runtime_state() {
         Arc::clone(&store) as Arc<dyn RuntimeStore>,
         memory_blob_store(),
     ));
-    restarted.register_session(sid.clone()).await;
+    restarted
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
     assert_eq!(
         restarted.runtime_state(&sid).await.unwrap(),
         RuntimeState::Destroyed,
@@ -915,7 +939,10 @@ async fn cold_reregister_ignores_legacy_session_uuid_runtime_state_alias() {
         Arc::clone(&store) as Arc<dyn RuntimeStore>,
         memory_blob_store(),
     ));
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
         RuntimeState::Idle,
@@ -935,7 +962,10 @@ async fn cold_reregister_prefers_canonical_runtime_state_over_stale_legacy_alias
         Arc::clone(&store) as Arc<dyn RuntimeStore>,
         memory_blob_store(),
     ));
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
         RuntimeState::Idle,
@@ -973,7 +1003,10 @@ async fn control_plane_receipt_lookup_ignores_legacy_storage_alias() {
         Arc::clone(&store) as Arc<dyn RuntimeStore>,
         memory_blob_store(),
     ));
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
 
     let loaded = meerkat_runtime::traits::RuntimeControlPlane::load_boundary_receipt(
         adapter.as_ref(),
@@ -1014,7 +1047,10 @@ async fn unregistered_session_errors() {
 async fn unregister_removes_driver() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
     adapter.unregister_session(&sid).await;
 
     let result = adapter.runtime_state(&sid).await;
@@ -1025,7 +1061,10 @@ async fn unregister_removes_driver() {
 async fn recycle_preserves_ephemeral_queued_work() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
 
     let first = make_prompt("first");
     let first_id = first.id().clone();
@@ -1068,7 +1107,10 @@ async fn recycle_preserves_persistent_queued_work() {
     let store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
     let adapter = Arc::new(MeerkatMachine::persistent(store, memory_blob_store()));
     let sid = SessionId::new();
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
 
     let first = make_prompt("first");
     let first_id = first.id().clone();
@@ -1114,7 +1156,10 @@ async fn recycle_lifecycle_commit_failure_preserves_generated_recycle_authority(
         memory_blob_store(),
     ));
     let sid = SessionId::new();
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
     let runtime_id = LogicalRuntimeId::for_session(&sid);
 
     meerkat_runtime::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
@@ -1199,7 +1244,10 @@ async fn recycle_keeps_waiters_for_preserved_pending_input() {
 
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
 
     let (outcome, handle) = adapter
         .accept_input_with_completion(&sid, make_prompt("survive recycle"))
@@ -1365,7 +1413,10 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
 async fn unregister_session_terminates_pending_completion_waiters() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
 
     let (outcome, handle) = adapter
         .accept_input_with_completion(&sid, make_prompt("pending on unregister"))
@@ -2156,7 +2207,10 @@ async fn ensure_session_with_executor_upgrades_registered_session() {
     let apply_called = Arc::new(AtomicBool::new(false));
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("upgrade me");
     let input_id = input.id().clone();
@@ -2276,7 +2330,10 @@ async fn ensure_session_with_executor_upgrades_racy_registration() {
     };
 
     tokio::time::sleep(Duration::from_millis(10)).await;
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
     ensure_task.await.unwrap();
 
     let input = make_prompt("race upgrade");
@@ -2595,7 +2652,10 @@ async fn completed_boundary_commit_failure_preserves_sync_pre_terminal_state() {
     let store = Arc::new(HarnessRuntimeStore::failing_atomic_apply());
     let adapter = Arc::new(MeerkatMachine::persistent(store, memory_blob_store()));
     let sid = SessionId::new();
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("sync boundary failure");
     let input_id = input.id().clone();
@@ -2918,7 +2978,10 @@ async fn completed_run_sync_path_skips_terminal_lifecycle_snapshot_writer() {
         memory_blob_store(),
     ));
     let sid = SessionId::new();
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
 
     let result = adapter
         .accept_input_and_run(
@@ -3201,7 +3264,10 @@ async fn accept_input_and_run_rejects_deduplicated_admission() {
 
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
 
     let key = IdempotencyKey::new("sync-dedup");
     let mut first = make_prompt("first");
@@ -3518,7 +3584,10 @@ async fn reset_runtime_resolves_pending_waiters() {
     // Register without executor so inputs queue but don't process
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("pending");
     let (outcome, handle) = adapter
@@ -3552,7 +3621,10 @@ async fn retire_without_loop_resolves_waiters() {
     // Register without executor (no RuntimeLoop)
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("will be retired");
     let (outcome, handle) = adapter
@@ -3616,11 +3688,23 @@ async fn unregister_session_aborts_spawned_drain_and_clears_suppression() {
         ) -> Vec<meerkat_core::interaction::PeerInputCandidate> {
             Vec::new()
         }
+
+        async fn drain_classified_inbox_interactions(
+            &self,
+        ) -> Result<
+            Vec<meerkat_core::interaction::ClassifiedInboxInteraction>,
+            meerkat_core::agent::CommsCapabilityError,
+        > {
+            Ok(Vec::new())
+        }
     }
 
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
 
     let comms: Arc<dyn CommsRuntime> = Arc::new(IdleDrainRuntime::new());
     let spawned = adapter
@@ -3677,11 +3761,23 @@ async fn idle_non_host_sessions_do_not_spawn_background_comms_drains() {
         ) -> Vec<meerkat_core::interaction::PeerInputCandidate> {
             Vec::new()
         }
+
+        async fn drain_classified_inbox_interactions(
+            &self,
+        ) -> Result<
+            Vec<meerkat_core::interaction::ClassifiedInboxInteraction>,
+            meerkat_core::agent::CommsCapabilityError,
+        > {
+            Ok(Vec::new())
+        }
     }
 
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
 
     let comms: Arc<dyn CommsRuntime> = Arc::new(IdleDrainRuntime::new());
     let spawned = adapter
@@ -3734,6 +3830,15 @@ async fn attached_sessions_do_not_spawn_comms_drains_without_keep_alive() {
             &self,
         ) -> Vec<meerkat_core::interaction::PeerInputCandidate> {
             Vec::new()
+        }
+
+        async fn drain_classified_inbox_interactions(
+            &self,
+        ) -> Result<
+            Vec<meerkat_core::interaction::ClassifiedInboxInteraction>,
+            meerkat_core::agent::CommsCapabilityError,
+        > {
+            Ok(Vec::new())
         }
     }
 

@@ -55,6 +55,27 @@ fn realtime_max_output_tokens(max_tokens: u32) -> Option<MaxTokens> {
     (max_tokens > 0).then(|| MaxTokens::Count(max_tokens.min(REALTIME_MAX_OUTPUT_TOKENS)))
 }
 
+/// Resolve the optional caller temperature into a realtime `Temperature`,
+/// distinguishing caller-Unset from an explicit-but-invalid value.
+///
+/// `None` is the caller-Unset distinction: the provider default applies. An
+/// explicit `Some(t)` outside the realtime protocol's accepted `[0.0, 2.0]`
+/// range is a typed [`LlmError::InvalidRequest`] reject rather than a silent
+/// downgrade to the provider default, so an out-of-range caller policy never
+/// fails open.
+fn resolve_realtime_temperature(temperature: Option<f32>) -> Result<Option<Temperature>, LlmError> {
+    match temperature {
+        None => Ok(None),
+        Some(value) => {
+            Temperature::new(value)
+                .map(Some)
+                .map_err(|error| LlmError::InvalidRequest {
+                    message: format!("invalid realtime temperature: {error}"),
+                })
+        }
+    }
+}
+
 /// LlmClient implementation that serves text turns via OpenAI Realtime WS.
 #[derive(Debug, Clone)]
 pub struct OpenAiRealtimeTextAdapter {
@@ -298,14 +319,12 @@ impl LlmClient for OpenAiRealtimeTextAdapter {
             //
             // Propagate the session-level LlmRequest tunables so
             // realtime turns honor the same max_output_tokens / temperature
-            // as the Responses-API path. Temperatures outside the realtime
-            // protocol's accepted [0.0, 2.0] range are dropped rather than
-            // rejected — the upstream constructor returns a typed error we
-            // do not want to elevate mid-stream.
+            // as the Responses-API path. `temperature == None` is the
+            // caller-Unset distinction (provider default applies); an
+            // explicit-but-invalid temperature is a typed reject rather than
+            // a silent downgrade to the provider default.
             let max_output_tokens = realtime_max_output_tokens(request.max_tokens);
-            let temperature = request
-                .temperature
-                .and_then(|t| Temperature::new(t).ok());
+            let temperature = resolve_realtime_temperature(request.temperature)?;
             let response_config = ResponseConfig {
                 conversation: Some(ConversationMode::None),
                 output_modalities: Some(OutputModalities::Text),
@@ -362,22 +381,10 @@ impl LlmClient for OpenAiRealtimeTextAdapter {
                         arguments,
                         ..
                     } => {
-                        let args = if arguments.trim().is_empty() {
-                            serde_json::json!({})
-                        } else {
-                            match serde_json::from_str::<serde_json::Value>(&arguments) {
-                                Ok(value) => value,
-                                Err(err) => {
-                                    tracing::warn!(
-                                        call_id = %call_id,
-                                        tool = %name,
-                                        error = %err,
-                                        "openai realtime: tool_call arguments failed JSON parse; falling back to raw string"
-                                    );
-                                    serde_json::Value::String(arguments.clone())
-                                }
-                            }
-                        };
+                        // Fail the tool-call boundary on malformed provider
+                        // JSON instead of laundering it into a Value::String
+                        // blob and yielding a synthetic successful ToolUse turn.
+                        let args = crate::live::parse_tool_call_args(&arguments, &call_id)?;
                         stop_reason = StopReason::ToolUse;
                         yield LlmEvent::ToolCallComplete {
                             id: call_id,
@@ -1052,5 +1059,40 @@ mod tests {
     fn provider_is_openai() {
         let adapter = OpenAiRealtimeTextAdapter::new("sk-test");
         assert_eq!(adapter.provider(), meerkat_core::Provider::OpenAI);
+    }
+
+    // Row #230: an unset caller temperature is the Unset distinction and
+    // defers to the provider default; an explicit-but-invalid temperature
+    // surfaces a typed reject rather than a silent downgrade.
+    #[test]
+    fn resolve_realtime_temperature_none_is_caller_unset() {
+        assert!(
+            resolve_realtime_temperature(None)
+                .expect("unset temperature is valid")
+                .is_none(),
+            "None must defer to the provider default, not be a reject"
+        );
+    }
+
+    #[test]
+    fn resolve_realtime_temperature_accepts_in_range() {
+        let resolved = resolve_realtime_temperature(Some(0.5)).expect("in-range temperature");
+        assert!(resolved.is_some());
+    }
+
+    #[test]
+    fn resolve_realtime_temperature_rejects_out_of_range() {
+        // Without the fix this silently became `None` (provider default),
+        // dropping explicit caller policy. It must now be a typed reject.
+        let err = resolve_realtime_temperature(Some(5.0))
+            .expect_err("an out-of-range temperature must be a typed reject, not a silent drop");
+        assert!(
+            matches!(err, LlmError::InvalidRequest { .. }),
+            "expected InvalidRequest, got {err:?}"
+        );
+
+        let negative = resolve_realtime_temperature(Some(-1.0))
+            .expect_err("a negative temperature must be a typed reject");
+        assert!(matches!(negative, LlmError::InvalidRequest { .. }));
     }
 }

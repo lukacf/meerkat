@@ -747,7 +747,7 @@ impl crate::composition::SignalConsumerSurface for RecordingMeerkatSignalSurface
             meerkat_machine_schema::identity::FieldId,
             crate::composition::OwnedFieldValue,
         )>,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::composition::ConsumerError> {
         self.log.lock().await.push((variant, projected_fields));
         Ok(())
     }
@@ -773,8 +773,11 @@ impl crate::composition::SignalConsumerSurface for RejectingMeerkatSignalSurface
             meerkat_machine_schema::identity::FieldId,
             crate::composition::OwnedFieldValue,
         )>,
-    ) -> Result<(), String> {
-        Err("injected signal commit failure".to_string())
+    ) -> Result<(), crate::composition::ConsumerError> {
+        Err(crate::composition::ConsumerError::new(
+            "injected_signal_commit_failure",
+            "injected signal commit failure",
+        ))
     }
 }
 
@@ -886,7 +889,10 @@ fn legacy_run_handler_does_not_string_match_commit_unregister_policy() {
 async fn provisional_dsl_stage_does_not_emit_routed_signal_until_authoritative_apply() {
     let machine = MeerkatMachine::ephemeral();
     let session_id = SessionId::new();
-    machine.register_session(session_id.clone()).await;
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let signal_surface = install_recording_meerkat_signal_dispatcher(&machine);
 
     let previous_snapshot = machine
@@ -934,7 +940,10 @@ async fn provisional_dsl_stage_does_not_emit_routed_signal_until_authoritative_a
 async fn provisional_dsl_rollback_after_shell_failure_leaks_no_routed_signal_or_state() {
     let machine = MeerkatMachine::ephemeral();
     let session_id = SessionId::new();
-    machine.register_session(session_id.clone()).await;
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let signal_surface = install_recording_meerkat_signal_dispatcher(&machine);
 
     let previous_snapshot = machine
@@ -960,7 +969,10 @@ async fn provisional_dsl_rollback_after_shell_failure_leaks_no_routed_signal_or_
 async fn authoritative_dsl_apply_preserves_committed_state_when_effect_dispatch_fails() {
     let machine = MeerkatMachine::ephemeral();
     let session_id = SessionId::new();
-    machine.register_session(session_id.clone()).await;
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     install_rejecting_meerkat_signal_dispatcher(&machine);
 
     let err = match machine
@@ -994,7 +1006,10 @@ async fn authoritative_dsl_apply_preserves_committed_state_when_effect_dispatch_
 async fn control_plane_runtime_id_is_not_raw_session_uuid_alias() {
     let machine = MeerkatMachine::ephemeral();
     let session_id = SessionId::new();
-    machine.register_session(session_id.clone()).await;
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let runtime_id = runtime_id_for_session(&session_id);
     let raw_session_alias = LogicalRuntimeId::legacy_session_uuid_alias(&session_id);
@@ -1050,7 +1065,10 @@ async fn persistent_retire_signal_failure_recovery_preserves_durable_terminal_st
         memory_blob_store(),
     );
     let session_id = SessionId::new();
-    machine.register_session(session_id.clone()).await;
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let bindings = machine
         .prepare_bindings(session_id.clone())
         .await
@@ -1099,7 +1117,10 @@ async fn persistent_retire_signal_failure_recovery_preserves_durable_terminal_st
         store.clone() as Arc<dyn crate::store::RuntimeStore>,
         memory_blob_store(),
     );
-    recovered.register_session(session_id.clone()).await;
+    recovered
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let signal_surface = install_recording_meerkat_signal_dispatcher(&recovered);
     crate::traits::RuntimeControlPlane::retire(&recovered, &runtime_id)
         .await
@@ -1164,7 +1185,10 @@ async fn prepare_bindings_dispatches_runtime_bound_after_shell_commit() {
 async fn rejected_provisional_dsl_transition_emits_no_routed_signal_or_state() {
     let machine = MeerkatMachine::ephemeral();
     let session_id = SessionId::new();
-    machine.register_session(session_id.clone()).await;
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let signal_surface = install_recording_meerkat_signal_dispatcher(&machine);
 
     let err = machine
@@ -1687,12 +1711,9 @@ async fn completion_preserves_structured_output_when_runtime_finalization_fails(
     .expect("completion waiter should resolve after finalization failure");
 
     match completion {
-        CompletionOutcome::CompletedWithFinalizationFailure { result, error } => {
-            assert_eq!(result.text, "{\"gate\":\"green\"}");
-            assert_eq!(
-                result.structured_output,
-                Some(serde_json::json!({ "gate": "green" }))
-            );
+        CompletionOutcome::CompletedWithFinalizationFailure { error } => {
+            // #85: the non-durable result is intentionally NOT carried on this
+            // outcome; only the typed finalization error reaches the waiter.
             assert_eq!(
                 error.kind,
                 meerkat_core::TurnTerminalCauseKind::RuntimeApplyFailure
@@ -2054,8 +2075,9 @@ async fn runtime_loop_checkpoint_failure_is_completion_finalization_failure() {
     .expect("completion waiter should resolve");
 
     match completion {
-        CompletionOutcome::CompletedWithFinalizationFailure { result, error } => {
-            assert_eq!(result.text, "checkpoint-fails-after-output");
+        CompletionOutcome::CompletedWithFinalizationFailure { error } => {
+            // #85: no non-durable result is carried; the typed error detail is
+            // the only thing the waiter observes.
             assert!(
                 error
                     .detail
@@ -2149,7 +2171,10 @@ async fn hook_denial_terminalizes_with_typed_machine_apply_failure_cause() {
 async fn legacy_fail_does_not_fabricate_runtime_apply_failure_cause() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let result: Result<(), RuntimeDriverError> = adapter
         .accept_input_and_run(
@@ -2243,7 +2268,10 @@ async fn spawn_test_comms_drain(
     comms_runtime: Arc<dyn CommsRuntime>,
     idle_timeout: Duration,
 ) {
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let mut sessions = adapter.sessions.write().await;
     let entry = sessions
         .get_mut(&session_id)
@@ -2370,7 +2398,10 @@ async fn unregister_session_aborts_and_removes_drain_slot() {
     let session_id = SessionId::new();
     let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     spawn_test_comms_drain(
         &adapter,
         &session_id,
@@ -2416,7 +2447,10 @@ async fn unregister_session_deletes_persisted_ops_lifecycle_epoch() {
         .await
         .expect("test snapshot should persist");
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     adapter.unregister_session(&session_id).await;
 
     assert!(
@@ -2427,7 +2461,10 @@ async fn unregister_session_deletes_persisted_ops_lifecycle_epoch() {
         "unregister ends the runtime epoch and must remove its durable ops snapshot"
     );
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let sessions = adapter.sessions.read().await;
     let rebound_epoch = sessions
         .get(&session_id)
@@ -2450,7 +2487,10 @@ async fn unregister_session_retains_terminal_machine_lifecycle_snapshot() {
     let session_id = SessionId::new();
     let runtime_id = runtime_id_for_session(&session_id);
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     crate::traits::RuntimeControlPlane::retire(adapter.as_ref(), &runtime_id)
         .await
         .expect("retire should persist generated terminal lifecycle");
@@ -2477,7 +2517,10 @@ async fn unregister_session_retains_terminal_machine_lifecycle_snapshot() {
 async fn session_service_runtime_ext_write_side_follows_machine_control_surface() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let state = <MeerkatMachine as SessionServiceRuntimeExt>::runtime_state(&adapter, &session_id)
         .await
@@ -2538,7 +2581,10 @@ async fn session_service_runtime_ext_write_side_follows_machine_control_surface(
 async fn model_routing_status_proves_finite_turn_and_operation_precedence() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
         &adapter,
         &session_id,
@@ -2695,7 +2741,10 @@ async fn model_routing_status_proves_finite_turn_and_operation_precedence() {
 async fn model_routing_denials_cover_approval_and_scoped_nesting_guards() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
         &adapter,
         &session_id,
@@ -3009,7 +3058,10 @@ async fn meerkat_machine_spine_snapshot_reports_registered_idle_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let snapshot = adapter
         .meerkat_machine_spine_snapshot(&session_id)
@@ -3049,7 +3101,10 @@ async fn persistent_without_blobs_keeps_persistent_driver() {
     ));
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let snapshot = adapter
         .meerkat_machine_spine_snapshot(&session_id)
@@ -3068,7 +3123,10 @@ async fn meerkat_machine_spine_snapshot_tracks_queued_prompt_input() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("hello from the runtime spine");
     let input_id = input.id().clone();
@@ -3132,7 +3190,10 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recyc
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("recycle pending waiter");
     let input_id = input.id().clone();
@@ -3195,7 +3256,10 @@ async fn meerkat_machine_spine_snapshot_recycle_reconciles_stale_completion_wait
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("preserve active waiter");
     let input_id = input.id().clone();
@@ -3288,7 +3352,10 @@ async fn shared_ingress_authority_is_identical_after_register_recover_and_recycl
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let (session_authority, driver_authority) = adapter
         .debug_shared_ingress_authorities(&session_id)
         .await
@@ -3329,7 +3396,10 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recov
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("recover pending waiter");
     let input_id = input.id().clone();
@@ -3392,7 +3462,10 @@ async fn deduplicated_accept_with_completion_emits_no_new_signal() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let mut first = make_prompt("dedup me");
     let key = IdempotencyKey::new("runtime-dedup");
@@ -3469,7 +3542,10 @@ async fn meerkat_machine_spine_snapshot_recover_reconciles_stale_completion_wait
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("preserve active waiter on recover");
     let input_id = input.id().clone();
@@ -3562,7 +3638,10 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy(
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("destroy completion waiter");
     let input_id = input.id().clone();
@@ -3632,7 +3711,10 @@ async fn persistent_destroy_synchronizes_driver_control_projection_shadow() {
     ));
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
@@ -3836,7 +3918,10 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
         memory_blob_store(),
     ));
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let runtime_id = LogicalRuntimeId::for_session(&session_id);
     let destroy_task = tokio::spawn({
@@ -3906,7 +3991,10 @@ async fn meerkat_machine_spine_snapshot_destroy_clears_steered_waiter_and_queue_
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let input = Input::Prompt(crate::input::PromptInput::new(
         "destroy steered prompt",
@@ -5167,7 +5255,10 @@ async fn hard_cancel_current_run_returns_not_ready_without_attached_loop() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let err = adapter
         .hard_cancel_current_run(&session_id, "idle hard-cancel probe")
@@ -5186,7 +5277,10 @@ async fn raw_fieldless_runtime_internal_stage_is_rejected_before_dsl_apply() {
     let adapter = MeerkatMachine::ephemeral();
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let err = adapter
         .stage_session_dsl_input(
@@ -5210,7 +5304,10 @@ async fn raw_fieldless_runtime_internal_routed_input_is_rejected_before_dsl_appl
     let adapter = MeerkatMachine::ephemeral();
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let err = adapter
         .apply_routed_meerkat_input(
@@ -5233,7 +5330,10 @@ async fn cancel_after_boundary_returns_not_ready_without_attached_loop() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let err = adapter
         .cancel_after_boundary(&session_id)
@@ -7889,7 +7989,10 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_run
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("stop completion waiter");
     let input_id = input.id().clone();
@@ -8095,7 +8198,10 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_retire_w
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("retire completion waiter");
     let input_id = input.id().clone();
@@ -8676,7 +8782,10 @@ async fn meerkat_machine_spine_snapshot_tracks_epoch_cursor_state() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let cursor_state = {
         let sessions = adapter.sessions.read().await;
@@ -8733,7 +8842,10 @@ async fn meerkat_machine_spine_snapshot_tracks_runtime_ops_state() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
@@ -8798,7 +8910,10 @@ async fn meerkat_machine_spine_snapshot_tracks_wait_all_state() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
@@ -8868,7 +8983,10 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
@@ -8986,7 +9104,10 @@ async fn meerkat_machine_spine_snapshot_recover_splits_completion_and_wait_all_l
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
@@ -9147,7 +9268,10 @@ async fn meerkat_machine_spine_snapshot_recover_preserves_steered_input_and_wait
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
@@ -9312,7 +9436,10 @@ async fn meerkat_machine_spine_snapshot_recycle_preserves_steered_input_and_wait
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
@@ -9477,7 +9604,10 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
@@ -9587,7 +9717,10 @@ async fn meerkat_machine_spine_snapshot_recycle_splits_completion_and_wait_all_l
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
@@ -10860,7 +10993,10 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_reset() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
@@ -10969,7 +11105,10 @@ async fn meerkat_machine_spine_snapshot_reset_clears_steered_waiter_and_queue_bu
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let input = Input::Prompt(crate::input::PromptInput::new(
         "reset steered prompt",
@@ -11131,7 +11270,10 @@ async fn meerkat_machine_spine_snapshot_reset_splits_completion_and_wait_all_lif
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("reset split lifetimes");
     let input_id = input.id().clone();
@@ -11729,7 +11871,10 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_destroy() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
@@ -11849,7 +11994,10 @@ async fn meerkat_machine_spine_snapshot_destroy_splits_completion_and_wait_all_l
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("destroy split lifetimes");
     let input_id = input.id().clone();
@@ -12413,7 +12561,10 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_stop_runtime_ex
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
@@ -12542,7 +12693,10 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_clears_steered_wai
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let input = Input::Prompt(crate::input::PromptInput::new(
         "stop steered prompt",
@@ -12705,7 +12859,10 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_splits_completion_
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("stop split lifetimes");
     let input_id = input.id().clone();
@@ -13304,7 +13461,10 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
@@ -13417,7 +13577,10 @@ async fn meerkat_machine_spine_snapshot_retire_splits_completion_and_wait_all_li
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("retire split lifetimes");
     let input_id = input.id().clone();
@@ -13566,7 +13729,10 @@ async fn meerkat_machine_spine_snapshot_retire_clears_steered_waiter_and_steer_q
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let input = Input::Prompt(crate::input::PromptInput::new(
         "retire steered prompt",
@@ -14309,7 +14475,10 @@ async fn meerkat_machine_spine_snapshot_tracks_stopped_comms_drain_state() {
         "unregistered session should not spawn a comms drain"
     );
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let spawned = adapter
         .maybe_spawn_comms_drain(
@@ -14343,7 +14512,10 @@ async fn register_session_rejects_destroyed_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     // Transition to Destroyed via the control-plane destroy path.
     let runtime_id = runtime_id_for_session(&session_id);
@@ -14400,7 +14572,10 @@ async fn hard_cancel_current_run_rejects_destroyed_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
@@ -14422,7 +14597,10 @@ async fn cancel_after_boundary_rejects_destroyed_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
@@ -14444,7 +14622,10 @@ async fn stop_runtime_executor_rejects_destroyed_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
@@ -14485,7 +14666,10 @@ async fn set_peer_ingress_context_rejects_destroyed_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::destroy(adapter.as_ref(), &runtime_id)
@@ -14517,7 +14701,10 @@ async fn notify_drain_exited_rejects_destroyed_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::destroy(adapter.as_ref(), &runtime_id)
@@ -14558,7 +14745,10 @@ async fn ingest_rejects_retired_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
@@ -14585,7 +14775,10 @@ async fn ingest_rejects_stopped_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let _bindings = adapter
         .prepare_bindings(session_id.clone())
         .await
@@ -14620,7 +14813,10 @@ async fn retire_rejection_from_stopped_surfaces_dsl_authority() {
 
     // Retire legality is DSL-owned; the Idle -> Retired path is exercised
     // above, so this anchors an incompatible Stopped phase.
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     // First stop
     adapter
@@ -14653,7 +14849,10 @@ async fn accept_input_with_completion_rejects_retired_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
@@ -14678,7 +14877,10 @@ async fn accept_input_with_completion_rejects_destroyed_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
@@ -14741,7 +14943,10 @@ async fn legacy_run_prepare_rejects_retired_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
@@ -14771,7 +14976,10 @@ async fn legacy_run_prepare_rejects_destroyed_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
@@ -14795,7 +15003,10 @@ async fn legacy_run_prepare_rejects_destroyed_session() {
 async fn legacy_run_commit_rejection_preserves_registered_running_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let prepared =
         prepare_legacy_run_for_authority_test(&adapter, &session_id, "commit rejection").await;
@@ -14841,7 +15052,10 @@ async fn legacy_run_commit_rejection_preserves_registered_running_session() {
 async fn legacy_run_commit_mismatched_input_rejection_preserves_active_run() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let prepared =
         prepare_legacy_run_for_authority_test(&adapter, &session_id, "commit input mismatch").await;
@@ -14900,7 +15114,10 @@ async fn legacy_run_commit_mismatched_input_rejection_preserves_active_run() {
 async fn legacy_run_fail_rejection_preserves_registered_running_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let prepared =
         prepare_legacy_run_for_authority_test(&adapter, &session_id, "fail rejection").await;
@@ -14944,7 +15161,10 @@ async fn legacy_run_fail_rejection_preserves_registered_running_session() {
 async fn legacy_run_fail_display_text_does_not_classify_terminal_cause() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let prepared =
         prepare_legacy_run_for_authority_test(&adapter, &session_id, "display fail cause").await;
@@ -14986,7 +15206,10 @@ async fn legacy_run_fail_display_text_does_not_classify_terminal_cause() {
 async fn raw_dsl_fail_rejects_without_prior_typed_terminal_cause() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let prepared =
         prepare_legacy_run_for_authority_test(&adapter, &session_id, "raw fail no cause").await;
@@ -15029,7 +15252,10 @@ async fn raw_dsl_fail_rejects_without_prior_typed_terminal_cause() {
 async fn legacy_run_fail_terminalizes_through_machine_authority() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let prepared =
         prepare_legacy_run_for_authority_test(&adapter, &session_id, "fail terminalization").await;
@@ -15068,7 +15294,10 @@ async fn staged_batch_commit_driver(
 ) -> (SharedDriver, RunId, Vec<InputId>) {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let first = match adapter
         .accept_input(&session_id, first)
@@ -15716,7 +15945,10 @@ async fn persistent_failed_run_lifecycle_commit_failure_preserves_pre_terminal_s
 async fn spine_invariants_hold_after_register() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let snapshot = adapter
         .meerkat_machine_spine_snapshot(&session_id)
@@ -15731,7 +15963,10 @@ async fn spine_invariants_hold_after_register() {
 async fn spine_invariants_hold_after_queued_input() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("queued input");
     let (_outcome, _handle) = adapter
@@ -15752,7 +15987,10 @@ async fn spine_invariants_hold_after_queued_input() {
 async fn spine_invariants_hold_after_destroy() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("will be destroyed");
     let (_outcome, _handle) = adapter
@@ -15778,7 +16016,10 @@ async fn spine_invariants_hold_after_destroy() {
 async fn spine_invariants_hold_after_retire() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("will be retired");
     let (_outcome, _handle) = adapter
@@ -15804,7 +16045,10 @@ async fn spine_invariants_hold_after_retire() {
 async fn spine_invariants_hold_after_reset() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("will be reset");
     let (_outcome, _handle) = adapter
@@ -15830,7 +16074,10 @@ async fn spine_invariants_hold_after_reset() {
 async fn spine_invariants_hold_after_recycle() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("will be recycled");
     let (_outcome, _handle) = adapter
@@ -15856,7 +16103,10 @@ async fn spine_invariants_hold_after_recycle() {
 async fn spine_invariants_hold_after_steered_input() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let steered = Input::Prompt(crate::input::PromptInput::new(
         "steered input",
@@ -17395,7 +17645,10 @@ async fn live_status_session_lookup_uses_generated_close_history() {
     let machine = MeerkatMachine::ephemeral();
     let host = meerkat_live::LiveAdapterHost::new(Arc::new(meerkat_live::NoOpProjectionSink));
     let session_id = SessionId::new();
-    machine.register_session(session_id.clone()).await;
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let channel_id = meerkat_live::LiveChannelId::new("live-status-close-history");
 
     let identity = domain_live_identity("gpt-realtime-2");
@@ -18469,7 +18722,10 @@ async fn publish_committed_visible_set_rejects_unknown_session() {
 async fn publish_committed_visible_set_rejects_destroyed_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
@@ -18491,7 +18747,10 @@ async fn publish_committed_visible_set_rejects_destroyed_session() {
 async fn publish_committed_visible_set_rejects_stale_active_revision() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     // VisibleSurfacesMatchAppliedStateInvariant: active_revision must not
     // lag behind staged_revision.
@@ -18514,7 +18773,10 @@ async fn publish_committed_visible_set_rejects_stale_active_revision() {
 async fn publish_committed_visible_set_rejects_equal_revisions_with_divergent_filters() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let state = meerkat_core::SessionToolVisibilityState {
         active_filter: meerkat_core::ToolFilter::All,
@@ -18537,7 +18799,10 @@ async fn publish_committed_visible_set_rejects_equal_revisions_with_divergent_fi
 async fn publish_committed_visible_set_rejects_active_requested_names_outside_staged() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let state = meerkat_core::SessionToolVisibilityState {
         active_requested_deferred_names: ["probe_tool".to_string()].into_iter().collect(),
@@ -18931,7 +19196,10 @@ fn test_llm_capability_surface_realtime() -> SessionLlmCapabilitySurface {
 async fn reconfigure_session_llm_identity_succeeds_on_idle_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     adapter.set_session_llm_reconfigure_host(Arc::new(TestLlmReconfigureHost {
         current_identity: Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
             model: "claude-sonnet-4-5".to_string(),
@@ -19018,7 +19286,10 @@ async fn session_has_executor_follows_generated_registration_phase() {
 
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     assert!(
         !adapter.session_has_executor(&session_id).await,
         "registered idle sessions start without generated executor registration"
@@ -21819,7 +22090,10 @@ async fn modeled_meerkat_accept_with_completion_idle_queue_signal_matches_runtim
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Idle).await;
 
     let before = runtime_parity_snapshot_summary(&adapter, &session_id)
@@ -22002,7 +22276,8 @@ async fn meerkat_reset_clears_silent_intent_overrides() {
     fixture
         .adapter
         .set_session_silent_intents(&fixture.session_id, runtime_parity_silent_intents())
-        .await;
+        .await
+        .expect("set silent intents");
 
     let runtime_id = runtime_id_for_session(&fixture.session_id);
     let result = fixture
@@ -22039,7 +22314,8 @@ async fn meerkat_destroy_clears_silent_intent_overrides() {
     fixture
         .adapter
         .set_session_silent_intents(&fixture.session_id, runtime_parity_silent_intents())
-        .await;
+        .await
+        .expect("set silent intents");
 
     let runtime_id = runtime_id_for_session(&fixture.session_id);
     let result = fixture
@@ -22076,7 +22352,8 @@ async fn meerkat_stop_runtime_executor_clears_silent_intent_overrides() {
     fixture
         .adapter
         .set_session_silent_intents(&fixture.session_id, runtime_parity_silent_intents())
-        .await;
+        .await
+        .expect("set silent intents");
 
     fixture
         .adapter
@@ -22375,7 +22652,10 @@ async fn build_runtime_parity_fixture(phase: RuntimeParityPhase) -> RuntimeParit
 
     match phase {
         RuntimeParityPhase::Idle => {
-            adapter.register_session(session_id.clone()).await;
+            adapter
+                .register_session(session_id.clone())
+                .await
+                .expect("register session");
             wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Idle).await;
             RuntimeParityFixture {
                 adapter,
@@ -22455,7 +22735,10 @@ async fn build_runtime_parity_fixture(phase: RuntimeParityPhase) -> RuntimeParit
             }
         }
         RuntimeParityPhase::Retired => {
-            adapter.register_session(session_id.clone()).await;
+            adapter
+                .register_session(session_id.clone())
+                .await
+                .expect("register session");
             adapter
                 .execute_meerkat_machine_command(
                     Some(Arc::clone(&adapter)),
@@ -22477,7 +22760,10 @@ async fn build_runtime_parity_fixture(phase: RuntimeParityPhase) -> RuntimeParit
             }
         }
         RuntimeParityPhase::Stopped => {
-            adapter.register_session(session_id.clone()).await;
+            adapter
+                .register_session(session_id.clone())
+                .await
+                .expect("register session");
             adapter
                 .stop_runtime_executor(&session_id, "runtime parity stopped fixture".to_string())
                 .await
@@ -22854,6 +23140,9 @@ fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
         }
         RuntimeDriverError::ValidationFailed { reason } => {
             format!("validation_failed:{reason}")
+        }
+        RuntimeDriverError::NotFound { runtime_id } => {
+            format!("not_found:{runtime_id}")
         }
         RuntimeDriverError::Destroyed => "destroyed".to_string(),
         RuntimeDriverError::RecoveryCorruption { reason } => {
@@ -23614,7 +23903,10 @@ async fn retire_from_retired_is_backed_by_dsl_idempotent_transition() {
 
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::retire(adapter.as_ref(), &runtime_id)
@@ -23709,7 +24001,10 @@ async fn destroy_from_bound_initializing_is_backed_by_dsl_guard() {
 async fn concurrent_retire_serializes_via_mutation_gate() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     // Accept an input so the session has queued work.
     let outcome = <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(
@@ -23769,7 +24064,10 @@ async fn concurrent_retire_serializes_via_mutation_gate() {
 async fn retire_runtime_is_idempotent_from_retired() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     // Transition: Idle → Retired (no runtime loop, so inputs are abandoned)
     let _ = <MeerkatMachine as SessionServiceRuntimeExt>::retire_runtime(&adapter, &session_id)
@@ -23832,8 +24130,14 @@ async fn mutation_gate_is_per_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid_a = SessionId::new();
     let sid_b = SessionId::new();
-    adapter.register_session(sid_a.clone()).await;
-    adapter.register_session(sid_b.clone()).await;
+    adapter
+        .register_session(sid_a.clone())
+        .await
+        .expect("register session");
+    adapter
+        .register_session(sid_b.clone())
+        .await
+        .expect("register session");
 
     let adapter_a = adapter.clone();
     let sa = sid_a.clone();
@@ -23868,7 +24172,10 @@ async fn mutation_gate_is_per_session() {
 async fn peer_ingress_owner_starts_unattached() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let owner = adapter.peer_ingress_owner(&session_id).await;
     assert!(
@@ -23893,7 +24200,10 @@ async fn peer_ingress_owner_unknown_session_is_unattached() {
 async fn attach_session_ingress_transitions_owner() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
     adapter
@@ -23917,7 +24227,10 @@ async fn attach_session_ingress_transitions_owner() {
 async fn attach_mob_ingress_transitions_owner() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
     let mob_id = crate::meerkat_machine::dsl::MobId::from("mob-w2g-test");
@@ -23947,7 +24260,10 @@ async fn mob_owned_drain_rejects_silent_session_downgrade() {
     // rejection and stop before the mechanical drain slot can rebind.
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     // Mob claims ownership with a specific comms runtime instance.
     let mob_comms: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
@@ -24009,7 +24325,10 @@ async fn mob_owned_drain_rejects_silent_session_downgrade() {
 async fn attach_session_ingress_exact_reassertion_is_idempotent() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
     assert!(
@@ -24052,7 +24371,10 @@ async fn attach_session_ingress_exact_reassertion_is_idempotent() {
 async fn attach_mob_ingress_exact_reassertion_is_idempotent() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
     let mob_id = crate::meerkat_machine::dsl::MobId::from("mob-w2g-idempotent");
@@ -24098,7 +24420,10 @@ async fn attach_mob_ingress_exact_reassertion_is_idempotent() {
 async fn attach_mob_ingress_rejects_conflicting_mob_rebind() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
     let mob_id = crate::meerkat_machine::dsl::MobId::from("mob-w2g-original");
@@ -24150,7 +24475,10 @@ async fn attach_mob_ingress_rejects_conflicting_mob_rebind() {
 async fn detach_ingress_unattached_is_idempotent_noop() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let detach = adapter
         .execute_meerkat_machine_command(
@@ -24180,7 +24508,10 @@ async fn detach_ingress_unattached_is_idempotent_noop() {
 async fn detach_ingress_clears_owner() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     // Attach a session-owned drain first.
     let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
@@ -24208,7 +24539,10 @@ async fn attach_mob_ingress_promotes_from_session_owned() {
     // is not.
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     // Step 1: session attach.
     let session_comms: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
@@ -24249,7 +24583,10 @@ async fn machine_owns_transcript_edit_admission_verdict() {
 
     let adapter = MeerkatMachine::ephemeral();
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let verdict = |runtime_running, has_active_inputs| {
         let adapter = &adapter;

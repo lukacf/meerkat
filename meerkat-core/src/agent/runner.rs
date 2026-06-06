@@ -1068,7 +1068,7 @@ where
         // Skill refs are text-only so they operate on the text projection.
         let user_input = if user_input.has_non_text_content() {
             // For multimodal input, prepend skill text to the text blocks only.
-            let skill_text = self.apply_skill_ref(String::new()).await;
+            let skill_text = self.apply_skill_ref(String::new(), event_tx.as_ref()).await;
             if skill_text.is_empty() {
                 user_input
             } else {
@@ -1078,7 +1078,9 @@ where
                 ContentInput::Blocks(blocks)
             }
         } else {
-            let text = self.apply_skill_ref(user_input.text_content()).await;
+            let text = self
+                .apply_skill_ref(user_input.text_content(), event_tx.as_ref())
+                .await;
             ContentInput::Text(text)
         };
 
@@ -1265,9 +1267,26 @@ where
     /// Consume canonical pending `skill_references` staged by the surface and
     /// prepend resolved skill bodies to the next user input.
     ///
+    /// Per-turn skill activation is a typed operational effect, not operator
+    /// text: a successful resolution emits the typed
+    /// [`AgentEvent::SkillsResolved`] (carrying the canonical [`SkillKey`]s and
+    /// injection byte count) before the rendered bodies are projected onto the
+    /// turn input, and a failed resolution emits the typed
+    /// [`AgentEvent::SkillResolutionFailed`] (carrying the typed `SkillKey` and
+    /// typed [`SkillResolutionFailureReason`]) rather than being swallowed by a
+    /// log line. The rendered prefix projection onto user text remains a
+    /// transport detail of how the activation reaches the model.
+    ///
     /// Compatibility slash refs are handled at transport/resolver boundaries;
     /// core runtime no longer parses slash refs directly.
-    async fn apply_skill_ref(&mut self, user_input: String) -> String {
+    ///
+    /// [`SkillKey`]: crate::skills::SkillKey
+    /// [`SkillResolutionFailureReason`]: crate::event::SkillResolutionFailureReason
+    async fn apply_skill_ref(
+        &mut self,
+        user_input: String,
+        event_tx: Option<&mpsc::Sender<AgentEvent>>,
+    ) -> String {
         let engine = match &self.skill_engine {
             Some(e) => e.clone(),
             None => return user_input,
@@ -1282,19 +1301,55 @@ where
             let canonical_keys: Vec<crate::skills::SkillKey> = refs.into_iter().collect();
             match engine.resolve_and_render(&canonical_keys).await {
                 Ok(resolved) => {
+                    // Typed activation effect: resolved skills are observable as
+                    // a structured event carrying the canonical keys, distinct
+                    // from any operator-typed text. The rendered bodies are then
+                    // projected onto the turn input below as transport.
+                    let mut injection_bytes = 0usize;
+                    let mut activated_keys: Vec<crate::skills::SkillKey> =
+                        Vec::with_capacity(resolved.len());
                     for skill in &resolved {
                         tracing::info!(
                             skill_key = %skill.key,
                             "Per-turn skill activation via skill_references"
                         );
+                        injection_bytes = injection_bytes.saturating_add(skill.byte_size);
+                        activated_keys.push(skill.key.clone());
                         prefix_parts.push(skill.rendered_body.clone());
+                    }
+                    if !activated_keys.is_empty() {
+                        let _ = crate::event_tap::tap_emit(
+                            &self.event_tap,
+                            event_tx,
+                            AgentEvent::SkillsResolved {
+                                skills: activated_keys,
+                                injection_bytes,
+                            },
+                        )
+                        .await;
                     }
                 }
                 Err(e) => {
+                    // Fail-explicit: emit the typed resolution failure carrying
+                    // the typed reason and the canonical key we attempted to
+                    // resolve, instead of swallowing the signal in a log line.
+                    let reason = crate::event::SkillResolutionFailureReason::from_skill_error(&e);
+                    let skill_key = canonical_keys.first().cloned();
                     tracing::warn!(
                         error = %e,
                         "Failed to resolve source-pinned skill_references"
                     );
+                    let _ = crate::event_tap::tap_emit(
+                        &self.event_tap,
+                        event_tx,
+                        AgentEvent::SkillResolutionFailed {
+                            skill_key,
+                            reason,
+                            reference: String::new(),
+                            error: e.to_string(),
+                        },
+                    )
+                    .await;
                 }
             }
         }
@@ -1361,5 +1416,384 @@ mod typed_transcript_contract_tests {
                 "unexpected error: {err:?}"
             );
         }
+    }
+}
+
+/// Gate tests for per-turn skill activation as a typed operational effect.
+///
+/// Row #65: a failing per-turn `skill_references` resolution must emit the
+/// typed [`AgentEvent::SkillResolutionFailed`] carrying the typed `SkillKey`
+/// and typed [`crate::event::SkillResolutionFailureReason`], not just a
+/// `tracing::warn` log line (the old behavior swallowed the signal after
+/// consuming the refs).
+///
+/// Row #84: a successful per-turn activation must produce a typed activation
+/// record — the typed [`AgentEvent::SkillsResolved`] carrying the canonical
+/// `SkillKey`s — distinct from any operator-typed text smuggled into the user
+/// input.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod skill_activation_effect_tests {
+    use super::*;
+    use crate::skills::{
+        ResolvedSkill, SkillCollection, SkillDescriptor, SkillEngine, SkillError, SkillFilter,
+        SkillKey, SkillName, SkillRuntime, SourceUuid,
+    };
+    use crate::types::{AssistantBlock, StopReason, ToolDef, Usage};
+    use std::future::Future;
+
+    fn fixture_skill_key(name: &str) -> SkillKey {
+        SkillKey::new(
+            SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")
+                .expect("valid fixture source uuid"),
+            SkillName::parse(name).expect("valid fixture skill name"),
+        )
+    }
+
+    struct StaticLlmClient;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for StaticLlmClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::super::LlmStreamResult, AgentError> {
+            Ok(super::super::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: "ok".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                Usage::default(),
+            ))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    struct NoTools;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for NoTools {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::new([])
+        }
+
+        async fn dispatch(
+            &self,
+            call: crate::types::ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            Err(ToolError::NotFound {
+                name: call.name.into(),
+            })
+        }
+    }
+
+    struct NoopStore;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentSessionStore for NoopStore {
+        async fn save(&self, _session: &crate::session::Session) -> Result<(), AgentError> {
+            Ok(())
+        }
+
+        async fn load(&self, _id: &str) -> Result<Option<crate::session::Session>, AgentError> {
+            Ok(None)
+        }
+    }
+
+    /// A `SkillEngine` whose `resolve_and_render` always fails with a typed
+    /// `NotFound` error carrying the requested key.
+    struct FailingSkillEngine;
+
+    impl SkillEngine for FailingSkillEngine {
+        fn inventory_section(&self) -> impl Future<Output = Result<String, SkillError>> + Send {
+            async move { Ok(String::new()) }
+        }
+
+        fn resolve_and_render(
+            &self,
+            keys: &[SkillKey],
+        ) -> impl Future<Output = Result<Vec<ResolvedSkill>, SkillError>> + Send {
+            let missing = keys
+                .first()
+                .cloned()
+                .unwrap_or_else(|| fixture_skill_key("unknown"));
+            async move { Err(SkillError::NotFound { key: missing }) }
+        }
+
+        fn collections(
+            &self,
+        ) -> impl Future<Output = Result<Vec<SkillCollection>, SkillError>> + Send {
+            async move { Ok(Vec::new()) }
+        }
+
+        fn list_skills(
+            &self,
+            _filter: &SkillFilter,
+        ) -> impl Future<Output = Result<Vec<SkillDescriptor>, SkillError>> + Send {
+            async move { Ok(Vec::new()) }
+        }
+
+        fn quarantined_diagnostics(
+            &self,
+        ) -> impl Future<Output = Result<Vec<crate::skills::SkillQuarantineDiagnostic>, SkillError>> + Send
+        {
+            async move { Ok(Vec::new()) }
+        }
+
+        fn health_snapshot(
+            &self,
+        ) -> impl Future<Output = Result<crate::skills::SourceHealthSnapshot, SkillError>> + Send
+        {
+            async move { Ok(crate::skills::SourceHealthSnapshot::default()) }
+        }
+
+        fn list_artifacts(
+            &self,
+            key: &SkillKey,
+        ) -> impl Future<Output = Result<Vec<crate::skills::SkillArtifact>, SkillError>> + Send
+        {
+            let missing = key.clone();
+            async move { Err(SkillError::NotFound { key: missing }) }
+        }
+
+        fn read_artifact(
+            &self,
+            key: &SkillKey,
+            _artifact_path: &str,
+        ) -> impl Future<Output = Result<crate::skills::SkillArtifactContent, SkillError>> + Send
+        {
+            let missing = key.clone();
+            async move { Err(SkillError::NotFound { key: missing }) }
+        }
+
+        fn invoke_function(
+            &self,
+            key: &SkillKey,
+            _function_name: &str,
+            _arguments: serde_json::Value,
+        ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send {
+            let missing = key.clone();
+            async move { Err(SkillError::NotFound { key: missing }) }
+        }
+    }
+
+    /// A `SkillEngine` whose `resolve_and_render` always succeeds, returning a
+    /// single rendered skill keyed by the first requested key.
+    struct SucceedingSkillEngine;
+
+    impl SkillEngine for SucceedingSkillEngine {
+        fn inventory_section(&self) -> impl Future<Output = Result<String, SkillError>> + Send {
+            async move { Ok(String::new()) }
+        }
+
+        fn resolve_and_render(
+            &self,
+            keys: &[SkillKey],
+        ) -> impl Future<Output = Result<Vec<ResolvedSkill>, SkillError>> + Send {
+            let key = keys
+                .first()
+                .cloned()
+                .unwrap_or_else(|| fixture_skill_key("email-extractor"));
+            async move {
+                Ok(vec![ResolvedSkill {
+                    key,
+                    name: "email-extractor".into(),
+                    rendered_body: "<skill>injected canonical skill</skill>".to_string(),
+                    byte_size: 34,
+                }])
+            }
+        }
+
+        fn collections(
+            &self,
+        ) -> impl Future<Output = Result<Vec<SkillCollection>, SkillError>> + Send {
+            async move { Ok(Vec::new()) }
+        }
+
+        fn list_skills(
+            &self,
+            _filter: &SkillFilter,
+        ) -> impl Future<Output = Result<Vec<SkillDescriptor>, SkillError>> + Send {
+            async move { Ok(Vec::new()) }
+        }
+
+        fn quarantined_diagnostics(
+            &self,
+        ) -> impl Future<Output = Result<Vec<crate::skills::SkillQuarantineDiagnostic>, SkillError>> + Send
+        {
+            async move { Ok(Vec::new()) }
+        }
+
+        fn health_snapshot(
+            &self,
+        ) -> impl Future<Output = Result<crate::skills::SourceHealthSnapshot, SkillError>> + Send
+        {
+            async move { Ok(crate::skills::SourceHealthSnapshot::default()) }
+        }
+
+        fn list_artifacts(
+            &self,
+            key: &SkillKey,
+        ) -> impl Future<Output = Result<Vec<crate::skills::SkillArtifact>, SkillError>> + Send
+        {
+            let missing = key.clone();
+            async move { Err(SkillError::NotFound { key: missing }) }
+        }
+
+        fn read_artifact(
+            &self,
+            key: &SkillKey,
+            _artifact_path: &str,
+        ) -> impl Future<Output = Result<crate::skills::SkillArtifactContent, SkillError>> + Send
+        {
+            let missing = key.clone();
+            async move { Err(SkillError::NotFound { key: missing }) }
+        }
+
+        fn invoke_function(
+            &self,
+            key: &SkillKey,
+            _function_name: &str,
+            _arguments: serde_json::Value,
+        ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send {
+            let missing = key.clone();
+            async move { Err(SkillError::NotFound { key: missing }) }
+        }
+    }
+
+    async fn build_agent_with_engine<E: SkillEngine + 'static>(
+        engine: E,
+    ) -> Agent<StaticLlmClient, NoTools, NoopStore> {
+        let skill_runtime = Arc::new(SkillRuntime::new(Arc::new(engine)));
+        AgentBuilder::new()
+            .with_skill_engine(skill_runtime)
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await
+    }
+
+    /// Row #65: a failing `skill_references` resolution emits the typed
+    /// `SkillResolutionFailed` event (carrying the typed `SkillKey` + typed
+    /// reason). The old behavior only logged and returned the input untouched,
+    /// so no event reaches the channel — this test fails on that behavior.
+    #[tokio::test]
+    async fn failed_skill_resolution_emits_typed_failure_event() {
+        let mut agent = build_agent_with_engine(FailingSkillEngine).await;
+        let key = fixture_skill_key("email-extractor");
+        agent.pending_skill_references = Some(vec![key.clone()]);
+
+        let (tx, mut rx) = mpsc::channel::<AgentEvent>(8);
+        let out = agent
+            .apply_skill_ref("operator typed text".to_string(), Some(&tx))
+            .await;
+        drop(tx);
+
+        // Resolution failed, so the operator input is returned unchanged.
+        assert_eq!(out, "operator typed text");
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+
+        let failure = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::SkillResolutionFailed {
+                    skill_key, reason, ..
+                } => Some((skill_key.clone(), reason.clone())),
+                _ => None,
+            })
+            .expect("failed resolution must emit a typed SkillResolutionFailed event");
+
+        assert_eq!(
+            failure.0,
+            Some(key.clone()),
+            "event must carry the typed SkillKey we attempted to resolve"
+        );
+        assert_eq!(
+            failure.1,
+            crate::event::SkillResolutionFailureReason::NotFound { key },
+            "event must carry the typed failure reason, not a stringified log"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::SkillsResolved { .. })),
+            "a failed resolution must not also report a successful activation"
+        );
+    }
+
+    /// Row #84: a successful activation produces a typed activation record (the
+    /// `SkillsResolved` event carrying the canonical `SkillKey`s), distinct
+    /// from the operator text. The old behavior folded activation purely into
+    /// the prompt string and emitted no typed effect — this test fails on that
+    /// behavior because no `SkillsResolved` event reaches the channel.
+    #[tokio::test]
+    async fn successful_skill_activation_emits_typed_activation_record() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let key = fixture_skill_key("email-extractor");
+        agent.pending_skill_references = Some(vec![key.clone()]);
+
+        let (tx, mut rx) = mpsc::channel::<AgentEvent>(8);
+        let out = agent
+            .apply_skill_ref("operator typed text".to_string(), Some(&tx))
+            .await;
+        drop(tx);
+
+        // The rendered body is still projected onto the turn input (transport),
+        // but that projection is no longer the *only* witness of activation.
+        assert!(
+            out.contains("<skill>injected canonical skill</skill>"),
+            "rendered body should still reach the turn input, saw: {out}"
+        );
+        assert!(
+            out.contains("operator typed text"),
+            "operator text must be preserved alongside the activation"
+        );
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+
+        let resolved = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::SkillsResolved {
+                    skills,
+                    injection_bytes,
+                } => Some((skills.clone(), *injection_bytes)),
+                _ => None,
+            })
+            .expect("successful activation must emit a typed SkillsResolved record");
+
+        assert_eq!(
+            resolved.0,
+            vec![key],
+            "typed activation record must carry the canonical SkillKey, distinct from operator text"
+        );
+        assert_eq!(
+            resolved.1, 34,
+            "typed activation record must carry the injection byte size"
+        );
     }
 }

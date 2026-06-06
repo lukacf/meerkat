@@ -433,7 +433,10 @@ async fn recovery_contract_preserves_durable_lifecycle_state_projection() {
             let session_id = SessionId::new();
             let runtime_id = LogicalRuntimeId::for_session(&session_id);
             let seeder = MeerkatMachine::persistent(harness.store.clone(), memory_blob_store());
-            seeder.register_session(session_id.clone()).await;
+            seeder
+                .register_session(session_id.clone())
+                .await
+                .expect("register session");
             match recovered_state {
                 RuntimeState::Retired => {
                     meerkat_runtime::RuntimeControlPlane::retire(&seeder, &runtime_id)
@@ -456,7 +459,10 @@ async fn recovery_contract_preserves_durable_lifecycle_state_projection() {
             drop(seeder);
 
             let machine = MeerkatMachine::persistent(harness.store.clone(), memory_blob_store());
-            machine.register_session(session_id.clone()).await;
+            machine
+                .register_session(session_id.clone())
+                .await
+                .expect("register session");
             assert_eq!(
                 machine.runtime_state(&session_id).await.unwrap(),
                 recovered_state,

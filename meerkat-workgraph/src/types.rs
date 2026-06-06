@@ -931,10 +931,6 @@ fn work_owner_key_from_machine(owner: wg_dsl::WorkOwnerKey) -> WorkOwnerKey {
     WorkOwnerKey { kind, id: owner.id }
 }
 
-fn datetime_to_millis(dt: DateTime<Utc>) -> u64 {
-    u64::try_from(dt.timestamp_millis()).unwrap_or(0)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WorkEdge {

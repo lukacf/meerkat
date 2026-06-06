@@ -531,34 +531,50 @@ impl ShellState {
     /// The shell rehydrates the typed domain outcome via
     /// [`Self::terminal_outcome`], pairing the DSL discriminant with the
     /// companion payload entry.
+    ///
+    /// A serialization fault is propagated as a typed [`OpsLifecycleError`]
+    /// rather than laundered into an empty-string payload: a terminal outcome
+    /// that cannot encode its payload must fail closed, never silently record
+    /// an empty payload that `terminal_outcome_from_parts` would later misread.
     fn split_outcome(
         outcome: &OperationTerminalOutcome,
-    ) -> (mm_dsl::OperationTerminalOutcomeKind, String) {
-        match outcome {
+    ) -> Result<(mm_dsl::OperationTerminalOutcomeKind, String), OpsLifecycleError> {
+        fn encode<T: serde::Serialize>(
+            label: &str,
+            value: &T,
+        ) -> Result<String, OpsLifecycleError> {
+            serde_json::to_string(value).map_err(|error| {
+                OpsLifecycleError::Internal(format!(
+                    "failed to serialize {label} terminal payload: {error}"
+                ))
+            })
+        }
+        let pair = match outcome {
             OperationTerminalOutcome::Completed(result) => (
                 mm_dsl::OperationTerminalOutcomeKind::Completed,
-                serde_json::to_string(result).unwrap_or_default(),
+                encode("Completed", result)?,
             ),
             OperationTerminalOutcome::Failed { error } => (
                 mm_dsl::OperationTerminalOutcomeKind::Failed,
-                serde_json::to_string(error).unwrap_or_default(),
+                encode("Failed", error)?,
             ),
             OperationTerminalOutcome::Aborted { reason } => (
                 mm_dsl::OperationTerminalOutcomeKind::Aborted,
-                serde_json::to_string(reason).unwrap_or_default(),
+                encode("Aborted", reason)?,
             ),
             OperationTerminalOutcome::Cancelled { reason } => (
                 mm_dsl::OperationTerminalOutcomeKind::Cancelled,
-                serde_json::to_string(reason).unwrap_or_default(),
+                encode("Cancelled", reason)?,
             ),
             OperationTerminalOutcome::Retired => {
                 (mm_dsl::OperationTerminalOutcomeKind::Retired, String::new())
             }
             OperationTerminalOutcome::Terminated { reason } => (
                 mm_dsl::OperationTerminalOutcomeKind::Terminated,
-                serde_json::to_string(reason).unwrap_or_default(),
+                encode("Terminated", reason)?,
             ),
-        }
+        };
+        Ok(pair)
     }
 
     fn terminal_outcome_from_parts(
@@ -2074,7 +2090,7 @@ impl RuntimeOpsLifecycleRegistry {
     ) -> Result<(), OpsLifecycleError> {
         let expected_operation_id = mm_dsl::OperationId::from_domain(operation_id).0;
         let (terminal_outcome, terminal_payload) =
-            ShellState::split_outcome(&entry.terminal_outcome);
+            ShellState::split_outcome(&entry.terminal_outcome)?;
         let effects = shell.dsl_apply_with_effects(
             mm_dsl::MeerkatMachineInput::RecoverCompletionFeedEntry {
                 operation_id: expected_operation_id.clone(),
@@ -2170,12 +2186,13 @@ impl RuntimeOpsLifecycleRegistry {
         // projected into shell/public feed state.
         let mut retained_ids: HashSet<OperationId> = HashSet::new();
         for (op_id, op_state) in authority_operations {
-            let (terminal_outcome, terminal_payload) = op_state
-                .terminal_outcome
-                .as_ref()
-                .map(ShellState::split_outcome)
-                .map(|(kind, payload)| (Some(kind), Some(payload)))
-                .unwrap_or((None, None));
+            let (terminal_outcome, terminal_payload) = match op_state.terminal_outcome.as_ref() {
+                Some(outcome) => {
+                    let (kind, payload) = ShellState::split_outcome(outcome)?;
+                    (Some(kind), Some(payload))
+                }
+                None => (None, None),
+            };
             let disposition = ShellState::recovered_operation_record_disposition(
                 &op_id,
                 op_state.status,
@@ -2806,7 +2823,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let mut state = self.write_state()?;
 
         let terminal_outcome = OperationTerminalOutcome::Failed { error };
-        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
+        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome)?;
 
         apply_op_transition(
             &mut state,
@@ -2896,7 +2913,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let mut state = self.write_state()?;
 
         let terminal_outcome = OperationTerminalOutcome::Completed(result);
-        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
+        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome)?;
 
         apply_op_transition(
             &mut state,
@@ -2918,7 +2935,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let mut state = self.write_state()?;
 
         let terminal_outcome = OperationTerminalOutcome::Failed { error };
-        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
+        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome)?;
 
         apply_op_transition(
             &mut state,
@@ -2944,7 +2961,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let mut state = self.write_state()?;
 
         let terminal_outcome = OperationTerminalOutcome::Aborted { reason };
-        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
+        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome)?;
 
         apply_op_transition(
             &mut state,
@@ -2970,7 +2987,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let mut state = self.write_state()?;
 
         let terminal_outcome = OperationTerminalOutcome::Cancelled { reason };
-        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
+        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome)?;
 
         apply_op_transition(
             &mut state,
@@ -3006,7 +3023,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let mut state = self.write_state()?;
 
         let terminal_outcome = OperationTerminalOutcome::Retired;
-        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
+        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome)?;
 
         apply_op_transition(
             &mut state,
@@ -3111,7 +3128,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             let terminal_outcome = OperationTerminalOutcome::Terminated {
                 reason: reason.clone(),
             };
-            let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
+            let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome)?;
 
             apply_op_transition(
                 &mut state,
@@ -3379,6 +3396,66 @@ mod tests {
             },
         );
         assert!(matches!(result, Err(OpsLifecycleError::PeerNotExpected(_))));
+    }
+
+    /// Regression for #183: the terminal payload is split/rehydrated through a
+    /// typed, fallible seam. Every outcome variant must round-trip through
+    /// `split_outcome` -> `terminal_outcome_from_parts` and reconstruct the
+    /// exact domain outcome, and a populated outcome must never produce an
+    /// empty payload (the old `serde_json::to_string(...).unwrap_or_default()`
+    /// laundered a serialize fault into an empty string).
+    #[test]
+    fn split_outcome_round_trips_each_variant_and_never_empties_a_populated_payload() {
+        let op_id = OperationId::new();
+        let outcomes = vec![
+            OperationTerminalOutcome::Completed(OperationResult {
+                id: op_id.clone(),
+                content: "done".into(),
+                is_error: false,
+                duration_ms: 7,
+                tokens_used: 42,
+            }),
+            OperationTerminalOutcome::Failed {
+                error: "boom".into(),
+            },
+            OperationTerminalOutcome::Aborted {
+                reason: Some("user aborted".into()),
+            },
+            OperationTerminalOutcome::Aborted { reason: None },
+            OperationTerminalOutcome::Cancelled {
+                reason: Some("cancelled".into()),
+            },
+            OperationTerminalOutcome::Cancelled { reason: None },
+            OperationTerminalOutcome::Retired,
+            OperationTerminalOutcome::Terminated {
+                reason: "owner stopped".into(),
+            },
+        ];
+
+        for outcome in outcomes {
+            let (kind, payload) = ShellState::split_outcome(&outcome)
+                .expect("populated terminal outcome must serialize without fault");
+
+            // A populated outcome must never collapse to an empty payload.
+            if !matches!(outcome, OperationTerminalOutcome::Retired) {
+                assert!(
+                    !payload.is_empty(),
+                    "populated outcome {outcome:?} must not produce an empty payload"
+                );
+            }
+
+            let rebuilt = ShellState::terminal_outcome_from_parts(
+                kind,
+                &payload,
+                "test authority",
+                "test-op",
+            )
+            .expect("round-trip must reconstruct the typed outcome");
+            assert_eq!(
+                rebuilt, outcome,
+                "split_outcome -> terminal_outcome_from_parts must reconstruct the exact outcome"
+            );
+        }
     }
 
     #[test]

@@ -264,14 +264,16 @@ pub enum DispatchRefusal {
         instance: MachineInstanceId,
     },
     /// The consumer surface rejected the typed input (e.g. because the
-    /// consumer machine is no longer accepting inputs). The inner message
-    /// is the consumer-side rejection reason and is opaque to the
-    /// dispatcher — typed by the consumer's own error.
-    #[error("consumer {instance} refused input {variant}: {reason}")]
+    /// consumer machine is no longer accepting inputs). The inner
+    /// [`ConsumerError`] is the consumer-side typed rejection and is opaque
+    /// to the dispatcher, but its stable `error_code` survives the seam so
+    /// callers and RMAT audits can enumerate refusals without parsing
+    /// strings.
+    #[error("consumer {instance} refused input {variant}: {error}")]
     ConsumerRefused {
         instance: MachineInstanceId,
         variant: InputVariantId,
-        reason: String,
+        error: ConsumerError,
     },
 }
 
@@ -310,13 +312,68 @@ pub enum SignalDispatchRefusal {
         composition: CompositionId,
         instance: MachineInstanceId,
     },
-    /// The consumer surface rejected the typed signal.
-    #[error("consumer {instance} refused signal {variant}: {reason}")]
+    /// The consumer surface rejected the typed signal. The inner
+    /// [`ConsumerError`] preserves the consumer's stable `error_code` across
+    /// the dispatch seam instead of flattening it into an untyped string.
+    #[error("consumer {instance} refused signal {variant}: {error}")]
     ConsumerRefused {
         instance: MachineInstanceId,
         variant: SignalVariantId,
-        reason: String,
+        error: ConsumerError,
     },
+}
+
+/// Opaque, typed consumer-side rejection.
+///
+/// The consumer surface owns a typed kernel error; the dispatcher must not
+/// flatten it into a bare string and lose the stable discriminant. This
+/// newtype is the dispatcher-facing projection of that typed error: it carries
+/// the consumer's stable [`ConsumerError::error_code`] (the same
+/// `&'static str` convention used by `meerkat_core::error`) alongside a
+/// human-readable message. The dispatcher moves it across the seam verbatim,
+/// so [`DispatchRefusal::ConsumerRefused`] / [`SignalDispatchRefusal::ConsumerRefused`]
+/// expose the typed code rather than re-parsing a flattened reason string.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{message} [{error_code}]")]
+pub struct ConsumerError {
+    /// Stable discriminant the consumer kernel owns (e.g. the consumer's
+    /// own typed `error_code()`). Opaque to the dispatcher, but enumerable
+    /// by callers and RMAT audits without parsing the message.
+    error_code: &'static str,
+    /// Human-readable rejection detail.
+    message: String,
+}
+
+impl ConsumerError {
+    /// Build a consumer rejection from the consumer kernel's stable
+    /// `error_code` and a human-readable message.
+    pub fn new(error_code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            error_code,
+            message: message.into(),
+        }
+    }
+
+    /// Stable typed discriminant preserved across the dispatch seam.
+    pub fn error_code(&self) -> &'static str {
+        self.error_code
+    }
+
+    /// Human-readable rejection detail.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl From<String> for ConsumerError {
+    /// Consumer-surface input projection/refusal detail that the kernel
+    /// produced as a bare string is carried across the dispatch seam under a
+    /// stable `consumer_projection_failed` discriminant (the string stays as
+    /// human-readable detail, but the typed code is what the dispatcher and
+    /// RMAT audits observe — never a re-parsed message).
+    fn from(message: String) -> Self {
+        Self::new("consumer_projection_failed", message)
+    }
 }
 
 /// Delivery surface for one consumer instance inside a composition.
@@ -341,7 +398,7 @@ pub trait ConsumerSurface: Send + Sync {
         &self,
         variant: InputVariantId,
         projected_fields: Vec<(FieldId, OwnedFieldValue)>,
-    ) -> Result<(), String>;
+    ) -> Result<(), ConsumerError>;
 }
 
 /// Delivery surface for one signal-consuming instance inside a composition.
@@ -355,7 +412,7 @@ pub trait SignalConsumerSurface: Send + Sync {
         &self,
         variant: SignalVariantId,
         projected_fields: Vec<(FieldId, OwnedFieldValue)>,
-    ) -> Result<(), String>;
+    ) -> Result<(), ConsumerError>;
 }
 
 /// Owned counterpart of [`FieldValue`] used when delivering a routed input
@@ -758,10 +815,10 @@ impl<E: ProducerEffect> CompositionDispatcher for CatalogCompositionDispatcher<E
         consumer
             .apply_routed_input(descriptor.input_variant.clone(), projected)
             .await
-            .map_err(|reason| DispatchRefusal::ConsumerRefused {
+            .map_err(|error| DispatchRefusal::ConsumerRefused {
                 instance: descriptor.instance_id.clone(),
                 variant: descriptor.input_variant.clone(),
-                reason,
+                error,
             })?;
 
         Ok(DispatchOutcome {
@@ -830,10 +887,10 @@ impl<S: ProducerSignal> CompositionSignalDispatcher for CatalogCompositionSignal
         consumer
             .receive_signal(descriptor.signal_variant.clone(), projected)
             .await
-            .map_err(|reason| SignalDispatchRefusal::ConsumerRefused {
+            .map_err(|error| SignalDispatchRefusal::ConsumerRefused {
                 instance: descriptor.instance_id.clone(),
                 variant: descriptor.signal_variant.clone(),
-                reason,
+                error,
             })?;
 
         Ok(SignalDispatchOutcome {
@@ -970,7 +1027,7 @@ mod tests {
             &self,
             variant: InputVariantId,
             projected_fields: Vec<(FieldId, OwnedFieldValue)>,
-        ) -> Result<(), String> {
+        ) -> Result<(), ConsumerError> {
             self.log.lock().await.push((variant, projected_fields));
             Ok(())
         }
@@ -992,7 +1049,7 @@ mod tests {
             &self,
             variant: SignalVariantId,
             projected_fields: Vec<(FieldId, OwnedFieldValue)>,
-        ) -> Result<(), String> {
+        ) -> Result<(), ConsumerError> {
             self.log.lock().await.push((variant, projected_fields));
             Ok(())
         }
@@ -1382,5 +1439,59 @@ mod tests {
         assert!(!owner_provided.is_standalone());
         assert!(owner_provided.wired().is_some());
         assert!(owner_provided.context_provider().is_some());
+    }
+
+    /// Consumer surface that always refuses with a typed [`ConsumerError`]
+    /// carrying a known stable `error_code`. Row #33 gate fixture.
+    struct RefusingMeerkatSurface;
+
+    #[async_trait]
+    impl ConsumerSurface for RefusingMeerkatSurface {
+        fn instance_id(&self) -> &MachineInstanceId {
+            static ID: std::sync::OnceLock<MachineInstanceId> = std::sync::OnceLock::new();
+            ID.get_or_init(|| MachineInstanceId::parse("meerkat").unwrap())
+        }
+
+        async fn apply_routed_input(
+            &self,
+            _variant: InputVariantId,
+            _projected_fields: Vec<(FieldId, OwnedFieldValue)>,
+        ) -> Result<(), ConsumerError> {
+            Err(ConsumerError::new(
+                "runtime_destroyed",
+                "consumer machine no longer accepts inputs",
+            ))
+        }
+    }
+
+    /// Row #33 gate: a consumer refusal must preserve the consumer's typed
+    /// `error_code` through the dispatcher. Under the OLD `Result<(), String>`
+    /// contract the discriminant was flattened into an opaque message; the
+    /// dispatcher could only re-parse a string. This asserts the typed code
+    /// survives on `DispatchRefusal::ConsumerRefused`.
+    #[tokio::test]
+    async fn consumer_refusal_preserves_typed_error_code_through_dispatcher() {
+        let schema = meerkat_mob_seam_composition();
+        let table = RouteTable::from_schema(&schema).expect("seam schema routes are well-formed");
+        let dispatcher = CatalogCompositionDispatcher::new(schema.name.clone(), table)
+            .with_consumer(Arc::new(RefusingMeerkatSurface));
+
+        let err = dispatcher
+            .dispatch(mob_producer(), sample_effect())
+            .await
+            .expect_err("refusing consumer surface");
+
+        match err {
+            DispatchRefusal::ConsumerRefused { error, .. } => {
+                assert_eq!(
+                    error.error_code(),
+                    "runtime_destroyed",
+                    "typed consumer error_code must survive the dispatch seam, not be flattened to a string"
+                );
+            }
+            other => {
+                panic!("expected ConsumerRefused carrying a typed ConsumerError, got {other:?}")
+            }
+        }
     }
 }

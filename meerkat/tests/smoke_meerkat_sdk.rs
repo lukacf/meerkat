@@ -1811,7 +1811,10 @@ mod scenario_22_runtime_host_comms {
             session_id: sid_a.clone(),
             turn_count: turn_count.clone(),
         });
-        runtime_adapter.register_session(sid_a.clone()).await;
+        runtime_adapter
+            .register_session(sid_a.clone())
+            .await
+            .expect("register session");
         runtime_adapter
             .register_session_with_executor(sid_a.clone(), executor)
             .await

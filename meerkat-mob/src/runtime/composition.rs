@@ -382,7 +382,7 @@ impl SignalConsumerSurface for MobSignalConsumerSurface {
         &self,
         variant: SignalVariantId,
         projected_fields: Vec<(FieldId, OwnedFieldValue)>,
-    ) -> Result<(), String> {
+    ) -> Result<(), meerkat_runtime::composition::ConsumerError> {
         let signal = build_mob_signal(&variant, &projected_fields)?;
         let command = super::state::MobCommand::ProjectMachineSignal { signal };
         match self.command_tx.try_send(command) {
@@ -400,7 +400,10 @@ impl SignalConsumerSurface for MobSignalConsumerSurface {
                 Ok(())
             }
             Err(mpsc::error::TrySendError::Closed(_command)) => {
-                Err("mob actor signal queue closed".to_string())
+                Err(meerkat_runtime::composition::ConsumerError::new(
+                    "mob_signal_queue_closed",
+                    "mob actor signal queue closed",
+                ))
             }
         }
     }
@@ -477,9 +480,11 @@ fn dispatch_refusal_to_mob_error(refusal: DispatchRefusal) -> MobError {
         DispatchRefusal::ConsumerRefused {
             instance,
             variant,
-            reason,
+            error,
         } => MobError::Internal(format!(
-            "consumer `{instance}` refused routed input `{variant}`: {reason}"
+            "consumer `{instance}` refused routed input `{variant}`: {} [{}]",
+            error.message(),
+            error.error_code()
         )),
     }
 }

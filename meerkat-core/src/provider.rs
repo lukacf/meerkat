@@ -102,11 +102,13 @@ mod tests {
 
     #[test]
     fn parse_strict_fails_closed_where_from_name_coerces_to_other() {
-        // Row #121 gate: the typed boundary that turns a client's display label
-        // back into a Provider must FAIL CLOSED on an unrecognized label. This
-        // pins the contract the factory override path relies on:
-        // `from_name` coerces unknown -> Other (fail open), whereas
-        // `parse_strict` returns None so the caller can surface a typed error.
+        // Pins the two distinct provider-name boundaries the codebase relies on:
+        // `from_name` maps an unrecognized label to the typed `Other` variant
+        // (correct where a non-catalog provider is legitimate, e.g. a
+        // caller-supplied custom AgentLlmClient), whereas `parse_strict` returns
+        // None so fail-closed seams (e.g. catalog-default / session-create
+        // provider resolution) can surface a typed error instead of minting a
+        // catalog identity from an arbitrary string.
         assert_eq!(
             Provider::from_name("totally-unknown-provider"),
             Provider::Other

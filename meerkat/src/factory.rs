@@ -2652,17 +2652,17 @@ impl AgentFactory {
             return Ok((client.provider(), None));
         }
         if let Some(client) = build_config.agent_llm_client_override.as_ref() {
-            // `AgentLlmClient::provider()` still returns the display label;
-            // parse it back into the typed enum at this boundary, FAIL CLOSED.
-            // `from_name` would silently coerce an unknown label to
-            // `Provider::Other` (minting an unowned provider identity); a label
-            // that does not resolve to a catalog provider is an error here.
-            let provider = Provider::parse_strict(client.provider()).ok_or_else(|| {
-                BuildAgentError::UnknownProvider {
-                    model: build_config.model.clone(),
-                }
-            })?;
-            return Ok((provider, None));
+            // `AgentLlmClient::provider()` returns the client's own display
+            // label. `from_name` maps a canonical catalog name to its typed
+            // variant and ANY other label to `Provider::Other` — the typed
+            // "non-catalog provider" variant. That is correct for a
+            // caller-supplied custom client (the bring-your-own-client
+            // extension point): `Other` is a real typed variant, NOT a
+            // fabricated catalog identity, so this does not mint catalog
+            // provider identity from an arbitrary string. (Failing closed here
+            // would break legitimate custom clients; see the public-facade
+            // AgentBuilder canary.)
+            return Ok((Provider::from_name(client.provider()), None));
         }
 
         Err(BuildAgentError::UnknownProvider {

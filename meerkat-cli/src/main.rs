@@ -327,16 +327,13 @@ fn completion_outcome_to_cli_runtime_turn_result(
             ))
         }
         meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
-            result,
             error,
         } => {
-            let structured_output = result
-                .structured_output
-                .as_ref()
-                .map(serde_json::Value::to_string)
-                .unwrap_or_else(|| "null".to_string());
+            // #85: finalization (durable commit) failed -> the run is not durably
+            // terminal. Surface only the typed error; the produced output is NOT
+            // durable and must not be reported as a usable result.
             Err(anyhow::anyhow!(
-                "turn finalization failed after output: {}; structured_output={structured_output}",
+                "turn finalization failed after output: {}",
                 error
                     .detail
                     .as_deref()
@@ -19183,7 +19180,8 @@ capabilities = ["definitely_missing_capability"]
             .expect("runtime-backed CLI service should create deferred session");
         runtime_adapter
             .register_session(created.session_id.clone())
-            .await;
+            .await
+            .expect("register session");
         runtime_adapter
             .stop_runtime_executor(&created.session_id, "seed stopped projection")
             .await

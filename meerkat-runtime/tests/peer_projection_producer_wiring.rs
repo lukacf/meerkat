@@ -252,7 +252,10 @@ impl RecordingCommsRuntime {
 }
 
 async fn register(machine: &Arc<MeerkatMachine>, sid: &SessionId) {
-    machine.register_session(sid.clone()).await;
+    machine
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
 }
 
 #[tokio::test]

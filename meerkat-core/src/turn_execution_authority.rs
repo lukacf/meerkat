@@ -195,6 +195,7 @@ impl TurnFailureSourceKind {
             AgentError::Llm { .. } => Self::Llm,
             AgentError::StoreError(_) => Self::StoreError,
             AgentError::ToolError(_) => Self::ToolError,
+            AgentError::Tool { .. } => Self::ToolError,
             AgentError::McpError(_) => Self::McpError,
             AgentError::SessionNotFound(_) => Self::SessionNotFound,
             AgentError::TokenBudgetExceeded { .. } => Self::TokenBudgetExceeded,

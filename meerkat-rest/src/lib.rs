@@ -8259,7 +8259,8 @@ mod tests {
         state
             .runtime_adapter
             .register_session(target_session_id.clone())
-            .await;
+            .await
+            .expect("register session");
         state
             .runtime_adapter
             .stop_runtime_executor(&target_session_id, "seed stopped projection")
@@ -12313,7 +12314,8 @@ mod tests {
             state
                 .runtime_adapter
                 .register_session(created.session_id.clone())
-                .await;
+                .await
+                .expect("register session");
             state
                 .runtime_adapter
                 .stop_runtime_executor(&created.session_id, "seed stopped projection")

@@ -446,6 +446,7 @@ impl From<&AgentError> for AgentErrorClass {
             AgentError::Llm { .. } => Self::Llm,
             AgentError::StoreError(_) => Self::Store,
             AgentError::ToolError(_) => Self::Tool,
+            AgentError::Tool { .. } => Self::Tool,
             AgentError::McpError(_) => Self::Mcp,
             AgentError::SessionNotFound(_) => Self::SessionNotFound,
             AgentError::TokenBudgetExceeded { .. }

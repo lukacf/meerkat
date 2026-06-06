@@ -1324,7 +1324,7 @@ impl McpRouter {
         }
 
         self.process_removals(&mut delta, &mut snapshot_alignment)
-            .await;
+            .await?;
         self.record_snapshot_alignment(snapshot_alignment);
         let published = self.publish_projection_snapshot();
         if published {
@@ -1765,11 +1765,17 @@ impl McpRouter {
     }
 
     /// Process removal finalization based on owner-owned timeout tracking.
+    ///
+    /// A surface-owner rejection of a finalize-removal input is authoritative
+    /// divergence: the router has computed a finalized set the machine refuses
+    /// to commit, so router/surface state would silently diverge if we
+    /// continued. Fail closed by surfacing the rejection as a typed
+    /// [`McpError`] instead of warn-and-continue.
     async fn process_removals(
         &mut self,
         delta: &mut McpApplyDelta,
         snapshot_alignment: &mut Option<SurfaceSnapshotAlignmentObligation>,
-    ) {
+    ) -> Result<(), McpError> {
         let now = Instant::now();
         let mut finalized: Vec<(String, bool)> = Vec::new();
 
@@ -1810,22 +1816,20 @@ impl McpRouter {
                     applied_at_turn,
                 }
             };
-            match self.surface_owner.apply(input) {
-                Ok(transition) => {
-                    self.execute_effects(&transition.effects, delta, None, snapshot_alignment);
-                    if degraded {
-                        delta.degraded_removals.push(server_name);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        server = %server_name,
-                        error = %e,
-                        "Surface owner rejected finalize removal"
-                    );
-                }
+            let transition =
+                self.surface_owner
+                    .apply(input)
+                    .map_err(|e| McpError::ProtocolError {
+                        message: format!(
+                            "surface owner rejected finalize removal for '{server_name}': {e}"
+                        ),
+                    })?;
+            self.execute_effects(&transition.effects, delta, None, snapshot_alignment);
+            if degraded {
+                delta.degraded_removals.push(server_name);
             }
         }
+        Ok(())
     }
 
     fn align_snapshot_if_requested(
@@ -1995,18 +1999,22 @@ impl McpRouter {
     }
 
     /// Progress only server removals (drain/timeout finalization) without applying staged ops.
-    pub async fn progress_removals(&mut self) -> McpApplyDelta {
+    ///
+    /// Fails closed if the surface owner rejects a finalize-removal: a rejected
+    /// finalize is authoritative divergence (router computed a finalized set the
+    /// machine refuses to commit), not a benign no-op.
+    pub async fn progress_removals(&mut self) -> Result<McpApplyDelta, McpError> {
         let mut delta = McpApplyDelta::default();
         let mut snapshot_alignment = None;
         self.process_removals(&mut delta, &mut snapshot_alignment)
-            .await;
+            .await?;
         self.record_snapshot_alignment(snapshot_alignment);
         let published = self.publish_projection_snapshot();
         if published {
             let obligation = self.pending_snapshot_alignment.take();
             self.align_snapshot_if_requested(obligation);
         }
-        delta
+        Ok(delta)
     }
 
     /// Call a tool by name, returning multimodal content blocks.
@@ -2634,6 +2642,204 @@ mod tests {
             SurfaceBaseState::Removed
         );
         assert_eq!(router.surface_owner.inflight_call_count(&sid), 0);
+    }
+
+    /// Surface handle decorator that delegates every read/transition to a real
+    /// generated handle, but rejects finalize-removal inputs. Used to prove the
+    /// router fails closed (does not silently continue with diverged state)
+    /// when the surface owner rejects a finalize the router already computed.
+    struct RejectFinalizeSurfaceHandle {
+        inner: Arc<dyn ExternalToolSurfaceHandle>,
+    }
+
+    impl RejectFinalizeSurfaceHandle {
+        fn new() -> Self {
+            Self {
+                inner: generated_surface_handle(),
+            }
+        }
+    }
+
+    impl ExternalToolSurfaceHandle for RejectFinalizeSurfaceHandle {
+        fn apply_surface_input(
+            &self,
+            input: CoreSurfaceInput,
+        ) -> Result<CoreSurfaceTransition, DslTransitionError> {
+            match input {
+                CoreSurfaceInput::FinalizeRemovalClean { .. }
+                | CoreSurfaceInput::FinalizeRemovalForced { .. } => {
+                    Err(DslTransitionError::guard_rejected(
+                        "RejectFinalizeSurfaceHandle",
+                        "finalize removal forcibly rejected for test",
+                    ))
+                }
+                other => self.inner.apply_surface_input(other),
+            }
+        }
+
+        fn register(&self, surface_id: String) -> Result<(), DslTransitionError> {
+            self.inner.register(surface_id)
+        }
+
+        fn stage_add(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError> {
+            self.inner.stage_add(surface_id, now_ms)
+        }
+
+        fn stage_remove(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError> {
+            self.inner.stage_remove(surface_id, now_ms)
+        }
+
+        fn stage_reload(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError> {
+            self.inner.stage_reload(surface_id, now_ms)
+        }
+
+        fn apply_boundary(
+            &self,
+            surface_id: String,
+            now_ms: u64,
+            staged_intent_sequence: u64,
+            applied_at_turn: u64,
+        ) -> Result<(), DslTransitionError> {
+            self.inner
+                .apply_boundary(surface_id, now_ms, staged_intent_sequence, applied_at_turn)
+        }
+
+        fn mark_pending_succeeded(
+            &self,
+            surface_id: String,
+            pending_task_sequence: u64,
+            staged_intent_sequence: u64,
+        ) -> Result<(), DslTransitionError> {
+            self.inner.mark_pending_succeeded(
+                surface_id,
+                pending_task_sequence,
+                staged_intent_sequence,
+            )
+        }
+
+        fn mark_pending_failed(
+            &self,
+            surface_id: String,
+            pending_task_sequence: u64,
+            staged_intent_sequence: u64,
+            cause: ExternalToolSurfaceFailureCause,
+        ) -> Result<(), DslTransitionError> {
+            self.inner.mark_pending_failed(
+                surface_id,
+                pending_task_sequence,
+                staged_intent_sequence,
+                cause,
+            )
+        }
+
+        fn call_started(&self, surface_id: String) -> Result<(), DslTransitionError> {
+            self.inner.call_started(surface_id)
+        }
+
+        fn call_finished(&self, surface_id: String) -> Result<(), DslTransitionError> {
+            self.inner.call_finished(surface_id)
+        }
+
+        fn finalize_removal_clean(&self, surface_id: String) -> Result<(), DslTransitionError> {
+            self.apply_surface_input(CoreSurfaceInput::FinalizeRemovalClean { surface_id })
+                .map(|_| ())
+        }
+
+        fn finalize_removal_forced(&self, surface_id: String) -> Result<(), DslTransitionError> {
+            self.apply_surface_input(CoreSurfaceInput::FinalizeRemovalForced { surface_id })
+                .map(|_| ())
+        }
+
+        fn snapshot_aligned(&self, epoch: u64) -> Result<(), DslTransitionError> {
+            self.inner.snapshot_aligned(epoch)
+        }
+
+        fn shutdown_surface(&self) -> Result<(), DslTransitionError> {
+            self.inner.shutdown_surface()
+        }
+
+        fn surface_snapshot(&self, surface_id: &str) -> Option<SurfaceSnapshot> {
+            self.inner.surface_snapshot(surface_id)
+        }
+
+        fn diagnostic_snapshot(&self) -> SurfaceDiagnosticSnapshot {
+            self.inner.diagnostic_snapshot()
+        }
+
+        fn visible_surfaces(&self) -> BTreeSet<String> {
+            self.inner.visible_surfaces()
+        }
+
+        fn removing_surfaces(&self) -> BTreeSet<String> {
+            self.inner.removing_surfaces()
+        }
+
+        fn pending_surfaces(&self) -> BTreeSet<String> {
+            self.inner.pending_surfaces()
+        }
+
+        fn has_pending_or_staged(&self) -> bool {
+            self.inner.has_pending_or_staged()
+        }
+
+        fn snapshot_epoch(&self) -> u64 {
+            self.inner.snapshot_epoch()
+        }
+
+        fn snapshot_aligned_epoch(&self) -> u64 {
+            self.inner.snapshot_aligned_epoch()
+        }
+    }
+
+    /// Gate for dogma row #112: a surface-owner rejection of a finalize-removal
+    /// is authoritative divergence. The router must fail closed (return a typed
+    /// error) instead of warn-and-continuing with router/machine state diverged.
+    #[tokio::test]
+    async fn finalize_removal_rejection_fails_closed_not_silently_continue() {
+        let mut router =
+            McpRouter::new_with_surface_handle(Arc::new(RejectFinalizeSurfaceHandle::new()));
+        let sid = SurfaceId::from("reject-finalize");
+
+        // Drive the surface to Active, then to Removing with zero inflight calls
+        // so process_removals decides to clean-finalize it.
+        complete_add(&mut router, "reject-finalize");
+        router
+            .surface_owner
+            .apply(ExternalToolSurfaceInput::StageRemove {
+                surface_id: sid.clone(),
+            })
+            .expect("stage remove");
+        let staged_sequence = router.surface_owner.staged_intents_in_order()[0].2;
+        router
+            .surface_owner
+            .apply(ExternalToolSurfaceInput::ApplyBoundary {
+                surface_id: sid.clone(),
+                staged_intent_sequence: staged_sequence,
+                applied_at_turn: TurnNumber(staged_sequence),
+            })
+            .expect("apply remove boundary");
+
+        assert_eq!(
+            router.surface_owner.inflight_call_count(&sid),
+            0,
+            "surface should have no inflight calls so finalize-clean is attempted"
+        );
+        assert!(
+            router.surface_owner.removing_surfaces().contains(&sid),
+            "surface should be in the removing set"
+        );
+
+        // process_removals computes the finalized set then asks the surface owner
+        // to commit it; the owner rejects. The OLD behavior warned and returned
+        // Ok with diverged state — this must now be a typed error.
+        let result = router.progress_removals().await;
+        let err = result.expect_err(
+            "surface-owner rejection of finalize removal must fail closed, not silently continue",
+        );
+        assert!(
+            matches!(err, McpError::ProtocolError { .. }),
+            "expected a typed ProtocolError fault, got {err:?}"
+        );
     }
 
     #[test]

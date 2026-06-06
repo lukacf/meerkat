@@ -126,13 +126,10 @@ fn rpc_mob_external_tools_provider_from_parts(
 }
 
 #[cfg(feature = "comms")]
-fn send_receipt_json(receipt: meerkat_core::comms::SendReceipt) -> serde_json::Value {
-    serde_json::to_value(meerkat_contracts::CommsSendResult::from(receipt)).unwrap_or_else(
-        |error| {
-            tracing::error!(?error, "failed to serialize CommsSendResult");
-            serde_json::Value::Object(serde_json::Map::new())
-        },
-    )
+fn send_receipt_json(
+    receipt: meerkat_core::comms::SendReceipt,
+) -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::to_value(meerkat_contracts::CommsSendResult::from(receipt))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -719,6 +716,56 @@ async fn record_mob_stream_terminal_authority(
                 "RecordMobEventStreamTerminated for stream '{stream_id}' emitted no MobEventStreamTerminalResolved effect"
             )
         })
+}
+
+/// Serialize an authoritative mob stream event, refusing to fabricate a
+/// `Value::Null` (or any other) event when serialization fails.
+///
+/// A serialization failure on the authoritative stream is a terminal fault: we
+/// cannot lawfully continue the stream after silently dropping or fabricating an
+/// event, because either choice would launder the fault into a fabricated
+/// success on the wire. The caller terminates the stream with the recorded fault
+/// detail instead.
+#[cfg(feature = "mob")]
+fn serialize_mob_stream_event<T: serde::Serialize>(
+    event: &T,
+) -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::to_value(event)
+}
+
+/// Terminate a mob stream after an authoritative event failed to serialize.
+///
+/// This records the typed serialization fault as the terminal detail and emits a
+/// machine-authorized terminal-error notification, so the client observes a
+/// truthful terminal instead of a fabricated `Value::Null` event.
+#[cfg(feature = "mob")]
+async fn emit_authorized_mob_stream_serialization_terminal(
+    notification_sink: &NotificationSink,
+    active_mob_streams: &Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
+    stream_authority: &RpcStreamAuthority,
+    stream_id: Uuid,
+    serialize_error: &serde_json::Error,
+) {
+    tracing::error!(
+        stream_id = %stream_id,
+        error = %serialize_error,
+        "failed to serialize authoritative mob stream event; terminating stream as terminal error"
+    );
+    emit_authorized_mob_stream_terminal(
+        notification_sink,
+        active_mob_streams,
+        stream_authority,
+        stream_id,
+        // No observation variant models a serialization fault yet; the
+        // queue-overflow observation is the closest terminal-*error* class
+        // (vs. TransportEnded, which would mislabel this as a clean remote
+        // end). The true cause is recorded verbatim in the detail.
+        meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalObservationKind::NotificationQueueOverflow,
+        Some(format!(
+            "authoritative mob stream event failed to serialize: {serialize_error}"
+        )),
+    )
+    .await;
 }
 
 #[cfg(feature = "mob")]
@@ -1327,7 +1374,16 @@ impl MethodRouter {
         }
 
         if self.runtime.pending_session_exists(session_id).await
-            || self.runtime.session_state(session_id).await.is_some()
+            // Best-effort owner probe: a store error here is treated as "not
+            // owned via this check" so the disjunction can fall through to the
+            // other existence checks. The authoritative read is performed again
+            // by the handler.
+            || self
+                .runtime
+                .session_state(session_id)
+                .await
+                .map(|opt| opt.is_some())
+                .unwrap_or(false)
             || self.runtime.read_session(session_id).await.is_ok()
             || self
                 .runtime
@@ -1970,18 +2026,24 @@ impl MethodRouter {
         // Use resolve_session_owner (from main) with enriched WireSessionInfo (from this PR).
         match self.resolve_session_owner(&session_id).await {
             Some(SessionOwner::Runtime) => {
-                if let Some(mut info) = self.runtime.read_session_rich(&session_id).await {
-                    info.session_ref = self
-                        .runtime
-                        .realm_id()
-                        .map(|realm| meerkat_contracts::format_session_ref(&realm, &session_id));
-                    RpcResponse::success(id, info)
-                } else {
-                    RpcResponse::error(
+                match self.runtime.read_session_rich(&session_id).await {
+                    Ok(Some(mut info)) => {
+                        info.session_ref = self.runtime.realm_id().map(|realm| {
+                            meerkat_contracts::format_session_ref(&realm, &session_id)
+                        });
+                        RpcResponse::success(id, info)
+                    }
+                    Ok(None) => RpcResponse::error(
                         id,
                         error::SESSION_NOT_FOUND,
                         format!("Session not found: {session_id}"),
-                    )
+                    ),
+                    // A store-layer failure must surface as a typed error, not
+                    // be laundered into a "session not found".
+                    Err(err) => match err.data {
+                        Some(data) => RpcResponse::error_with_data(id, err.code, err.message, data),
+                        None => RpcResponse::error(id, err.code, err.message),
+                    },
                 }
             }
             #[cfg(feature = "mob")]
@@ -2537,12 +2599,27 @@ impl MethodRouter {
         };
         let comms = match self.resolve_session_owner(&session_id).await {
             Some(SessionOwner::Runtime) => {
-                if self.runtime.session_state(&session_id).await.is_none() {
-                    return RpcResponse::error(
-                        id,
-                        error::INVALID_PARAMS,
-                        format!("Session is archived: {session_id}"),
-                    );
+                match self.runtime.session_state(&session_id).await {
+                    // Session exists and is live: proceed.
+                    Ok(Some(_)) => {}
+                    // Session genuinely absent: it has been archived.
+                    Ok(None) => {
+                        return RpcResponse::error(
+                            id,
+                            error::INVALID_PARAMS,
+                            format!("Session is archived: {session_id}"),
+                        );
+                    }
+                    // A store-layer failure must surface as a typed error, not
+                    // be conflated with an archived session.
+                    Err(err) => {
+                        return match err.data {
+                            Some(data) => {
+                                RpcResponse::error_with_data(id, err.code, err.message, data)
+                            }
+                            None => RpcResponse::error(id, err.code, err.message),
+                        };
+                    }
                 }
                 self.runtime.comms_runtime(&session_id).await
             }
@@ -2578,7 +2655,14 @@ impl MethodRouter {
             }
         };
         match comms.send(cmd).await {
-            Ok(receipt) => RpcResponse::success(id, send_receipt_json(receipt)),
+            Ok(receipt) => match send_receipt_json(receipt) {
+                Ok(value) => RpcResponse::success(id, value),
+                Err(serialize_error) => RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!("failed to serialize comms send receipt: {serialize_error}"),
+                ),
+            },
             Err(e) => {
                 let normalized = match &e {
                     meerkat_core::comms::SendError::PeerNotFound(peer) => json!({
@@ -2640,12 +2724,27 @@ impl MethodRouter {
         };
         let comms = match self.resolve_session_owner(&session_id).await {
             Some(SessionOwner::Runtime) => {
-                if self.runtime.session_state(&session_id).await.is_none() {
-                    return RpcResponse::error(
-                        id,
-                        error::INVALID_PARAMS,
-                        format!("Session is archived: {session_id}"),
-                    );
+                match self.runtime.session_state(&session_id).await {
+                    // Session exists and is live: proceed.
+                    Ok(Some(_)) => {}
+                    // Session genuinely absent: it has been archived.
+                    Ok(None) => {
+                        return RpcResponse::error(
+                            id,
+                            error::INVALID_PARAMS,
+                            format!("Session is archived: {session_id}"),
+                        );
+                    }
+                    // A store-layer failure must surface as a typed error, not
+                    // be conflated with an archived session.
+                    Err(err) => {
+                        return match err.data {
+                            Some(data) => {
+                                RpcResponse::error_with_data(id, err.code, err.message, data)
+                            }
+                            None => RpcResponse::error(id, err.code, err.message),
+                        };
+                    }
                 }
                 self.runtime.comms_runtime(&session_id).await
             }
@@ -2992,8 +3091,20 @@ impl MethodRouter {
                             match event {
                                 Some(envelope) => {
                                     sequence += 1;
-                                    let event_json = serde_json::to_value(&envelope)
-                                        .unwrap_or(serde_json::Value::Null);
+                                    let event_json = match serialize_mob_stream_event(&envelope) {
+                                        Ok(value) => value,
+                                        Err(serialize_error) => {
+                                            emit_authorized_mob_stream_serialization_terminal(
+                                                &notification_sink,
+                                                &active_mob_streams,
+                                                &stream_authority,
+                                                stream_id_for_task,
+                                                &serialize_error,
+                                            )
+                                            .await;
+                                            break;
+                                        }
+                                    };
                                     let emit_status = notification_sink
                                         .emit_mob_stream_event(
                                             &stream_id_for_task,
@@ -3087,8 +3198,20 @@ impl MethodRouter {
                             match event {
                                 Some(attributed) => {
                                     sequence += 1;
-                                    let event_json = serde_json::to_value(&attributed)
-                                        .unwrap_or(serde_json::Value::Null);
+                                    let event_json = match serialize_mob_stream_event(&attributed) {
+                                        Ok(value) => value,
+                                        Err(serialize_error) => {
+                                            emit_authorized_mob_stream_serialization_terminal(
+                                                &notification_sink,
+                                                &active_mob_streams,
+                                                &stream_authority,
+                                                stream_id_for_task,
+                                                &serialize_error,
+                                            )
+                                            .await;
+                                            break;
+                                        }
+                                    };
                                     let emit_status = notification_sink
                                         .emit_mob_stream_event(
                                             &stream_id_for_task,
@@ -3335,7 +3458,8 @@ mod tests {
             envelope_id,
             interaction_id,
             stream_reserved: true,
-        });
+        })
+        .expect("well-formed receipt serializes");
 
         assert_eq!(
             payload["request_id"],
@@ -3344,6 +3468,42 @@ mod tests {
         assert_eq!(
             payload["interaction_id"],
             serde_json::json!(interaction_id.0.to_string())
+        );
+    }
+
+    // Gate (#62): a serialization failure on the authoritative reply/stream must
+    // surface as a typed JSON-RPC error, never a fabricated success carrying an
+    // empty `{}` object or `null`. `send_receipt_json` now returns a `Result`
+    // (no `{}` fallback), and `RpcResponse::success` converts a serialize fault
+    // into an `INTERNAL_ERROR` response instead of a success-with-null.
+    #[test]
+    fn gate_serialize_failure_surfaces_typed_error_not_null_success() {
+        // A type whose Serialize impl always fails, standing in for a payload
+        // that cannot be serialized onto the authoritative reply.
+        struct AlwaysFailsToSerialize;
+        impl serde::Serialize for AlwaysFailsToSerialize {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("forced serialization failure"))
+            }
+        }
+
+        let response =
+            RpcResponse::success(Some(crate::protocol::RpcId::Num(7)), AlwaysFailsToSerialize);
+
+        // OLD behavior fabricated a success-with-{}/null; the fixed contract
+        // yields a typed error and no result payload at all.
+        assert!(
+            response.result.is_none(),
+            "serialization failure must not fabricate a success result"
+        );
+        let err = response
+            .error
+            .expect("serialization failure must surface as a typed JSON-RPC error");
+        assert_eq!(err.code, error::INTERNAL_ERROR);
+        assert!(
+            err.message.contains("serialize"),
+            "error message should name the serialization fault, got: {}",
+            err.message
         );
     }
 

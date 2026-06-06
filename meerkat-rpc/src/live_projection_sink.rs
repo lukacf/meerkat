@@ -868,7 +868,10 @@ mod tests {
         session_id: SessionId,
     ) -> meerkat_live::LiveChannelId {
         let machine = meerkat_runtime::meerkat_machine::MeerkatMachine::ephemeral();
-        machine.register_session(session_id.clone()).await;
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let channel_id = meerkat_live::LiveChannelId::random_uuid();
         let identity = test_live_identity();
         let authority = machine

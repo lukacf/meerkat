@@ -2131,7 +2131,10 @@ async fn retire_test_runtime_archive(
     match meerkat_runtime::RuntimeControlPlane::retire(adapter, &runtime_id).await {
         Ok(_) => Ok(()),
         Err(meerkat_runtime::RuntimeControlPlaneError::NotFound(_)) => {
-            adapter.register_session(session_id.clone()).await;
+            adapter
+                .register_session(session_id.clone())
+                .await
+                .expect("register session");
             meerkat_runtime::RuntimeControlPlane::retire(adapter, &runtime_id)
                 .await
                 .map(|_| ())
@@ -20713,7 +20716,10 @@ async fn test_abort_member_provision_retires_runtime_before_absent_cleanup_unreg
         })
         .await
         .expect("create runtime-backed cleanup session");
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     provisioner
         .abort_member_provision(
@@ -20781,7 +20787,10 @@ async fn test_abort_member_provision_archive_failure_keeps_runtime_binding_for_r
         })
         .await
         .expect("create runtime-backed cleanup session");
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     service.set_archive_failure(&session_id).await;
 
     let err = provisioner
@@ -21362,7 +21371,7 @@ async fn test_provision_member_uses_local_bindings_before_routed_runtime_bound()
             &self,
             variant: meerkat_machine_schema::identity::SignalVariantId,
             projected_fields: RecordingSignalFields,
-        ) -> Result<(), String> {
+        ) -> Result<(), meerkat_runtime::composition::ConsumerError> {
             self.log.lock().await.push((variant, projected_fields));
             Ok(())
         }

@@ -93,7 +93,11 @@ impl MeerkatMachine {
                         state: RuntimeState::Destroyed,
                     })?;
 
-                let provisional_work_id = uuid::Uuid::new_v4().to_string();
+                // Use the canonical admission input id (the id the `Input`
+                // already carries, which admission reports back verbatim as
+                // `AcceptOutcome::Accepted { input_id }`) rather than minting a
+                // disconnected provisional UUID. This keeps the work id the DSL
+                // observes identical to the committed admission id.
                 let ingest_input = crate::meerkat_machine::dsl::MeerkatMachineInput::Ingest {
                     session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
                     runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
@@ -102,22 +106,18 @@ impl MeerkatMachine {
                     fence_token: active_fence_token.unwrap_or_default(),
                     generation: active_runtime_generation,
                     runtime_epoch_id: active_runtime_epoch_id,
-                    work_id: crate::meerkat_machine::dsl::WorkId::from(provisional_work_id),
+                    work_id: crate::meerkat_machine::dsl::WorkId::from_domain(input.id()),
                     origin: crate::meerkat_machine::dsl::WorkOrigin::Ingest,
                 };
-                match self
-                    .preview_session_dsl_input(&session_id, ingest_input.clone(), "Ingest")
+                // Propagate the machine-owned preview rejection reason verbatim
+                // (matching the sibling `Destroy` arm), rather than discarding
+                // it and re-deriving an `InvalidState { state }` from the
+                // projected runtime state (which defaults to `Destroyed` and so
+                // launders the real rejection cause). The DSL preview owns the
+                // rejection reason; the dispatcher must not re-author it.
+                self.preview_session_dsl_input(&session_id, ingest_input.clone(), "Ingest")
                     .await
-                {
-                    Ok(_) => {}
-                    Err(_) => {
-                        let state = self
-                            .existing_session_runtime_state(&session_id)
-                            .await
-                            .unwrap_or(RuntimeState::Destroyed);
-                        return Err(RuntimeControlPlaneError::InvalidState { state });
-                    }
-                }
+                    .map_err(RuntimeControlPlaneError::Internal)?;
                 self.apply_session_dsl_input_with_dispatch_failure(
                     &session_id,
                     ingest_input,
@@ -1666,4 +1666,83 @@ fn project_model_routing_status(
         active_operation_override,
         pending_switch_turn,
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn make_prompt(text: &str) -> Input {
+        Input::Prompt(crate::input::PromptInput {
+            header: crate::input::InputHeader {
+                id: InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: crate::input::InputOrigin::Operator,
+                durability: crate::input::InputDurability::Durable,
+                visibility: crate::input::InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            text: text.into(),
+            blocks: None,
+            typed_turn_appends: Vec::new(),
+            turn_metadata: None,
+        })
+    }
+
+    /// Row #56 gate: a machine-rejected direct `Ingest` must surface the
+    /// machine-owned DSL preview rejection reason, NOT a re-derived
+    /// `InvalidState { state: Destroyed }`. A freshly registered session has
+    /// no runtime binding (no `PrepareBindings`), so the DSL preview rejects
+    /// the `Ingest` transition; the rejection cause is owned by the machine
+    /// and must propagate verbatim.
+    #[tokio::test]
+    async fn rejected_direct_ingest_surfaces_machine_reason_not_invalid_state_destroyed() {
+        let machine = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
+
+        let runtime_id = MeerkatMachine::logical_runtime_id(&session_id);
+        let err = machine
+            .execute_meerkat_machine_command(
+                None,
+                MeerkatMachineCommand::Ingest {
+                    runtime_id,
+                    input: make_prompt("ingest before binding"),
+                },
+            )
+            .await
+            .map_err(MeerkatMachine::control_plane_error_from_command_error)
+            .expect_err("ingest on an unbound session must be rejected by the DSL preview");
+
+        // OLD behavior laundered the machine-owned reason into a re-derived
+        // `InvalidState { state: Destroyed }`. The fix propagates the real
+        // rejection reason as `Internal(reason)`.
+        assert!(
+            !matches!(
+                err,
+                RuntimeControlPlaneError::InvalidState {
+                    state: RuntimeState::Destroyed
+                }
+            ),
+            "ingest rejection must not be laundered into a re-derived InvalidState{{Destroyed}}, got {err:?}"
+        );
+
+        match err {
+            RuntimeControlPlaneError::Internal(reason) => {
+                assert!(
+                    !reason.trim().is_empty(),
+                    "the machine-owned rejection reason must be propagated, not discarded"
+                );
+            }
+            other => panic!(
+                "expected the machine-owned preview rejection reason via Internal(_), got {other:?}"
+            ),
+        }
+    }
 }

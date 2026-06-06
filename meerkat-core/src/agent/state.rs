@@ -231,13 +231,13 @@ where
 }
 
 fn tool_call_args_projection_error(tool_name: &str, error: ToolCallArgumentsError) -> AgentError {
-    AgentError::ToolError(
-        ToolError::invalid_arguments(
-            tool_name,
-            format!("tool call arguments projection failed: {error}"),
-        )
-        .to_string(),
-    )
+    // Preserve the typed `invalid_arguments` cause so its `error_code()`
+    // survives terminalization to the wire surface, rather than flattening
+    // it into an opaque string.
+    AgentError::tool(ToolError::invalid_arguments(
+        tool_name,
+        format!("tool call arguments projection failed: {error}"),
+    ))
 }
 
 impl<C, T, S> Agent<C, T, S>
@@ -2139,7 +2139,11 @@ where
                                 &visible_tool_names,
                                 tc.name.as_str(),
                             ) {
-                                let error = AgentError::ToolError(error.to_string());
+                                // Preserve the typed `access_denied` / `not_found`
+                                // cause through terminalization so the distinction
+                                // survives to `error_code()`/wire instead of being
+                                // flattened into an opaque message.
+                                let error = AgentError::tool(error);
                                 self.terminalize_fatal_error(
                                     &run_id, turn_count, &event_tx, &error,
                                 )

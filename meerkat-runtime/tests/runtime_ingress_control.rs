@@ -182,7 +182,10 @@ async fn runtime_ingress_control_red_ok_reset_preempts_queued_input_once() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let sid = SessionId::new();
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
 
     let input = make_prompt("queued before reset");
     let input_id = input.id().clone();

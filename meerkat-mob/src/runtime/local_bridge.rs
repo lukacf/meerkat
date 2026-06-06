@@ -316,7 +316,10 @@ mod tests {
     async fn local_bridge_observe_returns_idle_for_registered_session() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        machine.register_session(session_id.clone()).await;
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
 
         let bridge = LocalMobRuntimeBridge::new(machine, session_id);
         let observation = bridge.observe_member().await.unwrap();
@@ -329,7 +332,10 @@ mod tests {
     async fn local_bridge_retire_returns_report() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        machine.register_session(session_id.clone()).await;
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
 
         let bridge = LocalMobRuntimeBridge::new(machine, session_id);
         let report = bridge.retire_member().await.unwrap();
@@ -342,7 +348,10 @@ mod tests {
     async fn local_bridge_interrupt_retired_runtime_is_terminal_noop() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        machine.register_session(session_id.clone()).await;
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
 
         let bridge = LocalMobRuntimeBridge::new(machine, session_id);
         bridge.retire_member().await.unwrap();
@@ -567,7 +576,10 @@ mod tests {
     async fn local_bridge_destroy_returns_report() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        machine.register_session(session_id.clone()).await;
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
 
         let bridge = LocalMobRuntimeBridge::new(machine, session_id);
         let report = bridge.destroy_member().await.unwrap();

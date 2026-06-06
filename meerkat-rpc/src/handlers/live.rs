@@ -825,10 +825,13 @@ pub async fn handle_live_open(
     // B17: validate the session exists before minting a channel.
     // Without this, a nonexistent-session call mints a channel that the
     // adapter then can't bind to anything truthful, leaving stale infra
-    // handles behind.
-    if runtime.session_state(&session_id).await.is_none()
-        && !runtime.pending_session_exists(&session_id).await
-    {
+    // handles behind. Row #98: a store fault is surfaced as a typed error,
+    // not silently treated as "session present".
+    let session_state = match runtime.session_state(&session_id).await {
+        Ok(state) => state,
+        Err(err) => return RpcResponse::error(id, err.code, err.message),
+    };
+    if session_state.is_none() && !runtime.pending_session_exists(&session_id).await {
         return RpcResponse::error(
             id,
             error::INVALID_PARAMS,
@@ -2053,7 +2056,10 @@ mod tests {
         session_id: meerkat_core::types::SessionId,
     ) -> meerkat_live::LiveChannelId {
         let machine = meerkat_runtime::meerkat_machine::MeerkatMachine::ephemeral();
-        machine.register_session(session_id.clone()).await;
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let channel_id = meerkat_live::LiveChannelId::random_uuid();
         let identity = test_live_identity();
         let authority = machine
@@ -2323,7 +2329,10 @@ mod tests {
         ));
         let machine = meerkat_runtime::meerkat_machine::MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
-        machine.register_session(session_id.clone()).await;
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let channel_id = LiveChannelId::random_uuid();
         let identity = test_live_identity();
         let open_authority = machine

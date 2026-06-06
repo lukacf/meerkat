@@ -2662,7 +2662,10 @@ async fn spawn_production_external_tcp_target(peer_name: &str) -> ProductionExte
     // generated owner"). A real session-backed external member gets this wiring
     // from its SessionRuntimeBindings; this simulation installs it explicitly.
     let adapter = Arc::new(meerkat_runtime::meerkat_machine::MeerkatMachine::ephemeral());
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     adapter
         .test_install_session_peer_comms_handle_on_runtime(&session_id, runtime.as_ref())
         .await

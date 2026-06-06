@@ -2337,7 +2337,12 @@ impl LocalSessionService {
             Err(meerkat_runtime::RuntimeControlPlaneError::NotFound(_)) => {
                 self.runtime_adapter
                     .register_session(session_id.clone())
-                    .await;
+                    .await
+                    .map_err(|error| {
+                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                            format!("machine archive register before retire failed: {error}"),
+                        ))
+                    })?;
                 meerkat_runtime::RuntimeControlPlane::retire(&*self.runtime_adapter, &runtime_id)
                     .await
                     .map(|_| ())
@@ -2388,7 +2393,14 @@ impl SessionService for LocalSessionService {
             }
             Some(meerkat_core::runtime_epoch::RuntimeBuildMode::StandaloneEphemeral) | None => None,
         };
-        self.runtime_adapter.register_session(sid.clone()).await;
+        self.runtime_adapter
+            .register_session(sid.clone())
+            .await
+            .map_err(|error| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "machine register session failed: {error}"
+                )))
+            })?;
         let runtime = Arc::new(LocalCommsRuntime::new(&name));
         let bindings = match provided_bindings {
             Some(bindings) => bindings,
@@ -4565,7 +4577,8 @@ mod tests {
                 Err(meerkat_runtime::RuntimeControlPlaneError::NotFound(_)) => {
                     self.runtime_adapter
                         .register_session(session_id.clone())
-                        .await;
+                        .await
+                        .expect("register session");
                     meerkat_runtime::RuntimeControlPlane::retire(
                         &*self.runtime_adapter,
                         &runtime_id,

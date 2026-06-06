@@ -164,7 +164,10 @@ async fn happy_path_drives_hydrate_resolve_apply_persist_in_order() {
     let adapter = MeerkatMachine::ephemeral();
     adapter.set_session_llm_reconfigure_host(host.clone());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let request = SessionLlmReconfigureRequest {
         model: Some("gpt-target".into()),
         provider: None,
@@ -196,7 +199,10 @@ async fn persist_failure_triggers_rollback_to_previous_identity() {
     let adapter = MeerkatMachine::ephemeral();
     adapter.set_session_llm_reconfigure_host(host.clone());
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
     let request = SessionLlmReconfigureRequest {
         model: Some("gpt-target".into()),
         provider: None,

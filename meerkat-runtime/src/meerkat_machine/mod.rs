@@ -2613,13 +2613,27 @@ impl MeerkatMachine {
 
     /// Register a runtime driver for a session (no RuntimeLoop — inputs queue but
     /// nothing processes them automatically). Useful for tests and legacy mode.
-    pub async fn register_session(&self, session_id: SessionId) {
-        let _ = self
+    ///
+    /// Registration is a control-plane prerequisite: a failed register must not be
+    /// laundered to success. The inner command can fail recovery, so the typed
+    /// error is propagated to the caller rather than discarded.
+    pub async fn register_session(
+        &self,
+        session_id: SessionId,
+    ) -> Result<(), RuntimeControlPlaneError> {
+        match self
             .execute_meerkat_machine_command(
                 None,
                 MeerkatMachineCommand::RegisterSession { session_id },
             )
-            .await;
+            .await
+            .map_err(MeerkatMachine::control_plane_error_from_command_error)?
+        {
+            MeerkatMachineCommandResult::Unit => Ok(()),
+            other => Err(RuntimeControlPlaneError::Internal(format!(
+                "register_session: unexpected command result variant: {other:?}"
+            ))),
+        }
     }
 }
 

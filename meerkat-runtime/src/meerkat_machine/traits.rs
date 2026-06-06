@@ -489,9 +489,9 @@ impl MeerkatMachine {
         err: RuntimeControlPlaneError,
     ) -> RuntimeDriverError {
         match err {
-            RuntimeControlPlaneError::NotFound(_) => RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            },
+            RuntimeControlPlaneError::NotFound(runtime_id) => {
+                RuntimeDriverError::NotFound { runtime_id }
+            }
             RuntimeControlPlaneError::InvalidState { state } => {
                 RuntimeDriverError::NotReady { state }
             }
@@ -875,5 +875,51 @@ impl crate::traits::RuntimeControlPlane for MeerkatMachine {
                 "unexpected MeerkatMachineCommandResult for load_boundary_receipt: {other:?}"
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// Row #45 gate: control-plane not-found must map to the dedicated
+    /// `RuntimeDriverError::NotFound` carrying the runtime id, NOT to
+    /// `NotReady { state: Destroyed }` (which conflates never-existed/absent
+    /// with a torn-down lifecycle).
+    #[test]
+    fn control_plane_not_found_maps_to_driver_not_found() {
+        let runtime_id = LogicalRuntimeId("missing-runtime".to_string());
+        let mapped = MeerkatMachine::driver_error_from_control_plane_error(
+            RuntimeControlPlaneError::NotFound(runtime_id.clone()),
+        );
+
+        match mapped {
+            RuntimeDriverError::NotFound {
+                runtime_id: mapped_id,
+            } => assert_eq!(mapped_id, runtime_id),
+            other => panic!(
+                "expected RuntimeDriverError::NotFound, got {other:?} (must not collapse absence into NotReady/Destroyed)"
+            ),
+        }
+    }
+
+    /// Guard the negative half explicitly: the not-found mapping must never
+    /// surface as `NotReady { state: Destroyed }`.
+    #[test]
+    fn control_plane_not_found_is_not_destroyed_not_ready() {
+        let mapped = MeerkatMachine::driver_error_from_control_plane_error(
+            RuntimeControlPlaneError::NotFound(LogicalRuntimeId("missing-runtime".to_string())),
+        );
+
+        assert!(
+            !matches!(
+                mapped,
+                RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed
+                }
+            ),
+            "not-found must not be laundered into NotReady{{Destroyed}}"
+        );
     }
 }

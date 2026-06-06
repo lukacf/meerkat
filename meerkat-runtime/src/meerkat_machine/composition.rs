@@ -341,7 +341,7 @@ impl ConsumerSurface for MeerkatConsumerSurface {
         &self,
         variant: InputVariantId,
         projected: Vec<(FieldId, OwnedFieldValue)>,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::composition::ConsumerError> {
         let session_id = self.resolve_session(&variant, &projected).await?;
         let input = if variant == seam_facts::inputs::prepare_bindings() {
             let rt = project_str(&projected, &seam_facts::fields::agent_runtime_id())?;
@@ -386,17 +386,21 @@ impl ConsumerSurface for MeerkatConsumerSurface {
                 session_id: mm_dsl::SessionId::from(sid.to_string()),
             }
         } else {
-            return Err(format!(
-                "meerkat consumer surface does not accept routed input `{}`; \
+            return Err(crate::composition::ConsumerError::new(
+                "meerkat_consumer_surface_unsupported_input",
+                format!(
+                    "meerkat consumer surface does not accept routed input `{}`; \
                      only PrepareBindings/Ingest/Retire/Destroy are declared in the \
                      `meerkat_mob_seam` schema",
-                variant.as_str()
+                    variant.as_str()
+                ),
             ));
         };
 
         self.machine
             .apply_routed_meerkat_input(&session_id, input)
             .await
+            .map_err(crate::composition::ConsumerError::from)
     }
 }
 
@@ -464,7 +468,7 @@ mod tests {
             )
             .await
             .expect_err("missing fence_token");
-        assert!(err.contains("fence_token"), "{err}");
+        assert!(err.message().contains("fence_token"), "{err}");
     }
 
     #[tokio::test]
@@ -480,7 +484,7 @@ mod tests {
             .apply_routed_input(iv("Recycle"), vec![])
             .await
             .expect_err("Recycle is not a routed variant");
-        assert!(err.contains("Recycle"), "{err}");
+        assert!(err.message().contains("Recycle"), "{err}");
     }
 
     #[tokio::test]
@@ -494,7 +498,7 @@ mod tests {
             .apply_routed_input(iv("Retire"), vec![])
             .await
             .expect_err("Retire without target");
-        assert!(err.contains("session_id"), "{err}");
+        assert!(err.message().contains("session_id"), "{err}");
     }
 
     #[tokio::test]
@@ -521,7 +525,7 @@ mod tests {
             )
             .await
             .expect_err("session_id disagrees with pinned session");
-        assert!(err.contains("pinned"), "{err}");
+        assert!(err.message().contains("pinned"), "{err}");
     }
 
     #[tokio::test]
@@ -529,7 +533,10 @@ mod tests {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let surface = MeerkatConsumerSurface::new(Arc::clone(&machine));
         let session_id = sid("00000000-0000-0000-0000-000000000001");
-        machine.register_session(session_id.clone()).await;
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         bind_runtime(&surface, &session_id, "rt-other").await;
 
         surface
@@ -559,7 +566,10 @@ mod tests {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let surface = MeerkatConsumerSurface::new(Arc::clone(&machine));
         let session_id = sid("00000000-0000-0000-0000-000000000001");
-        machine.register_session(session_id.clone()).await;
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         bind_runtime(&surface, &session_id, "rt-match").await;
 
         let err = surface
@@ -578,7 +588,7 @@ mod tests {
             )
             .await
             .expect_err("session_id is required for routed ingest");
-        assert!(err.contains("session_id"), "{err}");
+        assert!(err.message().contains("session_id"), "{err}");
     }
 
     #[tokio::test]
@@ -586,7 +596,10 @@ mod tests {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let surface = MeerkatConsumerSurface::new(Arc::clone(&machine));
         let session_id = sid("00000000-0000-0000-0000-000000000001");
-        machine.register_session(session_id.clone()).await;
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         bind_runtime(&surface, &session_id, "rt-current").await;
 
         let err = surface
@@ -609,7 +622,7 @@ mod tests {
             )
             .await
             .expect_err("generated binding guard rejects the routed input");
-        assert!(err.contains("Ingest"), "{err}");
+        assert!(err.message().contains("Ingest"), "{err}");
     }
 
     #[derive(Default)]
@@ -628,7 +641,7 @@ mod tests {
             &self,
             variant: SignalVariantId,
             projected_fields: Vec<(FieldId, OwnedFieldValue)>,
-        ) -> Result<(), String> {
+        ) -> Result<(), crate::composition::ConsumerError> {
             self.log.lock().await.push((variant, projected_fields));
             Ok(())
         }
@@ -638,7 +651,10 @@ mod tests {
     async fn routed_prepare_bindings_dispatches_runtime_bound_signal() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        machine.register_session(session_id.clone()).await;
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
 
         let signal_surface = Arc::new(RecordingSignalSurface::default());
         let schema = meerkat_machine_schema::catalog::meerkat_mob_seam_composition();
@@ -828,7 +844,10 @@ mod tests {
     async fn session_owned_prepare_bindings_rejects_conflicting_authoritative_runtime() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        machine.register_session(session_id.clone()).await;
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
 
         let signal_surface = Arc::new(RecordingSignalSurface::default());
         let schema = meerkat_machine_schema::catalog::meerkat_mob_seam_composition();

@@ -87,6 +87,26 @@ pub(crate) async fn apply_executor_effect(
     }
 }
 
+/// Typed outcome of draining ready executor effects.
+///
+/// Distinguishes the three terminal shapes a drain can produce so the loop
+/// driver never conflates a closed effect channel with an applied stop:
+/// channel closure must still route through the canonical stop/terminalize
+/// path (StopRuntimeExecutor + [`terminalize_async_stop`] + waiter resolution)
+/// instead of silently exiting as if a stop effect had already been applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EffectDrainOutcome {
+    /// A stop effect was applied (and terminalized) during this drain. The
+    /// loop should stop, terminalization has already run.
+    AppliedStop,
+    /// No effects were pending; the channel remains open. The loop may
+    /// continue processing queued work.
+    Empty,
+    /// The effect sender was dropped (control plane gone). The loop must
+    /// terminalize through the stop path rather than exit bare.
+    ChannelClosed,
+}
+
 /// Drain any ready executor effects before starting another unit of
 /// ordinary queued work.
 pub(crate) async fn drain_ready_executor_effects(
@@ -94,16 +114,18 @@ pub(crate) async fn drain_ready_executor_effects(
     completions: Option<&SharedCompletionRegistry>,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
     effect_rx: &mut mpsc::Receiver<RuntimeEffect>,
-) -> Result<bool, RuntimeDriverError> {
+) -> Result<EffectDrainOutcome, RuntimeDriverError> {
     loop {
         match effect_rx.try_recv() {
             Ok(effect) => {
                 if apply_executor_effect(driver, completions, executor, effect).await? {
-                    return Ok(true);
+                    return Ok(EffectDrainOutcome::AppliedStop);
                 }
             }
-            Err(mpsc::error::TryRecvError::Empty) => return Ok(false),
-            Err(mpsc::error::TryRecvError::Disconnected) => return Ok(true),
+            Err(mpsc::error::TryRecvError::Empty) => return Ok(EffectDrainOutcome::Empty),
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                return Ok(EffectDrainOutcome::ChannelClosed);
+            }
         }
     }
 }
@@ -309,5 +331,79 @@ mod tests {
             "unexpected error: {err}"
         );
         assert_eq!(boundary_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Regression for #287: a closed effect channel must surface as a distinct
+    /// `ChannelClosed` outcome, NOT collapse into the same `AppliedStop` signal a
+    /// real stop effect produces. Under the old `Result<bool, _>` shape both
+    /// returned `Ok(true)` and the loop exited bare without terminalizing.
+    #[tokio::test]
+    async fn drain_ready_executor_effects_channel_closed_is_distinct_from_applied_stop() {
+        let driver = shared_driver();
+
+        // Applied-stop case: a stop effect is delivered, then the sender is
+        // dropped. The drain applies the stop and reports `AppliedStop`.
+        {
+            let stop_calls = Arc::new(AtomicUsize::new(0));
+            let mut executor = RecordingExecutor {
+                boundary_calls: Arc::new(AtomicUsize::new(0)),
+                stop_calls: Arc::clone(&stop_calls),
+                cleanup_calls: Arc::new(AtomicUsize::new(0)),
+                fail_boundary: false,
+            };
+            let (tx, mut rx) = mpsc::channel::<RuntimeEffect>(4);
+            tx.send(runtime_effect(
+                RuntimeEffectKind::StopRuntimeExecutor,
+                "stop",
+            ))
+            .await
+            .expect("send stop effect");
+            drop(tx);
+
+            let outcome = drain_ready_executor_effects(&driver, None, &mut executor, &mut rx)
+                .await
+                .expect("drain with applied stop should succeed");
+            assert_eq!(
+                outcome,
+                EffectDrainOutcome::AppliedStop,
+                "an applied stop effect must report AppliedStop"
+            );
+            assert_eq!(stop_calls.load(Ordering::SeqCst), 1);
+        }
+
+        // Closed-channel-only case: the sender is dropped without ever
+        // delivering a stop effect. The drain must report `ChannelClosed`,
+        // distinguishable from `AppliedStop`, and must NOT invoke the
+        // executor stop.
+        {
+            let stop_calls = Arc::new(AtomicUsize::new(0));
+            let mut executor = RecordingExecutor {
+                boundary_calls: Arc::new(AtomicUsize::new(0)),
+                stop_calls: Arc::clone(&stop_calls),
+                cleanup_calls: Arc::new(AtomicUsize::new(0)),
+                fail_boundary: false,
+            };
+            let (tx, mut rx) = mpsc::channel::<RuntimeEffect>(4);
+            drop(tx);
+
+            let outcome = drain_ready_executor_effects(&driver, None, &mut executor, &mut rx)
+                .await
+                .expect("drain on closed channel should succeed");
+            assert_eq!(
+                outcome,
+                EffectDrainOutcome::ChannelClosed,
+                "a closed effect channel must be distinguishable from an applied stop"
+            );
+            assert_ne!(
+                outcome,
+                EffectDrainOutcome::AppliedStop,
+                "channel closure must NOT masquerade as an applied stop"
+            );
+            assert_eq!(
+                stop_calls.load(Ordering::SeqCst),
+                0,
+                "bare channel closure does not itself apply a stop effect"
+            );
+        }
     }
 }

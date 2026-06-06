@@ -218,7 +218,8 @@ where
             if !silent_intents.is_empty() {
                 machine
                     .set_session_silent_intents(&session_id, silent_intents)
-                    .await;
+                    .await
+                    .expect("set silent intents");
             }
             Arc::clone(bindings.peer_comms())
         })

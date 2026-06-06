@@ -6532,12 +6532,21 @@ impl SessionRuntime {
             .map_err(system_context_error_to_rpc)
     }
 
-    /// Get the current state of a session, or `None` if the session does not exist.
-    pub async fn session_state(&self, session_id: &SessionId) -> Option<SessionInfo> {
+    /// Get the current state of a session, or `Ok(None)` if the session does
+    /// not exist.
+    ///
+    /// A store-layer failure is surfaced as a typed `RpcError` rather than
+    /// collapsed to `Ok(None)`: collapsing would make a genuine store failure
+    /// indistinguishable from "session not found", laundering a control-plane
+    /// fault into a not-found at the wire boundary.
+    pub async fn session_state(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<SessionInfo>, RpcError> {
         // Check pending sessions first.
         {
             if let Some(info) = self.staged_sessions.project_info(session_id).await {
-                return Some(SessionInfo {
+                return Ok(Some(SessionInfo {
                     session_id: session_id.clone(),
                     state: if info.is_promoting {
                         SessionState::Running
@@ -6545,30 +6554,33 @@ impl SessionRuntime {
                         SessionState::Idle
                     },
                     labels: info.labels,
-                });
+                }));
             }
         }
 
         // Use `list()` instead of `read()` to avoid blocking on a
         // `ReadSnapshot` command while a turn is in progress. `list()`
         // reads state from non-blocking watch receivers.
-        if let Ok(summaries) = self.service.list(Default::default()).await {
-            for summary in summaries {
-                if summary.session_id == *session_id {
-                    return Some(SessionInfo {
-                        session_id: summary.session_id,
-                        state: if summary.is_active {
-                            SessionState::Running
-                        } else {
-                            SessionState::Idle
-                        },
-                        labels: summary.labels,
-                    });
-                }
+        let summaries = self
+            .service
+            .list(Default::default())
+            .await
+            .map_err(session_error_to_rpc)?;
+        for summary in summaries {
+            if summary.session_id == *session_id {
+                return Ok(Some(SessionInfo {
+                    session_id: summary.session_id,
+                    state: if summary.is_active {
+                        SessionState::Running
+                    } else {
+                        SessionState::Idle
+                    },
+                    labels: summary.labels,
+                }));
             }
         }
 
-        None
+        Ok(None)
     }
 
     pub async fn pending_session_exists(&self, session_id: &SessionId) -> bool {
@@ -6820,7 +6832,12 @@ impl SessionRuntime {
     }
 
     /// List all active sessions, optionally filtered by query parameters.
-    pub async fn list_sessions(&self, query: SessionQuery) -> Vec<SessionInfo> {
+    ///
+    /// A store-layer failure is surfaced as a typed `RpcError` rather than
+    /// collapsed into a partial list (pending sessions only): a partial list
+    /// would silently misreport a control-plane fault as an authoritative empty
+    /// or short result.
+    pub async fn list_sessions(&self, query: SessionQuery) -> Result<Vec<SessionInfo>, RpcError> {
         let mut result = Vec::new();
 
         // Include pending sessions as Idle, filtered by labels if requested.
@@ -6838,29 +6855,37 @@ impl SessionRuntime {
 
         // Include active sessions from the service. The service's `list()`
         // already handles label filtering on materialized sessions.
-        if let Ok(summaries) = self.service.list(query).await {
-            for summary in summaries {
-                let state = if summary.is_active {
-                    SessionState::Running
-                } else {
-                    SessionState::Idle
-                };
-                result.push(SessionInfo {
-                    session_id: summary.session_id,
-                    state,
-                    labels: summary.labels,
-                });
-            }
+        let summaries = self
+            .service
+            .list(query)
+            .await
+            .map_err(session_error_to_rpc)?;
+        for summary in summaries {
+            let state = if summary.is_active {
+                SessionState::Running
+            } else {
+                SessionState::Idle
+            };
+            result.push(SessionInfo {
+                session_id: summary.session_id,
+                state,
+                labels: summary.labels,
+            });
         }
 
-        result
+        Ok(result)
     }
 
     /// List all active sessions as canonical wire summaries, including pending sessions.
+    ///
+    /// A store-layer failure is surfaced as a typed `RpcError` rather than
+    /// collapsed into a partial list (pending sessions only): a partial list
+    /// would silently misreport a control-plane fault as an authoritative empty
+    /// or short result on the wire.
     pub async fn list_sessions_rich(
         &self,
         query: SessionQuery,
-    ) -> Vec<meerkat_contracts::WireSessionSummary> {
+    ) -> Result<Vec<meerkat_contracts::WireSessionSummary>, RpcError> {
         let mut result = Vec::new();
 
         // Include pending sessions as synthetic entries.
@@ -6878,20 +6903,28 @@ impl SessionRuntime {
         }
 
         // Include materialized sessions from the service.
-        if let Ok(summaries) = self.service.list(query).await {
-            for summary in summaries {
-                result.push(summary.into());
-            }
+        let summaries = self
+            .service
+            .list(query)
+            .await
+            .map_err(session_error_to_rpc)?;
+        for summary in summaries {
+            result.push(summary.into());
         }
 
-        result
+        Ok(result)
     }
 
     /// Read a session as a canonical wire info object, checking pending and materialized.
+    ///
+    /// Returns `Ok(None)` only when the session genuinely does not exist. A
+    /// store-layer failure on `list()` or `read()` is surfaced as a typed
+    /// `RpcError` rather than collapsed to `Ok(None)`: collapsing would launder
+    /// a control-plane fault into a "session not found" at the wire boundary.
     pub async fn read_session_rich(
         &self,
         session_id: &SessionId,
-    ) -> Option<meerkat_contracts::WireSessionInfo> {
+    ) -> Result<Option<meerkat_contracts::WireSessionInfo>, RpcError> {
         // Check pending sessions first.
         if let Some(info) = self.staged_sessions.project_info(session_id).await {
             let mut wire = meerkat_contracts::WireSessionInfo {
@@ -6911,60 +6944,76 @@ impl SessionRuntime {
             };
             self.attach_resolved_capabilities_to_wire_info(&mut wire)
                 .await;
-            return Some(wire);
+            return Ok(Some(wire));
         }
 
         // Try list() first — non-blocking (uses watch receivers).
-        if let Ok(summaries) = self.service.list(Default::default()).await {
-            for summary in summaries {
-                if summary.session_id == *session_id {
-                    if !summary.is_active {
-                        // Idle session: safe to call read() without blocking,
-                        // which provides last_assistant_text.
-                        if let Ok(view) = self.service.read(session_id).await {
+        let summaries = self
+            .service
+            .list(Default::default())
+            .await
+            .map_err(session_error_to_rpc)?;
+        for summary in summaries {
+            if summary.session_id == *session_id {
+                if !summary.is_active {
+                    // Idle session: safe to call read() without blocking,
+                    // which provides last_assistant_text.
+                    match self.service.read(session_id).await {
+                        Ok(view) => {
                             let mut info = view.state.into();
                             self.attach_resolved_capabilities_to_wire_info(&mut info)
                                 .await;
-                            return Some(info);
+                            return Ok(Some(info));
                         }
+                        // The session was archived between list() and read():
+                        // fall through to build from the summary below.
+                        Err(SessionError::NotFound { .. }) => {}
+                        // Any other store failure is a genuine control-plane
+                        // fault and must not be laundered into a summary-only
+                        // success or a not-found.
+                        Err(other) => return Err(session_error_to_rpc(other)),
                     }
-                    // Active session: return summary without last_assistant_text
-                    // to avoid blocking the caller during a running turn.
-                    let wire: meerkat_contracts::WireSessionSummary = summary.into();
-                    let llm_identity = self
-                        .service
-                        .live_session_llm_identity(session_id)
-                        .await
-                        .ok()?;
-                    let mut info = meerkat_contracts::WireSessionInfo {
-                        session_id: wire.session_id,
-                        session_ref: None,
-                        created_at: wire.created_at,
-                        updated_at: wire.updated_at,
-                        message_count: wire.message_count,
-                        is_active: wire.is_active,
-                        model: llm_identity.model,
-                        provider: llm_identity.provider.as_str().to_string(),
-                        last_assistant_text: None,
-                        resolved_capabilities: None,
-                        labels: wire.labels,
-                    };
-                    self.attach_resolved_capabilities_to_wire_info(&mut info)
-                        .await;
-                    return Some(info);
                 }
+                // Active session: return summary without last_assistant_text
+                // to avoid blocking the caller during a running turn.
+                let wire: meerkat_contracts::WireSessionSummary = summary.into();
+                let llm_identity = self
+                    .service
+                    .live_session_llm_identity(session_id)
+                    .await
+                    .map_err(session_error_to_rpc)?;
+                let mut info = meerkat_contracts::WireSessionInfo {
+                    session_id: wire.session_id,
+                    session_ref: None,
+                    created_at: wire.created_at,
+                    updated_at: wire.updated_at,
+                    message_count: wire.message_count,
+                    is_active: wire.is_active,
+                    model: llm_identity.model,
+                    provider: llm_identity.provider.as_str().to_string(),
+                    last_assistant_text: None,
+                    resolved_capabilities: None,
+                    labels: wire.labels,
+                };
+                self.attach_resolved_capabilities_to_wire_info(&mut info)
+                    .await;
+                return Ok(Some(info));
             }
         }
 
-        // Fallback: try read() for archived/persisted sessions not in the live list.
-        if let Ok(view) = self.service.read(session_id).await {
-            let mut info = view.state.into();
-            self.attach_resolved_capabilities_to_wire_info(&mut info)
-                .await;
-            return Some(info);
+        // Fallback: try read() for archived/persisted sessions not in the live
+        // list. A genuine not-found is reported as Ok(None); any other store
+        // failure is surfaced as a typed error.
+        match self.service.read(session_id).await {
+            Ok(view) => {
+                let mut info = view.state.into();
+                self.attach_resolved_capabilities_to_wire_info(&mut info)
+                    .await;
+                Ok(Some(info))
+            }
+            Err(SessionError::NotFound { .. }) => Ok(None),
+            Err(other) => Err(session_error_to_rpc(other)),
         }
-
-        None
     }
 
     /// Whether this runtime has a durable event replay projection installed.
@@ -6986,7 +7035,7 @@ impl SessionRuntime {
         let Some(sequence) = latest else {
             return Ok(None);
         };
-        if sequence == 0 && self.read_session_rich(&session_id).await.is_none() {
+        if sequence == 0 && self.read_session_rich(&session_id).await?.is_none() {
             return Err(RpcError {
                 code: error::SESSION_NOT_FOUND,
                 message: format!("Session not found: {session_id}"),
@@ -7072,7 +7121,7 @@ impl SessionRuntime {
         };
         let session = self
             .read_session_rich(scope.session_id())
-            .await
+            .await?
             .ok_or_else(|| RpcError {
                 code: error::SESSION_NOT_FOUND,
                 message: format!("Session not found: {}", scope.session_id()),
@@ -7693,7 +7742,7 @@ impl SessionRuntime {
         if self.staged_sessions.contains(session_id).await {
             return Ok(());
         }
-        if self.session_state(session_id).await.is_none() {
+        if self.session_state(session_id).await?.is_none() {
             return Err(RpcError {
                 code: error::SESSION_NOT_FOUND,
                 message: format!("Session not found: {session_id}"),
@@ -8128,7 +8177,10 @@ mod tests {
         session_id: meerkat_core::types::SessionId,
     ) -> meerkat_live::LiveChannelId {
         let machine = meerkat_runtime::meerkat_machine::MeerkatMachine::ephemeral();
-        machine.register_session(session_id.clone()).await;
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let channel_id = meerkat_live::LiveChannelId::random_uuid();
         let identity = test_live_identity();
         let authority = machine
@@ -12892,7 +12944,7 @@ mod tests {
             .await
             .unwrap();
 
-        let info = runtime.session_state(&session_id).await;
+        let info = runtime.session_state(&session_id).await.unwrap();
         assert_eq!(info.map(|i| i.state), Some(SessionState::Idle));
     }
 
@@ -13259,7 +13311,11 @@ mod tests {
 
         // Verify initial state
         assert_eq!(
-            runtime.session_state(&session_id).await.map(|i| i.state),
+            runtime
+                .session_state(&session_id)
+                .await
+                .unwrap()
+                .map(|i| i.state),
             Some(SessionState::Idle)
         );
 
@@ -13277,7 +13333,11 @@ mod tests {
         // Wait until the session transitions to Running.
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
         loop {
-            if runtime.session_state(&session_id).await.map(|i| i.state)
+            if runtime
+                .session_state(&session_id)
+                .await
+                .unwrap()
+                .map(|i| i.state)
                 == Some(SessionState::Running)
             {
                 break;
@@ -13295,7 +13355,11 @@ mod tests {
 
         // After completion, state should be Idle again
         assert_eq!(
-            runtime.session_state(&session_id).await.map(|i| i.state),
+            runtime
+                .session_state(&session_id)
+                .await
+                .unwrap()
+                .map(|i| i.state),
             Some(SessionState::Idle),
             "Session should be Idle after turn completes"
         );
@@ -13435,7 +13499,11 @@ mod tests {
 
         // State should still be idle
         assert_eq!(
-            runtime.session_state(&session_id).await.map(|i| i.state),
+            runtime
+                .session_state(&session_id)
+                .await
+                .unwrap()
+                .map(|i| i.state),
             Some(SessionState::Idle)
         );
     }
@@ -13516,7 +13584,8 @@ mod tests {
         runtime
             .runtime_adapter
             .register_session(created.session_id.clone())
-            .await;
+            .await
+            .expect("register session");
         runtime
             .runtime_adapter
             .stop_runtime_executor(&created.session_id, "seed stopped projection")
@@ -13545,14 +13614,14 @@ mod tests {
             .unwrap();
 
         // Verify it exists
-        assert!(runtime.session_state(&session_id).await.is_some());
+        assert!(runtime.session_state(&session_id).await.unwrap().is_some());
 
         // Archive it
         runtime.archive_session(&session_id).await.unwrap();
 
         // Verify it's gone
         assert!(
-            runtime.session_state(&session_id).await.is_none(),
+            runtime.session_state(&session_id).await.unwrap().is_none(),
             "Archived session should no longer exist"
         );
 
@@ -13586,7 +13655,7 @@ mod tests {
 
         // Read the session and check tool names. The session's tool list
         // should include mob tools (delegate, mob_create, etc.).
-        let info = runtime.session_state(&session_id).await.unwrap();
+        let info = runtime.session_state(&session_id).await.unwrap().unwrap();
         assert_eq!(info.state, SessionState::Idle);
 
         // Start a turn to materialize the agent, then check tool list
@@ -15517,7 +15586,7 @@ mod tests {
             }
         }
         assert!(
-            runtime.session_state(&session_id).await.is_none(),
+            runtime.session_state(&session_id).await.unwrap().is_none(),
             "background staged archive cleanup should remove the archived staged slot"
         );
         assert!(
@@ -16102,7 +16171,10 @@ mod tests {
                 });
         }
 
-        let listed = runtime.list_sessions(SessionQuery::default()).await;
+        let listed = runtime
+            .list_sessions(SessionQuery::default())
+            .await
+            .unwrap();
         assert_eq!(
             listed.len(),
             4,
@@ -16160,9 +16232,17 @@ mod tests {
 
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
         loop {
-            let first_running = runtime.session_state(&first).await.map(|info| info.state)
+            let first_running = runtime
+                .session_state(&first)
+                .await
+                .unwrap()
+                .map(|info| info.state)
                 == Some(SessionState::Running);
-            let second_running = runtime.session_state(&second).await.map(|info| info.state)
+            let second_running = runtime
+                .session_state(&second)
+                .await
+                .unwrap()
+                .map(|info| info.state)
                 == Some(SessionState::Running);
             if first_running && second_running {
                 break;
@@ -16282,6 +16362,7 @@ mod tests {
             if runtime
                 .session_state(&session_id)
                 .await
+                .unwrap()
                 .map(|info| info.state)
                 == Some(SessionState::Running)
             {
@@ -18123,7 +18204,11 @@ mod tests {
 
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
         loop {
-            if runtime.session_state(&blocker).await.map(|info| info.state)
+            if runtime
+                .session_state(&blocker)
+                .await
+                .unwrap()
+                .map(|info| info.state)
                 == Some(SessionState::Running)
             {
                 break;
@@ -18546,7 +18631,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let unknown_id = SessionId::new();
-        assert_eq!(runtime.session_state(&unknown_id).await, None);
+        assert_eq!(runtime.session_state(&unknown_id).await.unwrap(), None);
     }
 
     /// 10. Shutdown closes all sessions.
@@ -18565,14 +18650,14 @@ mod tests {
             .unwrap();
 
         // Verify both exist
-        assert!(runtime.session_state(&s1).await.is_some());
-        assert!(runtime.session_state(&s2).await.is_some());
+        assert!(runtime.session_state(&s1).await.unwrap().is_some());
+        assert!(runtime.session_state(&s2).await.unwrap().is_some());
 
         // Shutdown
         runtime.shutdown().await;
 
         // Both should be gone from the sessions map
-        let sessions = runtime.list_sessions(Default::default()).await;
+        let sessions = runtime.list_sessions(Default::default()).await.unwrap();
         assert!(
             sessions.is_empty(),
             "All sessions should be removed after shutdown"
@@ -19181,7 +19266,7 @@ mod tests {
             .unwrap();
 
         // Session exists and is idle (no turn started).
-        let info = runtime.session_state(&session_id).await.unwrap();
+        let info = runtime.session_state(&session_id).await.unwrap().unwrap();
         assert_eq!(info.state, SessionState::Idle);
     }
 
@@ -19440,6 +19525,7 @@ mod tests {
         let info = runtime
             .read_session_rich(&session_id)
             .await
+            .unwrap()
             .expect("pending session should be readable");
         assert_eq!(info.model, "claude-sonnet-4-5");
         assert_eq!(info.provider, "anthropic");
@@ -19471,6 +19557,7 @@ mod tests {
         let info = runtime
             .read_session_rich(&session_id)
             .await
+            .unwrap()
             .expect("pending realtime session should be readable");
         let capabilities = info
             .resolved_capabilities
@@ -19864,7 +19951,10 @@ mod tests {
             .await
             .unwrap();
 
-        let list1 = runtime.list_sessions_rich(Default::default()).await;
+        let list1 = runtime
+            .list_sessions_rich(Default::default())
+            .await
+            .unwrap();
         let ts1 = list1.iter().find(|s| s.session_id == session_id).unwrap();
         let created1 = ts1.created_at;
         let updated1 = ts1.updated_at;
@@ -19873,7 +19963,10 @@ mod tests {
 
         // Wait a moment and list again — timestamps should be identical.
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        let list2 = runtime.list_sessions_rich(Default::default()).await;
+        let list2 = runtime
+            .list_sessions_rich(Default::default())
+            .await
+            .unwrap();
         let ts2 = list2.iter().find(|s| s.session_id == session_id).unwrap();
         assert_eq!(ts2.created_at, created1, "created_at must not drift");
         assert_eq!(
@@ -19893,7 +19986,11 @@ mod tests {
             .await
             .unwrap();
 
-        let before = runtime.read_session_rich(&session_id).await.unwrap();
+        let before = runtime
+            .read_session_rich(&session_id)
+            .await
+            .unwrap()
+            .unwrap();
         let created = before.created_at;
 
         // Wait so updated_at can differ.
@@ -19911,7 +20008,11 @@ mod tests {
             .await
             .unwrap();
 
-        let after = runtime.read_session_rich(&session_id).await.unwrap();
+        let after = runtime
+            .read_session_rich(&session_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(after.created_at, created, "created_at must not change");
         assert!(
             after.updated_at >= created,
@@ -19948,10 +20049,129 @@ mod tests {
             .unwrap();
 
         // Session is now idle — read_session_rich should provide last_assistant_text.
-        let info = runtime.read_session_rich(&session_id).await.unwrap();
+        let info = runtime
+            .read_session_rich(&session_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(
             info.last_assistant_text.is_some(),
             "idle session should have last_assistant_text, got None"
+        );
+    }
+
+    /// A store double whose `load` always fails. `list` and the other methods
+    /// delegate to an in-memory store so a read falls through to the
+    /// authoritative `load()` path, where the injected store failure surfaces.
+    struct FailLoadStore {
+        inner: meerkat::MemoryStore,
+    }
+
+    impl FailLoadStore {
+        fn new() -> Self {
+            Self {
+                inner: meerkat::MemoryStore::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl meerkat::SessionStore for FailLoadStore {
+        async fn save(&self, session: &Session) -> Result<(), meerkat_store::SessionStoreError> {
+            self.inner.save(session).await
+        }
+
+        async fn save_authoritative_projection_if_current_revision(
+            &self,
+            session: &Session,
+            expected_current_revision: Option<String>,
+        ) -> Result<(), meerkat_store::SessionStoreError> {
+            self.inner
+                .save_authoritative_projection_if_current_revision(
+                    session,
+                    expected_current_revision,
+                )
+                .await
+        }
+
+        async fn load(
+            &self,
+            _id: &SessionId,
+        ) -> Result<Option<Session>, meerkat_store::SessionStoreError> {
+            Err(meerkat_store::SessionStoreError::Internal(
+                "forced load failure".to_string(),
+            ))
+        }
+
+        async fn list(
+            &self,
+            filter: meerkat_store::SessionFilter,
+        ) -> Result<Vec<meerkat_core::SessionMeta>, meerkat_store::SessionStoreError> {
+            self.inner.list(filter).await
+        }
+
+        async fn delete(&self, id: &SessionId) -> Result<(), meerkat_store::SessionStoreError> {
+            self.inner.delete(id).await
+        }
+
+        async fn delete_if_current_revision(
+            &self,
+            id: &SessionId,
+            expected_current_revision: &str,
+        ) -> Result<bool, meerkat_store::SessionStoreError> {
+            self.inner
+                .delete_if_current_revision(id, expected_current_revision)
+                .await
+        }
+    }
+
+    // Gate (#98): a store-layer failure on the authoritative read path must
+    // surface as a typed RpcError, NOT be collapsed into `Ok(None)` (which the
+    // wire handler presents as SESSION_NOT_FOUND). The OLD `if let Ok(view)`
+    // path silently dropped the Err and returned None, laundering a control-plane
+    // fault into a not-found.
+    #[tokio::test]
+    async fn gate_read_session_rich_surfaces_store_failure_as_error_not_not_found() {
+        let temp = tempfile::tempdir().unwrap();
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(FailLoadStore::new());
+        let runtime = make_runtime_with_session_store(temp_factory(&temp), 10, store);
+
+        // No session was created, so `list()` returns empty and the read falls
+        // through to the authoritative `load()` path, where the store fails.
+        let unknown = SessionId::new();
+        let result = runtime.read_session_rich(&unknown).await;
+
+        match result {
+            Ok(None) => panic!(
+                "store load failure must NOT be laundered into a not-found (Ok(None)); \
+                 it must surface as a typed RpcError"
+            ),
+            Ok(Some(_)) => panic!("unexpected session payload for a failing store"),
+            Err(err) => {
+                // A store fault is a control-plane failure, never a not-found.
+                // The exact code depends on which authoritative store call
+                // fails first, but it must never be laundered into not-found.
+                assert_ne!(
+                    err.code,
+                    error::SESSION_NOT_FOUND,
+                    "store failure must not be reported as SESSION_NOT_FOUND, got: {err:?}"
+                );
+            }
+        }
+    }
+
+    // Gate (#98): a genuine not-found must still be reported as `Ok(None)` so
+    // the fix distinguishes "session does not exist" from "store failed".
+    #[tokio::test]
+    async fn gate_read_session_rich_genuine_not_found_stays_ok_none() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let unknown = SessionId::new();
+        let result = runtime.read_session_rich(&unknown).await;
+        assert!(
+            matches!(result, Ok(None)),
+            "a genuinely absent session must be reported as Ok(None), got: {result:?}"
         );
     }
 
@@ -20011,6 +20231,7 @@ mod tests {
         let info = runtime
             .read_session_rich(&session_id)
             .await
+            .unwrap()
             .expect("hot-swapped session should be readable");
         let capabilities = info
             .resolved_capabilities
@@ -20499,6 +20720,7 @@ mod tests {
         let info = runtime
             .read_session_rich(&session_id)
             .await
+            .unwrap()
             .expect("read_session_rich after hot-swap");
         assert_eq!(info.model, "gpt-5.4");
         assert_eq!(info.provider, "openai");
@@ -20534,6 +20756,7 @@ mod tests {
         let info = runtime
             .read_session_rich(&session_id)
             .await
+            .unwrap()
             .expect("read recovered session after re-materialization");
         assert_eq!(info.model, "gpt-5.4", "recovered model must match hot-swap");
         assert_eq!(

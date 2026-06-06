@@ -75,6 +75,22 @@ pub fn write_session_snapshot_in_txn(
     let session_id = session.id().to_string();
     let metadata_json = serde_json::to_string(session.metadata())?;
     let session_json = serde_json::to_vec(session)?;
+    // Derived projection counters must round-trip through the durable i64
+    // columns without loss. A count that exceeds i64::MAX is itself an
+    // impossible state, so fail closed rather than silently clamping to a
+    // fabricated maximum (terminal-truth store-metadata cluster).
+    let message_count = i64::try_from(session.messages().len()).map_err(|_| {
+        StoreError::Internal(format!(
+            "session '{session_id}' message_count {} exceeds durable i64 range",
+            session.messages().len()
+        ))
+    })?;
+    let total_tokens = i64::try_from(session.total_tokens()).map_err(|_| {
+        StoreError::Internal(format!(
+            "session '{session_id}' total_tokens {} exceeds durable i64 range",
+            session.total_tokens()
+        ))
+    })?;
     tx.execute(
         r"
         INSERT INTO sessions (
@@ -98,8 +114,8 @@ pub fn write_session_snapshot_in_txn(
             session_id,
             system_time_millis(session.created_at()),
             system_time_millis(session.updated_at()),
-            i64::try_from(session.messages().len()).unwrap_or(i64::MAX),
-            i64::try_from(session.total_tokens()).unwrap_or(i64::MAX),
+            message_count,
+            total_tokens,
             metadata_json,
             session_json,
         ],
@@ -216,18 +232,39 @@ impl SqliteSessionStore {
                             Box::new(err),
                         )
                     })?;
+                    let id = parse_session_id(row.get(0)?).map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(err),
+                        )
+                    })?;
+                    // Derived projection counters are stored as i64. A negative
+                    // or out-of-range value is an impossible durable state, so
+                    // fail closed with a typed Corrupted error rather than
+                    // laundering it to usize::MAX/u64::MAX (terminal-truth
+                    // store-metadata cluster). The canonical truth is in
+                    // session_json; the caller can recover via load().
+                    let message_count = usize::try_from(row.get::<_, i64>(3)?).map_err(|_| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            rusqlite::types::Type::Integer,
+                            Box::new(StoreError::Corrupted(id.clone())),
+                        )
+                    })?;
+                    let total_tokens = u64::try_from(row.get::<_, i64>(4)?).map_err(|_| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            4,
+                            rusqlite::types::Type::Integer,
+                            Box::new(StoreError::Corrupted(id.clone())),
+                        )
+                    })?;
                     Ok(SessionMeta {
-                        id: parse_session_id(row.get(0)?).map_err(|err| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                0,
-                                rusqlite::types::Type::Text,
-                                Box::new(err),
-                            )
-                        })?,
+                        id,
                         created_at: millis_to_system_time(row.get(1)?),
                         updated_at: millis_to_system_time(row.get(2)?),
-                        message_count: usize::try_from(row.get::<_, i64>(3)?).unwrap_or(usize::MAX),
-                        total_tokens: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(u64::MAX),
+                        message_count,
+                        total_tokens,
                         metadata,
                     })
                 },
@@ -605,5 +642,44 @@ mod tests {
                 .unwrap()
         );
         assert!(first.load(session.id()).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn list_fails_closed_on_negative_durable_counter() {
+        // Gate (row #238): a durable row carrying a negative message_count is
+        // an impossible-state projection. list() must surface a typed error
+        // rather than laundering it to usize::MAX. OLD behavior:
+        // `usize::try_from(...).unwrap_or(usize::MAX)` returned a fabricated
+        // count and list() succeeded.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("sessions.sqlite3");
+        let store = SqliteSessionStore::open(&path).unwrap();
+
+        let session = Session::new();
+        store.save(&session).await.unwrap();
+
+        // Corrupt the derived counter column directly on disk.
+        let conn = open_connection(&path).unwrap();
+        conn.execute(
+            "UPDATE sessions SET message_count = -1 WHERE session_id = ?1",
+            params![session.id().to_string()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let err = store
+            .list(SessionFilter::default())
+            .await
+            .expect_err("list must fail closed on a negative durable counter");
+        // Negative counters surface through the typed StoreError boundary,
+        // not as usize::MAX.
+        assert!(
+            matches!(err, SessionStoreError::Internal(_)),
+            "unexpected error: {err}"
+        );
+
+        // Canonical truth still recoverable from session_json via load().
+        let loaded = store.load(session.id()).await.unwrap().unwrap();
+        assert_eq!(loaded.id(), session.id());
     }
 }

@@ -1040,6 +1040,37 @@ pub(crate) fn spawn_runtime_loop_with_completions(
 /// Check for new background op completions and inject a continuation if needed.
 ///
 /// Called after queue processing completes (session has returned to idle).
+/// Cursor-advance plan for the quiescent detached-wake injection tail.
+///
+/// A successful injection advances BOTH the injected and observed cursors so
+/// the completion is recorded as delivered. A failed injection must advance
+/// NEITHER: the completion stays visible at the unchanged observed cursor so
+/// the next wake re-presents it for retry instead of laundering a failed
+/// injection into a watermark advance that hides the completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetachedWakeCursorPlan {
+    /// Injection succeeded: advance the injected then the observed cursor.
+    AdvanceInjectedAndObserved,
+    /// Injection failed: leave both cursors untouched so the completion is
+    /// re-presented on the next wake.
+    LeaveVisibleForRetry,
+}
+
+impl DetachedWakeCursorPlan {
+    /// Decide the cursor-advance plan from the injection outcome.
+    fn from_injection(injection_succeeded: bool) -> Self {
+        if injection_succeeded {
+            Self::AdvanceInjectedAndObserved
+        } else {
+            Self::LeaveVisibleForRetry
+        }
+    }
+
+    fn advances_observed_cursor(self) -> bool {
+        matches!(self, Self::AdvanceInjectedAndObserved)
+    }
+}
+
 /// Distinguishes ordinary no-op from stale-authority shutdown so cursor
 /// projection cannot advance after the runtime loop loses current ownership.
 fn advance_runtime_completion_cursor(
@@ -1161,30 +1192,45 @@ async fn maybe_inject_feed_wake(
         crate::input::ContinuationInput::detached_background_op_completed(),
     );
     let mut d = driver.lock().await;
-    if d.as_driver_mut().accept_input(input).await.is_ok() {
-        let advanced = match advance_runtime_completion_cursor(
-            Some(registry),
-            meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeInjected,
-            batch.watermark,
-            epoch_cursor_state,
-        ) {
-            Ok(cursor) => cursor,
-            Err(outcome) => return outcome,
-        };
-        *last_injected_seq = advanced;
+    let injection_succeeded = d.as_driver_mut().accept_input(input).await.is_ok();
+    drop(d);
+
+    match DetachedWakeCursorPlan::from_injection(injection_succeeded) {
+        DetachedWakeCursorPlan::LeaveVisibleForRetry => {
+            // Injection failed: do NOT advance either cursor. Mirror the
+            // non-quiescent branch above and leave the completion visible so
+            // the next wake re-presents it for retry instead of laundering the
+            // failed injection into a watermark advance that hides the
+            // completion.
+            FeedWakeOutcome::Noop
+        }
+        DetachedWakeCursorPlan::AdvanceInjectedAndObserved => {
+            // Injection succeeded: advance both the injected and observed
+            // cursors so the completion is recorded as delivered and the loop
+            // does not hot-spin on it.
+            let injected = match advance_runtime_completion_cursor(
+                Some(registry),
+                meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeInjected,
+                batch.watermark,
+                epoch_cursor_state,
+            ) {
+                Ok(cursor) => cursor,
+                Err(outcome) => return outcome,
+            };
+            *last_injected_seq = injected;
+            let observed = match advance_runtime_completion_cursor(
+                Some(registry),
+                meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeObserved,
+                batch.watermark,
+                epoch_cursor_state,
+            ) {
+                Ok(cursor) => cursor,
+                Err(outcome) => return outcome,
+            };
+            *observed_seq = observed;
+            FeedWakeOutcome::Injected
+        }
     }
-    // Advance cursor after injection attempt (quiescent path).
-    let advanced = match advance_runtime_completion_cursor(
-        Some(registry),
-        meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeObserved,
-        batch.watermark,
-        epoch_cursor_state,
-    ) {
-        Ok(cursor) => cursor,
-        Err(outcome) => return outcome,
-    };
-    *observed_seq = advanced;
-    FeedWakeOutcome::Injected
 }
 
 /// Process all queued inputs until the queue is empty.
@@ -1212,8 +1258,23 @@ async fn process_queue(
         )
         .await
         {
-            Ok(true) => return true,
-            Ok(false) => {}
+            Ok(crate::control_plane::EffectDrainOutcome::AppliedStop) => return true,
+            Ok(crate::control_plane::EffectDrainOutcome::Empty) => {}
+            Ok(crate::control_plane::EffectDrainOutcome::ChannelClosed) => {
+                // The effect sender was dropped: the control plane is gone.
+                // Closure is NOT an applied stop — route through the canonical
+                // stop/terminalize path so the DSL executor-exit, durable
+                // stopped truth, and completion waiters cannot split before the
+                // loop exits.
+                drop(effect_authority_guard);
+                return stop_runtime_loop_executor_from_dsl_effect(
+                    driver,
+                    completions,
+                    executor,
+                    "runtime effect channel closed".to_string(),
+                )
+                .await;
+            }
             Err(error) => {
                 tracing::error!(
                     error = %error,
@@ -1801,6 +1862,51 @@ mod tests {
             apply_calls.load(Ordering::SeqCst),
             0,
             "failed stop effect must not be followed by ordinary queue processing"
+        );
+    }
+
+    /// Regression for #287: dropping the effect sender mid-run must drive the
+    /// loop through the canonical stop/terminalize path (StopRuntimeExecutor),
+    /// NOT exit bare as if a stop effect had already been applied. Before the
+    /// fix, channel closure returned `Ok(true)` directly and `stop_calls`
+    /// stayed at 0 — the executor stop was never invoked.
+    #[tokio::test]
+    async fn runtime_loop_effect_channel_closure_routes_through_stop_path() {
+        let driver = make_shared_ephemeral_driver("effect-channel-closed-stop");
+        let stop_calls = Arc::new(AtomicUsize::new(0));
+        let apply_calls = Arc::new(AtomicUsize::new(0));
+        let mut executor = crate::control_plane::test_support::StopFailingExecutor::new(
+            Arc::clone(&stop_calls),
+            Arc::clone(&apply_calls),
+        );
+        // Drop the effect sender so the drain observes a disconnected channel
+        // without any stop effect ever being delivered.
+        let (effect_tx, mut effect_rx) = tokio::sync::mpsc::channel(1);
+        drop(effect_tx);
+
+        let authority_binding = RuntimeLoopAuthorityBinding::detached_for_test();
+        let should_stop = process_queue(
+            &driver,
+            &mut executor,
+            &mut effect_rx,
+            None,
+            &authority_binding,
+        )
+        .await;
+
+        assert!(
+            should_stop,
+            "a closed effect channel must stop the runtime loop"
+        );
+        assert_eq!(
+            stop_calls.load(Ordering::SeqCst),
+            1,
+            "channel closure must route through StopRuntimeExecutor, not exit bare"
+        );
+        assert_eq!(
+            apply_calls.load(Ordering::SeqCst),
+            0,
+            "channel closure must not fall through to ordinary queue processing"
         );
     }
 
@@ -3407,6 +3513,35 @@ mod tests {
             "stale runtime loop must not advance observed cursor truth"
         );
         assert_eq!(last_injected_seq, 0);
+    }
+
+    /// Regression for #182: a detached wake whose continuation injection fails
+    /// must leave the observed cursor UNCHANGED so the completion is
+    /// re-presented on the next wake. A successful injection advances both
+    /// cursors. The old code advanced the observed cursor unconditionally,
+    /// laundering a failed injection into a watermark advance that hid the
+    /// completion from retry.
+    #[test]
+    fn detached_wake_cursor_plan_leaves_completion_visible_on_injection_failure() {
+        // Failed injection: leave both cursors untouched (completion stays
+        // visible for retry).
+        let failed = DetachedWakeCursorPlan::from_injection(false);
+        assert_eq!(failed, DetachedWakeCursorPlan::LeaveVisibleForRetry);
+        assert!(
+            !failed.advances_observed_cursor(),
+            "a failed injection must NOT advance the observed cursor"
+        );
+
+        // Successful injection: advance both injected and observed cursors.
+        let succeeded = DetachedWakeCursorPlan::from_injection(true);
+        assert_eq!(
+            succeeded,
+            DetachedWakeCursorPlan::AdvanceInjectedAndObserved
+        );
+        assert!(
+            succeeded.advances_observed_cursor(),
+            "a successful injection must advance the observed cursor"
+        );
     }
 
     // --- execution_kind stamping tests ---

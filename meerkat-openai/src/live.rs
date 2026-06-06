@@ -980,6 +980,34 @@ fn openai_realtime_tools(visible_tools: &[ToolDef]) -> Vec<Tool> {
         .collect()
 }
 
+/// Parse the JSON arguments of a realtime provider tool call, failing the
+/// tool-call boundary on malformed payloads instead of laundering invalid
+/// JSON into a `Value::String` blob. Mirrors the Anthropic streaming sibling
+/// (`parse_streamed_tool_args`) and the OpenAI completions sibling
+/// (`client::parse_tool_call_arguments`): empty args normalize to an empty
+/// object; anything that is not a JSON object surfaces a typed
+/// `LlmError::StreamParseError`.
+pub(crate) fn parse_tool_call_args(
+    arguments: &str,
+    call_id: &str,
+) -> Result<serde_json::Value, LlmError> {
+    let trimmed = arguments.trim();
+    if trimmed.is_empty() {
+        return Ok(serde_json::Value::Object(serde_json::Map::new()));
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(trimmed).map_err(|error| LlmError::StreamParseError {
+            message: format!("invalid OpenAI tool call arguments JSON for {call_id}: {error}"),
+        })?;
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err(LlmError::StreamParseError {
+            message: format!("OpenAI tool call arguments for {call_id} must be a JSON object"),
+        })
+    }
+}
+
 fn openai_realtime_instructions(
     seed_messages: &[Message],
     runtime_system_context: &[PendingSystemContextAppend],
@@ -1527,7 +1555,10 @@ impl OpenAiRealtimeSession {
             .or_default()
     }
 
-    fn capture_mcp_call_item(&mut self, item: &Item) -> Option<RealtimeSessionEvent> {
+    fn capture_mcp_call_item(
+        &mut self,
+        item: &Item,
+    ) -> Result<Option<RealtimeSessionEvent>, LlmError> {
         let Item::McpCall {
             id: Some(item_id),
             call_id,
@@ -1536,7 +1567,7 @@ impl OpenAiRealtimeSession {
             ..
         } = item
         else {
-            return None;
+            return Ok(None);
         };
 
         let pending = self.pending_mcp_call_mut(item_id);
@@ -1560,7 +1591,7 @@ impl OpenAiRealtimeSession {
         &mut self,
         item_id: &str,
         arguments: String,
-    ) -> Option<RealtimeSessionEvent> {
+    ) -> Result<Option<RealtimeSessionEvent>, LlmError> {
         if self.pending_text_suppressions.is_empty() {
             self.pending_text_suppressions.push_back(arguments.clone());
         }
@@ -1569,7 +1600,10 @@ impl OpenAiRealtimeSession {
         self.try_emit_mcp_tool_call(item_id)
     }
 
-    fn try_emit_mcp_tool_call(&mut self, item_id: &str) -> Option<RealtimeSessionEvent> {
+    fn try_emit_mcp_tool_call(
+        &mut self,
+        item_id: &str,
+    ) -> Result<Option<RealtimeSessionEvent>, LlmError> {
         let ready = self.pending_mcp_calls.get(item_id).and_then(|pending| {
             Some((
                 pending.call_id.clone()?,
@@ -1577,17 +1611,21 @@ impl OpenAiRealtimeSession {
                 pending.final_arguments.clone()?,
             ))
         });
-        let (call_id, tool_name, arguments) = ready?;
+        let Some((call_id, tool_name, arguments)) = ready else {
+            return Ok(None);
+        };
 
-        let pending = self.pending_mcp_calls.remove(item_id)?;
+        let Some(pending) = self.pending_mcp_calls.remove(item_id) else {
+            return Ok(None);
+        };
         let arguments = pending.final_arguments.unwrap_or(arguments);
+        let parsed = parse_tool_call_args(&arguments, &call_id)?;
         self.response_tool_call_observed = true;
-        Some(RealtimeSessionEvent::ToolCallRequested {
+        Ok(Some(RealtimeSessionEvent::ToolCallRequested {
             call_id,
             tool_name,
-            arguments: serde_json::from_str(&arguments)
-                .unwrap_or(serde_json::Value::String(arguments)),
-        })
+            arguments: parsed,
+        }))
     }
 
     fn should_suppress_mcp_echoed_text(&mut self, delta: &str) -> bool {
@@ -1932,7 +1970,7 @@ impl OpenAiRealtimeSession {
                         Some(response_id),
                     )));
                 }
-                self.capture_mcp_call_item(&item)
+                self.capture_mcp_call_item(&item)?
             }
             ServerEvent::ResponseMcpCallArgumentsDelta {
                 response_id,
@@ -1953,7 +1991,7 @@ impl OpenAiRealtimeSession {
             } => {
                 self.note_provider_response_progressed();
                 self.note_response_for_item(&response_id, &item_id);
-                self.note_mcp_argument_done(&item_id, arguments)
+                self.note_mcp_argument_done(&item_id, arguments)?
             }
             ServerEvent::ResponseOutputTextDelta {
                 event_id,
@@ -2093,12 +2131,12 @@ impl OpenAiRealtimeSession {
             } => {
                 self.note_provider_response_progressed();
                 self.note_response_for_item(&response_id, &item_id);
+                let parsed = parse_tool_call_args(&arguments, &call_id)?;
                 self.response_tool_call_observed = true;
                 Some(RealtimeSessionEvent::ToolCallRequested {
                     call_id,
                     tool_name: name,
-                    arguments: serde_json::from_str(&arguments)
-                        .unwrap_or(serde_json::Value::String(arguments)),
+                    arguments: parsed,
                 })
             }
             ServerEvent::ConversationItemTruncated {
@@ -9478,5 +9516,101 @@ mod tests {
             eof.is_none(),
             "R6-1: next_observation must return None after pump EOF, got {eof:?}"
         );
+    }
+
+    // Row #81: the shared tool-call argument parser must fail the tool-call
+    // boundary on malformed provider JSON with a typed `StreamParseError`
+    // rather than laundering it into a `Value::String` blob.
+    #[test]
+    fn parse_tool_call_args_rejects_malformed_json() {
+        let err = parse_tool_call_args("{not valid json", "call_42")
+            .expect_err("malformed JSON must be a typed fault, not a Value::String blob");
+        assert!(
+            matches!(err, LlmError::StreamParseError { .. }),
+            "expected StreamParseError, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_tool_call_args_rejects_non_object_json() {
+        let err = parse_tool_call_args("\"just a string\"", "call_43")
+            .expect_err("a non-object JSON value must be a typed fault");
+        assert!(matches!(err, LlmError::StreamParseError { .. }));
+    }
+
+    #[test]
+    fn parse_tool_call_args_accepts_object_and_normalizes_empty() {
+        let empty = parse_tool_call_args("   ", "call_44").expect("empty args normalize to {}");
+        assert!(empty.is_object() && empty.as_object().is_some_and(|m| m.is_empty()));
+        let parsed =
+            parse_tool_call_args("{\"q\":\"hi\"}", "call_45").expect("object args parse cleanly");
+        assert_eq!(parsed["q"], serde_json::json!("hi"));
+    }
+
+    // Row #81: a function-call done event carrying malformed JSON must fail
+    // the realtime tool-call boundary, not emit a `ToolCallRequested` whose
+    // `arguments` is a `Value::String` blob.
+    #[tokio::test]
+    async fn function_call_with_malformed_args_fails_tool_call_boundary() {
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::new(Mutex::new(Vec::new())),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+
+        let result = session.map_server_event(ServerEvent::ResponseFunctionCallArgumentsDone {
+            event_id: "evt_fn".to_string(),
+            response_id: "resp_fn".to_string(),
+            item_id: "item_fn".to_string(),
+            output_index: 0,
+            call_id: "call_malformed".to_string(),
+            name: "search".to_string(),
+            arguments: "{not json".to_string(),
+        });
+
+        let err = result.expect_err(
+            "malformed function-call args must fail the tool-call boundary, not emit \
+             a ToolCallRequested carrying Value::String",
+        );
+        assert!(
+            matches!(err, LlmError::StreamParseError { .. }),
+            "expected StreamParseError, got {err:?}"
+        );
+        assert!(
+            !session.response_tool_call_observed,
+            "a malformed tool call must not be marked observed"
+        );
+    }
+
+    #[tokio::test]
+    async fn function_call_with_valid_args_emits_tool_call_requested() {
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::new(Mutex::new(Vec::new())),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+
+        let mapped = session
+            .map_server_event(ServerEvent::ResponseFunctionCallArgumentsDone {
+                event_id: "evt_fn".to_string(),
+                response_id: "resp_fn".to_string(),
+                item_id: "item_fn".to_string(),
+                output_index: 0,
+                call_id: "call_ok".to_string(),
+                name: "search".to_string(),
+                arguments: "{\"q\":\"meerkat\"}".to_string(),
+            })
+            .expect("valid args must map cleanly");
+
+        match mapped {
+            Some(RealtimeSessionEvent::ToolCallRequested { arguments, .. }) => {
+                assert_eq!(arguments["q"], serde_json::json!("meerkat"));
+            }
+            other => panic!("expected ToolCallRequested, got {other:?}"),
+        }
     }
 }

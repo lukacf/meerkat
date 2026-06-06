@@ -113,7 +113,13 @@ impl SurfaceScheduleSessionHost for RpcScheduleTargetAdapter {
             return Ok(TargetProbeOutcome::Ready);
         };
 
-        if let Some(info) = runtime.session_state(session_id).await {
+        // Row #98: a store fault on the live session-state read is a typed
+        // failure, not "session absent" -> falling through to load_persisted.
+        if let Some(info) = runtime
+            .session_state(session_id)
+            .await
+            .map_err(rpc_to_schedule)?
+        {
             return Ok(if info.state == SessionState::Running {
                 TargetProbeOutcome::Busy {
                     detail: Some(format!("session still running: {session_id}")),

@@ -590,9 +590,11 @@ pub async fn handle_list(
         ..Default::default()
     };
 
-    let mut sessions: Vec<meerkat_contracts::WireSessionSummary> = runtime
-        .list_sessions_rich(query)
-        .await
+    let summaries = match runtime.list_sessions_rich(query).await {
+        Ok(s) => s,
+        Err(err) => return RpcResponse::error(id, err.code, err.message),
+    };
+    let mut sessions: Vec<meerkat_contracts::WireSessionSummary> = summaries
         .into_iter()
         .map(|mut ws| {
             ws.session_ref = runtime
@@ -632,17 +634,19 @@ pub async fn handle_read(
     };
 
     match runtime.read_session_rich(&session_id).await {
-        Some(mut info) => {
+        // Row #98: a store fault must NOT be reported as SESSION_NOT_FOUND.
+        Ok(Some(mut info)) => {
             info.session_ref = runtime
                 .realm_id()
                 .map(|realm| meerkat_contracts::format_session_ref(&realm, &info.session_id));
             RpcResponse::success(id, info)
         }
-        None => RpcResponse::error(
+        Ok(None) => RpcResponse::error(
             id,
             error::SESSION_NOT_FOUND,
             format!("Session not found: {session_id}"),
         ),
+        Err(err) => RpcResponse::error(id, err.code, err.message),
     }
 }
 

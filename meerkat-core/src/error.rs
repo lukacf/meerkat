@@ -286,6 +286,14 @@ pub enum AgentError {
     StoreError(String),
     #[error("Tool error: {0}")]
     ToolError(String),
+    /// A tool failure carrying the typed [`ToolError`] cause.
+    ///
+    /// Unlike [`AgentError::ToolError`] (which flattens to a `String` and
+    /// erases the cause), this variant preserves the typed cause so the
+    /// `access_denied` vs `not_found` vs `invalid_arguments` distinction
+    /// survives to [`ToolError::error_code`] and the wire surface.
+    #[error("Tool error: {error}")]
+    Tool { error: ToolError },
     #[error("MCP error: {0}")]
     McpError(String),
     #[error("Session not found: {0}")]
@@ -396,6 +404,25 @@ pub enum AgentError {
 }
 
 impl AgentError {
+    /// Wrap a typed [`ToolError`] as a terminal agent failure, preserving the
+    /// typed cause (and thus its [`ToolError::error_code`]).
+    pub fn tool(error: ToolError) -> Self {
+        Self::Tool { error }
+    }
+
+    /// Stable error code for the typed tool cause, when this is the
+    /// [`AgentError::Tool`] variant. Returns `None` for every other variant.
+    ///
+    /// This is the seam that lets `access_denied` / `not_found` /
+    /// `invalid_arguments` survive to the wire instead of being flattened
+    /// into an opaque message.
+    pub fn tool_error_code(&self) -> Option<&'static str> {
+        match self {
+            Self::Tool { error } => Some(error.error_code()),
+            _ => None,
+        }
+    }
+
     pub fn llm(
         provider: &'static str,
         reason: LlmFailureReason,
@@ -724,6 +751,61 @@ mod tests {
             display.contains("TimeBudgetExceeded") && display.contains("deadline reached"),
             "display should include cause and display message: {display}"
         );
+    }
+
+    // -- Rows 12 / 57: typed ToolError cause survives on AgentError --
+
+    #[test]
+    fn tool_variant_preserves_access_denied_error_code() {
+        // Row 12: a hidden-tool denial must terminalize carrying the typed
+        // ToolError so `access_denied` survives to error_code() (NOT flattened
+        // into an opaque string via AgentError::ToolError(String)).
+        let err = AgentError::tool(ToolError::access_denied("secret_tool"));
+        match &err {
+            AgentError::Tool { error } => {
+                assert_eq!(error.error_code(), "access_denied");
+            }
+            other => panic!("expected AgentError::Tool, got: {other}"),
+        }
+        assert_eq!(err.tool_error_code(), Some("access_denied"));
+    }
+
+    #[test]
+    fn tool_variant_preserves_not_found_error_code() {
+        // Row 12 sibling: not_found must remain distinct from access_denied.
+        let err = AgentError::tool(ToolError::not_found("missing_tool"));
+        assert_eq!(err.tool_error_code(), Some("tool_not_found"));
+        assert_ne!(
+            err.tool_error_code(),
+            AgentError::tool(ToolError::access_denied("missing_tool")).tool_error_code(),
+            "not_found must stay distinct from access_denied"
+        );
+    }
+
+    #[test]
+    fn tool_variant_preserves_invalid_arguments_error_code() {
+        // Row 57: an invalid tool-call args projection failure must terminalize
+        // carrying the typed invalid_arguments ToolError, not a flattened string.
+        let err = AgentError::tool(ToolError::invalid_arguments(
+            "search",
+            "tool call arguments projection failed: bad json",
+        ));
+        match &err {
+            AgentError::Tool { error } => {
+                assert_eq!(error.error_code(), "invalid_arguments");
+            }
+            other => panic!("expected AgentError::Tool, got: {other}"),
+        }
+        assert_eq!(err.tool_error_code(), Some("invalid_arguments"));
+    }
+
+    #[test]
+    fn flattened_tool_error_string_has_no_typed_code() {
+        // Guard: the OLD behavior (flattening into AgentError::ToolError(String))
+        // loses the typed code. tool_error_code() must return None for it, which
+        // is exactly the dogma gap rows 12/57 close by switching to Tool { error }.
+        let flattened = AgentError::ToolError(ToolError::access_denied("x").to_string());
+        assert_eq!(flattened.tool_error_code(), None);
     }
 
     #[test]

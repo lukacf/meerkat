@@ -689,8 +689,12 @@ impl MeerkatMachine {
     ///
     /// Peer requests whose intent matches one of these strings will be accepted
     /// without triggering an LLM turn (ApplyMode::Ignore, WakeMode::None).
-    pub async fn set_session_silent_intents(&self, session_id: &SessionId, intents: Vec<String>) {
-        let _ = self
+    pub async fn set_session_silent_intents(
+        &self,
+        session_id: &SessionId,
+        intents: Vec<String>,
+    ) -> Result<(), RuntimeDriverError> {
+        match self
             .execute_meerkat_machine_command(
                 None,
                 MeerkatMachineCommand::SetSilentIntents {
@@ -698,7 +702,14 @@ impl MeerkatMachine {
                     intents,
                 },
             )
-            .await;
+            .await
+            .map_err(MeerkatMachine::driver_error_from_command_error)?
+        {
+            MeerkatMachineCommandResult::Unit => Ok(()),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "set_session_silent_intents: unexpected command result variant: {other:?}"
+            ))),
+        }
     }
 
     pub async fn commit_service_turn_terminal_receipt(

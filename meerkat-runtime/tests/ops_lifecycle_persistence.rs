@@ -764,7 +764,10 @@ async fn cold_persistent_adapter_recovers_persisted_epoch() {
     let adapter = meerkat_runtime::MeerkatMachine::persistent_without_blobs(
         Arc::clone(&store) as Arc<dyn RuntimeStore>
     );
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let bindings = adapter.prepare_bindings(session_id.clone()).await.unwrap();
     assert_eq!(
@@ -824,7 +827,10 @@ async fn cold_persistent_adapter_keeps_canonical_ops_snapshot_over_more_advanced
     let adapter = meerkat_runtime::MeerkatMachine::persistent_without_blobs(
         Arc::clone(&store) as Arc<dyn RuntimeStore>
     );
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let bindings = adapter.prepare_bindings(session_id.clone()).await.unwrap();
     assert_eq!(
@@ -871,7 +877,10 @@ async fn cold_persistent_adapter_keeps_canonical_ops_snapshot_when_legacy_alias_
     let adapter = meerkat_runtime::MeerkatMachine::persistent_without_blobs(
         Arc::clone(&store) as Arc<dyn RuntimeStore>
     );
-    adapter.register_session(session_id.clone()).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
 
     let bindings = adapter.prepare_bindings(session_id.clone()).await.unwrap();
     assert_eq!(

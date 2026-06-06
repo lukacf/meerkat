@@ -304,7 +304,10 @@ async fn control_plane_contract_stop_runtime_executor_persists_stopped_state_wit
     let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let sid = SessionId::new();
 
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
     let _bindings = adapter
         .prepare_bindings(sid.clone())
         .await
@@ -435,7 +438,10 @@ async fn control_plane_contract_retire_without_runtime_loop_abandons_waited_work
     let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let sid = SessionId::new();
 
-    adapter.register_session(sid.clone()).await;
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
 
     let input = make_progress_input("retire-without-loop");
     let input_id = input.id().clone();

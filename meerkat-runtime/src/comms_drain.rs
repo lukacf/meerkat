@@ -100,14 +100,39 @@ pub fn spawn_comms_drain(
             let mut notified = std::pin::pin!(inbox_notify.notified());
             notified.as_mut().enable();
 
-            let candidates = comms_runtime.drain_peer_input_candidates().await;
+            // Drain the CLASSIFIED path directly so a classification fault stays
+            // a typed error instead of being laundered into an empty candidate
+            // vec (the old `drain_peer_input_candidates().await` collapsed the
+            // fallible drain with `.unwrap_or_default()`, making an error
+            // indistinguishable from an idle inbox and triggering the
+            // idle/dismiss lifecycle branch below). Empty-because-error must be
+            // distinguishable from empty-because-idle before deciding to idle.
+            let candidates = match comms_runtime.drain_classified_inbox_interactions().await {
+                Ok(candidates) => candidates,
+                Err(err) => {
+                    // A classified-drain fault is NOT an idle inbox. Fail closed
+                    // with the typed `Failed` terminal owned by the drain
+                    // lifecycle authority rather than silently idling/dismissing.
+                    tracing::error!(
+                        session_id = %session_id,
+                        error = %err,
+                        "comms_drain: classified inbox drain failed; exiting via typed Failed terminal (not idle/dismiss)"
+                    );
+                    adapter
+                        .notify_comms_drain_exited(&session_id, DrainExitReason::Failed)
+                        .await;
+                    return;
+                }
+            };
             if candidates.is_empty() {
                 // Lifecycle dismissal is NOT driven by a peer message body. A
                 // peer-controlled string must never stop this executor; the
                 // typed dismissal path is owned by the runtime drain-lifecycle
                 // authority, which fires `DrainExitReason::Dismissed` through
                 // the handle seam (see `handles::comms_drain`). The drain loop
-                // here only honors the idle-timeout terminal below.
+                // here only honors the idle-timeout terminal below. This branch
+                // is reached only on a genuinely empty (Ok) drain, never on a
+                // drain error.
                 if crate::tokio::time::timeout(timeout_dur, notified.as_mut())
                     .await
                     .is_err()
@@ -3915,13 +3940,19 @@ mod tests {
             self.peer_request_response_handle.clone()
         }
 
-        async fn drain_peer_input_candidates(&self) -> Vec<PeerInputCandidate> {
-            self.candidate
+        async fn drain_classified_inbox_interactions(
+            &self,
+        ) -> Result<
+            Vec<meerkat_core::interaction::ClassifiedInboxInteraction>,
+            meerkat_core::agent::CommsCapabilityError,
+        > {
+            Ok(self
+                .candidate
                 .lock()
                 .expect("candidate mutex")
                 .take()
                 .into_iter()
-                .collect()
+                .collect())
         }
 
         fn mark_interaction_complete(&self, _id: &InteractionId) {
@@ -4021,11 +4052,121 @@ mod tests {
         }
     }
 
+    /// Test double whose classified inbox drain can be configured to either
+    /// fail (typed classification fault) or return an empty (Ok) inbox.
+    struct ClassifiedDrainOutcomeRuntime {
+        notify: Arc<tokio::sync::Notify>,
+        fail_classified_drain: bool,
+    }
+
+    impl ClassifiedDrainOutcomeRuntime {
+        fn new(fail_classified_drain: bool) -> Self {
+            Self {
+                notify: Arc::new(tokio::sync::Notify::new()),
+                fail_classified_drain,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CommsRuntime for ClassifiedDrainOutcomeRuntime {
+        async fn drain_messages(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
+            self.notify.clone()
+        }
+
+        async fn drain_classified_inbox_interactions(
+            &self,
+        ) -> Result<
+            Vec<meerkat_core::interaction::ClassifiedInboxInteraction>,
+            meerkat_core::agent::CommsCapabilityError,
+        > {
+            if self.fail_classified_drain {
+                Err(meerkat_core::agent::CommsCapabilityError::Unsupported(
+                    "synthetic classification fault".to_string(),
+                ))
+            } else {
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    /// Regression for #341: a classified-drain ERROR must NOT be laundered into
+    /// an empty inbox and routed to the idle/dismiss lifecycle branch. With the
+    /// old `drain_peer_input_candidates().await.unwrap_or_default()` collapse,
+    /// an error became `Vec::new()` and the loop idled until the (long) idle
+    /// timeout. The fix consumes the typed classified path and fails closed
+    /// promptly with `DrainExitReason::Failed`, so the drain exits well before
+    /// the long idle timeout could fire.
+    #[tokio::test]
+    async fn classified_drain_error_fails_closed_not_idle_timeout() {
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
+
+        // Long idle timeout: if the error were laundered to empty, the drain
+        // would block here for 60s instead of exiting.
+        let runtime = Arc::new(ClassifiedDrainOutcomeRuntime::new(true));
+        let drain = spawn_comms_drain(
+            adapter.clone(),
+            session_id.clone(),
+            runtime.clone(),
+            Some(Duration::from_secs(60)),
+        );
+
+        tokio::time::timeout(Duration::from_secs(2), drain)
+            .await
+            .expect(
+                "a classified-drain error must fail closed promptly, NOT idle until the 60s timeout",
+            )
+            .expect("drain task should not panic");
+    }
+
+    /// Companion to #341: an actually-empty (Ok) inbox still idles — it must
+    /// NOT exit promptly. With a long idle timeout the drain blocks on the
+    /// inbox notify rather than terminating, proving empty-because-idle is
+    /// distinguishable from empty-because-error.
+    #[tokio::test]
+    async fn empty_classified_drain_idles_rather_than_exiting() {
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
+
+        let runtime = Arc::new(ClassifiedDrainOutcomeRuntime::new(false));
+        let drain = spawn_comms_drain(
+            adapter.clone(),
+            session_id.clone(),
+            runtime.clone(),
+            Some(Duration::from_secs(60)),
+        );
+
+        // An idle (empty Ok) inbox must keep the drain alive: it should still be
+        // running well within the 60s idle window.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), drain)
+                .await
+                .is_err(),
+            "an empty (Ok) inbox must idle, not exit promptly"
+        );
+    }
+
     #[tokio::test]
     async fn response_without_machine_terminality_is_rejected_before_progress_or_admission() {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
 
         let runtime = Arc::new(OneShotPeerRequestRuntime::new(
             response_candidate(PeerInputClass::ResponseTerminal, None),
@@ -4057,7 +4198,10 @@ mod tests {
     async fn malformed_response_terminality_rejects_pending_peer_truth_via_authority() {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
 
         let peer_handle = Arc::new(CountingPeerInteractionHandle::default());
         let peer_authority: Arc<dyn meerkat_core::handles::PeerInteractionHandle> =
@@ -4115,7 +4259,10 @@ mod tests {
         ] {
             let adapter = Arc::new(MeerkatMachine::ephemeral());
             let session_id = SessionId::new();
-            adapter.register_session(session_id.clone()).await;
+            adapter
+                .register_session(session_id.clone())
+                .await
+                .expect("register session");
 
             let runtime = Arc::new(OneShotPeerRequestRuntime::new(
                 candidate,
@@ -4157,7 +4304,10 @@ mod tests {
         ] {
             let adapter = Arc::new(MeerkatMachine::ephemeral());
             let session_id = SessionId::new();
-            adapter.register_session(session_id.clone()).await;
+            adapter
+                .register_session(session_id.clone())
+                .await
+                .expect("register session");
 
             let peer_handle = Arc::new(CountingPeerInteractionHandle::rejecting_request_received());
             let peer_authority: Arc<dyn meerkat_core::handles::PeerInteractionHandle> = peer_handle;
@@ -4201,7 +4351,10 @@ mod tests {
         ] {
             let adapter = Arc::new(MeerkatMachine::ephemeral());
             let session_id = SessionId::new();
-            adapter.register_session(session_id.clone()).await;
+            adapter
+                .register_session(session_id.clone())
+                .await
+                .expect("register session");
 
             let peer_handle = Arc::new(CountingPeerInteractionHandle::default());
             let peer_authority: Arc<dyn meerkat_core::handles::PeerInteractionHandle> =
@@ -4251,7 +4404,10 @@ mod tests {
         ] {
             let adapter = Arc::new(MeerkatMachine::ephemeral());
             let session_id = SessionId::new();
-            adapter.register_session(session_id.clone()).await;
+            adapter
+                .register_session(session_id.clone())
+                .await
+                .expect("register session");
 
             let runtime = Arc::new(OneShotPeerRequestRuntime::new(
                 inbound_peer_request_candidate(class),
@@ -4665,7 +4821,10 @@ mod tests {
 
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         adapter
             .stage_supervisor_bind(
                 &session_id,
@@ -4778,7 +4937,10 @@ mod tests {
 
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         adapter
             .test_install_session_peer_comms_handle_on_runtime(&session_id, member_runtime.as_ref())
             .await
@@ -4916,7 +5078,10 @@ mod tests {
 
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         adapter
             .stage_supervisor_bind(
                 &session_id,
@@ -5079,7 +5244,10 @@ mod tests {
 
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         adapter
             .stage_supervisor_bind(
                 &session_id,
@@ -5256,7 +5424,10 @@ mod tests {
 
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         adapter
             .stage_supervisor_bind(
                 &session_id,
@@ -5430,7 +5601,10 @@ mod tests {
 
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         adapter
             .stage_supervisor_bind(
                 &session_id,
@@ -5581,7 +5755,7 @@ mod tests {
     #[test]
     fn comms_drain_registers_inbox_waiter_before_draining() {
         // CONC-3: the drain MUST pin + `enable()` its inbox `notified` waiter
-        // BEFORE calling `drain_peer_input_candidates`, so a `notify_waiters()`
+        // BEFORE calling the classified inbox drain, so a `notify_waiters()`
         // that fires in the drain-empty -> await window is observed rather than
         // lost. Under the mob `Duration::MAX` idle timeout, losing it stalls the
         // drain forever (a peer message reported "sent" but never drained). Pin
@@ -5592,8 +5766,8 @@ mod tests {
             .find("notified.as_mut().enable();")
             .expect("drain must enable() its pinned inbox waiter");
         let drain = source
-            .find("let candidates = comms_runtime.drain_peer_input_candidates().await;")
-            .expect("drain must drain peer input candidates");
+            .find("comms_runtime.drain_classified_inbox_interactions().await")
+            .expect("drain must consume the typed classified inbox path");
         assert!(
             enable < drain,
             "the inbox waiter must be registered (enable) BEFORE the drain, not after"
@@ -6301,7 +6475,10 @@ mod tests {
         });
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let params = json!({
             "command": "bind_member",
             "supervisor": {
@@ -6422,7 +6599,10 @@ mod tests {
     async fn bind_material_adapter() -> (Arc<MeerkatMachine>, SessionId) {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         (adapter, session_id)
     }
 
@@ -6515,7 +6695,10 @@ mod tests {
             let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
             let adapter = Arc::new(MeerkatMachine::ephemeral());
             let session_id = SessionId::new();
-            adapter.register_session(session_id.clone()).await;
+            adapter
+                .register_session(session_id.clone())
+                .await
+                .expect("register session");
             let candidate = bridge_candidate(&sender, &BridgeCommand::BindMember(payload));
 
             assert!(
@@ -6560,7 +6743,10 @@ mod tests {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let candidate = bridge_candidate(&sender, &BridgeCommand::BindMember(payload));
 
         assert!(
@@ -6607,7 +6793,10 @@ mod tests {
         let supervisor = bridge_peer_identity(&payload.supervisor, "test").expect("valid peer");
         let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let sender = bridge_sender_fact(&payload.supervisor.peer_id);
         let admission = adapter
             .resolve_supervisor_bind_admission(
@@ -6629,7 +6818,10 @@ mod tests {
         let current_payload = sample_bind_payload();
         let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         bind_sample_supervisor(&adapter, &session_id, &current_payload).await;
         let mut takeover = sample_bind_payload();
         takeover.supervisor = old_supervisor_bridge_spec();
@@ -6663,7 +6855,10 @@ mod tests {
         let current_payload = sample_bind_payload();
         let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         bind_sample_supervisor(&adapter, &session_id, &current_payload).await;
         let mut replay = sample_bind_payload();
         replay.epoch = current_payload.epoch - 1;
@@ -6697,7 +6892,10 @@ mod tests {
         let current_payload = sample_bind_payload();
         let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         bind_sample_supervisor(&adapter, &session_id, &current_payload).await;
         let mut advance = sample_bind_payload();
         advance.epoch = current_payload.epoch + 5;
@@ -6731,7 +6929,10 @@ mod tests {
         let current_payload = sample_bind_payload();
         let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         bind_sample_supervisor(&adapter, &session_id, &current_payload).await;
         let retry = sample_bind_payload();
         let supervisor = bridge_peer_identity(&retry.supervisor, "test").expect("valid peer");
@@ -6762,7 +6963,10 @@ mod tests {
         let current_payload = sample_bind_payload();
         let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         bind_sample_supervisor(&adapter, &session_id, &current_payload).await;
         let retry = sample_bind_payload();
         let supervisor = bridge_peer_identity(&retry.supervisor, "test").expect("valid peer");
@@ -6798,7 +7002,10 @@ mod tests {
         let current_payload = sample_bind_payload();
         let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         bind_sample_supervisor(&adapter, &session_id, &current_payload).await;
         let retry = sample_bind_payload();
         let supervisor = bridge_peer_identity(&retry.supervisor, "test").expect("valid peer");
@@ -6830,7 +7037,10 @@ mod tests {
         );
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let current_supervisor =
             trusted_peer_from_runtime("mob/__mob_supervisor__", &supervisor_runtime);
         adapter
@@ -6905,7 +7115,10 @@ mod tests {
         });
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let current = trusted_supervisor_descriptor(0xbb);
         adapter
             .stage_supervisor_bind(
@@ -7099,7 +7312,10 @@ mod tests {
         });
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let supervisor = supervisor_bridge_spec();
         let command = BridgeCommand::BindMember(
             meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
@@ -7169,7 +7385,10 @@ mod tests {
         });
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let authorized = TrustedPeerDescriptor::test_only_unsigned_typed(
             "mob/__mob_supervisor__",
             PeerId::new(),
@@ -7247,7 +7466,10 @@ mod tests {
         });
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let authorized = trusted_supervisor_descriptor(0xbb);
         adapter
             .stage_supervisor_bind(
@@ -7351,7 +7573,10 @@ mod tests {
         let supervisor = bridge_peer_identity(&payload.supervisor, "test").expect("valid peer");
         let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let sender = bridge_sender_fact(&payload.supervisor.peer_id);
 
         assert!(
@@ -7384,7 +7609,10 @@ mod tests {
         let supervisor = bridge_peer_identity(&payload.supervisor, "test").expect("valid peer");
         let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         bind_sample_supervisor(&adapter, &session_id, &current_payload).await;
         let attacker_peer_id =
             PeerId::parse(PEER_ID_OLD_SUPERVISOR).expect("valid attacker peer id");
@@ -7425,7 +7653,10 @@ mod tests {
 
         let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let supervisor = TrustedPeerDescriptor::try_from(current_payload.supervisor.clone())
             .expect("valid supervisor spec");
         adapter
@@ -7574,7 +7805,10 @@ mod tests {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let candidate = bridge_candidate(&sender, &BridgeCommand::BindMember(payload));
 
         assert!(
@@ -7607,7 +7841,10 @@ mod tests {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let candidate = bridge_candidate(&sender, &BridgeCommand::BindMember(payload));
 
         assert!(
@@ -7653,7 +7890,10 @@ mod tests {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         adapter
             .stage_supervisor_bind(
                 &session_id,
@@ -7718,7 +7958,10 @@ mod tests {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         adapter
             .stage_supervisor_bind(
                 &session_id,
@@ -7777,7 +8020,10 @@ mod tests {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         adapter
             .stage_supervisor_bind(
                 &session_id,
@@ -7824,7 +8070,10 @@ mod tests {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let payload = BridgeSupervisorPayload {
             supervisor: supervisor.clone(),
             epoch: 1,
@@ -7872,7 +8121,10 @@ mod tests {
     async fn dsl_supervisor_guards_block_rebind_and_stale_revoke() {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
 
         // Start Unbound → Bound.
         adapter
@@ -7969,7 +8221,10 @@ mod tests {
     async fn dsl_supervisor_trust_publish_ack_stale_epoch_is_rejected() {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
 
         // Bind at epoch 1.
         adapter
@@ -8027,7 +8282,10 @@ mod tests {
     async fn generated_supervisor_publish_authority_rejects_stale_descriptor_same_peer_epoch() {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let runtime = bootstrap_runtime(PEER_ID_RECEIVER, "inproc://receiver", Some("token"));
         adapter
             .stage_local_endpoint_for_comms_runtime(&session_id, &runtime)
@@ -8085,7 +8343,10 @@ mod tests {
     async fn dsl_supervisor_trust_revoke_ack_stale_epoch_is_rejected() {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
 
         // Bind at epoch 1.
         adapter
@@ -8145,7 +8406,10 @@ mod tests {
     async fn dsl_supervisor_trust_ack_rejects_mismatched_peer_id() {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
 
         adapter
             .stage_supervisor_bind(
@@ -8173,7 +8437,10 @@ mod tests {
     async fn dsl_supervisor_trust_ack_rejected_when_unbound() {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
 
         // Unbound from the start — any ack must be rejected.
         let unbound = adapter
@@ -8192,7 +8459,10 @@ mod tests {
             Arc::new(meerkat_comms::CommsRuntime::inproc_only("mob/__mob_supervisor__").unwrap());
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let supervisor = trusted_peer_from_runtime("mob/__mob_supervisor__", &supervisor_runtime);
         add_test_projection_trust(runtime.as_ref(), supervisor.clone(), "trust supervisor").await;
         adapter
@@ -8260,7 +8530,10 @@ mod tests {
             Arc::new(meerkat_comms::CommsRuntime::inproc_only("peer-wire-noverlay").unwrap());
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let supervisor =
             trusted_peer_from_runtime("mob/__mob_supervisor_noverlay__", &supervisor_runtime);
         add_test_projection_trust(runtime.as_ref(), supervisor.clone(), "trust supervisor").await;
@@ -8315,7 +8588,10 @@ mod tests {
             Arc::new(meerkat_comms::CommsRuntime::inproc_only("peer-wire-mismatch").unwrap());
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
         let supervisor =
             trusted_peer_from_runtime("mob/__mob_supervisor_mismatch__", &supervisor_runtime);
         add_test_projection_trust(runtime.as_ref(), supervisor.clone(), "trust supervisor").await;

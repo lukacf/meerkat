@@ -3877,3 +3877,201 @@ async def test_client_live_open_passes_provider_managed_turning_mode():
             {"session_id": "session-44", "turning_mode": "provider_managed"},
         )
     ]
+
+
+# ---------------------------------------------------------------------------
+# Dogma row #88 — session fork SDK result parser must fail closed, not fabricate
+# empty/zero handles from absent/malformed required wire fields.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fork_session_rejects_missing_session_id() -> None:
+    """A session/fork response missing `session_id` raises INVALID_RESPONSE
+    rather than returning a SessionForkResult with an empty handle."""
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        # source_session_id present but the required session_id is absent.
+        return {"source_session_id": "src-1", "message_count": 3}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.fork_session_at("src-1", 0)
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_fork_session_rejects_non_numeric_message_count() -> None:
+    """A malformed (non-numeric) required `message_count` raises INVALID_RESPONSE
+    instead of being coerced to zero."""
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "source_session_id": "src-1",
+            "session_id": "fork-1",
+            "message_count": "not-a-number",
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.fork_session_at("src-1", 0)
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_fork_session_parses_valid_result() -> None:
+    """A well-formed fork response round-trips into a SessionForkResult."""
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "source_session_id": "src-1",
+            "session_id": "fork-1",
+            "session_ref": None,
+            "message_count": 7,
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    result = await client.fork_session_at("src-1", 0)
+    assert result.source_session_id == "src-1"
+    assert result.session_id == "fork-1"
+    assert result.message_count == 7
+
+
+# ---------------------------------------------------------------------------
+# Dogma row #127 — WorkGraph list helpers must fail closed on a present-but-non-
+# list collection rather than collapsing a malformed envelope to empty success.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_workgraph_items_rejects_non_list_items() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        # `items` present but not a list — a contract violation.
+        return {"items": "oops"}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.list_workgraph_items({"realm_id": "homecore"})
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_list_ready_workgraph_items_rejects_non_list_items() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {"items": {"not": "a list"}}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.list_ready_workgraph_items({"realm_id": "homecore"})
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_list_workgraph_events_rejects_non_list_events() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {"events": 42}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.list_workgraph_events({"realm_id": "homecore"})
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+# ---------------------------------------------------------------------------
+# Dogma row #136 — mob collection helpers must fail closed on a present-but-non-
+# list outer collection rather than returning [].
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_read_mob_events_rejects_non_list_events() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {"events": "not-a-list"}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.read_mob_events("mob-1")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_wait_mob_ready_rejects_non_list_members() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {"members": {"agent_identity": "lead"}}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.wait_mob_ready("mob-1")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+# ---------------------------------------------------------------------------
+# Dogma row #55 — callback tool handlers may return a typed ContentBlock list,
+# which must be delivered to the runtime as structured blocks rather than being
+# coerced to a stringified blob.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_passes_through_content_block_list() -> None:
+    from meerkat.tools import ToolRegistry
+
+    registry = ToolRegistry()
+
+    blocks = [
+        {"type": "text", "text": "hello"},
+        {
+            "type": "image",
+            "media_type": "image/png",
+            "source": "inline",
+            "data": "AAAA",
+        },
+    ]
+
+    async def handler(_arguments):
+        return blocks
+
+    registry.register("multimodal", handler)
+
+    content, is_error = await registry.handle("multimodal", {})
+    assert is_error is False
+    # The block list round-trips faithfully — NOT stringified.
+    assert content == blocks
+    assert isinstance(content, list)
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_keeps_string_results_as_strings() -> None:
+    from meerkat.tools import ToolRegistry
+
+    registry = ToolRegistry()
+
+    async def handler(_arguments):
+        return "plain text result"
+
+    registry.register("text", handler)
+
+    content, is_error = await registry.handle("text", {})
+    assert is_error is False
+    assert content == "plain text result"

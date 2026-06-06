@@ -113,8 +113,8 @@ export interface WasmModule {
   mob_create: (definitionJson: string) => Promise<string>;
   mob_status: (mobId: string) => Promise<string>;
   mob_list: () => Promise<string>;
-  mob_lifecycle: (mobId: string, action: string) => Promise<void>;
-  mob_events: (mobId: string, afterCursor: number, limit: number) => Promise<string>;
+  mob_lifecycle: (mobId: string, action: string) => Promise<string>;
+  mob_events: (mobId: string, afterCursor: string, limit: number) => Promise<string>;
   mob_spawn: (mobId: string, specsJson: string) => Promise<string>;
   mob_retire: (mobId: string, agentIdentity: string) => Promise<void>;
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
@@ -270,11 +270,14 @@ export class MeerkatRuntime {
    *
    * Runtime state must already be initialized.
    *
-   * When the agent calls this tool, it receives `"acknowledged"` immediately
-   * and continues processing. The host should watch `ToolCallRequested` events
-   * in the event stream to capture args and act on them. Any response (e.g.
-   * human approval) comes back through the normal session or mob member send
-   * APIs.
+   * When the agent calls this tool, the real work is deferred to the host: the
+   * dispatch records a typed *detached* async op (it does not block the turn
+   * boundary) and the agent sees a transcript result explicitly marked
+   * **deferred/pending**, not a fabricated success. The tool call has NOT
+   * completed when the agent continues. The host watches `ToolCallRequested`
+   * events in the event stream to capture args and act on them; any response
+   * (e.g. human approval) comes back through the normal session or mob member
+   * send APIs — never through this tool result.
    *
    * @param wasm - The WASM module (same one passed to init).
    * @param name - Tool name the agent will call.

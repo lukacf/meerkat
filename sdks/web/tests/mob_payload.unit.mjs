@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { Mob } from '../dist/mob.js';
 import { MeerkatRuntime } from '../dist/runtime.js';
-import { Session } from '../dist/session.js';
+import { Session, serializePromptContentInput } from '../dist/session.js';
 import { isKnownEvent } from '../dist/types.js';
 
 function makeSubscriptionRuntime(overrides = {}) {
@@ -978,4 +978,91 @@ test('Mob event decoders preserve generated payload envelopes', async () => {
   });
   assert.equal(mobEvent.envelope.source_id, 'session-2');
   assert.equal(mobEvent.envelope.payload.type, 'turn_completed');
+});
+
+// ── Row #39: prompt content is emitted as a discriminated WireContentInput ──
+
+test('serializePromptContentInput passes a plain string through as text', () => {
+  assert.equal(serializePromptContentInput('hello world'), 'hello world');
+});
+
+test('serializePromptContentInput emits block content as a JSON array (WireContentInput::Blocks)', () => {
+  const blocks = [{ type: 'text', text: 'hi' }];
+  const serialized = serializePromptContentInput(blocks);
+  // A JSON array is the untagged Blocks discriminator; round-trips losslessly.
+  assert.deepEqual(JSON.parse(serialized), blocks);
+});
+
+test('Session.turn forwards discriminated block JSON to the WASM boundary', async () => {
+  let forwardedPrompt;
+  const session = new Session(
+    7,
+    async (_handle, prompt) => {
+      forwardedPrompt = prompt;
+      return JSON.stringify({ text: 'ok' });
+    },
+    () => JSON.stringify({ session_id: 'session-web-unit' }),
+    () => undefined,
+    () => '[]',
+    async () => '{}',
+  );
+
+  const blocks = [
+    { type: 'text', text: 'describe' },
+    { type: 'image', media_type: 'image/png', data: 'QUJD' },
+  ];
+  await session.turn(blocks);
+  // The Rust side deserializes this strictly; it is a JSON array, not a
+  // single plain-text block.
+  assert.deepEqual(JSON.parse(forwardedPrompt), blocks);
+});
+
+// ── Row #215: destroyed/torn-down handles are classified by typed code ──────
+
+test('Session.destroy is idempotent on a retired handle via the typed code', () => {
+  let destroyAttempts = 0;
+  // The runtime retires a destroyed handle and rejects a repeat destroy with
+  // the typed invalid_session_handle envelope (a JSON string), like the real
+  // WASM err_js output.
+  const invalidHandleEnvelope = JSON.stringify({
+    code: 'invalid_session_handle',
+    message: 'unknown browser session handle: 7',
+  });
+  const session = new Session(
+    7,
+    async () => '{}',
+    () => '{}',
+    () => {
+      destroyAttempts += 1;
+      if (destroyAttempts > 1) {
+        throw invalidHandleEnvelope;
+      }
+    },
+    () => '[]',
+    async () => '{}',
+  );
+
+  assert.doesNotThrow(() => session.destroy());
+  // A repeat destroy of the retired handle is classified by the typed code
+  // and treated as already-gone (idempotent), not re-thrown.
+  assert.doesNotThrow(() => session.destroy());
+  assert.equal(destroyAttempts, 2);
+});
+
+test('Session.destroy re-throws non-already-gone typed errors', () => {
+  const busyEnvelope = JSON.stringify({
+    code: 'SESSION_BUSY',
+    message: 'session is busy',
+  });
+  const session = new Session(
+    7,
+    async () => '{}',
+    () => '{}',
+    () => {
+      throw busyEnvelope;
+    },
+    () => '[]',
+    async () => '{}',
+  );
+  assert.throws(() => session.destroy(), /SESSION_BUSY/);
 });

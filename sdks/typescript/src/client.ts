@@ -72,6 +72,7 @@ import {
   Mob,
   type MemberDeliveryReceipt,
   type MemberSendOptions,
+  type MobHandlingMode,
   type MobKickoffMemberSnapshot,
   type MobKickoffWaitOptions,
   type MobReadyMemberSnapshot,
@@ -479,7 +480,7 @@ export class MeerkatClient {
     {
       description: string;
       inputSchema: Record<string, unknown>;
-      handler: (args: Record<string, unknown>) => Promise<string>;
+      handler: (args: Record<string, unknown>) => Promise<string | ContentBlock[]>;
     }
   >();
 
@@ -496,12 +497,16 @@ export class MeerkatClient {
    *   return `Results for ${args.q}`;
    * });
    * ```
+   *
+   * Handlers may return a plain string or a `ContentBlock[]` for multimodal
+   * tool results. Block arrays are forwarded faithfully to the runtime as
+   * `WireToolResultContent` (no string coercion).
    */
   registerTool(
     name: string,
     description: string,
     inputSchema: Record<string, unknown>,
-    handler: (args: Record<string, unknown>) => Promise<string>,
+    handler: (args: Record<string, unknown>) => Promise<string | ContentBlock[]>,
   ): void {
     this.toolHandlers.set(name, { description, inputSchema, handler });
     // If already connected, register the new tool with the server immediately.
@@ -599,13 +604,14 @@ export class MeerkatClient {
 
     // Fetch capabilities
     const capsResult = await this.request("capabilities/get", {});
-    const rawCaps = (capsResult.capabilities as Array<Record<string, unknown>>) ?? [];
-    this._capabilities = rawCaps.map(
-      (cap): Capability => ({
-        id: String(cap.id ?? ""),
-        description: String(cap.description ?? ""),
-        status: MeerkatClient.normalizeStatus(cap.status),
-      }),
+    if (!Array.isArray(capsResult.capabilities)) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid capabilities/get response: capabilities must be a list",
+      );
+    }
+    this._capabilities = capsResult.capabilities.map((cap) =>
+      MeerkatClient.parseWireCapabilityEntry(cap),
     );
 
     // Register callback tools if any were declared.
@@ -653,6 +659,17 @@ export class MeerkatClient {
       pending.reject(reason);
     }
     this.pendingRequests.clear();
+  }
+
+  /**
+   * Surface a typed transport/protocol fault to every pending caller and
+   * stream consumer. Used when the read loop encounters a corrupted frame and
+   * the stream can no longer be trusted, so callers fail closed instead of
+   * hanging on a dropped response.
+   */
+  private failTransport(reason: unknown): void {
+    this.rejectPendingRequests(reason);
+    this.closeQueues();
   }
 
   private closeQueues(): void {
@@ -1440,10 +1457,10 @@ export class MeerkatClient {
           ? result.agent_identity
           : agentIdentity,
       memberRef,
-      handlingMode:
-        result.handling_mode === "steer" || result.handling_mode === "queue"
-          ? result.handling_mode
-          : (options?.handlingMode ?? "queue"),
+      handlingMode: MeerkatClient.parseWireHandlingMode(
+        result.handling_mode,
+        "Invalid mob/member_send response: missing or unknown handling_mode",
+      ),
     };
   }
 
@@ -2903,6 +2920,16 @@ export class MeerkatClient {
     try {
       data = JSON.parse(line);
     } catch {
+      // A corrupted (non-JSON) frame means the JSONL stream framing can no
+      // longer be trusted. Surface a typed protocol fault to every pending
+      // caller and stream consumer rather than silently dropping the line,
+      // which would launder a corrupted stream into a hang / missing response.
+      this.failTransport(
+        new MeerkatError(
+          "PROTOCOL_ERROR",
+          "Corrupted JSON-RPC frame: stream framing is no longer trustworthy",
+        ),
+      );
       return;
     }
 
@@ -3041,16 +3068,6 @@ export class MeerkatClient {
 
   // -- Static helpers -----------------------------------------------------
 
-  private static normalizeStatus(raw: unknown): string {
-    if (typeof raw === "string") return raw;
-    if (typeof raw === "object" && raw !== null) {
-      // Rust can emit externally-tagged enums for status:
-      // { DisabledByPolicy: { description: "..." } }
-      return Object.keys(raw)[0] ?? "Unknown";
-    }
-    return String(raw);
-  }
-
   private static requireRecord(
     raw: unknown,
     field: string,
@@ -3122,6 +3139,61 @@ export class MeerkatClient {
       return raw as WireMobMemberStatus;
     }
     throw new MeerkatError("INVALID_RESPONSE", message);
+  }
+
+  /**
+   * Parse a runtime-emitted handling mode against the closed WireHandlingMode
+   * union. Fails closed on an absent or unrecognized variant — the SDK never
+   * substitutes the client-requested mode for the runtime receipt. Mirrors the
+   * web SDK `parseWireHandlingMode` and Python `_parse_wire_handling_mode`.
+   */
+  private static parseWireHandlingMode(
+    raw: unknown,
+    message: string,
+  ): MobHandlingMode {
+    if (raw === "queue" || raw === "steer") {
+      return raw;
+    }
+    throw new MeerkatError("INVALID_RESPONSE", message);
+  }
+
+  /**
+   * Parse a capability status against the externally-tagged Rust
+   * `CapabilityStatus` enum: either the bare string variant (e.g. "Available")
+   * or a single-key object like `{ DisabledByPolicy: {...} }`. The capability
+   * vocabulary evolves, so we do not whitelist variants, but we fail closed on
+   * an absent or otherwise unparseable status rather than fabricating a
+   * permissive default. Mirrors Python `_parse_wire_capability_status`.
+   */
+  private static parseWireCapabilityStatus(raw: unknown, context: string): string {
+    if (typeof raw === "string" && raw.length > 0) {
+      return raw;
+    }
+    if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
+      const firstKey = Object.keys(raw as Record<string, unknown>)[0];
+      if (typeof firstKey === "string" && firstKey.length > 0) {
+        return firstKey;
+      }
+    }
+    throw new MeerkatError(
+      "INVALID_RESPONSE",
+      `${context}: missing or invalid capability status`,
+    );
+  }
+
+  /**
+   * Parse a single capabilities/get entry, failing closed on absent/malformed
+   * required fields rather than coercing to empty strings or a permissive
+   * status default. Mirrors the Python capability parser.
+   */
+  private static parseWireCapabilityEntry(raw: unknown): Capability {
+    const context = "Invalid capabilities/get response";
+    const record = MeerkatClient.requireRecord(raw, "capability", context);
+    return {
+      id: MeerkatClient.requireStringField(record, "id", context),
+      description: MeerkatClient.requireStringField(record, "description", context),
+      status: MeerkatClient.parseWireCapabilityStatus(record.status, context),
+    };
   }
 
   private static parseLiveRefreshResult(raw: unknown): LiveRefreshResult {
@@ -4202,16 +4274,18 @@ export class MeerkatClient {
   }
 
   static parseSessionHistory(data: Record<string, unknown>): SessionHistory {
-    const rawMessages = Array.isArray(data.messages)
-      ? (data.messages as Array<Record<string, unknown>>)
-      : [];
+    const context = "Invalid session history response";
+    if (!Array.isArray(data.messages)) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: messages must be a list`);
+    }
+    const rawMessages = data.messages as Array<Record<string, unknown>>;
     return {
-      sessionId: String(data.session_id ?? ""),
+      sessionId: MeerkatClient.requireStringField(data, "session_id", context),
       sessionRef: data.session_ref != null ? String(data.session_ref) : undefined,
-      messageCount: Number(data.message_count ?? 0),
-      offset: Number(data.offset ?? 0),
+      messageCount: MeerkatClient.requireNumberField(data, "message_count", context),
+      offset: MeerkatClient.requireNumberField(data, "offset", context),
       limit: data.limit != null ? Number(data.limit) : undefined,
-      hasMore: Boolean(data.has_more ?? false),
+      hasMore: MeerkatClient.requireBooleanField(data, "has_more", context),
       messages: rawMessages.map((message) => MeerkatClient.parseSessionMessage(message)),
     };
   }
@@ -4219,28 +4293,31 @@ export class MeerkatClient {
   static parseSessionTranscriptRevision(
     data: Record<string, unknown>,
   ): SessionTranscriptRevision {
-    const rawMessages = Array.isArray(data.messages)
-      ? (data.messages as Array<Record<string, unknown>>)
-      : [];
+    const context = "Invalid session transcript revision response";
+    if (!Array.isArray(data.messages)) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: messages must be a list`);
+    }
+    const rawMessages = data.messages as Array<Record<string, unknown>>;
     return {
-      sessionId: String(data.session_id ?? ""),
+      sessionId: MeerkatClient.requireStringField(data, "session_id", context),
       sessionRef: data.session_ref != null ? String(data.session_ref) : undefined,
-      revision: String(data.revision ?? ""),
-      headRevision: String(data.head_revision ?? ""),
-      messageCount: Number(data.message_count ?? 0),
-      offset: Number(data.offset ?? 0),
+      revision: MeerkatClient.requireStringField(data, "revision", context),
+      headRevision: MeerkatClient.requireStringField(data, "head_revision", context),
+      messageCount: MeerkatClient.requireNumberField(data, "message_count", context),
+      offset: MeerkatClient.requireNumberField(data, "offset", context),
       limit: data.limit != null ? Number(data.limit) : undefined,
-      hasMore: Boolean(data.has_more ?? false),
+      hasMore: MeerkatClient.requireBooleanField(data, "has_more", context),
       messages: rawMessages.map((message) => MeerkatClient.parseSessionMessage(message)),
     };
   }
 
   static parseSessionForkResult(data: Record<string, unknown>): SessionForkResult {
+    const context = "Invalid session fork response";
     return {
-      sourceSessionId: String(data.source_session_id ?? ""),
-      sessionId: String(data.session_id ?? ""),
+      sourceSessionId: MeerkatClient.requireStringField(data, "source_session_id", context),
+      sessionId: MeerkatClient.requireStringField(data, "session_id", context),
       sessionRef: data.session_ref != null ? String(data.session_ref) : undefined,
-      messageCount: Number(data.message_count ?? 0),
+      messageCount: MeerkatClient.requireNumberField(data, "message_count", context),
     };
   }
 
@@ -4558,7 +4635,7 @@ export class MeerkatClient {
 
   private writeCallbackResponse(
     requestId: unknown,
-    result: { content: string; is_error: boolean },
+    result: { content: string | ContentBlock[]; is_error: boolean },
   ): void {
     const response = { jsonrpc: "2.0", id: requestId, result };
     this.process?.stdin?.write(JSON.stringify(response) + "\n");

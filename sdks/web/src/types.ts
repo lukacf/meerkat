@@ -19,7 +19,8 @@ export interface RuntimeConfig {
   geminiApiKey?: string;
   /** Default model for new sessions. */
   model?: string;
-  /** Maximum concurrent sessions. Default: 64. */
+  /** Maximum concurrent sessions. Default: 100000 (matches the WASM runtime
+   * `default_max_sessions` / `MAX_SESSIONS`). */
   maxSessions?: number;
   /** Anthropic base URL (e.g. for proxy deployments). */
   anthropicBaseUrl?: string;

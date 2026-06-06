@@ -24,6 +24,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Serialize a prompt into the discriminated `WireContentInput` carried by the
+ * WASM `start_turn` boundary.
+ *
+ * Both `ContentInput` and `WireContentInput` are untagged (string OR
+ * `ContentBlock[]`), so the JSON *shape* is the discriminator: a plain string is
+ * passed through verbatim as text, and block content is emitted as a JSON array
+ * (`WireContentInput::Blocks`). The block array is JSON-encoded so the Rust side
+ * deserializes it strictly and fails closed on malformed blocks rather than
+ * misreading them as a single plain-text block.
+ */
+export function serializePromptContentInput(
+  prompt: string | ContentBlock[],
+): string {
+  // Plain text is passed through unquoted (it is not JSON-encoded), so a
+  // genuine string is never confused with structured block JSON.
+  return typeof prompt === 'string' ? prompt : JSON.stringify(prompt);
+}
+
+/**
  * Typed error surfaced on the Err channel of a runtime operation.
  *
  * Carries the stable wire `code` (e.g. `AGENT_ERROR`, `SESSION_BUSY`) emitted
@@ -150,7 +169,7 @@ export class Session {
    * never a synthetic empty-text "success".
    */
   async turn(prompt: string | ContentBlock[]): Promise<TurnResult> {
-    const promptStr = typeof prompt === 'string' ? prompt : JSON.stringify(prompt);
+    const promptStr = serializePromptContentInput(prompt);
     let json: string;
     try {
       json = await this.startTurnFn(this.handle, promptStr);
@@ -219,12 +238,18 @@ export class Session {
     return JSON.parse(json) as AppendSystemContextResult;
   }
 
-  /** Destroy the session and release resources. */
+  /**
+   * Destroy the session and release resources.
+   *
+   * Idempotent: a tear-down or an already-retired handle is classified by the
+   * runtime's typed error `code` (`not_initialized` / `invalid_session_handle`),
+   * not by sniffing the message string.
+   */
   destroy(): void {
     try {
       this.destroyFn(this.handle);
     } catch (error) {
-      if (isRuntimeNotInitializedError(error)) {
+      if (isAlreadyGoneError(error)) {
         return;
       }
       throw error;
@@ -244,21 +269,31 @@ export class Session {
   }
 }
 
-function isRuntimeNotInitializedError(error: unknown): boolean {
+/**
+ * Codes that mean "the session/runtime this handle pointed at is already gone".
+ *
+ * A destroyed handle is retired by the runtime (fail-closed), so a repeat
+ * `destroy()` surfaces `invalid_session_handle`; a torn-down runtime surfaces
+ * `not_initialized`. Both make `destroy()` idempotent.
+ */
+const ALREADY_GONE_CODES = new Set(['not_initialized', 'invalid_session_handle']);
+
+/**
+ * Classify a destroy failure as "already gone" using the typed wire `code`
+ * only — never by matching message strings.
+ */
+function isAlreadyGoneError(error: unknown): boolean {
   const code = extractErrorCode(error);
-  if (code?.toLowerCase() === 'not_initialized') {
-    return true;
-  }
-  const message =
-    error instanceof Error
-      ? error.message
-      : typeof error === 'string'
-        ? error
-        : '';
-  return /not_initialized/i.test(message);
+  return code != null && ALREADY_GONE_CODES.has(code.toLowerCase());
 }
 
 function extractErrorCode(error: unknown): string | undefined {
+  // The runtime rejects with its typed `{ code, message }` JSON envelope (as a
+  // string or object). Parse it for the stable code rather than sniffing text.
+  const envelope = parseErrorEnvelope(error);
+  if (envelope) {
+    return envelope.code;
+  }
   if (!error || typeof error !== 'object') return undefined;
   const record = error as { code?: unknown; cause?: unknown };
   if (typeof record.code === 'string') {

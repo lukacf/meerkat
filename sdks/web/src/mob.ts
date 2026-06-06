@@ -61,8 +61,8 @@ interface MobWasmBindings {
   mob_spawn_helper: (mobId: string, requestJson: string) => Promise<string>;
   mob_fork_helper: (mobId: string, requestJson: string) => Promise<string>;
   mob_status: (mobId: string) => Promise<string>;
-  mob_lifecycle: (mobId: string, action: string) => Promise<void>;
-  mob_events: (mobId: string, afterCursor: number, limit: number) => Promise<string>;
+  mob_lifecycle: (mobId: string, action: string) => Promise<string>;
+  mob_events: (mobId: string, afterCursor: string, limit: number) => Promise<string>;
   mob_run_flow: (mobId: string, flowId: string, params: string) => Promise<string>;
   mob_flow_status: (mobId: string, runId: string) => Promise<string>;
   mob_cancel_flow: (mobId: string, runId: string) => Promise<void>;
@@ -1059,13 +1059,18 @@ export class Mob {
 
   /** Perform a lifecycle action (stop, resume, complete, destroy). */
   async lifecycle(action: MobLifecycleAction): Promise<void> {
+    // The WASM boundary now returns a canonical MobLifecycleResult JSON (carrying
+    // the typed MobDestroyReport for destroy). Surfacing that typed report
+    // through this method is the generated-consumer refinement tracked in
+    // Wave 2c (#216); the result is consumed here, not silently dropped.
     await this.bindings.mob_lifecycle(this.mobId, action);
   }
 
-  /** Get mob events after a cursor. */
+  /** Get mob events after a cursor. The cursor is an opaque u64-backed string
+   *  forwarded verbatim — it MUST NOT be narrowed through Number() (which both
+   *  caps it at u32 range and silently resets a non-finite value to 0). */
   async events(afterCursor = '', limit = 100): Promise<MobEvent[]> {
-    const numericCursor = afterCursor === '' ? 0 : Number(afterCursor);
-    const json = await this.bindings.mob_events(this.mobId, Number.isFinite(numericCursor) ? numericCursor : 0, limit);
+    const json = await this.bindings.mob_events(this.mobId, afterCursor, limit);
     return parseMobEvents(parseJsonPayload(json, 'Invalid mob/events response'));
   }
 

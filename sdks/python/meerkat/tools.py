@@ -16,8 +16,16 @@ Example::
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Awaitable
+
+from .types import ContentBlock
+
+# A callback tool may return either a plain string (delivered as a single text
+# block) or a typed list of :class:`ContentBlock` (delivered faithfully as the
+# wire `WireToolResultContent` block array). We do NOT collapse block lists to a
+# stringified blob — multimodal results must round-trip as structured content.
+ToolResult = str | list[ContentBlock]
 
 
 @dataclass
@@ -27,7 +35,7 @@ class ToolRegistration:
     name: str
     description: str
     input_schema: dict[str, Any]
-    handler: Callable[[dict[str, Any]], Awaitable[str]]
+    handler: Callable[[dict[str, Any]], Awaitable[ToolResult]]
 
 
 class ToolRegistry:
@@ -39,7 +47,7 @@ class ToolRegistry:
     def register(
         self,
         name: str,
-        handler: Callable[[dict[str, Any]], Awaitable[str]],
+        handler: Callable[[dict[str, Any]], Awaitable[ToolResult]],
         *,
         description: str = "",
         input_schema: dict[str, Any] | None = None,
@@ -63,13 +71,28 @@ class ToolRegistry:
             for t in self._tools.values()
         ]
 
-    async def handle(self, name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
-        """Execute a tool handler. Returns (content, is_error)."""
+    async def handle(
+        self, name: str, arguments: dict[str, Any]
+    ) -> tuple[ToolResult, bool]:
+        """Execute a tool handler. Returns (content, is_error).
+
+        The content is the wire `WireToolResultContent` shape: either a plain
+        string or a typed list of :class:`ContentBlock`. A block list is passed
+        through faithfully (serialized as structured wire content) rather than
+        coerced to a stringified blob; only genuine non-list scalars are
+        stringified.
+        """
         tool = self._tools.get(name)
         if tool is None:
             return f"Unknown tool: {name}", True
         try:
             result = await tool.handler(arguments)
+            if isinstance(result, list):
+                # Typed multimodal block list — deliver as structured content.
+                return result, False
+            if isinstance(result, str):
+                return result, False
+            # Genuine scalar (e.g. number/bool) — stringify for the text path.
             return str(result), False
         except Exception as exc:
             return f"Tool error: {exc}", True

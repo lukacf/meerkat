@@ -79,12 +79,14 @@ test("MeerkatRuntime drives direct-session lifecycle through shipped wasm export
     assert.equal(state.run_counter, undefined);
 
     session.destroy();
-    const archived = session.getState();
-    assert.equal(archived.session_id, state.session_id);
-    assert.equal(archived.is_active, false);
+    // Row #215: a destroyed handle is retired and fails closed — it is no
+    // longer an addressable archived projection. getState() throws the typed
+    // invalid_session_handle envelope (a JSON string from err_js).
+    assert.throws(() => session.getState(), /invalid_session_handle/);
+    // turn() wraps the rejection into a typed MeerkatError carrying the code.
     await assert.rejects(
       () => session.turn("stale handles must not restart archived sessions"),
-      /SESSION_NOT_FOUND|session not found/,
+      (error) => error?.code === "invalid_session_handle",
     );
     assert.throws(() => session.isDestroyed, /deprecated/i);
   } finally {
@@ -140,16 +142,24 @@ test("Session.destroy does not cache destroyed state when the underlying wasm de
 test("Session.destroy treats runtime teardown as canonical absence without poisoning the handle", () => {
   let destroyAttempts = 0;
   let stateReads = 0;
+  // The real WASM runtime rejects with its typed `{ code, message }` JSON
+  // envelope string (via `err_js`), not a plain Error message. Row #215:
+  // destroy idempotency is classified by the typed `code`, never by string
+  // matching the message.
+  const notInitializedEnvelope = JSON.stringify({
+    code: "not_initialized",
+    message: "runtime not initialized",
+  });
   const session = new Session(
     8,
     async () => "{}",
     () => {
       stateReads += 1;
-      throw new Error("not_initialized: runtime not initialized");
+      throw notInitializedEnvelope;
     },
     () => {
       destroyAttempts += 1;
-      throw new Error("not_initialized: runtime not initialized");
+      throw notInitializedEnvelope;
     },
     () => "[]",
     async () => JSON.stringify({ handle: 8, status: "staged" }),

@@ -200,7 +200,9 @@ struct Credentials {
     openai_api_key: Option<String>,
     #[serde(default)]
     gemini_api_key: Option<String>,
-    #[serde(default = "default_model")]
+    /// Optional explicit model override. When unset, the default is resolved
+    /// from the catalog for the highest-priority configured provider.
+    #[serde(default)]
     model: Option<String>,
     /// Per-provider base URLs. Unset providers default to the upstream vendor URL.
     #[serde(default)]
@@ -209,10 +211,9 @@ struct Credentials {
     openai_base_url: Option<String>,
     #[serde(default)]
     gemini_base_url: Option<String>,
-}
-
-fn default_model() -> Option<String> {
-    Some(meerkat_models::catalog::global_default_model().to_string())
+    /// Maximum concurrent sessions for the bootstrapped service.
+    #[serde(default = "default_max_sessions")]
+    max_sessions: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -224,7 +225,9 @@ struct RuntimeConfig {
     openai_api_key: Option<String>,
     #[serde(default)]
     gemini_api_key: Option<String>,
-    #[serde(default = "default_model")]
+    /// Optional explicit model override. When unset, the default is resolved
+    /// from the catalog for the highest-priority configured provider.
+    #[serde(default)]
     model: Option<String>,
     /// Per-provider base URLs. Unset providers default to the upstream vendor URL.
     #[serde(default)]
@@ -239,6 +242,34 @@ struct RuntimeConfig {
 
 fn default_max_sessions() -> usize {
     MAX_SESSIONS
+}
+
+/// Resolve the default model for the highest-priority configured provider.
+///
+/// Rule 7: the surface must not decide which provider's default to use
+/// independent of which key is configured. The decision is delegated to the
+/// catalog seam — `provider_priority()` owns the cross-provider preference order
+/// and `default_model(provider)` owns each provider's default model. The surface
+/// only enumerates the configured providers and consults the catalog.
+///
+/// `api_keys` is keyed by the same provider strings populated into the realm
+/// (`anthropic` / `openai` / `gemini`); the `google` alias normalizes to the
+/// Gemini identity before lookup. Returns the catalog global default when no
+/// configured provider yields a typed identity (e.g. an unrecognized key).
+fn default_model_for_configured_providers(api_keys: &HashMap<String, String>) -> String {
+    let canonical = |key: &str| -> Option<meerkat_core::Provider> {
+        let normalized = if key == "google" { "gemini" } else { key };
+        meerkat_core::Provider::parse_strict(normalized)
+    };
+    let configured: Vec<meerkat_core::Provider> =
+        api_keys.keys().filter_map(|key| canonical(key)).collect();
+    meerkat_models::catalog::provider_priority()
+        .iter()
+        .copied()
+        .find(|provider| configured.contains(provider))
+        .and_then(|provider| meerkat_models::catalog::default_model(provider.as_str()))
+        .unwrap_or_else(meerkat_models::catalog::global_default_model)
+        .to_string()
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -272,8 +303,39 @@ struct RuntimeState {
     /// Opaque browser-local handles mapped to runtime-owned sessions.
     sessions: BTreeMap<u32, RuntimeHandleSession>,
     next_handle: u32,
+    /// Trust-verified bootstrap mobpack (definition id + skills), consumed when
+    /// `create_session_simple` builds a standalone session so the verified pack
+    /// contributes its system prompt rather than being discarded at init.
+    bootstrap_mobpack: Option<BootstrapMobpack>,
     #[cfg(target_arch = "wasm32")]
     js_tools: Vec<JsToolEntry>,
+}
+
+/// Verified bootstrap mobpack retained for standalone session system-prompt
+/// assembly. Built only after `verify_extracted_pack_trust` succeeds.
+struct BootstrapMobpack {
+    definition_id: String,
+    name: String,
+    skills: BTreeMap<String, String>,
+}
+
+impl BootstrapMobpack {
+    fn from_parsed(parsed: ParsedMobpack) -> Self {
+        Self {
+            definition_id: parsed.definition.id,
+            name: parsed.manifest.mobpack.name,
+            skills: parsed.skills,
+        }
+    }
+
+    fn compile_system_prompt(&self, user_system_prompt: Option<&str>) -> String {
+        compile_system_prompt(
+            &self.definition_id,
+            &self.name,
+            &self.skills,
+            user_system_prompt,
+        )
+    }
 }
 
 /// Populate `config.realm["default"]` with InlineSecret-backed bindings
@@ -531,9 +593,20 @@ fn helper_result_payload(mob_id: &MobId, result: &meerkat_mob::HelperResult) -> 
 // Error helpers
 // ═══════════════════════════════════════════════════════════
 
+/// Host-safe structured error envelope (`{code, message}`). The wasm surface
+/// wraps it into a `JsValue` via [`js_from_value`]; keeping the typed envelope
+/// as the Rust-owned value lets non-wasm unit tests assert the typed `code`
+/// without constructing a `JsValue` (which panics outside wasm).
+fn err_value(code: &str, message: impl std::fmt::Display) -> serde_json::Value {
+    serde_json::json!({ "code": code, "message": message.to_string() })
+}
+
+fn js_from_value(value: serde_json::Value) -> JsValue {
+    JsValue::from_str(&value.to_string())
+}
+
 fn err_js(code: &str, message: &str) -> JsValue {
-    let json = serde_json::json!({ "code": code, "message": message });
-    JsValue::from_str(&json.to_string())
+    js_from_value(err_value(code, message))
 }
 
 fn err_str(code: &str, msg: impl std::fmt::Display) -> JsValue {
@@ -636,6 +709,43 @@ fn err_invalid_session_handle(handle: u32) -> JsValue {
     )
 }
 
+/// Parse a caller-supplied prompt into typed [`meerkat_core::types::ContentInput`],
+/// failing closed when the prompt is structured-but-malformed content.
+///
+/// The Web SDK serializes a `ContentBlock[]` prompt as a JSON array
+/// (`WireContentInput::Blocks`) and a plain text prompt as a bare string. Both
+/// `ContentInput` and `WireContentInput` are `#[serde(untagged)]` (string OR
+/// array), so the JSON shape is the discriminator.
+///
+/// Rule 4 / Rule 8: a JSON value that is block-shaped (array or object) but does
+/// not deserialize into `ContentInput` must surface `INVALID_PARAMS` rather than
+/// being silently misread as a single plain-text block. Only a prompt that is
+/// genuinely not structured JSON (a non-JSON string, or a JSON string literal)
+/// is treated as text.
+fn parse_prompt_content_input(
+    prompt: &str,
+) -> Result<meerkat_core::types::ContentInput, serde_json::Value> {
+    match serde_json::from_str::<serde_json::Value>(prompt) {
+        // A JSON array is the only block-shaped `ContentInput`/`WireContentInput`
+        // form (the Web SDK emits `ContentBlock[]` as a JSON array). Deserialize
+        // it strictly and fail closed — a malformed block array must never be
+        // silently downgraded to a single plain-text block.
+        Ok(value @ serde_json::Value::Array(_)) => {
+            serde_json::from_value::<meerkat_core::types::ContentInput>(value).map_err(|e| {
+                err_value(
+                    "INVALID_PARAMS",
+                    format!("prompt is structured block content but not valid ContentInput: {e}"),
+                )
+            })
+        }
+        // Anything else (a plain non-JSON string, a JSON object/number/bool, or a
+        // bare JSON string literal) is treated as plain text. The SDK never
+        // JSON-encodes plain text, so a non-array value is the caller's literal
+        // text rather than structured block content.
+        _ => Ok(meerkat_core::types::ContentInput::from(prompt)),
+    }
+}
+
 async fn resolve_mob_member_bridge_session_id(
     mob_state: &MobMcpState,
     mob_id: &MobId,
@@ -667,7 +777,34 @@ struct ParsedMobpack {
 fn parse_mobpack(bytes: &[u8]) -> Result<ParsedMobpack, String> {
     let files =
         extract_targz_safe(bytes).map_err(|e| format!("failed to parse mobpack archive: {e}"))?;
+    parse_mobpack_from_files(&files)
+}
 
+/// Extract, trust-verify, and parse a mobpack for runtime bootstrap.
+///
+/// Rule 8 / browser-safety: the browser advertises "initialization from a
+/// mobpack", so it must run the canonical [`meerkat_mob_pack::trust`]
+/// verification — not just a local parser. Verification runs under
+/// [`TrustPolicy::Strict`] by default so an unsigned or untrusted pack fails
+/// closed. The verified [`ParsedMobpack`] (definition + skills) is then returned
+/// for the runtime build instead of being discarded.
+fn extract_verify_and_parse_mobpack(
+    bytes: &[u8],
+    trust_policy: meerkat_mob_pack::trust::TrustPolicy,
+    trusted_signers: &meerkat_mob_pack::trust::TrustedSigners,
+) -> Result<ParsedMobpack, serde_json::Value> {
+    let files = extract_targz_safe(bytes).map_err(|e| {
+        err_value(
+            "invalid_mobpack",
+            format!("failed to parse mobpack archive: {e}"),
+        )
+    })?;
+    meerkat_mob_pack::trust::verify_extracted_pack_trust(&files, trust_policy, trusted_signers)
+        .map_err(|e| err_value("untrusted_mobpack", e))?;
+    parse_mobpack_from_files(&files).map_err(|e| err_value("invalid_mobpack", e))
+}
+
+fn parse_mobpack_from_files(files: &BTreeMap<String, Vec<u8>>) -> Result<ParsedMobpack, String> {
     let manifest_text = std::str::from_utf8(
         files
             .get("manifest.toml")
@@ -699,7 +836,7 @@ fn parse_mobpack(bytes: &[u8]) -> Result<ParsedMobpack, String> {
     }
 
     let mut skills = BTreeMap::new();
-    for (path, content) in &files {
+    for (path, content) in files {
         if let Some(name) = path.strip_prefix("skills/") {
             let text = std::str::from_utf8(content)
                 .map_err(|e| format!("skill file '{path}' is not valid UTF-8: {e}"))?;
@@ -1039,15 +1176,29 @@ impl meerkat_core::AgentToolDispatcher for JsToolDispatcher {
         &self,
         call: meerkat_core::ToolCallView<'_>,
     ) -> Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::error::ToolError> {
-        // Fire-and-forget tools return immediately. The host watches
-        // ToolCallRequested events in the stream to act on the call.
+        // Fire-and-forget tools defer the real work to the host: the host
+        // watches ToolCallRequested events in the stream and acts on the call
+        // asynchronously. Rule 8: do NOT fabricate an `is_error:false`
+        // synchronous *success* (which would assert the host action completed
+        // before it happened). Instead, model it as a typed detached async op so
+        // the turn boundary does not block on (or assert) the deferred action,
+        // and label the transcript result as pending rather than completed.
         if Self::is_fire_and_forget(call.name) {
-            return Ok(meerkat_core::ToolResult::new(
+            let detached =
+                meerkat_core::ops::AsyncOpRef::detached(meerkat_core::ops::OperationId::new());
+            let pending = meerkat_core::ToolResult::new(
                 call.id.to_string(),
-                "acknowledged".to_string(),
+                "deferred to host: this tool call was dispatched to the host \
+                 asynchronously and has not completed; its result (if any) arrives \
+                 through a later session/mob message, not this tool result"
+                    .to_string(),
                 false,
-            )
-            .into());
+            );
+            return Ok(meerkat_core::ops::ToolDispatchOutcome::new(
+                pending,
+                vec![detached],
+                Vec::new(),
+            ));
         }
 
         let callback = Self::get_callback(call.name)
@@ -1151,10 +1302,14 @@ fn build_wasm_tool_dispatcher() -> Result<Arc<dyn meerkat_core::AgentToolDispatc
 // Bootstrap: init_runtime
 // ═══════════════════════════════════════════════════════════
 
-/// Primary bootstrap: parse a mobpack and create service infrastructure.
+/// Primary bootstrap: trust-verify a mobpack and create service infrastructure.
 ///
-/// `mobpack_bytes`: tar.gz mobpack archive.
-/// `credentials_json`: `{ "anthropic_api_key"?: "...", "openai_api_key"?: "...", "gemini_api_key"?: "...", "model"?: "<catalog default>" }`
+/// `mobpack_bytes`: tar.gz mobpack archive. Verified via the canonical
+/// [`meerkat_mob_pack::trust`] authority under [`TrustPolicy::Strict`] — an
+/// unsigned or untrusted pack fails closed with a typed error.
+/// `credentials_json`: `{ "anthropic_api_key"?: "...", "openai_api_key"?: "...",
+/// "gemini_api_key"?: "...", "model"?: "<catalog default for configured provider>",
+/// "max_sessions"?: 100000 }`
 ///
 /// Stores an `EphemeralSessionService<FactoryAgentBuilder>` and a `MobMcpState`
 /// in a `thread_local! RuntimeState` for subsequent mob/comms calls.
@@ -1162,7 +1317,14 @@ fn build_wasm_tool_dispatcher() -> Result<Arc<dyn meerkat_core::AgentToolDispatc
 pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsValue, JsValue> {
     init_tracing();
     patch_fetch_response_url();
-    let _parsed = parse_mobpack(mobpack_bytes).map_err(|e| err_str("invalid_mobpack", e))?;
+    // Browser bootstrap must run canonical trust verification (Strict by
+    // default), not a local parser. The verified pack is consumed below.
+    let parsed = extract_verify_and_parse_mobpack(
+        mobpack_bytes,
+        meerkat_mob_pack::trust::TrustPolicy::Strict,
+        &meerkat_mob_pack::trust::TrustedSigners::default(),
+    )
+    .map_err(js_from_value)?;
     let creds: Credentials =
         serde_json::from_str(credentials_json).map_err(|e| err_str("invalid_credentials", e))?;
 
@@ -1172,9 +1334,12 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
         creds.gemini_api_key.as_deref(),
     )?;
 
+    // Catalog-owned default: pick the default model for the highest-priority
+    // configured provider rather than hardcoding a single provider's default.
     let model = creds
         .model
-        .unwrap_or_else(|| meerkat_models::catalog::global_default_model().to_string());
+        .unwrap_or_else(|| default_model_for_configured_providers(&api_keys));
+    let max_sessions = creds.max_sessions;
 
     let providers: Vec<String> = api_keys.keys().cloned().collect();
     let base_urls = build_provider_base_urls(
@@ -1186,13 +1351,18 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
     config.agent.model.clone_from(&model);
     populate_realm_from_api_keys(&mut config, &api_keys, base_urls.as_ref());
 
-    let (session_service, mob_state) = build_service_infrastructure(config, MAX_SESSIONS)?;
+    let (session_service, mob_state) = build_service_infrastructure(config, max_sessions)?;
+
+    let bootstrap_mobpack = BootstrapMobpack::from_parsed(parsed);
+    let mobpack_name = bootstrap_mobpack.name.clone();
+    let skill_count = bootstrap_mobpack.skills.len();
 
     install_runtime_state(RuntimeState {
         mob_state,
         session_service,
         sessions: BTreeMap::new(),
         next_handle: 1,
+        bootstrap_mobpack: Some(bootstrap_mobpack),
         #[cfg(target_arch = "wasm32")]
         js_tools: Vec::new(),
     });
@@ -1201,6 +1371,8 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
         "status": "initialized",
         "model": model,
         "providers": providers,
+        "max_sessions": max_sessions,
+        "mobpack": { "name": mobpack_name, "skills": skill_count },
     });
     Ok(JsValue::from_str(&result.to_string()))
 }
@@ -1211,7 +1383,9 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
 
 /// Advanced bare-bones bootstrap without a mobpack.
 ///
-/// `config_json`: `{ "anthropic_api_key"?: "...", "openai_api_key"?: "...", "gemini_api_key"?: "...", "model"?: "<catalog default>", "max_sessions"?: 100000 }`
+/// `config_json`: `{ "anthropic_api_key"?: "...", "openai_api_key"?: "...",
+/// "gemini_api_key"?: "...", "model"?: "<catalog default for configured provider>",
+/// "max_sessions"?: 100000 }`
 #[wasm_bindgen]
 pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
     init_tracing();
@@ -1225,9 +1399,11 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
         rt_config.gemini_api_key.as_deref(),
     )?;
 
+    // Catalog-owned default: pick the default model for the highest-priority
+    // configured provider rather than hardcoding a single provider's default.
     let model = rt_config
         .model
-        .unwrap_or_else(|| meerkat_models::catalog::global_default_model().to_string());
+        .unwrap_or_else(|| default_model_for_configured_providers(&api_keys));
     let max_sessions = rt_config.max_sessions;
 
     let providers: Vec<String> = api_keys.keys().cloned().collect();
@@ -1247,6 +1423,7 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
         session_service,
         sessions: BTreeMap::new(),
         next_handle: 1,
+        bootstrap_mobpack: None,
         #[cfg(target_arch = "wasm32")]
         js_tools: Vec::new(),
     });
@@ -1377,12 +1554,25 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, Js
 }
 
 /// Create a standalone session through initialized runtime state.
+///
+/// When the runtime was bootstrapped from a trust-verified mobpack
+/// (`init_runtime`), that pack's skills and definition are folded into the
+/// system prompt so the verified bootstrap pack is actually consumed rather
+/// than discarded.
 #[wasm_bindgen]
 pub fn create_session_simple(config_json: &str) -> Result<u32, JsValue> {
     let config: SessionConfig =
         serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
-    let system_prompt = config.system_prompt.clone();
-    create_runtime_backed_session(config, system_prompt, String::new())
+    let (system_prompt, mob_id) = with_runtime_state(|state| {
+        Ok(match &state.bootstrap_mobpack {
+            Some(pack) => (
+                Some(pack.compile_system_prompt(config.system_prompt.as_deref())),
+                pack.definition_id.clone(),
+            ),
+            None => (config.system_prompt.clone(), String::new()),
+        })
+    })?;
+    create_runtime_backed_session(config, system_prompt, mob_id)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1512,10 +1702,10 @@ pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
     })?;
 
     // Parse the prompt as structured ContentInput (supports both plain strings
-    // and JSON-serialized content blocks from the Web SDK). Falls back to plain
-    // text when the prompt is not valid ContentInput JSON.
-    let content_input: meerkat_core::types::ContentInput =
-        serde_json::from_str(prompt).unwrap_or_else(|_| prompt.into());
+    // and JSON-serialized content blocks from the Web SDK). Structured-but-
+    // malformed block JSON fails closed with INVALID_PARAMS instead of being
+    // silently misread as plain text.
+    let content_input = parse_prompt_content_input(prompt).map_err(js_from_value)?;
 
     let run_result = session_service
         .start_turn(
@@ -1600,6 +1790,12 @@ pub fn inspect_mobpack(mobpack_bytes: &[u8]) -> Result<String, JsValue> {
 }
 
 /// Remove a session.
+///
+/// The browser-local handle is retired on success: subsequent
+/// `get_session_state`/`start_turn`/`poll_events` on this handle fail closed
+/// with `invalid_session_handle` rather than returning an addressable archived
+/// projection. The handle is only removed after cleanup succeeds, so a failed
+/// destroy leaves the handle live for retry.
 #[wasm_bindgen]
 pub fn destroy_session(handle: u32) -> Result<(), JsValue> {
     let (session_service, mob_state, session_id) = with_runtime_state(|state| {
@@ -1618,7 +1814,12 @@ pub fn destroy_session(handle: u32) -> Result<(), JsValue> {
         mob_state,
         session_id,
     ))
-    .map_err(err_web_destroy_session)
+    .map_err(err_web_destroy_session)?;
+    // Fail-closed: retire the handle so it is no longer addressable.
+    with_runtime_state_mut(|state| {
+        state.sessions.remove(&handle);
+        Ok(())
+    })
 }
 
 #[derive(Debug)]
@@ -1682,10 +1883,7 @@ pub fn poll_events(handle: u32) -> Result<String, JsValue> {
                 Err(crate::tokio::sync::broadcast::error::TryRecvError::Empty) => break,
                 Err(crate::tokio::sync::broadcast::error::TryRecvError::Closed) => break,
                 Err(crate::tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
-                    events.push(serde_json::json!({
-                        "type": "lagged",
-                        "skipped": skipped,
-                    }));
+                    events.push(SubscriptionLaggedItem::new(skipped).to_value()?);
                 }
             }
         }
@@ -1753,8 +1951,13 @@ pub async fn mob_list() -> Result<JsValue, JsValue> {
 ///
 /// `action` is a compatibility string carrier that is immediately
 /// deserialized into the typed wire lifecycle action contract.
+///
+/// Returns the canonical [`meerkat_contracts::MobLifecycleResult`] envelope as
+/// JSON, mirroring the public MCP/RPC shape. For `destroy`, this carries the
+/// structured `MobDestroyReport` (destroyed bridge sessions, retained mobs,
+/// cleanup errors) instead of discarding it.
 #[wasm_bindgen]
-pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<(), JsValue> {
+pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<JsValue, JsValue> {
     let action = parse_mob_lifecycle_action_arg(action).map_err(|err| {
         err_js(
             "invalid_action",
@@ -1763,14 +1966,22 @@ pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<(), JsValue> {
     })?;
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
-    // WASM lifecycle wrapper is `() on success`; the structured
-    // MobDestroyReport is available through public/RPC lifecycle result
-    // envelopes for consumers that need cleanup detail.
-    let _destroy_report = mob_state
+    // `WireMobLifecycleAction` is `Copy`; reuse it for the result envelope.
+    let destroy_report = mob_state
         .mob_lifecycle_action(&id, action)
         .await
         .map_err(err_mob_destroy)?;
-    Ok(())
+    let destroy_report = destroy_report
+        .map(|report| serde_json::to_value(&report).map_err(|e| err_str("serialize_error", e)))
+        .transpose()?;
+    let result = meerkat_contracts::MobLifecycleResult {
+        mob_id: mob_id.to_string(),
+        action,
+        ok: true,
+        destroy_report,
+    };
+    let json = serde_json::to_string(&result).map_err(|e| err_str("serialize_error", e))?;
+    Ok(JsValue::from_str(&json))
 }
 
 fn parse_mob_lifecycle_action_arg(
@@ -1783,18 +1994,40 @@ fn parse_mob_lifecycle_action_arg(
 ///
 /// Returns JSON array of mob events.
 ///
-/// Note: `after_cursor` is u32 at the JS boundary (wasm_bindgen limitation),
-/// internally widened to u64. Cursors beyond 4B are not supported via this export.
+/// `after_cursor` is carried as an opaque string so the full u64 runtime cursor
+/// survives the JS boundary — JS numbers cannot represent all u64 values and the
+/// prior `u32` parameter both truncated and (on the SDK side) silently rewound
+/// the stream to position 0 for large/non-finite values. An empty string means
+/// "from the start" (cursor 0); a non-numeric cursor fails closed.
 #[wasm_bindgen]
-pub async fn mob_events(mob_id: &str, after_cursor: u32, limit: u32) -> Result<JsValue, JsValue> {
+pub async fn mob_events(mob_id: &str, after_cursor: &str, limit: u32) -> Result<JsValue, JsValue> {
+    let after_cursor = parse_mob_event_cursor(after_cursor).map_err(js_from_value)?;
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let events = mob_state
-        .mob_events(&id, after_cursor as u64, limit as usize)
+        .mob_events(&id, after_cursor, limit as usize)
         .await
         .map_err(err_mob)?;
     let json = serde_json::to_string(&events).map_err(|e| err_str("serialize_error", e))?;
     Ok(JsValue::from_str(&json))
+}
+
+/// Parse an opaque mob-event cursor string into the runtime's u64 cursor.
+///
+/// An empty/whitespace cursor maps to 0 (stream start). Any other value must be
+/// a base-10 u64; a malformed cursor fails closed with `INVALID_PARAMS` rather
+/// than silently rewinding the stream.
+fn parse_mob_event_cursor(after_cursor: &str) -> Result<u64, serde_json::Value> {
+    let trimmed = after_cursor.trim();
+    if trimmed.is_empty() {
+        return Ok(0);
+    }
+    trimmed.parse::<u64>().map_err(|e| {
+        err_value(
+            "INVALID_PARAMS",
+            format!("invalid mob event cursor '{after_cursor}': {e}"),
+        )
+    })
 }
 
 /// Spawn one or more members in a mob.
@@ -2148,10 +2381,10 @@ pub async fn mob_respawn(
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let mid = AgentIdentity::from(agent_identity);
-    let initial_message = initial_message.map(|message| {
-        serde_json::from_str::<meerkat_core::types::ContentInput>(&message)
-            .unwrap_or_else(|_| message.into())
-    });
+    let initial_message = initial_message
+        .map(|message| parse_prompt_content_input(&message))
+        .transpose()
+        .map_err(js_from_value)?;
     match mob_state.mob_respawn(&id, mid, initial_message).await {
         Ok(receipt) => {
             let identity_str = receipt.identity.to_string();
@@ -2482,10 +2715,7 @@ pub fn poll_subscription(handle: u32) -> Result<String, JsValue> {
                         ),
                         Err(TryRecvError::Lagged(n)) => {
                             tracing::warn!(skipped = n, "subscription lagged");
-                            events.push(serde_json::json!({
-                                "type": "lagged",
-                                "skipped": n,
-                            }));
+                            events.push(SubscriptionLaggedItem::new(n).to_value()?);
                             continue;
                         }
                         Err(TryRecvError::Empty | TryRecvError::Closed) => break,
@@ -2534,6 +2764,44 @@ fn serialize_subscription_item<T: Serialize + ?Sized>(
     serde_json::to_value(item).map_err(|e| format!("failed to serialize {projection}: {e}"))
 }
 
+/// Typed lag-fault sentinel for the subscription/poll stream.
+///
+/// Rule 4 / Rule 9: the lag fault is a typed item, not an ad-hoc
+/// `json!({type:'lagged',skipped:n})` literal duplicated at every poll site. A
+/// single typed owner serializes the `{ type: "lagged", skipped: <u64> }`
+/// schema consumed by `@rkat/web`'s `SubscriptionLaggedEvent`.
+///
+/// NOTE: the fully-generated cross-language contract (typed `EventEnvelope` +
+/// `Lagged` variant emitted from `meerkat-contracts` through SDK codegen) is the
+/// canonical destination per remediation row #204; this in-lane struct removes
+/// the dual hand-modeling on the Rust side until that contract lands.
+#[derive(Debug, Clone, Copy, Serialize)]
+struct SubscriptionLaggedItem {
+    #[serde(rename = "type")]
+    kind: SubscriptionLaggedKind,
+    skipped: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SubscriptionLaggedKind {
+    Lagged,
+}
+
+impl SubscriptionLaggedItem {
+    fn new(skipped: u64) -> Self {
+        Self {
+            kind: SubscriptionLaggedKind::Lagged,
+            skipped,
+        }
+    }
+
+    /// Serialize the typed sentinel into the stream's `serde_json::Value`.
+    fn to_value(self) -> Result<serde_json::Value, JsValue> {
+        serde_json::to_value(self).map_err(|e| err_str("serialize_error", e))
+    }
+}
+
 /// Close a subscription and free resources.
 #[wasm_bindgen]
 pub fn close_subscription(handle: u32) -> Result<(), JsValue> {
@@ -2551,16 +2819,21 @@ pub fn close_subscription(handle: u32) -> Result<(), JsValue> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_arch = "wasm32"))]
     use super::{
-        EventSubscription, SUBSCRIPTIONS, SubscriptionInner, close_subscription,
-        destroy_session_with_services, merge_runtime_system_context_state, mob_destroy_error_value,
-        parse_js_tool_result, parse_mob_lifecycle_action_arg, parse_mobpack, poll_subscription,
-        serialize_subscription_item, session_error_envelope,
+        Credentials, default_model_for_configured_providers, extract_verify_and_parse_mobpack,
+    };
+    use super::{
+        EventSubscription, SUBSCRIPTIONS, SubscriptionInner, SubscriptionLaggedItem,
+        close_subscription, destroy_session_with_services, merge_runtime_system_context_state,
+        mob_destroy_error_value, parse_js_tool_result, parse_mob_event_cursor,
+        parse_mob_lifecycle_action_arg, parse_mobpack, parse_prompt_content_input,
+        poll_subscription, serialize_subscription_item, session_error_envelope,
     };
     #[cfg(target_arch = "wasm32")]
     use super::{
-        append_system_context, create_session_simple, destroy_session, get_session_state,
-        init_runtime_from_config,
+        append_system_context, clear_tool_callbacks, create_session_simple, destroy_session,
+        get_session_state, init_runtime_from_config, register_js_tool,
     };
     #[cfg(not(target_arch = "wasm32"))]
     use super::{build_service_infrastructure, populate_realm_from_api_keys};
@@ -3284,7 +3557,7 @@ capabilities = [{capability_values}]
 
     #[cfg(target_arch = "wasm32")]
     #[test]
-    fn destroy_session_export_keeps_handle_as_canonical_projection() {
+    fn destroy_session_retires_handle_and_fails_closed() {
         init_test_runtime();
         let handle = create_session_simple(
             &json!({
@@ -3301,11 +3574,24 @@ capabilities = [{capability_values}]
         assert!(before["session_id"].as_str().is_some());
 
         destroy_session(handle).expect("destroy session");
-        let after = get_session_state(handle).expect("canonical archived state after destroy");
-        let after: serde_json::Value = serde_json::from_str(&after).expect("state json");
-        assert_eq!(after["handle"], handle);
-        assert_eq!(after["session_id"], before["session_id"]);
-        assert_eq!(after["is_active"], false);
+
+        // Row #215: a destroyed handle is retired, not left as an addressable
+        // archived projection. Subsequent reads fail closed with the typed
+        // invalid_session_handle code.
+        let after = get_session_state(handle)
+            .expect_err("destroyed handle must fail closed, not return archived JSON");
+        let after: serde_json::Value =
+            serde_json::from_str(&after.as_string().expect("typed error envelope string"))
+                .expect("typed error envelope json");
+        assert_eq!(after["code"], "invalid_session_handle");
+
+        // Re-destroy is idempotent at the typed-code level (still invalid_session_handle).
+        let redestroy = destroy_session(handle)
+            .expect_err("re-destroying a retired handle must surface invalid_session_handle");
+        let redestroy: serde_json::Value =
+            serde_json::from_str(&redestroy.as_string().expect("typed error envelope string"))
+                .expect("typed error envelope json");
+        assert_eq!(redestroy["code"], "invalid_session_handle");
     }
 
     #[test]
@@ -3399,6 +3685,229 @@ capabilities = [{capability_values}]
         assert_eq!(parsed["role"], "worker");
         assert_eq!(parsed["envelope"]["payload"]["type"], "text_delta");
         assert_eq!(parsed["envelope"]["payload"]["delta"], "hello");
+    }
+
+    // ── Row #39: content-bearing prompt parsing fails closed ───────────────
+
+    #[test]
+    fn parse_prompt_content_input_plain_string_is_text() {
+        let parsed = parse_prompt_content_input("hello world").expect("plain text parses");
+        assert_eq!(
+            parsed,
+            meerkat_core::types::ContentInput::Text("hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_prompt_content_input_valid_blocks_parse_to_blocks() {
+        let blocks_json = json!([{ "type": "text", "text": "hi" }]).to_string();
+        let parsed = parse_prompt_content_input(&blocks_json).expect("valid blocks parse");
+        let blocks = match parsed {
+            meerkat_core::types::ContentInput::Blocks(blocks) => blocks,
+            meerkat_core::types::ContentInput::Text(text) => {
+                unreachable!("expected blocks, got text: {text}")
+            }
+        };
+        assert_eq!(blocks.len(), 1);
+    }
+
+    #[test]
+    fn parse_prompt_content_input_malformed_blocks_fail_closed() {
+        // Block-shaped JSON (an array) that is NOT a valid ContentInput must
+        // error with INVALID_PARAMS, never be misread as a single text block.
+        let malformed = json!([{ "type": "image", "media_type": 12345 }]).to_string();
+        let err = parse_prompt_content_input(&malformed)
+            .expect_err("malformed block JSON must fail closed");
+        assert_eq!(err["code"], "INVALID_PARAMS");
+    }
+
+    #[test]
+    fn parse_prompt_content_input_non_array_json_is_text() {
+        // A bare number/boolean is not block-shaped content; it is plain text.
+        let parsed = parse_prompt_content_input("42").expect("number text parses");
+        assert_eq!(
+            parsed,
+            meerkat_core::types::ContentInput::Text("42".to_string())
+        );
+    }
+
+    // ── Row #40: provider-aware default model resolution ───────────────────
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn default_model_for_only_openai_is_openai_catalog_default() {
+        let keys = HashMap::from([("openai".to_string(), "sk-oai".to_string())]);
+        let model = default_model_for_configured_providers(&keys);
+        let expected = meerkat_models::catalog::default_model("openai")
+            .expect("openai catalog default")
+            .to_string();
+        assert_eq!(model, expected);
+        // Must NOT hardcode the anthropic global default when anthropic is absent.
+        assert_ne!(model, meerkat_models::catalog::global_default_model());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn default_model_prefers_highest_priority_configured_provider() {
+        // openai + gemini configured (no anthropic): priority picks openai.
+        let keys = HashMap::from([
+            ("gemini".to_string(), "g".to_string()),
+            ("openai".to_string(), "o".to_string()),
+        ]);
+        let model = default_model_for_configured_providers(&keys);
+        assert_eq!(
+            model,
+            meerkat_models::catalog::default_model("openai").expect("openai catalog default")
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn default_model_unrecognized_key_falls_back_to_global_default() {
+        let keys = HashMap::from([("notaprovider".to_string(), "x".to_string())]);
+        let model = default_model_for_configured_providers(&keys);
+        assert_eq!(model, meerkat_models::catalog::global_default_model());
+    }
+
+    // ── Row #60: realm binding order pinned to catalog provider_priority ────
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn default_realm_binding_order_equals_provider_priority() {
+        // Insertion order intentionally reversed vs catalog priority to prove
+        // the surface sorts by provider_priority(), not by HashMap iteration.
+        let mut config = Config::default();
+        let api_keys = HashMap::from([
+            ("gemini".to_string(), "g".to_string()),
+            ("openai".to_string(), "o".to_string()),
+            ("anthropic".to_string(), "a".to_string()),
+        ]);
+        populate_realm_from_api_keys(&mut config, &api_keys, None);
+        let section = config.realm.get("default").expect("default realm");
+
+        // The highest-priority configured provider (anthropic) seeds the
+        // per-realm default_binding.
+        let top = meerkat_models::catalog::provider_priority()
+            .first()
+            .expect("at least one provider in priority");
+        let expected_binding = format!("default_{}", top.as_str());
+        assert_eq!(
+            section.default_binding.as_deref(),
+            Some(expected_binding.as_str())
+        );
+
+        // Each backend's provider identity round-trips through Provider::parse_strict.
+        for backend in section.backend.values() {
+            assert!(
+                meerkat_core::Provider::parse_strict(&backend.provider).is_some(),
+                "backend provider '{}' must be a typed catalog identity",
+                backend.provider
+            );
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn unrecognized_realm_key_sorts_last_and_does_not_seed_default() {
+        let mut config = Config::default();
+        let api_keys = HashMap::from([
+            ("notaprovider".to_string(), "x".to_string()),
+            ("anthropic".to_string(), "a".to_string()),
+        ]);
+        populate_realm_from_api_keys(&mut config, &api_keys, None);
+        let section = config.realm.get("default").expect("default realm");
+        // A recognized provider (anthropic) wins the default over the
+        // unrecognized key, which sorts last.
+        assert_eq!(
+            section.default_binding.as_deref(),
+            Some("default_anthropic")
+        );
+    }
+
+    // ── Row #186: Credentials carries max_sessions ─────────────────────────
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn credentials_deserialize_threads_max_sessions() {
+        let creds: Credentials = serde_json::from_str(
+            &json!({ "anthropic_api_key": "sk-test", "max_sessions": 7 }).to_string(),
+        )
+        .expect("credentials parse");
+        assert_eq!(creds.max_sessions, 7);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn credentials_max_sessions_defaults_to_runtime_constant() {
+        let creds: Credentials =
+            serde_json::from_str(&json!({ "anthropic_api_key": "sk-test" }).to_string())
+                .expect("credentials parse");
+        assert_eq!(creds.max_sessions, super::MAX_SESSIONS);
+    }
+
+    // ── Row #163: mobpack init runs canonical trust verification ───────────
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn unsigned_mobpack_fails_closed_under_strict_policy() {
+        // test_mobpack_bytes produces an unsigned pack (no signature.toml).
+        let bytes = test_mobpack_bytes(&["sessions"]);
+        let err = extract_verify_and_parse_mobpack(
+            &bytes,
+            meerkat_mob_pack::trust::TrustPolicy::Strict,
+            &meerkat_mob_pack::trust::TrustedSigners::default(),
+        )
+        .expect_err("unsigned pack must fail closed under Strict policy");
+        assert_eq!(err["code"], "untrusted_mobpack");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn unsigned_mobpack_accepted_under_permissive_and_definition_consumed() {
+        let bytes = test_mobpack_bytes(&["sessions"]);
+        let parsed = extract_verify_and_parse_mobpack(
+            &bytes,
+            meerkat_mob_pack::trust::TrustPolicy::Permissive,
+            &meerkat_mob_pack::trust::TrustedSigners::default(),
+        )
+        .expect("permissive policy accepts unsigned pack");
+        // The verified definition is consumed, not discarded.
+        assert_eq!(parsed.definition.id, "browser-test");
+    }
+
+    // ── Row #204: lagged sentinel serializes to the typed schema ───────────
+
+    #[test]
+    fn lagged_sentinel_serializes_to_typed_schema() {
+        // A cursor beyond u32::MAX proves the skipped count is carried as u64.
+        let skipped = u64::from(u32::MAX) + 5;
+        let value = SubscriptionLaggedItem::new(skipped)
+            .to_value()
+            .expect("lagged sentinel serializes");
+        assert_eq!(value["type"], "lagged");
+        assert_eq!(value["skipped"].as_u64(), Some(skipped));
+    }
+
+    // ── Row #217: mob event cursor round-trips u64 / fails closed ──────────
+
+    #[test]
+    fn mob_event_cursor_round_trips_beyond_u32() {
+        let cursor = u64::from(u32::MAX) + 17;
+        let parsed = parse_mob_event_cursor(&cursor.to_string()).expect("large cursor parses");
+        assert_eq!(parsed, cursor);
+    }
+
+    #[test]
+    fn mob_event_cursor_empty_is_stream_start() {
+        assert_eq!(parse_mob_event_cursor("").expect("empty cursor"), 0);
+        assert_eq!(parse_mob_event_cursor("   ").expect("blank cursor"), 0);
+    }
+
+    #[test]
+    fn mob_event_cursor_malformed_fails_closed() {
+        let err = parse_mob_event_cursor("not-a-number")
+            .expect_err("non-numeric cursor must fail closed");
+        assert_eq!(err["code"], "INVALID_PARAMS");
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -3606,5 +4115,60 @@ capabilities = [{capability_values}]
             parse_js_tool_result("call_2", &result_json).expect("string content should parse");
         assert!(tool_result.is_error);
         assert_eq!(tool_result.text_content(), "ok");
+    }
+
+    // ── ROW #173: a fire-and-forget JS tool dispatch must model the deferred
+    // host action as a typed DETACHED async op (which does not gate the turn
+    // boundary) and must NOT fabricate a completed `is_error:false` success
+    // transcript that asserts the host action finished before it did.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test(async)]
+    #[allow(clippy::expect_used)]
+    async fn fire_and_forget_dispatch_emits_detached_async_op_not_synchronous_success() {
+        use meerkat_core::AgentToolDispatcher;
+
+        init_test_runtime();
+        register_js_tool(
+            "request_approval".to_string(),
+            "fire-and-forget approval".to_string(),
+            json!({ "type": "object" }).to_string(),
+        )
+        .expect("register fire-and-forget tool");
+
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).expect("raw args");
+        let call = meerkat_core::ToolCallView {
+            id: "call_ff",
+            name: "request_approval",
+            args: &args,
+        };
+
+        let outcome = super::JsToolDispatcher
+            .dispatch(call)
+            .await
+            .expect("fire-and-forget dispatch should not error");
+
+        // The deferred host action is recorded as a typed detached async op so
+        // the turn boundary is not blocked on (or asserting) the host action.
+        assert_eq!(outcome.async_ops.len(), 1, "exactly one deferred async op");
+        assert_eq!(
+            outcome.async_ops[0].wait_policy,
+            meerkat_core::ops::WaitPolicy::Detached,
+            "deferred host action must be DETACHED, not a turn-blocking barrier"
+        );
+
+        // The transcript result is NOT a fabricated completed success: it is
+        // explicitly labeled deferred/pending so the model is not told the host
+        // action succeeded before it happened.
+        assert_eq!(outcome.result.tool_use_id, "call_ff");
+        assert!(
+            !outcome.result.text_content().contains("acknowledged"),
+            "result must not assert a completed 'acknowledged' success"
+        );
+        assert!(
+            outcome.result.text_content().contains("deferred"),
+            "result must describe the deferred/pending host action"
+        );
+
+        clear_tool_callbacks();
     }
 }

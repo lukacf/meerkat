@@ -1369,16 +1369,22 @@ class MeerkatClient:
         filter: WorkGraphItemFilter | None = None,
     ) -> WorkItemListResult:
         raw = await self._request("workgraph/list", dict(filter or {}))
-        items = raw.get("items", [])
-        return {"items": items if isinstance(items, list) else []}
+        return {
+            "items": MeerkatClient._require_list_field(
+                raw, "items", "Invalid workgraph/list response"
+            )
+        }
 
     async def list_ready_workgraph_items(
         self,
         filter: WorkGraphReadyFilter | None = None,
     ) -> WorkItemListResult:
         raw = await self._request("workgraph/ready", dict(filter or {}))
-        items = raw.get("items", [])
-        return {"items": items if isinstance(items, list) else []}
+        return {
+            "items": MeerkatClient._require_list_field(
+                raw, "items", "Invalid workgraph/ready response"
+            )
+        }
 
     async def get_workgraph_snapshot(
         self,
@@ -1391,8 +1397,11 @@ class MeerkatClient:
         filter: WorkGraphEventFilter | None = None,
     ) -> WorkGraphEventsResult:
         raw = await self._request("workgraph/events", dict(filter or {}))
-        events = raw.get("events", [])
-        return {"events": events if isinstance(events, list) else []}
+        return {
+            "events": MeerkatClient._require_list_field(
+                raw, "events", "Invalid workgraph/events response"
+            )
+        }
 
     async def get_workgraph_goal_status(self, params: GoalStatusRequest) -> GoalStatusResult:
         return await self._request("workgraph/goal/status", _wire_params(params))
@@ -1826,8 +1835,11 @@ class MeerkatClient:
                 "limit": limit,
             },
         )
-        events = raw.get("events", [])
-        return {"events": events if isinstance(events, list) else []}
+        return {
+            "events": MeerkatClient._require_list_field(
+                raw, "events", "Invalid mob/events response"
+            )
+        }
 
     async def mob_ingress_interaction(
         self, params: dict[str, Any]
@@ -2083,9 +2095,9 @@ class MeerkatClient:
         if timeout_ms is not None:
             params["timeout_ms"] = timeout_ms
         result = await self._request("mob/wait_ready", params)
-        members = result.get("members", [])
-        if not isinstance(members, list):
-            return []
+        members = self._require_list_field(
+            result, "members", "Invalid mob/wait_ready response"
+        )
         normalized: list[MobReadyMemberSnapshot] = []
         for entry in members:
             if not isinstance(entry, dict):
@@ -3458,6 +3470,24 @@ class MeerkatClient:
         return value
 
     @staticmethod
+    def _require_list_field(
+        raw: dict[str, Any], field: str, context: str
+    ) -> list[Any]:
+        """Return a required wire array, failing closed on malformed shapes.
+
+        An absent field is treated as the empty list (the runtime may omit
+        empty collections), but a field that is *present-but-non-list* is a
+        contract violation and raises ``INVALID_RESPONSE`` rather than being
+        silently coerced to ``[]``.
+        """
+        if field not in raw:
+            return []
+        value = raw[field]
+        if not isinstance(value, list):
+            raise MeerkatError("INVALID_RESPONSE", f"{context}: {field} must be a list")
+        return value
+
+    @staticmethod
     def _parse_skill_diagnostics(raw: Any) -> SkillRuntimeDiagnostics | None:
         if not isinstance(raw, dict):
             return None
@@ -3629,11 +3659,18 @@ class MeerkatClient:
 
     @staticmethod
     def _parse_session_fork_result(data: dict[str, Any]) -> SessionForkResult:
+        context = "Invalid session/fork response"
         return SessionForkResult(
-            source_session_id=str(data.get("source_session_id", "")),
-            session_id=str(data.get("session_id", "")),
+            source_session_id=MeerkatClient._require_string_field(
+                data, "source_session_id", context
+            ),
+            session_id=MeerkatClient._require_string_field(
+                data, "session_id", context
+            ),
             session_ref=data.get("session_ref"),
-            message_count=MeerkatClient._parse_int(data.get("message_count"), 0),
+            message_count=int(
+                MeerkatClient._require_number_field(data, "message_count", context)
+            ),
         )
 
     @staticmethod

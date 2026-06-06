@@ -3537,3 +3537,260 @@ describe("Mob member host ingress", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// SDK fail-closed parse boundaries (DOGMA remediation rows 55/88/161/192/246/357)
+// ---------------------------------------------------------------------------
+
+describe("Member-send handling-mode parse boundary (row 357)", () => {
+  it("returns the runtime-reported handling mode without substitution", async () => {
+    const client = new MeerkatClient();
+    const expectedRef = makeMemberRef("mob-1", "reviewer-1");
+    client.request = async () => ({
+      agent_identity: "reviewer-1",
+      member_ref: expectedRef,
+      handling_mode: "queue",
+    });
+
+    // Client requested "steer"; runtime receipt says "queue" — the receipt wins.
+    const receipt = await new Mob(client, "mob-1").member("reviewer-1").send("hi", {
+      handlingMode: "steer",
+    });
+    assert.equal(receipt.handlingMode, "queue");
+  });
+
+  it("throws INVALID_RESPONSE on a missing handling_mode instead of substituting the requested mode", async () => {
+    const client = new MeerkatClient();
+    const expectedRef = makeMemberRef("mob-1", "reviewer-1");
+    client.request = async () => ({
+      agent_identity: "reviewer-1",
+      member_ref: expectedRef,
+      // handling_mode intentionally absent
+    });
+
+    await assert.rejects(
+      () => new Mob(client, "mob-1").member("reviewer-1").send("hi", { handlingMode: "queue" }),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        /handling_mode/.test(error.message),
+    );
+  });
+
+  it("throws INVALID_RESPONSE on an unknown handling_mode variant", async () => {
+    const client = new MeerkatClient();
+    const expectedRef = makeMemberRef("mob-1", "reviewer-1");
+    client.request = async () => ({
+      agent_identity: "reviewer-1",
+      member_ref: expectedRef,
+      handling_mode: "interrupt",
+    });
+
+    await assert.rejects(
+      () => new Mob(client, "mob-1").member("reviewer-1").send("hi"),
+      (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+    );
+  });
+});
+
+describe("Session fork result parse boundary (row 88)", () => {
+  it("parses a well-formed fork result", () => {
+    const result = MeerkatClient.parseSessionForkResult({
+      source_session_id: "src-1",
+      session_id: "fork-1",
+      session_ref: "ref-1",
+      message_count: 4,
+    });
+    assert.equal(result.sourceSessionId, "src-1");
+    assert.equal(result.sessionId, "fork-1");
+    assert.equal(result.sessionRef, "ref-1");
+    assert.equal(result.messageCount, 4);
+  });
+
+  it("throws INVALID_RESPONSE when session_id is missing instead of fabricating an empty handle", () => {
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionForkResult({
+          source_session_id: "src-1",
+          message_count: 4,
+        }),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        /session_id/.test(error.message),
+    );
+  });
+
+  it("throws INVALID_RESPONSE when message_count is malformed instead of coercing to zero", () => {
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionForkResult({
+          source_session_id: "src-1",
+          session_id: "fork-1",
+          message_count: "many",
+        }),
+      (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+    );
+  });
+});
+
+describe("Session history parse boundary (row 192)", () => {
+  it("throws INVALID_RESPONSE when session_id is missing instead of returning an empty transcript", () => {
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionHistory({
+          message_count: 0,
+          offset: 0,
+          has_more: false,
+          messages: [],
+        }),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        /session_id/.test(error.message),
+    );
+  });
+
+  it("throws INVALID_RESPONSE when message_count is malformed instead of coercing to zero", () => {
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionHistory({
+          session_id: "s1",
+          message_count: null,
+          offset: 0,
+          has_more: false,
+          messages: [],
+        }),
+      (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+    );
+  });
+
+  it("throws INVALID_RESPONSE for transcript revisions missing required fields", () => {
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionTranscriptRevision({
+          session_id: "s1",
+          // revision/head_revision/message_count missing
+          offset: 0,
+          has_more: false,
+          messages: [],
+        }),
+      (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+    );
+  });
+});
+
+describe("Capability status parse boundary (row 161)", () => {
+  it("parses a bare-string capability status", () => {
+    const cap = MeerkatClient.parseWireCapabilityEntry({
+      id: "memory",
+      description: "Semantic memory",
+      status: "Available",
+    });
+    assert.deepEqual(cap, {
+      id: "memory",
+      description: "Semantic memory",
+      status: "Available",
+    });
+  });
+
+  it("parses an externally-tagged capability status object without fabricating 'Unknown'", () => {
+    const cap = MeerkatClient.parseWireCapabilityEntry({
+      id: "memory",
+      description: "Semantic memory",
+      status: { DisabledByPolicy: { description: "blocked" } },
+    });
+    assert.equal(cap.status, "DisabledByPolicy");
+  });
+
+  it("throws INVALID_RESPONSE on a missing capability status instead of coalescing to 'Available'/'Unknown'", () => {
+    assert.throws(
+      () =>
+        MeerkatClient.parseWireCapabilityEntry({
+          id: "memory",
+          description: "Semantic memory",
+          // status absent
+        }),
+      (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+    );
+  });
+
+  it("throws INVALID_RESPONSE on an unparseable (numeric) capability status", () => {
+    assert.throws(
+      () =>
+        MeerkatClient.parseWireCapabilityEntry({
+          id: "memory",
+          description: "Semantic memory",
+          status: 7,
+        }),
+      (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+    );
+  });
+
+  it("throws INVALID_RESPONSE on a missing capability id instead of coercing to ''", () => {
+    assert.throws(
+      () =>
+        MeerkatClient.parseWireCapabilityEntry({
+          description: "Semantic memory",
+          status: "Available",
+        }),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        /id/.test(error.message),
+    );
+  });
+});
+
+describe("Transport corrupted-frame fault (row 246)", () => {
+  it("surfaces a typed PROTOCOL_ERROR to pending callers instead of silently dropping a corrupted frame", async () => {
+    const client = new MeerkatClient();
+    client.process = { stdin: { write: () => {} } };
+
+    // Register a pending request through the real request bookkeeping.
+    const pending = client.registerRequest(client.requestId + 1);
+
+    // Feed a corrupted (non-JSON) frame into the read loop.
+    client.handleLine("this is not json{");
+
+    await assert.rejects(
+      () => pending,
+      (error) => error instanceof MeerkatError && error.code === "PROTOCOL_ERROR",
+    );
+  });
+});
+
+describe("Callback tool result content type (row 55)", () => {
+  it("delivers a multimodal block array to the runtime as blocks rather than a stringified blob", async () => {
+    const client = new MeerkatClient();
+    const blocks = [
+      { type: "text", text: "see image" },
+      { type: "image", media_type: "image/png", source: "blob", blob_id: "blob_1" },
+    ];
+    // Register the tool before attaching a process so the eager
+    // `tools/register` round-trip is skipped and only the callback response
+    // write is captured below.
+    client.registerTool("render", "Render", { type: "object" }, async () => blocks);
+
+    const writes = [];
+    client.process = { stdin: { write: (line) => writes.push(line) } };
+
+    client.handleLine(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 42,
+        method: "tool/execute",
+        params: { name: "render", arguments: {} },
+      }),
+    );
+
+    // Allow the handler promise + writeCallbackResponse microtask to settle.
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(writes.length, 1);
+    const response = JSON.parse(writes[0]);
+    assert.equal(response.id, 42);
+    assert.equal(response.result.is_error, false);
+    assert.deepEqual(response.result.content, blocks);
+  });
+});

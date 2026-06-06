@@ -1216,19 +1216,13 @@ fn runtime_completion_to_mob_result(
             )))
         }
         meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
-            result,
             error,
         } => Err(MobError::Internal(format!(
-            "turn finalization failed after output: {}; structured_output={}",
+            "turn finalization failed after output: {}",
             error
                 .detail
                 .as_deref()
                 .unwrap_or("turn finalization failed"),
-            result
-                .structured_output
-                .as_ref()
-                .map(serde_json::Value::to_string)
-                .unwrap_or_else(|| "null".to_string())
         ))),
         meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
             Err(MobError::Internal(format!("runtime terminated: {reason}")))

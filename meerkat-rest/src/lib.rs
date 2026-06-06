@@ -3631,11 +3631,11 @@ fn completion_outcome_to_api_result(
             }
         }
         meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
-            result,
             error,
         } => {
-            let response = run_result_to_response(*result, realm);
-            let structured_output = response.structured_output.clone();
+            // Finalization (durable commit) failed: the run is not durably
+            // terminal. Surface ONLY the typed error — never the (non-durable)
+            // run_result/structured_output, which would be a false success.
             Err(ApiError::InternalWithData {
                 message: error
                     .detail
@@ -3644,8 +3644,6 @@ fn completion_outcome_to_api_result(
                 code: "TURN_FINALIZATION_FAILED".to_string(),
                 details: json!({
                     "error": error,
-                    "run_result": response,
-                    "structured_output": structured_output,
                 }),
             })
         }
@@ -11558,24 +11556,14 @@ mod tests {
     }
 
     #[test]
-    fn completion_outcome_to_api_result_surfaces_output_and_finalization_error() {
+    fn completion_outcome_to_api_result_finalization_failure_hides_nondurable_result() {
+        // Row #85 gate: a finalization (durable-commit) failure is NOT durably
+        // terminal, so the REST reply must carry ONLY the typed error and must
+        // NOT expose run_result / structured_output (a false success).
         let session_id = SessionId::new();
         let realm = meerkat_core::RealmId::parse("test-realm").expect("valid test realm id");
-        let run_result = meerkat_core::RunResult {
-            text: "{\"gate\":\"green\"}".to_string(),
-            session_id: session_id.clone(),
-            usage: Default::default(),
-            turns: 1,
-            tool_calls: 0,
-            terminal_cause_kind: None,
-            structured_output: Some(json!({ "gate": "green" })),
-            extraction_error: None,
-            schema_warnings: None,
-            skill_diagnostics: None,
-        };
         let err = completion_outcome_to_api_result(
             meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
-                result: Box::new(run_result),
                 error: meerkat_core::TurnErrorMetadata::runtime_apply_failure(
                     "runtime loop commit failed: synthetic finalization failure",
                 ),
@@ -11599,11 +11587,14 @@ mod tests {
         assert!(message.contains("synthetic finalization failure"));
         assert_eq!(details["error"]["kind"], "runtime_apply_failure");
         assert_eq!(details["error"]["terminal"], true);
-        assert_eq!(
-            details["run_result"]["structured_output"],
-            json!({ "gate": "green" })
+        assert!(
+            details.get("run_result").is_none(),
+            "finalization failure must not expose a non-durable run_result"
         );
-        assert_eq!(details["structured_output"], json!({ "gate": "green" }));
+        assert!(
+            details.get("structured_output").is_none(),
+            "finalization failure must not expose non-durable structured_output"
+        );
     }
 
     #[test]

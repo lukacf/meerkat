@@ -95,3 +95,28 @@ pub mod provider_canonical_str {
         Ok(Provider::from_name(&name))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Provider;
+
+    #[test]
+    fn parse_strict_fails_closed_where_from_name_coerces_to_other() {
+        // Row #121 gate: the typed boundary that turns a client's display label
+        // back into a Provider must FAIL CLOSED on an unrecognized label. This
+        // pins the contract the factory override path relies on:
+        // `from_name` coerces unknown -> Other (fail open), whereas
+        // `parse_strict` returns None so the caller can surface a typed error.
+        assert_eq!(
+            Provider::from_name("totally-unknown-provider"),
+            Provider::Other
+        );
+        assert_eq!(Provider::parse_strict("totally-unknown-provider"), None);
+        // Canonical names still resolve through the strict path.
+        assert_eq!(
+            Provider::parse_strict("anthropic"),
+            Some(Provider::Anthropic)
+        );
+        assert_eq!(Provider::parse_strict("openai"), Some(Provider::OpenAI));
+    }
+}

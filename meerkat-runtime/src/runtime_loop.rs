@@ -320,7 +320,12 @@ fn resolve_completion_waiters_from_authority(
             }
         }
         RuntimeCompletionResultClass::CompletedWithFinalizationFailure => {
-            let Some(CoreApplyTerminal::RunResult(result)) = terminal else {
+            // The class authority still requires that output was produced (a
+            // RunResult terminal), but the produced result is deliberately NOT
+            // forwarded to waiters: finalization (durable commit) failed, so the
+            // run is not durably terminal and the output must not be surfaced as
+            // a usable success result.
+            let Some(CoreApplyTerminal::RunResult(_result)) = terminal else {
                 fail_closed_completion_waiters(
                     registry,
                     input_ids,
@@ -339,7 +344,6 @@ fn resolve_completion_waiters_from_authority(
             for input_id in input_ids {
                 registry.resolve_completed_with_finalization_failure_authorized(
                     input_id,
-                    result.as_ref().clone(),
                     error.clone(),
                     authority.clone(),
                 );

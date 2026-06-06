@@ -70,12 +70,12 @@ pub enum CompletionOutcome {
         reason: String,
         error: TurnErrorMetadata,
     },
-    /// The turn produced a valid result, but a later runtime finalization step
-    /// failed. Consumers can use the result while handling the mechanics error.
-    CompletedWithFinalizationFailure {
-        result: Box<RunResult>,
-        error: TurnErrorMetadata,
-    },
+    /// The turn produced output, but a later runtime finalization step (the
+    /// durable commit) failed, so the run is NOT durably terminal. The produced
+    /// result is deliberately NOT carried on this outcome: a finalization
+    /// failure must be treated as failure by every surface, never surfaced as a
+    /// usable success result (that would be a false belief of success).
+    CompletedWithFinalizationFailure { error: TurnErrorMetadata },
     /// The runtime was stopped or destroyed while the input was pending.
     RuntimeTerminated(String),
 }
@@ -430,9 +430,8 @@ impl CompletionRegistry {
                         error: error.clone(),
                     }
                 }
-                CompletionOutcome::CompletedWithFinalizationFailure { result, error } => {
+                CompletionOutcome::CompletedWithFinalizationFailure { error } => {
                     CompletionOutcome::CompletedWithFinalizationFailure {
-                        result: Box::new(result.as_ref().clone()),
                         error: error.clone(),
                     }
                 }
@@ -658,17 +657,13 @@ impl CompletionRegistry {
     fn resolve_completed_with_finalization_failure(
         &mut self,
         input_id: &InputId,
-        result: RunResult,
         error: TurnErrorMetadata,
         cleanup_observation: CompletionCleanupObservation,
     ) {
         if let Some(senders) = self.take_waiters(input_id) {
             Self::send_outcome(
                 senders,
-                CompletionOutcome::CompletedWithFinalizationFailure {
-                    result: Box::new(result),
-                    error,
-                },
+                CompletionOutcome::CompletedWithFinalizationFailure { error },
                 cleanup_observation,
             );
         }
@@ -677,7 +672,6 @@ impl CompletionRegistry {
     pub(crate) fn resolve_completed_with_finalization_failure_authorized(
         &mut self,
         input_id: &InputId,
-        result: RunResult,
         error: TurnErrorMetadata,
         authority: RuntimeCompletionResultAuthority,
     ) {
@@ -688,7 +682,6 @@ impl CompletionRegistry {
         }
         self.resolve_completed_with_finalization_failure(
             input_id,
-            result,
             error,
             CompletionCleanupObservation::from_authority(authority),
         );

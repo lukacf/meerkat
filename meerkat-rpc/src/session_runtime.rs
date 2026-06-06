@@ -7971,7 +7971,9 @@ fn completion_outcome_to_rpc_result(
         CompletionOutcome::Abandoned(reason) => Err(RpcError {
             code: error::INTERNAL_ERROR,
             message: format!("turn abandoned: {reason}"),
-            data: None,
+            // Carry the terminal reason as structured data (not only in the
+            // human message) so SDK consumers receive a typed payload.
+            data: Some(serde_json::json!({ "reason": reason })),
         }),
         CompletionOutcome::AbandonedWithError {
             reason,
@@ -7983,12 +7985,10 @@ fn completion_outcome_to_rpc_result(
                 "error": turn_error,
             })),
         }),
-        CompletionOutcome::CompletedWithFinalizationFailure {
-            result,
-            error: turn_error,
-        } => {
-            let wire_result = meerkat_contracts::WireRunResult::from(*result);
-            let structured_output = wire_result.structured_output.clone();
+        CompletionOutcome::CompletedWithFinalizationFailure { error: turn_error } => {
+            // Finalization (durable commit) failed: the run is not durably
+            // terminal. Surface ONLY the typed error — never the (non-durable)
+            // run_result/structured_output, which would be a false success.
             Err(RpcError {
                 code: error::INTERNAL_ERROR,
                 message: turn_error
@@ -7997,15 +7997,15 @@ fn completion_outcome_to_rpc_result(
                     .unwrap_or_else(|| "turn finalization failed".to_string()),
                 data: Some(serde_json::json!({
                     "error": turn_error,
-                    "run_result": wire_result,
-                    "structured_output": structured_output,
                 })),
             })
         }
         CompletionOutcome::RuntimeTerminated(reason) => Err(RpcError {
             code: error::INTERNAL_ERROR,
             message: format!("runtime terminated: {reason}"),
-            data: None,
+            // Carry the terminal reason as structured data (not only in the
+            // human message) so SDK consumers receive a typed payload.
+            data: Some(serde_json::json!({ "reason": reason })),
         }),
     }
 }
@@ -20998,23 +20998,42 @@ mod tests {
     }
 
     #[test]
-    fn completion_outcome_to_rpc_result_surfaces_output_and_finalization_error() {
+    fn completion_outcome_to_rpc_result_terminal_reasons_carry_structured_data() {
+        // Row #105 gate: Abandoned / RuntimeTerminated must carry the terminal
+        // reason as structured `data` for SDK consumers, not only in the human
+        // message string.
         let session_id = SessionId::new();
-        let run_result = meerkat_core::RunResult {
-            text: "{\"gate\":\"green\"}".to_string(),
-            session_id: session_id.clone(),
-            usage: Default::default(),
-            turns: 1,
-            tool_calls: 0,
-            terminal_cause_kind: None,
-            structured_output: Some(serde_json::json!({ "gate": "green" })),
-            extraction_error: None,
-            schema_warnings: None,
-            skill_diagnostics: None,
-        };
+        let abandoned = completion_outcome_to_rpc_result(
+            meerkat_runtime::completion::CompletionOutcome::Abandoned("budget exhausted".into()),
+            &session_id,
+        )
+        .expect_err("abandoned should map to an RPC error");
+        assert_eq!(
+            abandoned.data.expect("abandoned data")["reason"],
+            serde_json::json!("budget exhausted")
+        );
+
+        let terminated = completion_outcome_to_rpc_result(
+            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(
+                "runtime stopped".into(),
+            ),
+            &session_id,
+        )
+        .expect_err("runtime-terminated should map to an RPC error");
+        assert_eq!(
+            terminated.data.expect("terminated data")["reason"],
+            serde_json::json!("runtime stopped")
+        );
+    }
+
+    #[test]
+    fn completion_outcome_to_rpc_result_finalization_failure_hides_nondurable_result() {
+        // Row #85 gate: a finalization (durable-commit) failure is NOT durably
+        // terminal, so the RPC reply must carry ONLY the typed error and must
+        // NOT expose run_result / structured_output (a false success).
+        let session_id = SessionId::new();
         let err = completion_outcome_to_rpc_result(
             meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
-                result: Box::new(run_result),
                 error: meerkat_core::TurnErrorMetadata::runtime_apply_failure(
                     "runtime loop commit failed: synthetic finalization failure",
                 ),
@@ -21028,13 +21047,13 @@ mod tests {
         let data = err.data.expect("finalization failure error data");
         assert_eq!(data["error"]["kind"], "runtime_apply_failure");
         assert_eq!(data["error"]["terminal"], true);
-        assert_eq!(
-            data["run_result"]["structured_output"],
-            serde_json::json!({ "gate": "green" })
+        assert!(
+            data.get("run_result").is_none(),
+            "finalization failure must not expose a non-durable run_result"
         );
-        assert_eq!(
-            data["structured_output"],
-            serde_json::json!({ "gate": "green" })
+        assert!(
+            data.get("structured_output").is_none(),
+            "finalization failure must not expose non-durable structured_output"
         );
     }
 

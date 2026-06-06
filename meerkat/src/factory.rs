@@ -2653,8 +2653,16 @@ impl AgentFactory {
         }
         if let Some(client) = build_config.agent_llm_client_override.as_ref() {
             // `AgentLlmClient::provider()` still returns the display label;
-            // parse it back into the typed enum at this boundary.
-            return Ok((Provider::from_name(client.provider()), None));
+            // parse it back into the typed enum at this boundary, FAIL CLOSED.
+            // `from_name` would silently coerce an unknown label to
+            // `Provider::Other` (minting an unowned provider identity); a label
+            // that does not resolve to a catalog provider is an error here.
+            let provider = Provider::parse_strict(client.provider()).ok_or_else(|| {
+                BuildAgentError::UnknownProvider {
+                    model: build_config.model.clone(),
+                }
+            })?;
+            return Ok((provider, None));
         }
 
         Err(BuildAgentError::UnknownProvider {

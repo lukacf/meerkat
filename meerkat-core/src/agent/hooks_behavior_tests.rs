@@ -359,9 +359,9 @@ async fn malformed_provider_tool_call_args_fail_closed_before_event_or_hook_proj
         .expect_err("malformed provider tool-call args must fail closed");
 
     assert!(
-        matches!(&err, AgentError::ToolError(message)
-            if message.contains("Invalid arguments")
-                && message.contains("tool call arguments")),
+        matches!(&err, AgentError::Tool { error }
+            if error.to_string().contains("Invalid arguments")
+                && error.to_string().contains("tool call arguments")),
         "unexpected error: {err}"
     );
     assert!(

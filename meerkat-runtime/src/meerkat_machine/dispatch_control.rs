@@ -109,15 +109,25 @@ impl MeerkatMachine {
                     work_id: crate::meerkat_machine::dsl::WorkId::from_domain(input.id()),
                     origin: crate::meerkat_machine::dsl::WorkOrigin::Ingest,
                 };
-                // Propagate the machine-owned preview rejection reason verbatim
-                // (matching the sibling `Destroy` arm), rather than discarding
-                // it and re-deriving an `InvalidState { state }` from the
-                // projected runtime state (which defaults to `Destroyed` and so
-                // launders the real rejection cause). The DSL preview owns the
-                // rejection reason; the dispatcher must not re-author it.
-                self.preview_session_dsl_input(&session_id, ingest_input.clone(), "Ingest")
+                // On a machine-rejected Ingest, surface the TYPED lifecycle
+                // state when the session has a known projected runtime state
+                // (e.g. Retired/Stopped) — `InvalidState { state }` is the most
+                // typed cause. Only when there is NO projected state (an unbound
+                // session) do we surface the machine-owned DSL rejection reason
+                // verbatim, rather than fabricating `InvalidState { Destroyed }`
+                // from a defaulted projection (#56: do not re-author the cause as
+                // a wrong state, but do not degrade a known typed state either).
+                if let Err(reason) = self
+                    .preview_session_dsl_input(&session_id, ingest_input.clone(), "Ingest")
                     .await
-                    .map_err(RuntimeControlPlaneError::Internal)?;
+                {
+                    return Err(
+                        match self.existing_session_runtime_state(&session_id).await {
+                            Some(state) => RuntimeControlPlaneError::InvalidState { state },
+                            None => RuntimeControlPlaneError::Internal(reason),
+                        },
+                    );
+                }
                 self.apply_session_dsl_input_with_dispatch_failure(
                     &session_id,
                     ingest_input,
@@ -1693,11 +1703,12 @@ mod tests {
     }
 
     /// Row #56 gate: a machine-rejected direct `Ingest` must surface the
-    /// machine-owned DSL preview rejection reason, NOT a re-derived
-    /// `InvalidState { state: Destroyed }`. A freshly registered session has
-    /// no runtime binding (no `PrepareBindings`), so the DSL preview rejects
-    /// the `Ingest` transition; the rejection cause is owned by the machine
-    /// and must propagate verbatim.
+    /// session's REAL typed lifecycle state, NOT a re-derived
+    /// `InvalidState { state: Destroyed }` fabricated from a defaulted
+    /// projection. A freshly registered session has no runtime binding (no
+    /// `PrepareBindings`), so the DSL preview rejects the `Ingest` transition;
+    /// the dispatcher surfaces the actual (non-`Destroyed`) state rather than
+    /// laundering the cause into a fabricated state.
     #[tokio::test]
     async fn rejected_direct_ingest_surfaces_machine_reason_not_invalid_state_destroyed() {
         let machine = MeerkatMachine::ephemeral();
@@ -1720,28 +1731,23 @@ mod tests {
             .map_err(MeerkatMachine::control_plane_error_from_command_error)
             .expect_err("ingest on an unbound session must be rejected by the DSL preview");
 
-        // OLD behavior laundered the machine-owned reason into a re-derived
-        // `InvalidState { state: Destroyed }`. The fix propagates the real
-        // rejection reason as `Internal(reason)`.
-        assert!(
-            !matches!(
-                err,
-                RuntimeControlPlaneError::InvalidState {
-                    state: RuntimeState::Destroyed
-                }
-            ),
-            "ingest rejection must not be laundered into a re-derived InvalidState{{Destroyed}}, got {err:?}"
-        );
-
+        // OLD behavior laundered the rejection into a re-derived
+        // `InvalidState { state: Destroyed }` from a defaulted projection. The
+        // fix surfaces the session's REAL typed lifecycle state when it is known
+        // (here, the unbound pre-binding state), which must never be the
+        // fabricated `Destroyed`. A typed `InvalidState { state }` is strictly
+        // more informative than an `Internal(reason)` string.
         match err {
-            RuntimeControlPlaneError::Internal(reason) => {
-                assert!(
-                    !reason.trim().is_empty(),
-                    "the machine-owned rejection reason must be propagated, not discarded"
+            RuntimeControlPlaneError::InvalidState { state } => {
+                assert_ne!(
+                    state,
+                    RuntimeState::Destroyed,
+                    "ingest rejection must surface the real pre-binding state, \
+                     not a fabricated InvalidState{{Destroyed}}"
                 );
             }
             other => panic!(
-                "expected the machine-owned preview rejection reason via Internal(_), got {other:?}"
+                "expected a typed InvalidState{{state}} for the unbound session, got {other:?}"
             ),
         }
     }

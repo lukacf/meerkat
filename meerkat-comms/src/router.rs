@@ -522,14 +522,20 @@ impl Router {
         }
     }
 
-    /// Deliver an inproc envelope under the router's configured namespace.
+    /// Deliver an inproc envelope, honoring namespace isolation when it has
+    /// been opted into.
     ///
-    /// The configured `inproc_namespace` is the delivery authority: the
-    /// destination pubkey must have a live inproc owner *in this namespace*.
-    /// A peer registered only in a different namespace is NOT reachable — we
-    /// fail closed with [`SendError::PeerNotFound`] rather than crossing
-    /// namespaces. This honors the namespace isolation promised by
-    /// `CoreCommsConfig.inproc_namespace`.
+    /// `CoreCommsConfig.inproc_namespace` is the namespace-isolation OPT-IN.
+    /// When it is configured (`Some(ns)`) the namespace is the delivery
+    /// authority: the destination pubkey must have a live inproc owner *in that
+    /// namespace* or we fail closed with [`SendError::PeerNotFound`] rather than
+    /// crossing namespaces (#242 — no cross-namespace delivery). When it is NOT
+    /// configured (`None`) no isolation was promised, so none is imposed — the
+    /// legacy any-namespace resolution stands. Coercing an absent namespace to a
+    /// synthetic `""` namespace here would wrongly partition default-namespace
+    /// peers that legitimately share a process (e.g. an in-process mob member
+    /// and its runtime bridge), so the typed `None` is respected as
+    /// "unconstrained", not as a distinct namespace.
     async fn send_inproc_in_namespace(
         &self,
         peer: &TrustedPeer,
@@ -537,16 +543,10 @@ impl Router {
         dest: PeerId,
     ) -> Result<SendOutcome, SendError> {
         let registry = InprocRegistry::global();
-        let namespace = self.inproc_namespace.as_deref().unwrap_or("");
-        // Namespace is the routing authority. Require the destination pubkey to
-        // have a live inproc owner *in this namespace* before any delivery.
-        // A peer registered only in a different namespace does not resolve here
-        // and must not be reached — fail closed rather than crossing
-        // namespaces. This honors the isolation promised by
-        // `CoreCommsConfig.inproc_namespace`.
-        if registry
-            .get_by_pubkey_in_namespace(namespace, &peer.pubkey)
-            .is_none()
+        if let Some(namespace) = self.inproc_namespace.as_deref()
+            && registry
+                .get_by_pubkey_in_namespace(namespace, &peer.pubkey)
+                .is_none()
         {
             return Err(SendError::PeerNotFound(dest));
         }

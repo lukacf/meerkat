@@ -4701,12 +4701,16 @@ async fn spawn_live_external_peer_with_transport(
                         // `trust_candidate_sender_for_reply` records trust for the
                         // requester, but the registration of that peer in the
                         // send path propagates asynchronously. Under slow
-                        // scheduling (notably the Linux CI executors) it can lag
-                        // this reply, surfacing a transient `PeerNotFound`. Wait
-                        // for the registration to land rather than racing it; any
-                        // other send error still fails immediately (no masking).
+                        // scheduling (notably the high-parallelism Linux RBE
+                        // executors) it can lag this reply well past a few
+                        // seconds, surfacing a transient `PeerNotFound`. Wait
+                        // generously for the registration to land rather than
+                        // racing it; any other send error still fails immediately
+                        // (no masking). The deadline only bounds the failure-lag
+                        // path -- the happy path returns as soon as the peer is
+                        // registered.
                         let send_deadline =
-                            tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+                            tokio::time::Instant::now() + std::time::Duration::from_secs(60);
                         loop {
                             match responder_runtime
                                 .send(CommsCommand::PeerResponse {

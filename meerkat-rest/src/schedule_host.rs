@@ -258,9 +258,13 @@ impl SurfaceScheduleSessionHost for RestScheduleTargetAdapter {
 
     async fn materialize_session(
         &self,
+        _occurrence: &Occurrence,
         create: &SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError> {
+        // Idempotent reuse of an already-bound materialized session is enforced
+        // by `SharedScheduleTargetAdapter::resolve_session` (Layer B) before
+        // this is reached, so this surface need not re-derive a deterministic id.
         self.context
             .materialize_scheduled_session(create, prompt_system_prompt)
             .await

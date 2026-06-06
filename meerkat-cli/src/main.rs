@@ -10155,10 +10155,14 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
 
     async fn materialize_session(
         &self,
+        occurrence: &meerkat::Occurrence,
         create: &meerkat::SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, meerkat::ScheduleDomainError> {
-        let session = Session::new();
+        // Deterministic per-occurrence id so a reclaim/redrive reuses the same
+        // session instead of orphaning a fresh random one in the
+        // materialize->bind crash window.
+        let session = Session::with_id(occurrence.materialized_session_id());
         let session_id = session.id().clone();
         let bindings = self
             .runtime_adapter

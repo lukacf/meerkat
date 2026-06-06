@@ -181,6 +181,16 @@ pub struct DefaultHookEngine {
         Arc<std::sync::RwLock<HashMap<InProcessHookHandlerId, InProcessHookHandler>>>,
     background_patch_delivery: LocalHookPatchDelivery,
     background_slots: Arc<Semaphore>,
+    /// In-flight background hook tasks owned by the engine lifecycle.
+    ///
+    /// On non-wasm targets the previously-detached background `tokio::spawn`
+    /// is tracked here so (a) dropping the engine aborts the `JoinSet` instead
+    /// of leaking a zombie task that races a freed delivery queue, and (b) the
+    /// consumer seam (`drain_published_patches_for_session`) reaps finished
+    /// publishers before reading. Wasm has no detached-task-teardown hazard, so
+    /// the field is gated out and the wasm path keeps the existing spawn.
+    #[cfg(not(target_arch = "wasm32"))]
+    inflight_background: Arc<Mutex<tokio::task::JoinSet<()>>>,
     revision: Arc<AtomicU64>,
 }
 
@@ -201,6 +211,8 @@ impl DefaultHookEngine {
             in_process_handlers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             background_patch_delivery: LocalHookPatchDelivery::new(),
             background_slots: Arc::new(Semaphore::new(background_max_concurrency)),
+            #[cfg(not(target_arch = "wasm32"))]
+            inflight_background: Arc::new(Mutex::new(tokio::task::JoinSet::new())),
             revision: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -317,6 +329,19 @@ impl DefaultHookEngine {
         &self,
         session_id: &SessionId,
     ) -> Vec<HookPatchEnvelope> {
+        // Reap any background publishers that have already finished before
+        // reading the queue. We use the non-blocking `try_join_next` (not
+        // `join_next().await`) deliberately: it reaps completed tasks — whose
+        // publishes have already committed to the delivery queue — without
+        // blocking on still-running tasks, so it cannot deadlock against a
+        // background hook that is itself awaiting this same engine. Finished
+        // tasks are removed from the `JoinSet` here, so the set stays bounded
+        // and engine drop only has to abort genuinely-in-flight work.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut set = self.inflight_background.lock().await;
+            while set.try_join_next().is_some() {}
+        }
         let target = HookPatchDeliveryTarget::for_session(session_id.clone());
         self.background_patch_delivery.drain(&target).await
     }
@@ -821,7 +846,7 @@ impl HookEngine for DefaultHookEngine {
                 };
                 let engine = self.clone();
                 let invocation_cloned = invocation.clone();
-                tokio::spawn(async move {
+                let task = async move {
                     let _permit = permit;
                     let delivery_target =
                         HookPatchDeliveryTarget::for_session(invocation_cloned.session_id.clone());
@@ -851,7 +876,15 @@ impl HookEngine for DefaultHookEngine {
                             .publish_patches(delivery_target, outcome.published_patches)
                             .await;
                     }
-                });
+                };
+                // Non-wasm: bind the task to the engine lifecycle via the owned
+                // `JoinSet` so engine drop aborts it and the consumer seam can
+                // reap finished publishers. Wasm: keep the existing detached
+                // spawn (no detached-task-teardown hazard there).
+                #[cfg(not(target_arch = "wasm32"))]
+                self.inflight_background.lock().await.spawn(task);
+                #[cfg(target_arch = "wasm32")]
+                tokio::spawn(task);
             }
         }
 
@@ -1049,6 +1082,94 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn background_post_hook_task_is_tracked_and_reaped_not_leaked() {
+        // R2 regression: the background post-hook task used to be a detached
+        // `tokio::spawn` tied to nothing, so on engine/runtime teardown a task
+        // parked between `execute_one` and `publish_patches` would vanish with
+        // no signal. The task is now owned by the engine's `JoinSet`, so it is
+        // (a) observable as in-flight after `execute()` and (b) reaped at the
+        // consumer seam (`drain_published_patches`) once it completes.
+        let mut config = HooksConfig::default();
+        config.entries = vec![HookEntryConfig {
+            id: HookId::new("tracked-post-bg"),
+            point: HookPoint::PostToolExecution,
+            mode: HookExecutionMode::Background,
+            capability: HookCapability::Observe,
+            runtime: runtime_in_process("tracked-post-bg"),
+            ..Default::default()
+        }];
+
+        let engine = DefaultHookEngine::new(config);
+        // A handler with a short delay so the spawned task is genuinely
+        // in-flight when we observe the JoinSet immediately after `execute()`.
+        engine
+            .register_in_process_handler(
+                "tracked-post-bg",
+                delayed_handler(
+                    20,
+                    RuntimeHookResponse {
+                        decision: None,
+                        patches: Vec::new(),
+                    },
+                ),
+            )
+            .await;
+
+        let session_id = SessionId::new();
+        let report = engine
+            .execute(
+                HookInvocation {
+                    point: HookPoint::PostToolExecution,
+                    session_id: session_id.clone(),
+                    turn_number: Some(1),
+                    prompt_input: None,
+                    prompt: None,
+                    error_report: None,
+                    error_class: None,
+                    error: None,
+                    llm_request: None,
+                    llm_response: None,
+                    tool_call: None,
+                    tool_result: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(report.published_patches.is_empty());
+
+        // The background publisher is owned by the engine's JoinSet, not
+        // detached: it is tracked as in-flight right after `execute()` returns.
+        assert_eq!(
+            engine.inflight_background.lock().await.len(),
+            1,
+            "background post-hook task must be tracked in the engine JoinSet, not detached"
+        );
+
+        // The consumer seam reaps the finished publisher (non-blocking
+        // `try_join_next`). Drain repeatedly until the task has run and been
+        // reaped, proving the task is reaped (lifecycle-bound) rather than
+        // leaked. `HookPatch` is uninhabited, so no envelope can ever be
+        // published; the observable contract here is the reaped, empty JoinSet.
+        let mut drained = Vec::new();
+        for _ in 0..200 {
+            drained = engine.drain_published_patches(&session_id).await.unwrap();
+            if engine.inflight_background.lock().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            engine.inflight_background.lock().await.is_empty(),
+            "finished background publisher must be reaped from the engine JoinSet, not leaked"
+        );
+        assert!(
+            drained.is_empty(),
+            "uninhabited HookPatch means no envelope is ever published"
         );
     }
 

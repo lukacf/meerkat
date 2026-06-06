@@ -3,14 +3,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 #[cfg(not(feature = "mob"))]
 use meerkat::surface::NoopScheduleMobHost;
-use meerkat::surface::prepare_surface_session;
 use meerkat::surface::{
     ScheduledPromptDispatch, SharedScheduleTargetAdapter, SurfaceScheduleMobHost,
     SurfaceScheduleSessionHost, schedule_host_supported, spawn_schedule_host,
 };
 use meerkat::{
-    DeliveryDispatch, Occurrence, ScheduleDomainError, SessionMaterializationSpec, SessionService,
-    SessionTargetBinding, TargetProbeOutcome,
+    DeliveryDispatch, Occurrence, ScheduleDomainError, Session, SessionMaterializationSpec,
+    SessionService, SessionTargetBinding, TargetProbeOutcome,
 };
 use meerkat_core::agent::AgentToolDispatcher;
 use meerkat_core::handles::ExternalToolSurfaceHandle;
@@ -143,6 +142,7 @@ impl McpScheduleContext {
 
     async fn materialize_scheduled_session(
         &self,
+        occurrence: &Occurrence,
         create: &SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError> {
@@ -151,12 +151,24 @@ impl McpScheduleContext {
             .reserve_create_session_admission()
             .await
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
-        let prepared = prepare_surface_session(&self.runtime_adapter)
+        // Layer A: derive the materialized SessionId deterministically from the
+        // occurrence identity (NOT attempt_count) so a redrive of the same
+        // occurrence reuses the existing session (via the `resume_session`
+        // create-or-reuse recovery path) instead of minting a second orphan if
+        // a prior attempt died inside the materialize->bind window.
+        // `prepare_bindings` is idempotent on an already-registered session, so
+        // a second materialize for the same id is a no-op reuse.
+        let session = Session::with_id(occurrence.materialized_session_id());
+        let session_id = session.id().clone();
+        let runtime_bindings = self
+            .runtime_adapter
+            .prepare_bindings(session_id.clone())
             .await
-            .map_err(ScheduleDomainError::Internal)?;
-        let session = prepared.session;
-        let session_id = prepared.session_id;
-        let runtime_bindings = prepared.bindings;
+            .map_err(|error| {
+                ScheduleDomainError::Internal(format!(
+                    "failed to prepare bindings for scheduled session {session_id}: {error}"
+                ))
+            })?;
 
         let output_schema = create.output_schema.clone();
 
@@ -407,11 +419,12 @@ impl SurfaceScheduleSessionHost for McpScheduleTargetAdapter {
 
     async fn materialize_session(
         &self,
+        occurrence: &Occurrence,
         create: &SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError> {
         self.context
-            .materialize_scheduled_session(create, prompt_system_prompt)
+            .materialize_scheduled_session(occurrence, create, prompt_system_prompt)
             .await
     }
 

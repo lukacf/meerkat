@@ -566,7 +566,7 @@ where
                                     retry: retry_schedule.clone(),
                                 })?;
                             self.execute_turn_effects(&recover, turn_count, event_tx)
-                                .await;
+                                .await?;
                             let _ = crate::event_tap::tap_emit(
                                 &self.event_tap,
                                 event_tx.as_ref(),
@@ -590,7 +590,7 @@ where
                                     retry_attempt: retry_schedule.plan.attempt,
                                 })?;
                             self.execute_turn_effects(&retry, turn_count, event_tx)
-                                .await;
+                                .await?;
                             continue;
                         }
                         return Err(error);
@@ -630,7 +630,7 @@ where
                                 retry: retry_schedule.clone(),
                             })?;
                         self.execute_turn_effects(&recover, turn_count, event_tx)
-                            .await;
+                            .await?;
                         let _ = crate::event_tap::tap_emit(
                             &self.event_tap,
                             event_tx.as_ref(),
@@ -653,7 +653,7 @@ where
                             retry_attempt: retry_schedule.plan.attempt,
                         })?;
                         self.execute_turn_effects(&retry, turn_count, event_tx)
-                            .await;
+                            .await?;
                         continue;
                     }
                     return Err(e);
@@ -818,42 +818,51 @@ where
 
     /// Execute side effects from a transition. Handles CheckCompaction
     /// effects emitted on CallingLlm entry.
+    ///
+    /// Terminal effects (`RunCompleted`/`RunFailed`/`RunCancelled`) are applied
+    /// against the runtime turn-state handle, which owns the canonical
+    /// lifecycle fact. If the handle REJECTS a terminal effect, the run is NOT
+    /// terminalized — fail closed by `?`-propagating the rejection as an
+    /// `AgentError` (mirroring `apply_turn_input_via_runtime_handle`) instead of
+    /// laundering it into a `tracing::warn!` and reporting the effect applied.
     async fn execute_turn_effects(
         &mut self,
         transition: &TurnExecutionTransition,
         turn_count: u32,
         event_tx: &Option<mpsc::Sender<AgentEvent>>,
-    ) {
+    ) -> Result<(), AgentError> {
         for effect in &transition.effects {
             match effect {
                 TurnExecutionEffect::RunCompleted { run_id } => {
-                    if let Some(handle) = self.turn_state_handle.as_deref()
-                        && let Err(error) = handle.run_completed(run_id.clone())
-                    {
-                        tracing::warn!(
-                            error = %error,
-                            "runtime turn-state handle rejected RunCompleted effect"
-                        );
+                    if let Some(handle) = self.turn_state_handle.as_deref() {
+                        handle.run_completed(run_id.clone()).map_err(|err| {
+                            AgentError::InternalError(format!(
+                                "runtime turn-state handle rejected RunCompleted effect for \
+                                 {run_id:?}: {err}"
+                            ))
+                        })?;
                     }
                 }
                 TurnExecutionEffect::RunFailed { run_id, reason } => {
-                    if let Some(handle) = self.turn_state_handle.as_deref()
-                        && let Err(error) = handle.run_failed(run_id.clone(), reason.clone())
-                    {
-                        tracing::warn!(
-                            error = %error,
-                            "runtime turn-state handle rejected RunFailed effect"
-                        );
+                    if let Some(handle) = self.turn_state_handle.as_deref() {
+                        handle
+                            .run_failed(run_id.clone(), reason.clone())
+                            .map_err(|err| {
+                                AgentError::InternalError(format!(
+                                    "runtime turn-state handle rejected RunFailed effect for \
+                                     {run_id:?}: {err}"
+                                ))
+                            })?;
                     }
                 }
                 TurnExecutionEffect::RunCancelled { run_id } => {
-                    if let Some(handle) = self.turn_state_handle.as_deref()
-                        && let Err(error) = handle.run_cancelled(run_id.clone())
-                    {
-                        tracing::warn!(
-                            error = %error,
-                            "runtime turn-state handle rejected RunCancelled effect"
-                        );
+                    if let Some(handle) = self.turn_state_handle.as_deref() {
+                        handle.run_cancelled(run_id.clone()).map_err(|err| {
+                            AgentError::InternalError(format!(
+                                "runtime turn-state handle rejected RunCancelled effect for \
+                                 {run_id:?}: {err}"
+                            ))
+                        })?;
                     }
                 }
                 TurnExecutionEffect::RunStarted { .. }
@@ -992,6 +1001,7 @@ where
                 }
             }
         }
+        Ok(())
     }
 
     async fn index_compaction_discards(
@@ -1107,7 +1117,7 @@ where
             failure: TurnFailureSource::from_agent_error(error),
         })?;
         self.execute_turn_effects(&transition, turn_count, event_tx)
-            .await;
+            .await?;
         Ok(())
     }
 
@@ -1124,7 +1134,7 @@ where
             error: reason.clone(),
         })?;
         self.execute_turn_effects(&transition, turn_count, event_tx)
-            .await;
+            .await?;
 
         let extraction_error = crate::types::ExtractionError {
             last_output: self
@@ -1224,7 +1234,7 @@ where
         let t = self.apply_turn_input(TurnExecutionInput::PrimitiveApplied {
             run_id: run_id.clone(),
         })?;
-        self.execute_turn_effects(&t, 0, &event_tx).await;
+        self.execute_turn_effects(&t, 0, &event_tx).await?;
 
         // Helper to conditionally emit events (only when listener exists).
         // Also forwards to the event tap for interaction-scoped subscribers.
@@ -2354,7 +2364,7 @@ where
                         let t = self.apply_turn_input(TurnExecutionInput::BoundaryContinue {
                             run_id: run_id.clone(),
                         })?;
-                        self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                        self.execute_turn_effects(&t, turn_count, &event_tx).await?;
                         turn_count += 1;
                     } else if self.turn_in_extraction_flow()? {
                         // Extraction turn response — validate against schema
@@ -2453,7 +2463,7 @@ where
                                     // Authority decided to retry — push retry prompt
                                     self.session
                                         .push(Message::User(UserMessage::text(retry_prompt)));
-                                    self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                                    self.execute_turn_effects(&t, turn_count, &event_tx).await?;
                                     turn_count += 1;
                                     continue;
                                 }
@@ -2462,7 +2472,7 @@ where
                                 // main run already completed; extraction is a
                                 // post-run outcome and must not terminalize the
                                 // run as failed.
-                                self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                                self.execute_turn_effects(&t, turn_count, &event_tx).await?;
                                 let extraction_error = crate::types::ExtractionError {
                                     last_output: self
                                         .extraction_state
@@ -2521,7 +2531,7 @@ where
                                 run_id: run_id.clone(),
                             },
                         )?;
-                        self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                        self.execute_turn_effects(&t, turn_count, &event_tx).await?;
                         self.save_session_best_effort().await;
                         if let Some(structured_output) = result.structured_output.clone() {
                             self.emit_extraction_succeeded_event(
@@ -2624,7 +2634,7 @@ where
                             let t = self.apply_turn_input(TurnExecutionInput::ExtractionStart {
                                 run_id: run_id.clone(),
                             })?;
-                            self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                            self.execute_turn_effects(&t, turn_count, &event_tx).await?;
                             turn_count += 1;
                             continue;
                         }
@@ -2634,7 +2644,7 @@ where
                                 self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
                                     run_id: run_id.clone(),
                                 })?;
-                            self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                            self.execute_turn_effects(&t, turn_count, &event_tx).await?;
                             self.save_session_best_effort().await;
                             return self.build_result(turn_count + 1, tool_call_count).await;
                         }
@@ -2667,7 +2677,7 @@ where
                         let t = self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
                             run_id: run_id.clone(),
                         })?;
-                        self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                        self.execute_turn_effects(&t, turn_count, &event_tx).await?;
 
                         // Save session
                         self.save_session_best_effort().await;
@@ -2741,7 +2751,7 @@ where
                     let t = self.apply_turn_input(TurnExecutionInput::BoundaryContinue {
                         run_id: run_id.clone(),
                     })?;
-                    self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                    self.execute_turn_effects(&t, turn_count, &event_tx).await?;
                     turn_count += 1;
                 }
                 TurnPhase::DrainingBoundary | TurnPhase::Extracting => {
@@ -2749,7 +2759,7 @@ where
                     let t = self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
                         run_id: run_id.clone(),
                     })?;
-                    self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                    self.execute_turn_effects(&t, turn_count, &event_tx).await?;
                 }
                 TurnPhase::Cancelling => {
                     // Handle cancellation
@@ -2765,7 +2775,7 @@ where
                         run_id: run_id.clone(),
                         retry_attempt,
                     })?;
-                    self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                    self.execute_turn_effects(&t, turn_count, &event_tx).await?;
                 }
                 TurnPhase::Completed | TurnPhase::Failed | TurnPhase::Cancelled => {
                     return self.build_result(turn_count, tool_call_count).await;
@@ -4888,6 +4898,310 @@ mod tests {
             snapshot.terminal_cause_kind,
             Some(crate::TurnTerminalCauseKind::HookDenied),
             "RunCompleted hook denial should leave the machine-owned terminal cause"
+        );
+    }
+
+    /// Row #102 gate: a turn-state handle that REJECTS the terminal
+    /// `run_completed` effect must NOT be laundered into a `tracing::warn!`
+    /// while the run reports success. `execute_turn_effects` fail-closes by
+    /// `?`-propagating the rejection as an `AgentError`, so the run
+    /// terminalizes with an error rather than fabricating an `Ok(RunResult)`
+    /// over a handle that refused the canonical lifecycle fact.
+    ///
+    /// Wraps the generated-kernel-backed [`TestTurnStateHandle`] so every
+    /// non-terminal transition still moves through real MeerkatMachine
+    /// authority; only `run_completed` is forced to reject.
+    #[derive(Debug)]
+    struct RejectRunCompletedHandle {
+        inner: crate::agent::test_turn_state_handle::TestTurnStateHandle,
+    }
+
+    impl RejectRunCompletedHandle {
+        fn new() -> Self {
+            Self {
+                inner: crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+            }
+        }
+    }
+
+    impl crate::handles::TurnStateHandle for RejectRunCompletedHandle {
+        fn apply_turn_input(
+            &self,
+            input: crate::turn_execution_authority::TurnExecutionInput,
+        ) -> Result<
+            Vec<crate::turn_execution_authority::TurnExecutionEffect>,
+            crate::handles::DslTransitionError,
+        > {
+            self.inner.apply_turn_input(input)
+        }
+
+        fn start_conversation_run(
+            &self,
+            run_id: RunId,
+            primitive_kind: TurnPrimitiveKind,
+            admitted_content_shape: ContentShape,
+            vision_enabled: bool,
+            image_tool_results_enabled: bool,
+            max_extraction_retries: u64,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.start_conversation_run(
+                run_id,
+                primitive_kind,
+                admitted_content_shape,
+                vision_enabled,
+                image_tool_results_enabled,
+                max_extraction_retries,
+            )
+        }
+
+        fn start_immediate_append(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.start_immediate_append(run_id)
+        }
+
+        fn start_immediate_context(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.start_immediate_context(run_id)
+        }
+
+        fn primitive_applied(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.primitive_applied(run_id)
+        }
+
+        fn llm_returned_tool_calls(
+            &self,
+            run_id: RunId,
+            tool_count: u64,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.llm_returned_tool_calls(run_id, tool_count)
+        }
+
+        fn llm_returned_terminal(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.llm_returned_terminal(run_id)
+        }
+
+        fn register_pending_ops(
+            &self,
+            run_id: RunId,
+            op_refs: std::collections::BTreeSet<crate::ops::AsyncOpRef>,
+            barrier_operation_ids: std::collections::BTreeSet<crate::ops::OperationId>,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner
+                .register_pending_ops(run_id, op_refs, barrier_operation_ids)
+        }
+
+        fn tool_calls_resolved(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.tool_calls_resolved(run_id)
+        }
+
+        fn ops_barrier_satisfied(
+            &self,
+            run_id: RunId,
+            operation_ids: std::collections::BTreeSet<crate::ops::OperationId>,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.ops_barrier_satisfied(run_id, operation_ids)
+        }
+
+        fn boundary_continue(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.boundary_continue(run_id)
+        }
+
+        fn boundary_complete(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.boundary_complete(run_id)
+        }
+
+        fn enter_extraction(
+            &self,
+            run_id: RunId,
+            max_retries: u32,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.enter_extraction(run_id, max_retries)
+        }
+
+        fn extraction_start(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.extraction_start(run_id)
+        }
+
+        fn extraction_validation_passed(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.extraction_validation_passed(run_id)
+        }
+
+        fn extraction_validation_failed(
+            &self,
+            run_id: RunId,
+            error: String,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.extraction_validation_failed(run_id, error)
+        }
+
+        fn extraction_failed(
+            &self,
+            run_id: RunId,
+            error: String,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.extraction_failed(run_id, error)
+        }
+
+        fn recoverable_failure(
+            &self,
+            run_id: RunId,
+            retry: crate::retry::LlmRetrySchedule,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.recoverable_failure(run_id, retry)
+        }
+
+        fn fatal_failure(
+            &self,
+            run_id: RunId,
+            failure: TurnFailureSource,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.fatal_failure(run_id, failure)
+        }
+
+        fn retry_requested(
+            &self,
+            run_id: RunId,
+            retry_attempt: u32,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.retry_requested(run_id, retry_attempt)
+        }
+
+        fn cancel_now(&self, run_id: RunId) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.cancel_now(run_id)
+        }
+
+        fn request_cancel_after_boundary(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.request_cancel_after_boundary(run_id)
+        }
+
+        fn cancellation_observed(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.cancellation_observed(run_id)
+        }
+
+        fn acknowledge_terminal(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.acknowledge_terminal(run_id)
+        }
+
+        fn turn_limit_reached(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.turn_limit_reached(run_id)
+        }
+
+        fn budget_exhausted(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.budget_exhausted(run_id)
+        }
+
+        fn time_budget_exceeded(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.time_budget_exceeded(run_id)
+        }
+
+        fn force_cancel_no_run(&self) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.force_cancel_no_run()
+        }
+
+        /// The fail-closed seam under test: reject the terminal completion
+        /// effect. The agent loop must surface this as an error, not warn and
+        /// report the run completed.
+        fn run_completed(&self, _run_id: RunId) -> Result<(), crate::handles::DslTransitionError> {
+            Err(crate::handles::DslTransitionError::guard_rejected(
+                "RejectRunCompletedHandle::run_completed",
+                "test handle rejects the terminal RunCompleted effect",
+            ))
+        }
+
+        fn run_failed(
+            &self,
+            run_id: RunId,
+            reason: crate::turn_execution_authority::TurnFailureReason,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.run_failed(run_id, reason)
+        }
+
+        fn run_cancelled(&self, run_id: RunId) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.run_cancelled(run_id)
+        }
+
+        fn snapshot(&self) -> crate::handles::TurnStateSnapshot {
+            self.inner.snapshot()
+        }
+    }
+
+    #[tokio::test]
+    async fn run_completed_effect_rejection_fails_run_closed() {
+        let mut agent = AgentBuilder::new()
+            .resume_session({
+                let mut session = crate::Session::new();
+                session
+                    .set_build_state(crate::SessionBuildState::default())
+                    .expect("test session build state should serialize");
+                session
+            })
+            .with_turn_state_handle(Arc::new(RejectRunCompletedHandle::new()))
+            .with_runtime_execution_kind_for_test(
+                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+            )
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        let (tx, _rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        let err = agent
+            .run_with_events("prompt".to_string().into(), tx)
+            .await
+            .expect_err(
+                "a turn-state handle that rejects the RunCompleted terminal effect must fail \
+                 the run closed, not report success",
+            );
+        assert!(
+            matches!(err, AgentError::InternalError(ref message)
+                if message.contains("rejected RunCompleted effect")),
+            "rejection must propagate as an InternalError naming the rejected terminal effect, \
+             got: {err:?}"
         );
     }
 

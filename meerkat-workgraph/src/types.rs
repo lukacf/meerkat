@@ -635,7 +635,6 @@ pub struct WorkItem {
     pub owner: Option<WorkOwner>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim: Option<WorkClaim>,
-    #[serde(default = "default_workgraph_machine_state")]
     pub machine_state: WorkGraphMachineState,
     pub revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -652,10 +651,6 @@ pub struct WorkItem {
     pub external_refs: Vec<ExternalWorkRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_refs: Vec<WorkEvidenceRef>,
-}
-
-fn default_workgraph_machine_state() -> WorkGraphMachineState {
-    WorkGraphMachineState::default()
 }
 
 #[derive(Deserialize)]
@@ -701,10 +696,12 @@ impl<'de> Deserialize<'de> for WorkItem {
         D: serde::Deserializer<'de>,
     {
         let mut wire = WorkItemWire::deserialize(deserializer)?;
-        let machine_state = wire
-            .machine_state
-            .take()
-            .unwrap_or_else(|| legacy_workgraph_machine_state(&wire));
+        let machine_state = wire.machine_state.take().ok_or_else(|| {
+            serde::de::Error::custom(
+                "WorkItem is missing `machine_state`: lifecycle/revision authority is machine-owned \
+                 and cannot be reconstructed from projected fields",
+            )
+        })?;
         Ok(Self {
             id: wire.id,
             realm_id: wire.realm_id,
@@ -893,28 +890,6 @@ impl schemars::JsonSchema for WorkItem {
             }
         })
     }
-}
-
-fn legacy_workgraph_machine_state(wire: &WorkItemWire) -> WorkGraphMachineState {
-    let mut machine_state = WorkGraphMachineState {
-        lifecycle_phase: work_lifecycle_state_from_status(wire.status),
-        revision: wire.revision,
-        due_at_utc_ms: wire.due_at.map(datetime_to_millis),
-        not_before_utc_ms: wire.not_before.map(datetime_to_millis),
-        snoozed_until_utc_ms: wire.snoozed_until.map(datetime_to_millis),
-        completion_policy: wire.completion_policy.clone().to_machine(),
-        completion_supervisor_owner_key: wire.completion_policy.supervisor_owner_key(),
-        completion_reviewer_quorum_threshold: wire.completion_policy.reviewer_quorum_threshold(),
-        terminal_at_utc_ms: wire.terminal_at.map(datetime_to_millis),
-        evidence_count: wire.evidence_refs.len().try_into().unwrap_or(u64::MAX),
-        ..default_workgraph_machine_state()
-    };
-    if let Some(claim) = &wire.claim {
-        machine_state.claim_owner_key = Some(work_owner_key_to_machine(&claim.owner.key));
-        machine_state.claimed_at_utc_ms = Some(datetime_to_millis(claim.claimed_at));
-        machine_state.lease_expires_at_utc_ms = claim.lease_expires_at.map(datetime_to_millis);
-    }
-    machine_state
 }
 
 pub(crate) fn work_lifecycle_state_from_status(status: WorkStatus) -> wg_dsl::WorkLifecycleState {
@@ -1599,4 +1574,60 @@ pub struct WorkGraphItemsResponse {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WorkGraphEventsResponse {
     pub events: Vec<WorkGraphEvent>,
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::machine::WorkGraphMachine;
+
+    fn machine_item() -> WorkItem {
+        WorkGraphMachine::create_item(
+            CreateWorkItemRequest {
+                title: "deserialize-authority".to_string(),
+                ..Default::default()
+            },
+            "realm".to_string(),
+            WorkNamespace::default(),
+            Utc::now(),
+        )
+        .expect("machine create_item")
+        .0
+    }
+
+    #[test]
+    fn work_item_round_trip_preserves_machine_state() {
+        let item = machine_item();
+        let json = serde_json::to_string(&item).expect("serialize work item");
+        let decoded: WorkItem = serde_json::from_str(&json).expect("deserialize work item");
+        assert_eq!(
+            decoded, item,
+            "round-trip must preserve the whole work item"
+        );
+        assert_eq!(
+            decoded.machine_state, item.machine_state,
+            "round-trip must preserve machine-owned lifecycle authority verbatim"
+        );
+    }
+
+    #[test]
+    fn work_item_without_machine_state_fails_closed() {
+        let item = machine_item();
+        let mut value = serde_json::to_value(&item).expect("serialize work item to value");
+        value
+            .as_object_mut()
+            .expect("work item json object")
+            .remove("machine_state");
+
+        let result: Result<WorkItem, _> = serde_json::from_value(value);
+        let err = result.expect_err(
+            "deserializing a WorkItem without machine_state must fail closed, \
+             never fabricate lifecycle/revision authority from projected fields",
+        );
+        assert!(
+            err.to_string().contains("machine_state"),
+            "fail-closed error must cite the missing machine_state authority, got: {err}"
+        );
+    }
 }

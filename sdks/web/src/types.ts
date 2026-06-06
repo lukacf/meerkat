@@ -1,5 +1,10 @@
 import { KNOWN_AGENT_EVENT_TYPES } from './generated/events.js';
-import type { AgentEvent, SkillKey, Usage } from './generated/events.js';
+import type {
+  AgentEvent,
+  SkillKey,
+  TurnTerminalCauseKind,
+  Usage,
+} from './generated/events.js';
 import type { WireMobMemberStatus } from './generated/mob.js';
 
 // ─── Bootstrap config ───────────────────────────────────────────
@@ -160,7 +165,15 @@ export interface MobRespawnResult {
   failed_peer_ids?: string[];
 }
 
-/** Result of a turn execution. */
+/**
+ * Result of a turn execution.
+ *
+ * Mirrors the canonical `WireRunResult` wire shape (the same envelope RPC's
+ * `turn/start` returns). The runtime-owned terminal class is carried by
+ * {@link terminal_cause_kind}; there is no fabricated in-band `status`
+ * string. Agent-level faults reject the underlying promise instead of
+ * resolving with a synthetic failure payload.
+ */
 export interface TurnResult {
   /** Canonical text returned by the runtime. */
   text: string;
@@ -170,7 +183,12 @@ export interface TurnResult {
   tool_calls: number;
   turns?: number;
   session_id?: string;
-  status?: string;
+  /**
+   * Runtime-owned terminal cause for this turn (e.g. `budget_exhausted`,
+   * `turn_limit_reached`). Present only when the turn terminated on a typed
+   * terminal condition.
+   */
+  terminal_cause_kind?: TurnTerminalCauseKind | null;
 }
 
 export type {
@@ -575,9 +593,17 @@ export function isKnownEvent(event: { type: string }): event is AgentEvent {
 /** JSON schema object for tool input. */
 export type JsonSchema = Record<string, unknown>;
 
-/** Result returned from a tool callback. */
+/**
+ * Result returned from a tool callback.
+ *
+ * `content` mirrors the canonical `WireToolResultContent` union
+ * (`string | ContentBlock[]`): plain text OR typed multimodal blocks
+ * (images, video). Block content survives to the agent as typed
+ * {@link ContentBlock}s rather than being narrowed to a string at the
+ * WASM boundary.
+ */
 export interface ToolCallbackResult {
-  content: string;
+  content: string | ContentBlock[];
   is_error: boolean;
 }
 

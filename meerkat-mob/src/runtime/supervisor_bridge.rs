@@ -413,6 +413,68 @@ impl MobSupervisorBridge {
             })
     }
 
+    /// Fail-closed rollback mirror of [`Self::apply_bridge_trust`]. Drives the
+    /// generated `RemoveDirectPeerEndpoint` transition and reconciles the
+    /// resulting removal obligation against the live comms runtime so the DSL
+    /// authority and the comms trust set never diverge. No-ops if the recipient
+    /// is not currently a trusted direct peer endpoint.
+    async fn remove_bridge_trust(
+        runtime: &Arc<meerkat_comms::CommsRuntime>,
+        dsl: &Arc<meerkat_runtime::HandleDslAuthority>,
+        recipient: TrustedPeerDescriptor,
+    ) -> Result<(), MobError> {
+        let endpoint = mm_dsl::PeerEndpoint::from(&recipient);
+        if !dsl
+            .snapshot_state()
+            .direct_peer_endpoints
+            .contains(&endpoint)
+        {
+            return Ok(());
+        }
+        let transition = dsl
+            .apply_input_with_transition(
+                mm_dsl::MeerkatMachineInput::RemoveDirectPeerEndpoint { endpoint },
+                "mob_supervisor_bridge::untrust_recipient",
+            )
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "supervisor bridge DSL rejected recipient trust removal projection: {error}"
+                ))
+            })?;
+        let obligations =
+            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+                &transition,
+                dsl.peer_projection_freshness_authority(),
+            );
+        let obligation = match obligations.as_slice() {
+            [obligation] => obligation.clone(),
+            [] => {
+                return Err(MobError::Internal(
+                    "supervisor bridge trust removal projection emitted no reconcile request"
+                        .to_string(),
+                ));
+            }
+            _ => {
+                return Err(MobError::Internal(
+                    "supervisor bridge trust removal projection emitted multiple reconcile requests"
+                        .to_string(),
+                ));
+            }
+        };
+        let comms_runtime: Arc<dyn CoreCommsRuntime> = runtime.clone();
+        let reconciler =
+            meerkat_runtime::comms_trust_reconcile::CommsTrustReconciler::new(comms_runtime);
+        reconciler
+            .reconcile(&obligation)
+            .await
+            .map(|_report| ())
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "supervisor bridge generated trust removal reconciliation failed: {error}"
+                ))
+            })
+    }
+
     fn local_endpoint_for_runtime(
         runtime: &dyn CoreCommsRuntime,
     ) -> Result<mm_dsl::PeerEndpoint, MobError> {
@@ -618,6 +680,19 @@ impl MobSupervisorBridge {
         let runtime = self.runtime().await;
         let dsl = self.dsl.read().await.clone();
         Self::apply_bridge_trust(&runtime, &dsl, recipient.clone()).await
+    }
+
+    /// Fail-closed rollback for [`Self::trust_recipient`]: removes the recipient
+    /// from the bridge trust set (DSL + reconciled comms runtime) when an
+    /// install-before-send must be undone (e.g. supervisor authorization was
+    /// rejected after trust was installed for transport).
+    pub(crate) async fn untrust_recipient(
+        &self,
+        recipient: &TrustedPeerDescriptor,
+    ) -> Result<(), MobError> {
+        let runtime = self.runtime().await;
+        let dsl = self.dsl.read().await.clone();
+        Self::remove_bridge_trust(&runtime, &dsl, recipient.clone()).await
     }
 
     pub(crate) async fn request_json<T: serde::Serialize>(

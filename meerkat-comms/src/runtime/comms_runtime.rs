@@ -500,10 +500,6 @@ impl CoreCommsRuntime for CommsRuntime {
         Ok(())
     }
 
-    fn dismiss_received(&self) -> bool {
-        self.dismiss_flag.swap(false, Ordering::SeqCst)
-    }
-
     fn event_injector(&self) -> Option<Arc<dyn meerkat_core::EventInjector>> {
         Some(self.event_injector())
     }
@@ -702,14 +698,19 @@ impl CoreCommsRuntime for CommsRuntime {
                     },
                 )
                 .await
-                .map(|envelope_id| SendReceipt::PeerMessageSent {
-                    envelope_id,
-                    acked: false,
+                .map(|outcome| SendReceipt::PeerMessageSent {
+                    envelope_id: outcome.envelope_id,
+                    // Verified ACK truth from the delivery path: `true` only
+                    // when a peer ACK was received and verified over a stream
+                    // transport; inproc handoffs report `false`.
+                    acked: outcome.acked,
                 }),
             CommsCommand::PeerLifecycle { to, kind, params } => self
                 .send_peer_command(&to, crate::types::MessageKind::Lifecycle { kind, params })
                 .await
-                .map(|envelope_id| SendReceipt::PeerLifecycleSent { envelope_id }),
+                .map(|outcome| SendReceipt::PeerLifecycleSent {
+                    envelope_id: outcome.envelope_id,
+                }),
             CommsCommand::PeerRequest {
                 to,
                 intent,
@@ -764,14 +765,17 @@ impl CoreCommsRuntime for CommsRuntime {
                     )
                     .await
                 {
-                    Ok(id) => id,
+                    Ok(outcome) => outcome.envelope_id,
                     Err(e) => {
                         if stream_reserved {
                             self.expire_interaction_stream_on_send_failure(corr_id, interaction_id);
                         }
-                        // Roll the peer-interaction DSL forward to
-                        // `TimedOut` so the authoritative lifecycle matches
-                        // reality (send failed, no response will come).
+                        // A send failure is NOT a timeout: the typed `SendError`
+                        // `e` is returned to the caller verbatim (peer offline /
+                        // transport / admission-drop), never laundered into a
+                        // timeout receipt. The DSL cleanup below removes the
+                        // pending entry; the authoritative send-failure
+                        // disposition is owned by the typed error returned here.
                         let _ = peer_handle.request_timed_out(corr_id);
                         return Err(e);
                     }
@@ -863,7 +867,8 @@ impl CoreCommsRuntime for CommsRuntime {
                             handling_mode: effective_handling_mode,
                         },
                     )
-                    .await?;
+                    .await?
+                    .envelope_id;
 
                 // The terminal inbound transition is coupled to the actual
                 // response send outcome: route/transport failure leaves the
@@ -976,9 +981,12 @@ impl CoreCommsRuntime for CommsRuntime {
                     )
                     .await
                 {
-                    Ok(id) => id,
+                    Ok(outcome) => outcome.envelope_id,
                     Err(e) => {
                         self.expire_interaction_stream_on_send_failure(corr_id, interaction_id);
+                        // Send failure returns the typed `SendError` verbatim;
+                        // it is never laundered into a timeout receipt. DSL
+                        // cleanup removes the pending entry.
                         let _ = peer_handle.request_timed_out(corr_id);
                         return Err(SendAndStreamError::Send(e));
                     }
@@ -1114,18 +1122,10 @@ impl CoreCommsRuntime for CommsRuntime {
 
                 match entry.item {
                     crate::types::InboxItem::External { envelope } => {
-                        // Check for DISMISS
-                        if let MessageKind::Message {
-                            blocks: None,
-                            ref body,
-                            ..
-                        } = envelope.kind
-                            && body.trim().eq_ignore_ascii_case("DISMISS")
-                        {
-                            self.dismiss_flag.store(true, Ordering::SeqCst);
-                            return None;
-                        }
-
+                        // Runtime lifecycle dismissal does NOT flow through a
+                        // peer message body. A peer-controlled string can never
+                        // stop the local executor; dismissal must arrive as a
+                        // typed lifecycle signal owned by the runtime authority.
                         // Extract handling_mode before consuming the kind.
                         // `send_response` may omit this field, so the sender
                         // side defaults it from the original request mode.
@@ -1412,7 +1412,6 @@ pub struct CommsRuntime {
     keypair: Arc<Keypair>,
     bridge_bootstrap_token: String,
     require_peer_auth: bool,
-    dismiss_flag: AtomicBool,
     subscriber_registry: crate::event_injector::SubscriberRegistry,
     interaction_stream_registry: InteractionStreamRegistry,
     peer_comms_handle: crate::classify::PeerCommsHandleSlot,
@@ -1557,7 +1556,6 @@ impl CommsRuntime {
             bridge_bootstrap_token: Self::derive_bridge_bootstrap_token(&keypair),
             keypair: Arc::new(keypair),
             require_peer_auth: config.require_peer_auth,
-            dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
             peer_comms_handle,
@@ -1670,7 +1668,6 @@ impl CommsRuntime {
             bridge_bootstrap_token: Self::derive_bridge_bootstrap_token(&keypair),
             keypair: Arc::new(keypair),
             require_peer_auth: true,
-            dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
             peer_comms_handle,
@@ -1787,7 +1784,6 @@ impl CommsRuntime {
             bridge_bootstrap_token: Self::derive_bridge_bootstrap_token(&keypair),
             keypair: Arc::new(keypair),
             require_peer_auth: true,
-            dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
             peer_comms_handle,
@@ -2504,17 +2500,22 @@ impl CommsRuntime {
         &self,
         route: &PeerRoute,
         kind: crate::types::MessageKind,
-    ) -> Result<Uuid, SendError> {
+    ) -> Result<crate::router::SendOutcome, SendError> {
         self.send_peer_command_with_id(route, Uuid::new_v4(), kind)
             .await
     }
 
+    /// Send a peer command and return the typed delivery outcome.
+    ///
+    /// The returned [`crate::router::SendOutcome`] carries the verified ACK
+    /// truth (`acked`) so public receipts reflect whether the peer actually
+    /// acknowledged the envelope rather than hardcoding `false`.
     async fn send_peer_command_with_id(
         &self,
         route: &PeerRoute,
         envelope_id: Uuid,
         kind: crate::types::MessageKind,
-    ) -> Result<Uuid, SendError> {
+    ) -> Result<crate::router::SendOutcome, SendError> {
         let dest_peer_id = route.peer_id;
         let kind = self.hydrate_message_kind_for_transport(kind).await?;
         let result = self
@@ -2522,7 +2523,7 @@ impl CommsRuntime {
             .send_with_id(dest_peer_id, envelope_id, kind)
             .await;
         match result {
-            Ok(envelope_id) => Ok(envelope_id),
+            Ok(outcome) => Ok(outcome),
             Err(crate::router::SendError::PeerNotFound(peer_id)) => {
                 Err(SendError::PeerNotFound(peer_id.to_string()))
             }
@@ -5147,6 +5148,112 @@ mod tests {
                 assert_eq!(got_blocks.as_ref(), Some(&blocks));
             }
             other => panic!("expected message content, got {other:?}"),
+        }
+    }
+
+    /// ROW #267 gate: a peer message whose body is "DISMISS" must NOT control
+    /// runtime lifecycle. It is drained as an ordinary peer message, never
+    /// swallowed into a dismiss signal. Lifecycle dismissal is a typed signal
+    /// owned by the runtime authority, not a peer-controlled string body.
+    #[tokio::test]
+    async fn peer_message_body_dismiss_does_not_control_lifecycle() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = test_runtime_config("dismiss-body-is-not-lifecycle", &tmp);
+        let runtime = CommsRuntime::new(config).await.unwrap();
+        install_test_peer_comms_handle(&runtime);
+
+        let sender = Keypair::generate();
+        add_trusted_peer_with_generated_authority(
+            &runtime,
+            trusted_descriptor("sender", sender.public_key(), "tcp://127.0.0.1:4242"),
+        )
+        .await;
+
+        let msg = signed_envelope(
+            &sender,
+            runtime.public_key(),
+            MessageKind::Message {
+                body: "DISMISS".to_string(),
+                blocks: None,
+                handling_mode: None,
+            },
+        );
+        runtime
+            .router
+            .inbox_sender()
+            .send_classified(InboxItem::External { envelope: msg })
+            .into_result()
+            .unwrap();
+
+        // The body-string trigger is gone: the message survives the drain as a
+        // normal peer message rather than being consumed as a dismiss signal.
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(&runtime).await;
+        assert_eq!(
+            interactions.len(),
+            1,
+            "a 'DISMISS' body must not be swallowed by a lifecycle trigger"
+        );
+        assert!(
+            matches!(
+                &interactions[0].content,
+                meerkat_core::InteractionContent::Message { body, .. } if body == "DISMISS"
+            ),
+            "the 'DISMISS' body must drain as an ordinary peer message"
+        );
+        // And the runtime exposes no dismiss signal from a peer body: with the
+        // override removed, the real runtime uses the trait default (`false`).
+        assert!(
+            !CoreCommsRuntime::dismiss_received(&runtime),
+            "a peer message body must never raise a runtime dismiss signal"
+        );
+    }
+
+    /// ROW #291 gate: a peer-request transport send failure must surface as a
+    /// typed `SendError` to the caller, never be laundered into a timeout
+    /// success/receipt. The connectivity failure (unreachable TCP peer) is a
+    /// `Transport`/`PeerOffline` send error, not a `PeerRequestSent` receipt.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn peer_request_send_failure_is_typed_send_error_not_timeout() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let peer_name = format!("unreachable-peer-{suffix}");
+        let runtime_name = format!("send-fail-runtime-{suffix}");
+
+        let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
+        let runtime = Arc::new(CommsRuntime::inproc_only(&runtime_name).unwrap());
+        install_test_peer_request_response_authority(&runtime);
+
+        // Trust the peer at an unreachable TCP address so the transport send
+        // genuinely fails (connection refused) rather than completing.
+        add_trusted_peer_with_generated_authority(
+            &runtime,
+            trusted_descriptor(&peer_name, peer.public_key(), "tcp://127.0.0.1:1"),
+        )
+        .await;
+
+        let result = CoreCommsRuntime::send(
+            runtime.as_ref(),
+            CommsCommand::PeerRequest {
+                to: peer_route(&peer_name, peer.public_key()),
+                intent: "checksum".to_string(),
+                params: serde_json::json!({"path": "README.md"}),
+                blocks: None,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                stream: InputStreamMode::ReserveInteraction,
+            },
+        )
+        .await;
+
+        // The failure must be a typed send error, never a successful receipt
+        // (which would have masqueraded as a delivered-then-timed-out request).
+        match result {
+            Err(SendError::Transport(_) | SendError::PeerOffline | SendError::PeerNotFound(_)) => {}
+            Ok(receipt) => {
+                panic!("transport send failure must not produce a success receipt, got {receipt:?}")
+            }
+            Err(other) => panic!(
+                "transport send failure must be a typed connectivity send error, got {other:?}"
+            ),
         }
     }
 

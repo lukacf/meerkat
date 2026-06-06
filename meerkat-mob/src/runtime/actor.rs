@@ -409,6 +409,63 @@ struct SupervisorPrivateTrustInstall {
     removal_key: String,
 }
 
+/// Typed failure outcome from installing a session's supervisor private trust.
+///
+/// Carries the underlying [`MobError`] plus a *typed* discriminant recording
+/// whether the compensating cleanup that removes the just-attempted ("new")
+/// supervisor trust also failed. The supervisor-activation rollback path keys
+/// on `new_trust_cleanup_failed` directly instead of string-matching the
+/// formatted error message — the cleanup verdict is a structured fact, not a
+/// substring of human-readable text.
+#[derive(Debug)]
+struct SupervisorPrivateTrustInstallError {
+    error: MobError,
+    new_trust_cleanup_failed: bool,
+}
+
+impl SupervisorPrivateTrustInstallError {
+    /// A failure where the attempted-new-trust cleanup compensation succeeded
+    /// (or no cleanup was required).
+    fn without_cleanup_failure(error: MobError) -> Self {
+        Self {
+            error,
+            new_trust_cleanup_failed: false,
+        }
+    }
+
+    /// A failure where the attempted-new-trust cleanup compensation *also*
+    /// failed, leaving residual supervisor trust that the activation rollback
+    /// must surface.
+    ///
+    /// Only reachable on the runtime-adapter publish path; without that feature
+    /// the install routine fails earlier and no cleanup is attempted.
+    #[cfg(feature = "runtime-adapter")]
+    fn with_failed_new_trust_cleanup(error: MobError) -> Self {
+        Self {
+            error,
+            new_trust_cleanup_failed: true,
+        }
+    }
+}
+
+impl std::fmt::Display for SupervisorPrivateTrustInstallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, f)
+    }
+}
+
+impl From<MobError> for SupervisorPrivateTrustInstallError {
+    fn from(error: MobError) -> Self {
+        Self::without_cleanup_failure(error)
+    }
+}
+
+impl From<SupervisorPrivateTrustInstallError> for MobError {
+    fn from(value: SupervisorPrivateTrustInstallError) -> Self {
+        value.error
+    }
+}
+
 struct SupervisorAuthorityActivationError {
     error: MobError,
     rollback_succeeded: bool,
@@ -1029,7 +1086,7 @@ pub(super) struct MobActor {
     pub(super) pending_spawns: PendingSpawnLineage,
     pub(super) pending_spawn_cleanup_anchors: BTreeMap<u64, PendingSpawnCleanupAnchor>,
     pub(super) edge_locks: Arc<super::edge_locks::EdgeLockRegistry>,
-    pub(super) lifecycle_tasks: tokio::task::JoinSet<()>,
+    pub(super) lifecycle_tasks: tokio::task::JoinSet<Result<(), MobError>>,
     pub(super) next_peer_delivery_ticket: PeerDeliveryId,
     pub(super) peer_delivery_tasks: tokio::task::JoinSet<PeerDeliveryCompletion>,
     pub(super) peer_delivery_inflight: BTreeMap<PeerDeliveryId, PeerDeliveryInflight>,
@@ -1417,7 +1474,7 @@ impl MobActor {
         session_id: &SessionId,
         comms: &Arc<dyn CoreCommsRuntime>,
         previous_private_trust_removal_key: Option<&str>,
-    ) -> Result<SupervisorPrivateTrustInstall, MobError> {
+    ) -> Result<SupervisorPrivateTrustInstall, SupervisorPrivateTrustInstallError> {
         let authority = self.supervisor_bridge.authority().await;
         let spec = Self::supervisor_spec_for_authority(&self.definition.id, &authority)?;
         #[cfg(target_arch = "wasm32")]
@@ -1451,12 +1508,13 @@ impl MobActor {
         authority: &crate::store::SupervisorAuthorityRecord,
         spec: TrustedPeerDescriptor,
         previous_private_trust_removal_key: Option<&str>,
-    ) -> Result<SupervisorPrivateTrustInstall, MobError> {
+    ) -> Result<SupervisorPrivateTrustInstall, SupervisorPrivateTrustInstallError> {
         #[cfg(feature = "runtime-adapter")]
         let Some(adapter) = self.runtime_adapter.as_ref() else {
             return Err(MobError::Internal(format!(
                 "cannot publish supervisor private trust for session '{session_id}': runtime adapter unavailable"
-            )));
+            ))
+            .into());
         };
         #[cfg(not(feature = "runtime-adapter"))]
         let _ = session_id;
@@ -1464,7 +1522,8 @@ impl MobActor {
         {
             return Err(MobError::Internal(
                 "cannot publish supervisor private trust without runtime adapter".to_string(),
-            ));
+            )
+            .into());
         }
 
         #[cfg(feature = "runtime-adapter")]
@@ -1573,7 +1632,7 @@ impl MobActor {
                     if let Err(feedback_error) = feedback {
                         reason.push_str(&format!("; revoke feedback failed: {feedback_error}"));
                     }
-                    return Err(MobError::WiringError(reason));
+                    return Err(MobError::WiringError(reason).into());
                 }
                 adapter
                     .stage_supervisor_trust_revoked(
@@ -1660,7 +1719,8 @@ impl MobActor {
                     _ => {
                         return Err(MobError::WiringError(format!(
                             "supervisor private trust publication for session '{session_id}' saw an unknown supervisor binding variant"
-                        )));
+                        ))
+                        .into());
                     }
                 }
             };
@@ -1681,12 +1741,14 @@ impl MobActor {
                 [] => {
                     return Err(MobError::WiringError(format!(
                         "supervisor private trust publication for session '{session_id}' produced no generated publish obligation"
-                    )));
+                    ))
+                    .into());
                 }
                 _ => {
                     return Err(MobError::WiringError(format!(
                         "supervisor private trust publication for session '{session_id}' produced multiple generated publish obligations"
-                    )));
+                    ))
+                    .into());
                 }
             };
             if publish_obligation.name() != &next_name
@@ -1698,7 +1760,8 @@ impl MobActor {
             {
                 return Err(MobError::WiringError(format!(
                     "supervisor private trust publication for session '{session_id}' generated obligation did not match the staged supervisor binding"
-                )));
+                ))
+                .into());
             }
             let publish_spec =
                 meerkat_runtime::comms_drain::trusted_peer_descriptor_from_supervisor_publish_obligation(
@@ -1734,7 +1797,7 @@ impl MobActor {
                         error.to_string(),
                     )
                     .await;
-                if !already_bound {
+                let new_trust_cleanup_failed = if !already_bound {
                     self.cleanup_supervisor_private_trust_publish_attempt(
                         session_id,
                         comms,
@@ -1742,8 +1805,11 @@ impl MobActor {
                         publish_removal_key.clone(),
                         "failed to clean up supervisor private trust after publish add failure",
                     )
-                    .await;
-                }
+                    .await
+                    .is_err()
+                } else {
+                    false
+                };
                 let rollback = if already_bound {
                     Ok(())
                 } else {
@@ -1763,7 +1829,12 @@ impl MobActor {
                 if let Err(rollback_error) = rollback {
                     reason.push_str(&format!("; rollback failed: {rollback_error}"));
                 }
-                return Err(MobError::WiringError(reason));
+                let error = MobError::WiringError(reason);
+                return Err(if new_trust_cleanup_failed {
+                    SupervisorPrivateTrustInstallError::with_failed_new_trust_cleanup(error)
+                } else {
+                    SupervisorPrivateTrustInstallError::without_cleanup_failure(error)
+                });
             }
 
             if let Err(error) = Self::stage_supervisor_trust_published_for_private_trust(
@@ -1774,7 +1845,7 @@ impl MobActor {
             )
             .await
             {
-                if !already_bound {
+                let new_trust_cleanup_failed = if !already_bound {
                     self.cleanup_supervisor_private_trust_publish_attempt(
                         session_id,
                         comms,
@@ -1782,8 +1853,11 @@ impl MobActor {
                         publish_removal_key.clone(),
                         "failed to clean up supervisor private trust after rejected publish ack",
                     )
-                    .await;
-                }
+                    .await
+                    .is_err()
+                } else {
+                    false
+                };
                 let rollback = if already_bound {
                     Ok(())
                 } else {
@@ -1803,7 +1877,12 @@ impl MobActor {
                 if let Err(rollback_error) = rollback {
                     reason.push_str(&format!("; rollback failed: {rollback_error}"));
                 }
-                return Err(MobError::WiringError(reason));
+                let error = MobError::WiringError(reason);
+                return Err(if new_trust_cleanup_failed {
+                    SupervisorPrivateTrustInstallError::with_failed_new_trust_cleanup(error)
+                } else {
+                    SupervisorPrivateTrustInstallError::without_cleanup_failure(error)
+                });
             }
 
             Ok(SupervisorPrivateTrustInstall {
@@ -1894,6 +1973,10 @@ impl MobActor {
         }
     }
 
+    /// Remove the just-attempted ("new") supervisor private trust after a failed
+    /// publish. Returns the typed cleanup result so callers can record whether
+    /// the compensation itself failed — the activation rollback keys on that
+    /// structured verdict rather than parsing the formatted error message.
     async fn cleanup_supervisor_private_trust_publish_attempt(
         &self,
         session_id: &SessionId,
@@ -1901,7 +1984,7 @@ impl MobActor {
         authority: CommsTrustMutationAuthority,
         removal_key: String,
         context: &'static str,
-    ) {
+    ) -> Result<(), MobError> {
         if let Err(error) = self
             .apply_private_trusted_peer_remove(comms.as_ref(), removal_key, authority)
             .await
@@ -1912,7 +1995,9 @@ impl MobActor {
                 context,
                 "failed to clean up supervisor private trust publish attempt"
             );
+            return Err(MobError::from(error));
         }
+        Ok(())
     }
 
     async fn cleanup_supervisor_private_trust_for_session(
@@ -2561,20 +2646,45 @@ impl MobActor {
         let payload = self.bridge_supervisor_payload_for_recipient(peer).await?;
         let protocol_version = payload.protocol_version;
         let command = super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(payload);
+        // Transport requires the recipient be trusted before the request can be
+        // routed (see comms admission), so trust is installed before the send.
+        // The invariant is enforced by rolling the trust back below on every
+        // path where this `peer` is not a CONFIRMED, ACCEPTED supervisor: an
+        // `AuthorizeSupervisor` rejection or send failure must leave NO
+        // installed recipient trust (fail closed).
         self.supervisor_bridge.trust_recipient(peer).await?;
-        let value = self
+        let value = match self
             .supervisor_bridge
             .send_bridge_command(peer, &command, std::time::Duration::from_secs(30))
-            .await?;
+            .await
+        {
+            Ok(value) => value,
+            Err(send_error) => {
+                return Err(self
+                    .rollback_supervisor_recipient_trust(peer, send_error)
+                    .await);
+            }
+        };
         if let Some(rejection) = Self::bridge_rejection_reply(protocol_version, &value) {
             let should_rebind = match rejection.typed_cause() {
                 Some(cause) => self.classify_bridge_rejection_recovery(cause)?,
                 None => false,
             };
             if should_rebind && let Some(binding) = binding {
-                let authorized_bind = self
-                    .bind_peer_only_member_for_binding(peer, binding)
-                    .await?;
+                // The AuthorizeSupervisor was rejected with a recoverable cause,
+                // so we re-bind the same peer (the bind re-establishes its own
+                // recipient trust). If the bind itself fails, the recipient was
+                // never confirmed and its trust must not survive — roll it back
+                // fail-closed.
+                let authorized_bind =
+                    match self.bind_peer_only_member_for_binding(peer, binding).await {
+                        Ok(authorized_bind) => authorized_bind,
+                        Err(bind_error) => {
+                            return Err(self
+                                .rollback_supervisor_recipient_trust(peer, bind_error)
+                                .await);
+                        }
+                    };
                 self.persist_rebound_binding(
                     binding,
                     &authorized_bind.peer,
@@ -2592,14 +2702,42 @@ impl MobActor {
                 .await?;
                 return Ok(authorized_bind.peer);
             }
-            return Err(Self::bridge_rejection_error(rejection));
+            return Err(self
+                .rollback_supervisor_recipient_trust(peer, Self::bridge_rejection_error(rejection))
+                .await);
         }
-        let _ack = super::bridge_protocol::decode_bridge_ack(
+        let _ack = match super::bridge_protocol::decode_bridge_ack(
             &command,
             value,
             "authorize supervisor response",
-        )?;
+        ) {
+            Ok(ack) => ack,
+            Err(decode_error) => {
+                return Err(self
+                    .rollback_supervisor_recipient_trust(peer, decode_error)
+                    .await);
+            }
+        };
         Ok(peer.clone())
+    }
+
+    /// Fail-closed rollback for supervisor recipient trust installed ahead of an
+    /// `AuthorizeSupervisor` send. The recipient was trusted only so the bridge
+    /// request could be routed; if authorization did not terminate in a
+    /// confirmed accept, the trust must not survive. The authorization
+    /// `original_error` is preserved; an untrust failure is folded into a typed
+    /// `MobError` rather than silently dropped.
+    async fn rollback_supervisor_recipient_trust(
+        &self,
+        peer: &TrustedPeerDescriptor,
+        original_error: MobError,
+    ) -> MobError {
+        if let Err(untrust_error) = self.supervisor_bridge.untrust_recipient(peer).await {
+            return MobError::WiringError(format!(
+                "supervisor authorization failed ({original_error}); additionally failed to roll back installed recipient trust: {untrust_error}"
+            ));
+        }
+        original_error
     }
 
     async fn load_supervisor_authority_snapshot(
@@ -4743,16 +4881,30 @@ impl MobActor {
         }
     }
 
-    async fn notify_orchestrator_lifecycle(&mut self, message: String) {
-        // Drain completed lifecycle tasks (non-blocking).
-        while let Some(result) = self.lifecycle_tasks.try_join_next() {
-            if let Err(error) = result {
-                tracing::debug!(error = %error, "lifecycle notification task failed");
-            }
-        }
+    /// Deliver a lifecycle notification to the orchestrator member.
+    ///
+    /// This is *not* best-effort projection work: a genuine delivery fault
+    /// surfaces to the caller as a typed [`MobError`] instead of being
+    /// swallowed by a `tracing::warn`. Cases that legitimately have nothing to
+    /// deliver (no orchestrator declared, orchestrator not yet seated in the
+    /// roster) return `Ok(())`. Faults — an addressable orchestrator that
+    /// cannot be projected, an autonomous host with no reachable injector, or
+    /// an injection/turn that fails — return `Err`.
+    ///
+    /// The injector for an [`AutonomousHost`](crate::MobRuntimeMode::AutonomousHost)
+    /// orchestrator is resolved *synchronously* so its unavailability fails the
+    /// caller immediately. The actual delivery is dispatched on the bounded
+    /// `lifecycle_tasks` set (preserving backpressure); a delivery failure from
+    /// a previously dispatched task is surfaced when this method next drains the
+    /// set.
+    async fn notify_orchestrator_lifecycle(&mut self, message: String) -> Result<(), MobError> {
+        // Drain completed lifecycle tasks (non-blocking). A prior delivery that
+        // failed is surfaced here rather than dropped: lifecycle delivery owns a
+        // real fault, not a log line.
+        self.drain_completed_lifecycle_tasks()?;
 
         let Some(orchestrator) = &self.definition.orchestrator else {
-            return;
+            return Ok(());
         };
         let Some(orchestrator_entry) = self
             .roster
@@ -4762,15 +4914,14 @@ impl MobActor {
             .next()
             .cloned()
         else {
-            return;
+            // The orchestrator is declared but not yet seated; there is nothing
+            // to deliver to yet.
+            return Ok(());
         };
 
         while self.lifecycle_tasks.len() >= MAX_LIFECYCLE_NOTIFICATION_TASKS {
             match self.lifecycle_tasks.join_next().await {
-                Some(Ok(())) => {}
-                Some(Err(error)) => {
-                    tracing::debug!(error = %error, "lifecycle notification task failed");
-                }
+                Some(join_result) => Self::surface_lifecycle_task_outcome(join_result)?,
                 None => break,
             }
         }
@@ -4783,20 +4934,33 @@ impl MobActor {
             &orchestrator_entry.member_ref,
             bridge_session_id,
         ) else {
-            return;
+            return Err(MobError::WiringError(format!(
+                "orchestrator lifecycle notification for '{agent_identity}' could not project an addressable member binding"
+            )));
         };
-        self.lifecycle_tasks.spawn(async move {
-            let result = match runtime_mode {
-                crate::MobRuntimeMode::AutonomousHost => {
-                    let Some(bridge_session_id) = member_ref.bridge_session_id() else {
-                        return;
-                    };
-                    let Some(injector) = provisioner
-                        .interaction_event_injector(bridge_session_id)
-                        .await
-                    else {
-                        return;
-                    };
+
+        match runtime_mode {
+            crate::MobRuntimeMode::AutonomousHost => {
+                // Resolve the injector synchronously so an unreachable autonomous
+                // host fails the caller now instead of vanishing inside a
+                // detached task.
+                let Some(bridge_session_id) = member_ref.bridge_session_id() else {
+                    return Err(MobError::WiringError(format!(
+                        "orchestrator lifecycle notification for '{agent_identity}' has no bridge session for autonomous-host injection"
+                    )));
+                };
+                let Some(injector) = provisioner
+                    .interaction_event_injector(bridge_session_id)
+                    .await
+                else {
+                    return Err(MobError::MissingMemberCapability {
+                        member_id: agent_identity.clone(),
+                        capability: crate::error::MobMemberCapability::InteractionEventInjector,
+                        context: "orchestrator lifecycle notification",
+                    });
+                };
+                let task_identity = agent_identity.clone();
+                self.lifecycle_tasks.spawn(async move {
                     injector
                         .inject(
                             message.into(),
@@ -4806,32 +4970,71 @@ impl MobActor {
                         )
                         .map_err(|error| {
                             MobError::Internal(format!(
-                                "orchestrator lifecycle inject failed for '{agent_identity}': {error}"
+                                "orchestrator lifecycle inject failed for '{task_identity}': {error}"
                             ))
                         })
-                }
-                crate::MobRuntimeMode::TurnDriven => {
+                });
+            }
+            crate::MobRuntimeMode::TurnDriven => {
+                let task_member_ref = member_ref.clone();
+                self.lifecycle_tasks.spawn(async move {
                     provisioner
                         .start_turn(
-                            &member_ref,
+                            &task_member_ref,
                             meerkat_core::service::StartTurnRequest {
                                 prompt: message.into(),
                                 system_prompt: None,
                                 event_tx: None,
-                                runtime: meerkat_core::service::StartTurnRuntimeSemantics::default(),
+                                runtime: meerkat_core::service::StartTurnRuntimeSemantics::default(
+                                ),
                             },
                         )
                         .await
-                }
-            };
-            if let Err(error) = result {
-                tracing::warn!(
-                    orchestrator_member_ref = ?member_ref,
-                    error = %error,
-                    "failed to notify orchestrator lifecycle turn"
-                );
+                });
             }
-        });
+        }
+        Ok(())
+    }
+
+    /// Drain all completed lifecycle notification tasks without blocking,
+    /// surfacing the first delivery fault as a typed [`MobError`].
+    fn drain_completed_lifecycle_tasks(&mut self) -> Result<(), MobError> {
+        let mut surfaced: Option<MobError> = None;
+        while let Some(join_result) = self.lifecycle_tasks.try_join_next() {
+            if let Err(error) = Self::surface_lifecycle_task_outcome(join_result) {
+                // Drain the remainder before returning so the set does not grow
+                // unbounded, but report the first observed delivery fault.
+                if surfaced.is_none() {
+                    surfaced = Some(error);
+                }
+            }
+        }
+        match surfaced {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Interpret a single lifecycle task join result. An aborted task (mob
+    /// teardown) is not a delivery fault; a panicked task or a delivery `Err`
+    /// is.
+    fn surface_lifecycle_task_outcome(
+        join_result: Result<Result<(), MobError>, tokio::task::JoinError>,
+    ) -> Result<(), MobError> {
+        match join_result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(delivery_error)) => {
+                tracing::warn!(
+                    error = %delivery_error,
+                    "orchestrator lifecycle delivery failed"
+                );
+                Err(delivery_error)
+            }
+            Err(join_error) if join_error.is_cancelled() => Ok(()),
+            Err(join_error) => Err(MobError::Internal(format!(
+                "orchestrator lifecycle delivery task did not complete: {join_error}"
+            ))),
+        }
     }
 
     fn retire_event_key(agent_identity: &MeerkatId, member_ref: &MemberRef) -> String {
@@ -6490,11 +6693,17 @@ impl MobActor {
                     message,
                     reply_tx,
                 } => {
+                    let mut burst_result = Ok(());
                     for index in 0..count {
-                        self.notify_orchestrator_lifecycle(format!("{message} #{index}"))
-                            .await;
+                        if let Err(error) = self
+                            .notify_orchestrator_lifecycle(format!("{message} #{index}"))
+                            .await
+                        {
+                            burst_result = Err(error);
+                            break;
+                        }
                     }
-                    let _ = reply_tx.send(Ok(()));
+                    let _ = reply_tx.send(burst_result);
                 }
                 #[cfg(test)]
                 MobCommand::DslT2Snapshot { reply_tx } => {
@@ -6622,11 +6831,24 @@ impl MobActor {
                                     self.fail_all_pending_spawns("mob is stopping").await;
                                 if stop_result.is_ok() {
                                     self.cancel_pending_peer_deliveries("mob is stopping").await;
-                                    self.notify_orchestrator_lifecycle(format!(
-                                        "Mob '{}' is stopping.",
-                                        self.definition.id
-                                    ))
-                                    .await;
+                                    // Lifecycle delivery is a real fault, not
+                                    // best-effort: fold a failure into the stop
+                                    // result rather than swallowing it. Cleanup
+                                    // still proceeds so the mob can stop.
+                                    if let Err(error) = self
+                                        .notify_orchestrator_lifecycle(format!(
+                                            "Mob '{}' is stopping.",
+                                            self.definition.id
+                                        ))
+                                        .await
+                                    {
+                                        tracing::warn!(
+                                            mob_id = %self.definition.id,
+                                            error = %error,
+                                            "stop encountered orchestrator lifecycle delivery error"
+                                        );
+                                        stop_result = Err(error);
+                                    }
                                     // Cancel checkpointer gates before stopping host loops so
                                     // in-flight saves that complete after the loop stops don't
                                     // race with subsequent external cleanup (e.g. DML deletes).
@@ -8751,7 +8973,7 @@ impl MobActor {
                             "spawn supervisor private trust failed for '{agent_identity}': {error}; archive compensation failed: {rollback_error}"
                         )));
                     }
-                    return Err(error);
+                    return Err(error.into());
                 }
             }
         } else {
@@ -13851,8 +14073,21 @@ impl MobActor {
             .await?;
         self.cancel_all_flow_tasks().await?;
 
-        self.notify_orchestrator_lifecycle(format!("Mob '{}' is completing.", self.definition.id))
-            .await;
+        // Completion is the dominant, terminal operation: it must proceed even
+        // if the orchestrator cannot be told the mob is completing. This seam
+        // owns that policy and decides to continue, but the delivery fault is
+        // explicitly surfaced (logged) rather than swallowed inside the
+        // delivery routine.
+        if let Err(error) = self
+            .notify_orchestrator_lifecycle(format!("Mob '{}' is completing.", self.definition.id))
+            .await
+        {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                error = %error,
+                "completion proceeding despite orchestrator lifecycle delivery failure"
+            );
+        }
         self.retire_all_members("complete").await?;
 
         // MobMachine owns both completion admission and the durable journal
@@ -14649,11 +14884,25 @@ impl MobActor {
             })?;
         }
         if destroy_input_needed {
-            self.notify_orchestrator_lifecycle(format!(
-                "Mob '{}' is destroying.",
-                self.definition.id
-            ))
-            .await;
+            // Destroy is terminal and must proceed. The orchestrator is itself
+            // being torn down here, so an unreachable injector is expected
+            // rather than a destroy-blocking fault. This seam owns that policy:
+            // it decides to continue and surfaces the delivery outcome via the
+            // log instead of swallowing it inside the delivery routine or
+            // marking the destroy incomplete.
+            if let Err(error) = self
+                .notify_orchestrator_lifecycle(format!(
+                    "Mob '{}' is destroying.",
+                    self.definition.id
+                ))
+                .await
+            {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    error = %error,
+                    "destroy proceeding despite orchestrator lifecycle delivery failure"
+                );
+            }
         }
         let (remote_entries, local_entries): (Vec<_>, Vec<_>) = entries
             .into_iter()
@@ -15717,12 +15966,16 @@ impl MobActor {
                     .await
                 {
                     Ok(_) => activated_session_trust.push((session_id, comms)),
-                    Err(error) => {
+                    Err(SupervisorPrivateTrustInstallError {
+                        error,
+                        new_trust_cleanup_failed,
+                    }) => {
                         return Err(self
                             .supervisor_activation_error_with_rollback(
                                 current,
                                 &activated_session_trust,
                                 error,
+                                new_trust_cleanup_failed,
                             )
                             .await);
                     }
@@ -15750,6 +16003,7 @@ impl MobActor {
                         current,
                         &activated_session_trust,
                         cas_error,
+                        false,
                     )
                     .await);
             }
@@ -15759,13 +16013,19 @@ impl MobActor {
                         current,
                         &activated_session_trust,
                         MobError::from(error),
+                        false,
                     )
                     .await);
             }
         }
         if let Err(error) = self.commit_prepared_dsl_transition(prepared_commit.transition) {
             return Err(self
-                .supervisor_activation_error_with_rollback(current, &activated_session_trust, error)
+                .supervisor_activation_error_with_rollback(
+                    current,
+                    &activated_session_trust,
+                    error,
+                    false,
+                )
                 .await);
         }
         if let Err(error) = self
@@ -15774,7 +16034,12 @@ impl MobActor {
             .await
         {
             return Err(self
-                .supervisor_activation_error_with_rollback(current, &activated_session_trust, error)
+                .supervisor_activation_error_with_rollback(
+                    current,
+                    &activated_session_trust,
+                    error,
+                    false,
+                )
                 .await);
         }
         Ok(())
@@ -15785,6 +16050,7 @@ impl MobActor {
         current: &crate::store::SupervisorAuthorityRecord,
         activated_session_trust: &[(SessionId, Arc<dyn CoreCommsRuntime>)],
         error: MobError,
+        new_trust_cleanup_failed: bool,
     ) -> SupervisorAuthorityActivationError {
         let mut rollback_errors = Vec::new();
         if let Err(rollback_error) = self.rotate_supervisor_bridge_to(current).await {
@@ -15803,8 +16069,11 @@ impl MobActor {
                 }
             }
         }
-        let error_text = error.to_string();
-        if error_text.contains("cleanup failed while removing new supervisor trust") {
+        // Whether the activation failure left a half-installed "new" supervisor
+        // trust is a typed verdict carried by the install error, not a substring
+        // of the formatted message. Keying on the structured discriminant keeps
+        // this rollback resilient to error-text wording changes.
+        if new_trust_cleanup_failed {
             rollback_errors.push("supervisor private trust cleanup failed".to_string());
         }
         SupervisorAuthorityActivationError {
@@ -18813,5 +19082,132 @@ mod bridge_rejection_tests {
                 "expected revoke cleanup classifier must not parse error text with {disallowed}"
             );
         }
+    }
+
+    /// Row #53 (atomicity_window): an `AuthorizeSupervisor` rejection or send
+    /// failure must leave NO installed recipient trust. The recipient is
+    /// trusted only so the bridge request can be routed; the authorization
+    /// path must roll the trust back (`untrust_recipient`) on every
+    /// non-confirmed-accept outcome. This ratchet pins that the actor's
+    /// `ensure_supervisor_authorized` invokes the rollback on the send-failure,
+    /// rejection, and decode-failure branches instead of returning while leaving
+    /// trust installed.
+    #[test]
+    fn authorize_supervisor_rejection_rolls_back_recipient_trust_in_actor() {
+        let source = include_str!("actor.rs");
+        let start = source
+            .find("async fn ensure_supervisor_authorized")
+            .expect("actor ensure_supervisor_authorized exists");
+        let end = source[start..]
+            .find("\n    /// Fail-closed rollback for supervisor recipient trust")
+            .expect("ensure_supervisor_authorized precedes its rollback helper doc");
+        let body = &source[start..start + end];
+
+        assert!(
+            body.contains("self.supervisor_bridge.trust_recipient(peer).await?;"),
+            "authorization must still establish recipient trust before the routed send"
+        );
+        assert!(
+            body.contains("rollback_supervisor_recipient_trust(peer, send_error)"),
+            "a send failure must roll back the just-installed recipient trust"
+        );
+        assert!(
+            body.contains("rollback_supervisor_recipient_trust(peer, decode_error)"),
+            "a malformed authorize response must roll back the just-installed recipient trust"
+        );
+        assert!(
+            body.contains("rollback_supervisor_recipient_trust(peer, bind_error)"),
+            "a failed rebind must roll back the rejected recipient's trust"
+        );
+        assert!(
+            body.contains(
+                "rollback_supervisor_recipient_trust(peer, Self::bridge_rejection_error(rejection))"
+            ),
+            "a terminal rejection must roll back trust, carrying the typed rejection error"
+        );
+        // The terminal rejection arm must not return the raw rejection without
+        // rolling trust back first.
+        assert!(
+            !body.contains("return Err(Self::bridge_rejection_error(rejection));"),
+            "terminal rejection must route through the trust rollback, not return raw"
+        );
+
+        // The rollback helper itself must actually untrust the recipient.
+        let helper_start = source
+            .find("async fn rollback_supervisor_recipient_trust")
+            .expect("actor rollback helper exists");
+        let helper_end = source[helper_start..]
+            .find("\n    async fn load_supervisor_authority_snapshot")
+            .expect("rollback helper precedes the authority-snapshot loader");
+        let helper_body = &source[helper_start..helper_start + helper_end];
+        assert!(
+            helper_body.contains("self.supervisor_bridge.untrust_recipient(peer).await"),
+            "rollback helper must untrust the recipient so a rejection leaves no trust"
+        );
+    }
+
+    /// Row #155 (fault_laundered): the supervisor-activation rollback must
+    /// classify "did the attempted new-supervisor-trust cleanup also fail" by a
+    /// typed discriminant carried on the install error, never by
+    /// string-matching the formatted error message.
+    #[test]
+    fn supervisor_activation_rollback_classifies_cleanup_failure_by_typed_variant() {
+        let source = include_str!("actor.rs");
+        let start = source
+            .find("async fn supervisor_activation_error_with_rollback")
+            .expect("supervisor_activation_error_with_rollback exists");
+        let end = source[start..]
+            .find("\n    /// Cancel checkpointers and transition to Stopped.")
+            .expect("rollback classifier precedes fail_reset_to_stopped");
+        let body = &source[start..start + end];
+
+        assert!(
+            body.contains("if new_trust_cleanup_failed {"),
+            "rollback must key on the typed new_trust_cleanup_failed discriminant"
+        );
+        for disallowed in [
+            "error_text",
+            "error.to_string()",
+            ".contains(",
+            "to_lowercase",
+        ] {
+            assert!(
+                !body.contains(disallowed),
+                "supervisor activation rollback classifier must not parse error text with {disallowed}"
+            );
+        }
+    }
+
+    /// Row #155: the install path must surface the cleanup verdict as a typed
+    /// outcome (`SupervisorPrivateTrustInstallError` carrying
+    /// `new_trust_cleanup_failed`) rather than burying it in a formatted string
+    /// that a downstream `.contains()` would have to recover.
+    #[test]
+    fn supervisor_private_trust_install_carries_typed_cleanup_verdict() {
+        let source = include_str!("actor.rs");
+        let start = source
+            .find("async fn install_supervisor_private_trust_for_session_authority")
+            .expect("install_supervisor_private_trust_for_session_authority exists");
+        let end = source[start..]
+            .find("\n    async fn stage_supervisor_trust_published_for_private_trust")
+            .expect("install fn precedes its publish-feedback staging helper");
+        let body = &source[start..start + end];
+
+        assert!(
+            body.contains(
+                "Result<SupervisorPrivateTrustInstall, SupervisorPrivateTrustInstallError>"
+            ),
+            "install must return the typed install error so callers read a structured cleanup verdict"
+        );
+        assert!(
+            body.contains(
+                "SupervisorPrivateTrustInstallError::with_failed_new_trust_cleanup(error)"
+            ),
+            "a failed attempted-trust cleanup must be recorded as a typed discriminant"
+        );
+        assert!(
+            body.contains(".is_err()"),
+            "the cleanup attempt result must be inspected, not discarded"
+        );
     }
 }

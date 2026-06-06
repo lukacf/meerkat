@@ -2491,6 +2491,10 @@ enum MobWebCommands {
         pack: PathBuf,
         #[arg(short = 'o', long)]
         output: PathBuf,
+        /// Path to the prebuilt wasm32 runtime artifact (`runtime_bg.wasm`) produced by the
+        /// `meerkat-web-runtime` build pipeline. Required: the CLI does not compile wasm32 itself.
+        #[arg(long)]
+        wasm: Option<PathBuf>,
         #[arg(long, value_enum)]
         trust_policy: Option<TrustPolicyArg>,
     },
@@ -12277,13 +12281,14 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             MobWebCommands::Build {
                 pack,
                 output,
+                wasm,
                 trust_policy,
             },
     } = &command
     {
         println!(
             "{}",
-            execute_mob_web_build(scope, pack, output, *trust_policy).await?
+            execute_mob_web_build(scope, pack, output, wasm.as_deref(), *trust_policy).await?
         );
         return Ok(());
     }
@@ -12719,6 +12724,7 @@ async fn execute_mob_web_build(
     scope: &RuntimeScope,
     pack: &std::path::Path,
     output: &std::path::Path,
+    wasm: Option<&std::path::Path>,
     cli_trust_policy: Option<TrustPolicyArg>,
 ) -> anyhow::Result<String> {
     let verified =
@@ -12729,6 +12735,31 @@ async fn execute_mob_web_build(
                 anyhow::bail!("forbidden capability '{cap}' is not allowed for web builds");
             }
         }
+    }
+
+    // Fail closed: the CLI does not compile wasm32 here. The browser bundle is only valid with a
+    // real `runtime_bg.wasm` produced by the `meerkat-web-runtime` build pipeline. Refuse to emit
+    // a bundle (and refuse to report success) unless the operator supplies a non-empty artifact.
+    let wasm_source = wasm.ok_or_else(|| {
+        anyhow::anyhow!(
+            "mob web build failed: missing --wasm <runtime_bg.wasm>; the wasm32 runtime artifact \
+             must be built by the meerkat-web-runtime pipeline (e.g. `wasm-pack build \
+             meerkat-web-runtime`) and passed to this command. The CLI does not compile wasm32 \
+             and will not emit a placeholder bundle."
+        )
+    })?;
+    let wasm_bytes = tokio::fs::read(wasm_source).await.map_err(|err| {
+        anyhow::anyhow!(
+            "mob web build failed: cannot read wasm artifact '{}': {err}",
+            wasm_source.display()
+        )
+    })?;
+    if wasm_bytes.is_empty() {
+        anyhow::bail!(
+            "mob web build failed: wasm artifact '{}' is empty; a 0-byte runtime_bg.wasm cannot \
+             produce a runnable web bundle",
+            wasm_source.display()
+        );
     }
 
     tokio::fs::create_dir_all(output).await.map_err(|err| {
@@ -12756,7 +12787,7 @@ async fn execute_mob_web_build(
     )
     .await
     .map_err(|err| anyhow::anyhow!("failed writing runtime.js: {err}"))?;
-    tokio::fs::write(output.join("runtime_bg.wasm"), [])
+    tokio::fs::write(output.join("runtime_bg.wasm"), &wasm_bytes)
         .await
         .map_err(|err| anyhow::anyhow!("failed writing runtime_bg.wasm: {err}"))?;
 
@@ -17290,12 +17321,14 @@ url = "https://user.example/mcp"
                             MobWebCommands::Build {
                                 pack,
                                 output,
+                                wasm,
                                 trust_policy,
                             },
                     },
             } => {
                 assert_eq!(pack, PathBuf::from("./fixture.mobpack"));
                 assert_eq!(output, PathBuf::from("./web-out"));
+                assert_eq!(wasm, None);
                 assert_eq!(trust_policy, None);
             }
             _ => unreachable!("expected mob web build command"),
@@ -17413,10 +17446,15 @@ url = "https://user.example/mcp"
         );
 
         let web_out = temp.path().join("web-out");
-        let web_err =
-            execute_mob_web_build(&scope, &valid_pack, &web_out, Some(TrustPolicyArg::Strict))
-                .await
-                .expect_err("strict web build should reject unsigned packs");
+        let web_err = execute_mob_web_build(
+            &scope,
+            &valid_pack,
+            &web_out,
+            None,
+            Some(TrustPolicyArg::Strict),
+        )
+        .await
+        .expect_err("strict web build should reject unsigned packs");
         assert!(
             web_err.to_string().contains("unsigned pack"),
             "web build should share the trust verification seam: {web_err}"
@@ -17439,6 +17477,74 @@ url = "https://user.example/mcp"
         assert!(
             err.to_string().contains("definition.json is missing"),
             "validate failure should mention missing definition: {err}"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_mob_web_build_never_reports_empty_wasm_success() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope_with_context(temp.path().to_path_buf());
+        let mob_dir = create_mobpack_fixture_dir(temp.path());
+        let valid_pack = temp.path().join("valid.mobpack");
+        execute_mob_pack(&mob_dir, &valid_pack, None)
+            .await
+            .expect("pack before web build");
+
+        // No wasm artifact supplied: must fail closed, never emit a bundle.
+        let missing_out = temp.path().join("web-missing");
+        let missing_err = execute_mob_web_build(&scope, &valid_pack, &missing_out, None, None)
+            .await
+            .expect_err("web build must fail closed when no wasm artifact is supplied");
+        assert!(
+            missing_err.to_string().contains("--wasm"),
+            "missing-wasm failure should name the required artifact: {missing_err}"
+        );
+        assert!(
+            !missing_out.join("runtime_bg.wasm").exists(),
+            "fail-closed web build must not write a placeholder runtime_bg.wasm"
+        );
+
+        // Empty wasm artifact supplied: must fail closed, never emit a bundle.
+        let empty_wasm = temp.path().join("empty_bg.wasm");
+        tokio::fs::write(&empty_wasm, [])
+            .await
+            .expect("write empty wasm fixture");
+        let empty_out = temp.path().join("web-empty");
+        let empty_err =
+            execute_mob_web_build(&scope, &valid_pack, &empty_out, Some(&empty_wasm), None)
+                .await
+                .expect_err("web build must reject a 0-byte wasm artifact");
+        assert!(
+            empty_err.to_string().contains("empty"),
+            "empty-wasm failure should mention the empty artifact: {empty_err}"
+        );
+
+        // Real (non-empty) wasm artifact: must succeed and copy the real bytes through.
+        let real_wasm = temp.path().join("real_bg.wasm");
+        let real_bytes = b"\0asm\x01\0\0\0".to_vec();
+        tokio::fs::write(&real_wasm, &real_bytes)
+            .await
+            .expect("write real wasm fixture");
+        let real_out = temp.path().join("web-real");
+        let rendered =
+            execute_mob_web_build(&scope, &valid_pack, &real_out, Some(&real_wasm), None)
+                .await
+                .expect("web build should succeed with a real wasm artifact");
+        assert!(
+            rendered.starts_with("web\t"),
+            "successful web build should report the output path: {rendered}"
+        );
+        let emitted_wasm = tokio::fs::read(real_out.join("runtime_bg.wasm"))
+            .await
+            .expect("web build should emit runtime_bg.wasm on success");
+        assert!(
+            !emitted_wasm.is_empty(),
+            "successful web build must never emit a 0-byte runtime_bg.wasm"
+        );
+        assert_eq!(
+            emitted_wasm, real_bytes,
+            "web build should copy the supplied wasm artifact bytes verbatim"
         );
     }
 

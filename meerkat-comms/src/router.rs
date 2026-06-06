@@ -89,6 +89,20 @@ pub enum SendError {
     AdmissionDropped { reason: crate::inbox::DropReason },
 }
 
+/// Outcome of a successful router send.
+///
+/// Carries the verified delivery-acknowledgement truth alongside the envelope
+/// id. `acked` is `true` only when the send waited for and cryptographically
+/// verified a peer ACK over a stream transport. Inproc delivery has no ACK
+/// round-trip (direct inbox handoff), and non-ack-bearing kinds (Ack/Response)
+/// never wait — both report `acked == false`. The public receipt must reflect
+/// this truth rather than hardcoding it.
+#[derive(Debug, Clone, Copy)]
+pub struct SendOutcome {
+    pub envelope_id: Uuid,
+    pub acked: bool,
+}
+
 #[inline]
 fn map_inproc_send_error(err: InprocSendError, dest: PeerId) -> SendError {
     match err {
@@ -450,7 +464,7 @@ impl Router {
         stream: &mut S,
         envelope: Envelope,
         wait_for_ack: bool,
-    ) -> Result<Uuid, SendError>
+    ) -> Result<SendOutcome, SendError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
@@ -486,7 +500,12 @@ impl Router {
                         if in_reply_to != sent_id {
                             return Err(SendError::PeerOffline);
                         }
-                        Ok(sent_id)
+                        // A peer ACK was received and verified: this is the only
+                        // path that may report `acked == true`.
+                        Ok(SendOutcome {
+                            envelope_id: sent_id,
+                            acked: true,
+                        })
                     } else {
                         Err(SendError::PeerOffline)
                     }
@@ -494,8 +513,63 @@ impl Router {
                 _ => Err(SendError::PeerOffline),
             }
         } else {
-            Ok(sent_id)
+            // No ACK was awaited (Ack/Response kinds), so we cannot claim one
+            // was received.
+            Ok(SendOutcome {
+                envelope_id: sent_id,
+                acked: false,
+            })
         }
+    }
+
+    /// Deliver an inproc envelope under the router's configured namespace.
+    ///
+    /// The configured `inproc_namespace` is the delivery authority: the
+    /// destination pubkey must have a live inproc owner *in this namespace*.
+    /// A peer registered only in a different namespace is NOT reachable — we
+    /// fail closed with [`SendError::PeerNotFound`] rather than crossing
+    /// namespaces. This honors the namespace isolation promised by
+    /// `CoreCommsConfig.inproc_namespace`.
+    async fn send_inproc_in_namespace(
+        &self,
+        peer: &TrustedPeer,
+        envelope: Envelope,
+        dest: PeerId,
+    ) -> Result<SendOutcome, SendError> {
+        let registry = InprocRegistry::global();
+        let namespace = self.inproc_namespace.as_deref().unwrap_or("");
+        // Namespace is the routing authority. Require the destination pubkey to
+        // have a live inproc owner *in this namespace* before any delivery.
+        // A peer registered only in a different namespace does not resolve here
+        // and must not be reached — fail closed rather than crossing
+        // namespaces. This honors the isolation promised by
+        // `CoreCommsConfig.inproc_namespace`.
+        if registry
+            .get_by_pubkey_in_namespace(namespace, &peer.pubkey)
+            .is_none()
+        {
+            return Err(SendError::PeerNotFound(dest));
+        }
+        // The pubkey is confirmed live in our namespace. Delivery itself still
+        // fails closed if the canonical identity is ambiguously live across
+        // namespaces (see `get_by_pubkey_any_namespace`), so no cross-namespace
+        // misdelivery is possible.
+        let envelope_id = registry
+            .send_to_pubkey_any_namespace_with_id_wait(
+                &self.keypair,
+                &peer.pubkey,
+                envelope.id,
+                envelope.kind,
+                self.require_peer_auth,
+            )
+            .await
+            .map_err(|err| map_inproc_send_error(err, dest))?;
+        // Inproc delivery is a direct inbox handoff: there is no ACK round-trip,
+        // so we never claim the envelope was acked.
+        Ok(SendOutcome {
+            envelope_id,
+            acked: false,
+        })
     }
 
     /// Canonical send: routing identity is a [`PeerId`], never a [`PeerName`].
@@ -506,7 +580,7 @@ impl Router {
     /// at the boundary and handle the typed
     /// [`TrustResolveError::Ambiguous`](crate::trust::TrustResolveError::Ambiguous)
     /// case explicitly — the router will not guess.
-    pub async fn send(&self, dest: PeerId, kind: MessageKind) -> Result<Uuid, SendError> {
+    pub async fn send(&self, dest: PeerId, kind: MessageKind) -> Result<SendOutcome, SendError> {
         self.send_with_id(dest, Uuid::new_v4(), kind).await
     }
 
@@ -515,12 +589,16 @@ impl Router {
     /// Used by the correlated request/response path, which reserves a
     /// stream key before the envelope goes out so replies can correlate
     /// via `in_reply_to` without an extra local id map.
+    ///
+    /// The returned [`SendOutcome`] carries the verified ACK truth: `acked` is
+    /// `true` only when a peer ACK was received and cryptographically verified
+    /// over a stream transport.
     pub async fn send_with_id(
         &self,
         dest: PeerId,
         envelope_id: Uuid,
         kind: MessageKind,
-    ) -> Result<Uuid, SendError> {
+    ) -> Result<SendOutcome, SendError> {
         let peer = match self.trusted_peer_by_peer_id(&dest) {
             TrustedPeerLookup::Resolved(peer) => peer,
             TrustedPeerLookup::Ambiguous => return Err(SendError::PeerNotFound(dest)),
@@ -561,22 +639,7 @@ impl Router {
                     self.send_on_stream(&mut stream, envelope, wait_for_ack)
                         .await
                 }
-                PeerAddr::Inproc(_) => {
-                    let registry = InprocRegistry::global();
-                    // Router sends have a typed peer identity, but not a
-                    // typed target namespace. Require the canonical pubkey to
-                    // have exactly one live inproc owner before delivery.
-                    registry
-                        .send_to_pubkey_any_namespace_with_id_wait(
-                            &self.keypair,
-                            &peer.pubkey,
-                            envelope.id,
-                            envelope.kind,
-                            self.require_peer_auth,
-                        )
-                        .await
-                        .map_err(|err| map_inproc_send_error(err, dest))
-                }
+                PeerAddr::Inproc(_) => self.send_inproc_in_namespace(&peer, envelope, dest).await,
             }
         }
 
@@ -586,19 +649,7 @@ impl Router {
                 PeerAddr::Tcp(_) => Err(SendError::Transport(TransportError::InvalidAddress(
                     "TCP transport is not available on wasm32".to_string(),
                 ))),
-                PeerAddr::Inproc(_) => {
-                    let registry = InprocRegistry::global();
-                    registry
-                        .send_to_pubkey_any_namespace_with_id_wait(
-                            &self.keypair,
-                            &peer.pubkey,
-                            envelope.id,
-                            envelope.kind,
-                            self.require_peer_auth,
-                        )
-                        .await
-                        .map_err(|err| map_inproc_send_error(err, dest))
-                }
+                PeerAddr::Inproc(_) => self.send_inproc_in_namespace(&peer, envelope, dest).await,
             }
         }
     }
@@ -635,6 +686,190 @@ mod tests {
             addr: addr.to_string(),
             meta: PeerMeta::default(),
         }
+    }
+
+    /// ROW #268 gate: `acked` reflects the verified ACK from the delivery path.
+    /// A stream send that receives and verifies a peer ACK reports
+    /// `acked == true`; a send that does not await an ACK reports
+    /// `acked == false`. The truth is never hardcoded.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn send_outcome_acked_reflects_verified_ack() {
+        use crate::transport::codec::{EnvelopeFrame, TransportCodec};
+        use crate::types::MessageKind;
+        use futures::{SinkExt, StreamExt};
+        use tokio_util::codec::Framed;
+
+        let router_kp = Keypair::generate();
+        let router_pubkey = router_kp.public_key();
+        let (_inbox, inbox_sender) = Inbox::new();
+        let router = Router::new(
+            router_kp,
+            TrustedPeers::new(),
+            CommsConfig::default(),
+            inbox_sender,
+            true,
+        );
+
+        let peer_kp = Keypair::generate();
+        let peer_pubkey = peer_kp.public_key();
+
+        // Outgoing Message envelope addressed to the peer, signed by the router.
+        let mut envelope = Envelope {
+            id: Uuid::new_v4(),
+            from: router_pubkey,
+            to: peer_pubkey,
+            kind: MessageKind::Message {
+                body: "needs ack".to_string(),
+                blocks: None,
+                handling_mode: None,
+            },
+            sig: crate::identity::Signature::new([0u8; 64]),
+        };
+        envelope.sign(&router.keypair);
+        let sent_id = envelope.id;
+
+        let (mut client, server) = tokio::io::duplex(4096);
+
+        // Peer side: read the framed message, then reply with a verified ACK.
+        let peer_task = tokio::spawn(async move {
+            let mut framed = Framed::new(server, TransportCodec::new(DEFAULT_MAX_MESSAGE_BYTES));
+            let incoming = framed
+                .next()
+                .await
+                .expect("peer receives a frame")
+                .expect("frame decodes");
+            let mut ack = Envelope {
+                id: Uuid::new_v4(),
+                from: peer_pubkey,
+                to: router_pubkey,
+                kind: MessageKind::Ack {
+                    in_reply_to: incoming.envelope.id,
+                },
+                sig: crate::identity::Signature::new([0u8; 64]),
+            };
+            ack.sign(&peer_kp);
+            framed
+                .send(EnvelopeFrame::from_envelope(ack))
+                .await
+                .expect("peer sends ack");
+        });
+
+        let outcome = router
+            .send_on_stream(&mut client, envelope, true)
+            .await
+            .expect("send_on_stream succeeds with a verified ack");
+        peer_task.await.expect("peer task completes");
+
+        assert_eq!(outcome.envelope_id, sent_id);
+        assert!(
+            outcome.acked,
+            "a verified peer ACK must produce acked == true, not a hardcoded false"
+        );
+
+        // A kind that does not await an ACK (Response) must report acked=false.
+        let (mut client2, _server2) = tokio::io::duplex(4096);
+        let mut response_env = Envelope {
+            id: Uuid::new_v4(),
+            from: router_pubkey,
+            to: peer_pubkey,
+            kind: MessageKind::Response {
+                in_reply_to: Uuid::new_v4(),
+                status: crate::types::Status::Completed,
+                result: serde_json::json!({"ok": true}),
+                blocks: None,
+                handling_mode: None,
+            },
+            sig: crate::identity::Signature::new([0u8; 64]),
+        };
+        response_env.sign(&router.keypair);
+        let no_ack = router
+            .send_on_stream(&mut client2, response_env, false)
+            .await
+            .expect("non-ack-bearing send succeeds");
+        assert!(
+            !no_ack.acked,
+            "a send that does not await an ACK must report acked == false"
+        );
+    }
+
+    /// ROW #242 gate: a trusted inproc send from a runtime in namespace A to a
+    /// peer registered ONLY in namespace B must NOT be delivered — the
+    /// configured `inproc_namespace` is the delivery authority, not a
+    /// cross-namespace pubkey lookup.
+    #[tokio::test]
+    async fn inproc_send_does_not_cross_namespace() {
+        use crate::classify::test_support;
+
+        // Use the process-global registry, but isolate by unique namespaces and
+        // a fresh keypair rather than `clear()` so we never disturb peers other
+        // tests registered concurrently (the registry is process-global).
+        let registry = InprocRegistry::global();
+        let suffix = Uuid::new_v4().simple().to_string();
+        let namespace_a = format!("realm-a-{suffix}");
+        let namespace_b = format!("realm-b-{suffix}");
+
+        // Receiver lives only in namespace B.
+        let receiver_kp = Keypair::generate();
+        let receiver_pubkey = receiver_kp.public_key();
+        let receiver_pubkey_bytes = *receiver_pubkey.as_bytes();
+        let (mut receiver_inbox, receiver_sender) = Inbox::new_classified(
+            test_support::classification_context(TrustedPeers::new(), false),
+        );
+        registry.register_with_meta_in_namespace(
+            &namespace_b,
+            "receiver",
+            receiver_pubkey,
+            receiver_sender,
+            PeerMeta::default(),
+        );
+
+        // Router is scoped to namespace "realm-a" and trusts the receiver.
+        let (_inbox, inbox_sender) = Inbox::new();
+        let router = Router::new(
+            Keypair::generate(),
+            TrustedPeers::new(),
+            CommsConfig::default(),
+            inbox_sender,
+            false,
+        )
+        .with_inproc_namespace(Some(namespace_a.clone()));
+
+        let peer_id = PeerId::from_ed25519_pubkey(&receiver_pubkey_bytes);
+        router
+            .add_trusted_peer_with_peer_id(
+                peer_id,
+                peer("receiver", receiver_pubkey_bytes, "inproc://receiver"),
+                GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection,
+                false,
+            )
+            .expect("trust add");
+
+        // Trusted send resolves the peer (trust is namespace-agnostic) but the
+        // delivery authority is the router's namespace ("realm-a"), where the
+        // receiver is NOT registered. Must fail closed, not deliver.
+        let result = router
+            .send(
+                peer_id,
+                MessageKind::Message {
+                    body: "cross-namespace must not deliver".to_string(),
+                    blocks: None,
+                    handling_mode: None,
+                },
+            )
+            .await;
+        assert!(
+            matches!(result, Err(SendError::PeerNotFound(_))),
+            "send to a peer registered only in another namespace must fail closed, got {result:?}"
+        );
+        assert!(
+            receiver_inbox.try_drain_classified().is_empty(),
+            "envelope must not be delivered across namespaces"
+        );
+
+        // Clean up only our own registration; never `clear()` the shared
+        // process-global registry.
+        registry.unregister_in_namespace(&namespace_b, &receiver_pubkey);
     }
 
     #[test]

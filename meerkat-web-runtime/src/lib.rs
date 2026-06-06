@@ -562,35 +562,55 @@ fn err_mob_destroy(e: MobMcpDestroyError) -> JsValue {
     JsValue::from_str(&mob_destroy_error_value(e).to_string())
 }
 
-fn err_session(e: meerkat_core::SessionError) -> JsValue {
+/// Build the typed `{ code, message, ... }` error envelope for a
+/// [`meerkat_core::SessionError`]. Each variant carries its stable
+/// `SessionError::code()` so callers can classify the terminal fault — agent
+/// faults surface as `AGENT_ERROR`, never flattened to a generic
+/// `internal_error` and never laundered into an Ok-with-status payload.
+fn session_error_envelope(e: meerkat_core::SessionError) -> serde_json::Value {
     match e {
         meerkat_core::SessionError::NotFound { .. } => {
-            err_js("SESSION_NOT_FOUND", "session not found")
+            serde_json::json!({ "code": "SESSION_NOT_FOUND", "message": "session not found" })
         }
-        meerkat_core::SessionError::Busy { .. } => err_js("SESSION_BUSY", "session is busy"),
-        meerkat_core::SessionError::PersistenceDisabled => err_js(
-            "SESSION_PERSISTENCE_DISABLED",
-            "session persistence is disabled",
-        ),
-        meerkat_core::SessionError::CompactionDisabled => err_js(
-            "SESSION_COMPACTION_DISABLED",
-            "session compaction is disabled",
-        ),
+        meerkat_core::SessionError::Busy { .. } => {
+            serde_json::json!({ "code": "SESSION_BUSY", "message": "session is busy" })
+        }
+        meerkat_core::SessionError::PersistenceDisabled => serde_json::json!({
+            "code": "SESSION_PERSISTENCE_DISABLED",
+            "message": "session persistence is disabled",
+        }),
+        meerkat_core::SessionError::CompactionDisabled => serde_json::json!({
+            "code": "SESSION_COMPACTION_DISABLED",
+            "message": "session compaction is disabled",
+        }),
         meerkat_core::SessionError::NotRunning { .. } => {
-            err_js("SESSION_NOT_RUNNING", "session is not running")
+            serde_json::json!({ "code": "SESSION_NOT_RUNNING", "message": "session is not running" })
         }
-        meerkat_core::SessionError::Unsupported(message) => err_js("SESSION_UNSUPPORTED", &message),
+        meerkat_core::SessionError::Unsupported(message) => {
+            serde_json::json!({ "code": "SESSION_UNSUPPORTED", "message": message })
+        }
         meerkat_core::SessionError::FailedWithData { message, data } => {
             let mut data = data;
             if let serde_json::Value::Object(map) = &mut data {
                 map.entry("message".to_string())
                     .or_insert_with(|| serde_json::Value::String(message));
             }
-            JsValue::from_str(&data.to_string())
+            data
         }
-        meerkat_core::SessionError::Store(other) => err_str("internal_error", other),
-        meerkat_core::SessionError::Agent(other) => err_str("internal_error", other),
+        meerkat_core::SessionError::Store(_) => {
+            serde_json::json!({ "code": "SESSION_STORE_ERROR", "message": e.to_string() })
+        }
+        // Carry the typed `SessionError::code()` ("AGENT_ERROR") rather than
+        // flattening agent faults into a generic "internal_error", so callers
+        // can classify the terminal fault on the Err channel.
+        meerkat_core::SessionError::Agent(_) => {
+            serde_json::json!({ "code": e.code(), "message": e.to_string() })
+        }
     }
+}
+
+fn err_session(e: meerkat_core::SessionError) -> JsValue {
+    JsValue::from_str(&session_error_envelope(e).to_string())
 }
 
 fn err_session_control(e: meerkat_core::SessionControlError) -> JsValue {
@@ -1048,23 +1068,61 @@ impl meerkat_core::AgentToolDispatcher for JsToolDispatcher {
             })?;
         let result_str = result_val.as_string().unwrap_or_default();
 
-        // Parse JSON result: {"content": "...", "is_error": false}
-        #[derive(Deserialize)]
-        struct JsToolResult {
-            content: String,
-            #[serde(default)]
-            is_error: bool,
-        }
-        let parsed: JsToolResult = serde_json::from_str(&result_str).map_err(|e| {
-            meerkat_core::error::ToolError::execution_failed(format!(
-                "invalid tool result JSON: {e}"
-            ))
-        })?;
+        Ok(parse_js_tool_result(call.id, &result_str)?.into())
+    }
+}
 
-        Ok(
-            meerkat_core::ToolResult::new(call.id.to_string(), parsed.content, parsed.is_error)
-                .into(),
-        )
+/// JSON shape returned by a JS tool callback.
+///
+/// `content` carries the canonical [`meerkat_contracts::WireToolResultContent`]
+/// typed owner — a `string | ContentBlock[]` union — so multimodal block
+/// content (images, video) survives as typed blocks rather than being narrowed
+/// to a string at the boundary.
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize)]
+struct JsToolResult {
+    content: meerkat_contracts::WireToolResultContent,
+    #[serde(default)]
+    is_error: bool,
+}
+
+/// Parse a JS tool-callback JSON string into a typed [`meerkat_core::ToolResult`],
+/// preserving multimodal block content via [`meerkat_contracts::WireToolResultContent`].
+///
+/// Not wasm-gated so the typed-content conversion is unit-testable on the host.
+#[cfg(any(target_arch = "wasm32", test))]
+fn parse_js_tool_result(
+    call_id: &str,
+    result_str: &str,
+) -> Result<meerkat_core::ToolResult, meerkat_core::error::ToolError> {
+    use meerkat_contracts::WireToolResultContent;
+
+    let parsed: JsToolResult = serde_json::from_str(result_str).map_err(|e| {
+        meerkat_core::error::ToolError::execution_failed(format!("invalid tool result JSON: {e}"))
+    })?;
+
+    match parsed.content {
+        WireToolResultContent::Text(text) => Ok(meerkat_core::ToolResult::new(
+            call_id.to_string(),
+            text,
+            parsed.is_error,
+        )),
+        WireToolResultContent::Blocks(blocks) => {
+            let blocks = blocks
+                .into_iter()
+                .map(meerkat_core::ContentBlock::try_from)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| {
+                    meerkat_core::error::ToolError::execution_failed(format!(
+                        "invalid tool result content block: {e}"
+                    ))
+                })?;
+            Ok(meerkat_core::ToolResult::with_blocks(
+                call_id.to_string(),
+                blocks,
+                parsed.is_error,
+            ))
+        }
     }
 }
 
@@ -1433,11 +1491,16 @@ pub async fn append_system_context(handle: u32, request_json: &str) -> Result<Js
 
 /// Run a turn through the runtime-backed session service.
 ///
-/// Returns JSON: `{ "text", "usage", "status", "session_id", "turns", "tool_calls" }`
+/// On success, resolves (Ok) with a JSON-serialized [`meerkat_contracts::WireRunResult`]
+/// — the same canonical wire shape RPC's `turn/start` returns — exposing
+/// `terminal_cause_kind` so callers read the runtime-owned terminal class
+/// instead of a fabricated status string.
 ///
-/// Convention: always resolves (Ok). Check `status` field for "completed" vs "failed".
-/// Only rejects (Err) for infrastructure errors (session not found, busy, etc).
-/// Agent-level errors (LLM failure, timeout) resolve with `status: "failed"` + `error` field.
+/// On any [`meerkat_core::SessionError`] (including `Agent`), rejects (Err)
+/// with the typed error envelope (`{ code, message }`), carrying the stable
+/// `SessionError::code()`. Agent-level failures surface on the Err channel as
+/// `AGENT_ERROR`; they are NOT laundered into an Ok value with a `status`
+/// string.
 #[wasm_bindgen]
 pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
     let (session_service, session_id) = with_runtime_state(|state| {
@@ -1468,30 +1531,14 @@ pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
 
     match run_result {
         Ok(result) => {
-            let result_json = serde_json::json!({
-                "text": result.text,
-                "usage": {
-                    "input_tokens": result.usage.input_tokens,
-                    "output_tokens": result.usage.output_tokens,
-                },
-                "session_id": result.session_id.to_string(),
-                "status": "completed",
-                "turns": result.turns,
-                "tool_calls": result.tool_calls,
-            });
-            Ok(JsValue::from_str(&result_json.to_string()))
+            let wire: meerkat_contracts::WireRunResult = result.into();
+            let result_json =
+                serde_json::to_string(&wire).map_err(|e| err_str("internal_error", e))?;
+            Ok(JsValue::from_str(&result_json))
         }
-        Err(meerkat_core::SessionError::Agent(err)) => {
-            let error_msg = format!("{err}");
-            let result_json = serde_json::json!({
-                "text": "",
-                "usage": { "input_tokens": 0, "output_tokens": 0 },
-                "session_id": session_id.to_string(),
-                "status": "failed",
-                "error": error_msg,
-            });
-            Ok(JsValue::from_str(&result_json.to_string()))
-        }
+        // Agent-level failures (LLM failure, timeout, budget) reject on the Err
+        // channel carrying the typed `SessionError::code()`, mirroring how RPC's
+        // `turn/start` surfaces terminal faults. No Ok-with-status laundering.
         Err(err) => Err(err_session(err)),
     }
 }
@@ -2507,8 +2554,8 @@ mod tests {
     use super::{
         EventSubscription, SUBSCRIPTIONS, SubscriptionInner, close_subscription,
         destroy_session_with_services, merge_runtime_system_context_state, mob_destroy_error_value,
-        parse_mob_lifecycle_action_arg, parse_mobpack, poll_subscription,
-        serialize_subscription_item,
+        parse_js_tool_result, parse_mob_lifecycle_action_arg, parse_mobpack, poll_subscription,
+        serialize_subscription_item, session_error_envelope,
     };
     #[cfg(target_arch = "wasm32")]
     use super::{
@@ -3450,5 +3497,114 @@ capabilities = [{capability_values}]
 
         let close_result = close_subscription(handle);
         assert!(close_result.is_ok());
+    }
+
+    // ── ROW #83: WASM direct turn must NOT launder agent faults into an Ok
+    // status string. The Err channel (built by `session_error_envelope`, which
+    // `err_session`/`start_turn` use) carries the typed `SessionError::code()`.
+    #[test]
+    fn start_turn_agent_error_carries_typed_code_on_err_channel() {
+        let err = meerkat_core::SessionError::Agent(meerkat_core::error::AgentError::ToolError(
+            "boom".to_string(),
+        ));
+        // The typed code that `start_turn`'s Err arm now surfaces.
+        assert_eq!(err.code(), "AGENT_ERROR");
+
+        // The Err envelope must carry that typed code — not a fabricated
+        // "completed"/"failed" status string and not a flattened
+        // "internal_error".
+        let envelope = session_error_envelope(err);
+        assert_eq!(envelope["code"], "AGENT_ERROR");
+        assert_ne!(
+            envelope["code"], "internal_error",
+            "agent fault must not be flattened into a generic internal_error code"
+        );
+        assert!(
+            envelope.get("status").is_none(),
+            "agent fault must not be laundered into an in-band status string"
+        );
+    }
+
+    // ── ROW #83: success path returns the canonical WireRunResult — exposing
+    // `terminal_cause_kind` — with no fabricated in-band `status` string.
+    #[test]
+    fn start_turn_success_exposes_terminal_cause_kind_no_status_string() {
+        let run = meerkat_core::RunResult {
+            text: "hello".to_string(),
+            session_id: meerkat_core::SessionId::new(),
+            usage: Default::default(),
+            turns: 1,
+            tool_calls: 0,
+            terminal_cause_kind: None,
+            structured_output: None,
+            extraction_error: None,
+            schema_warnings: None,
+            skill_diagnostics: None,
+        };
+        let wire: meerkat_contracts::WireRunResult = run.into();
+        let json = serde_json::to_value(&wire).expect("wire result should serialize");
+        // Canonical terminal-class field is present (None serializes as absent,
+        // but the field is the typed owner, not a hand-rolled status literal).
+        assert!(
+            json.get("status").is_none(),
+            "success path must not fabricate an in-band status string"
+        );
+        assert_eq!(json["text"], "hello");
+        // terminal_cause_kind is the runtime-owned terminal class surfaced to JS.
+        assert!(wire.terminal_cause_kind.is_none());
+    }
+
+    // ── ROW #138: JS tool callback returning block content must reach
+    // `ToolResult` as typed multimodal blocks, NOT a stringified scalar.
+    #[test]
+    fn js_tool_callback_block_content_reaches_tool_result_as_typed_blocks() {
+        let result_json = serde_json::json!({
+            "content": [
+                { "type": "text", "text": "see image" },
+                { "type": "image", "media_type": "image/png", "source": "inline", "data": "QUJD" }
+            ],
+            "is_error": false
+        })
+        .to_string();
+
+        let tool_result =
+            parse_js_tool_result("call_1", &result_json).expect("block content should parse");
+
+        assert_eq!(tool_result.tool_use_id, "call_1");
+        assert!(!tool_result.is_error);
+        assert_eq!(
+            tool_result.content.len(),
+            2,
+            "both blocks must survive as typed content blocks"
+        );
+        assert!(
+            matches!(
+                tool_result.content[0],
+                meerkat_core::ContentBlock::Text { .. }
+            ),
+            "first block should be typed Text"
+        );
+        assert!(
+            matches!(
+                tool_result.content[1],
+                meerkat_core::ContentBlock::Image { .. }
+            ),
+            "image block must reach ToolResult as a typed Image, not stringified"
+        );
+        assert!(
+            tool_result.has_images(),
+            "typed image content must be detectable as an image"
+        );
+    }
+
+    // ── ROW #138: plain-string tool result still parses through the typed
+    // `WireToolResultContent::Text` arm.
+    #[test]
+    fn js_tool_callback_string_content_parses_as_text() {
+        let result_json = serde_json::json!({ "content": "ok", "is_error": true }).to_string();
+        let tool_result =
+            parse_js_tool_result("call_2", &result_json).expect("string content should parse");
+        assert!(tool_result.is_error);
+        assert_eq!(tool_result.text_content(), "ok");
     }
 }

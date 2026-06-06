@@ -1769,7 +1769,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
-    async fn sqlite_legacy_item_without_machine_state_backfills_on_write() {
+    async fn sqlite_item_without_machine_state_fails_closed_on_read() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("workgraph.sqlite3");
         let store = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
@@ -1831,28 +1831,20 @@ mod tests {
             })
             .expect("strip machine state");
 
+        // machine_state is the sole machine-owned lifecycle/revision authority.
+        // A persisted item missing it can no longer be backfilled from projected
+        // fields (that fabrication path was deleted); reading it must FAIL CLOSED
+        // with a typed error rather than reconstructing machine truth.
         let reopened = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
         let service = WorkGraphService::with_scope(reopened, "realm", WorkNamespace::default());
-        let legacy = service.get(None, None, item.id).await.expect("get legacy");
-        assert_eq!(legacy.machine_state.revision, legacy.revision);
-        assert!(matches!(
-            legacy.machine_state.lifecycle_phase,
-            crate::machines::workgraph_lifecycle::WorkLifecycleState::Open
-        ));
-
-        let claimed = service
-            .claim(ClaimWorkItemRequest {
-                id: legacy.id,
-                realm_id: None,
-                namespace: None,
-                expected_revision: legacy.revision,
-                owner: WorkOwner::new(WorkOwnerKey::label("worker").expect("owner")),
-                lease_seconds: Some(60),
-                lease_expires_at: None,
-            })
+        let err = service
+            .get(None, None, item.id)
             .await
-            .expect("claim legacy");
-        assert_eq!(claimed.status, WorkStatus::InProgress);
+            .expect_err("reading an item with no machine_state must fail closed");
+        assert!(
+            matches!(err, WorkGraphError::Store(_)),
+            "expected a typed Store deserialization error, got: {err:?}"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

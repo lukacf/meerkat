@@ -61,8 +61,9 @@ pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Spawn a background task that drains the comms inbox and routes
 /// classified interactions through the runtime adapter.
 ///
-/// The task runs until the comms runtime signals DISMISS or the returned
-/// `JoinHandle` is aborted by the drain lifecycle authority.
+/// The task runs until its idle timeout expires or the returned `JoinHandle`
+/// is aborted by the drain lifecycle authority. Lifecycle dismissal is a typed
+/// signal owned by that authority, never a peer message body.
 pub fn spawn_comms_drain(
     adapter: Arc<MeerkatMachine>,
     session_id: SessionId,
@@ -101,17 +102,12 @@ pub fn spawn_comms_drain(
 
             let candidates = comms_runtime.drain_peer_input_candidates().await;
             if candidates.is_empty() {
-                // Check DISMISS on empty drain.
-                if comms_runtime.dismiss_received() {
-                    tracing::info!("comms_drain: DISMISS received, stopping");
-                    let _ = adapter
-                        .stop_runtime_executor(&session_id, "peer DISMISS")
-                        .await;
-                    adapter
-                        .notify_comms_drain_exited(&session_id, DrainExitReason::Dismissed)
-                        .await;
-                    return;
-                }
+                // Lifecycle dismissal is NOT driven by a peer message body. A
+                // peer-controlled string must never stop this executor; the
+                // typed dismissal path is owned by the runtime drain-lifecycle
+                // authority, which fires `DrainExitReason::Dismissed` through
+                // the handle seam (see `handles::comms_drain`). The drain loop
+                // here only honors the idle-timeout terminal below.
                 if crate::tokio::time::timeout(timeout_dur, notified.as_mut())
                     .await
                     .is_err()

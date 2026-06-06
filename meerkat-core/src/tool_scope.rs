@@ -1468,6 +1468,17 @@ impl ToolScope {
         }
     }
 
+    /// Whether this scope owns a durable (generated-MeerkatMachine) tool
+    /// visibility projection that must be persisted on boundary apply.
+    ///
+    /// Standalone builds use a read-only local projection
+    /// ([`ToolVisibilityAuthorityKind::LocalReadOnlyProjection`]) with no
+    /// durable session-metadata projection to write, so publishing the
+    /// committed visible set there is a legitimate no-op rather than a fault.
+    pub(crate) fn owns_durable_visibility_projection(&self) -> bool {
+        self.visibility_authority == ToolVisibilityAuthorityKind::GeneratedMachine
+    }
+
     /// Returns the currently visible tools using base + active external filter composition.
     pub fn visible_tools(&self) -> Arc<[Arc<ToolDef>]> {
         match self.visible_tools_result() {

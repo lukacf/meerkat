@@ -707,34 +707,54 @@ impl GeminiClient {
         }
     }
 
-    /// Parse streaming response line
-    fn parse_stream_line(line: &str) -> Option<GenerateContentResponse> {
-        serde_json::from_str(line).ok()
+    /// Parse a streaming response line.
+    ///
+    /// Returns `Ok(None)` when the line is blank (not a data event), and
+    /// `Err(LlmError::StreamParseError)` when a non-empty line fails to parse —
+    /// a malformed-but-present data event is a typed fault, not a silently
+    /// skippable non-event.
+    fn parse_stream_line(line: &str) -> Result<Option<GenerateContentResponse>, LlmError> {
+        if line.trim().is_empty() {
+            return Ok(None);
+        }
+        serde_json::from_str(line)
+            .map(Some)
+            .map_err(|error| LlmError::StreamParseError {
+                message: format!("invalid Gemini SSE data event JSON: {error}"),
+            })
     }
 
-    fn parse_stream_line_for_wire(&self, line: &str) -> Option<GenerateContentResponse> {
+    fn parse_stream_line_for_wire(
+        &self,
+        line: &str,
+    ) -> Result<Option<GenerateContentResponse>, LlmError> {
         match self.wire_mode {
             GeminiWireMode::PublicGenerateContent => Self::parse_stream_line(line),
             GeminiWireMode::CodeAssist => {
-                let wrapper: Option<CodeAssistGenerateContentResponse> =
-                    serde_json::from_str(line).ok();
-                wrapper
-                    .map(|wrapper| {
-                        if let Some(mut response) = wrapper.response {
-                            if response.response_id.is_none() {
-                                response.response_id = wrapper.trace_id;
-                            }
-                            response
-                        } else {
-                            GenerateContentResponse {
-                                candidates: Some(Vec::new()),
-                                usage_metadata: None,
-                                response_id: wrapper.trace_id,
-                                prompt_feedback: None,
-                            }
+                if line.trim().is_empty() {
+                    return Ok(None);
+                }
+                // CodeAssist responses are wrapped; fall back to the bare wire
+                // shape only when the wrapper does not match. A line that parses
+                // as neither is a typed fault.
+                if let Ok(wrapper) = serde_json::from_str::<CodeAssistGenerateContentResponse>(line)
+                {
+                    let response = if let Some(mut response) = wrapper.response {
+                        if response.response_id.is_none() {
+                            response.response_id = wrapper.trace_id;
                         }
-                    })
-                    .or_else(|| Self::parse_stream_line(line))
+                        response
+                    } else {
+                        GenerateContentResponse {
+                            candidates: Some(Vec::new()),
+                            usage_metadata: None,
+                            response_id: wrapper.trace_id,
+                            prompt_feedback: None,
+                        }
+                    };
+                    return Ok(Some(response));
+                }
+                Self::parse_stream_line(line)
             }
         }
     }
@@ -1572,7 +1592,7 @@ impl LlmClient for GeminiClient {
                     let line = buffer[..newline_pos].trim();
                     let data = line.strip_prefix("data: ");
                     let parsed_response = if let Some(d) = data {
-                        self.parse_stream_line_for_wire(d)
+                        self.parse_stream_line_for_wire(d)?
                     } else {
                         None
                     };
@@ -2613,9 +2633,7 @@ mod tests {
     fn test_parse_stream_line_valid_response() -> Result<(), Box<dyn std::error::Error>> {
         let line =
             r#"{"candidates":[{"content":{"parts":[{"text":"Hello"}]},"finishReason":"STOP"}]}"#;
-        let response = GeminiClient::parse_stream_line(line);
-        assert!(response.is_some());
-        let response = response.ok_or("missing response")?;
+        let response = GeminiClient::parse_stream_line(line)?.ok_or("missing response")?;
         assert!(response.candidates.is_some());
         let candidates = response.candidates.ok_or("missing candidates")?;
         assert_eq!(candidates.len(), 1);
@@ -2625,9 +2643,7 @@ mod tests {
     #[test]
     fn test_parse_stream_line_with_usage() -> Result<(), Box<dyn std::error::Error>> {
         let line = r#"{"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}"#;
-        let response = GeminiClient::parse_stream_line(line);
-        assert!(response.is_some());
-        let response = response.ok_or("missing response")?;
+        let response = GeminiClient::parse_stream_line(line)?.ok_or("missing response")?;
         assert!(response.usage_metadata.is_some());
         let usage = response.usage_metadata.ok_or("missing usage")?;
         assert_eq!(usage.prompt_token_count, Some(10));
@@ -2637,9 +2653,7 @@ mod tests {
     #[test]
     fn test_parse_stream_line_function_call() -> Result<(), Box<dyn std::error::Error>> {
         let line = r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather","args":{"city":"Tokyo"}}}]}}]}"#;
-        let response = GeminiClient::parse_stream_line(line);
-        assert!(response.is_some());
-        let response = response.ok_or("missing response")?;
+        let response = GeminiClient::parse_stream_line(line)?.ok_or("missing response")?;
         let candidates = response.candidates.as_ref().ok_or("missing candidates")?;
         let parts = candidates[0]
             .content
@@ -2656,16 +2670,18 @@ mod tests {
 
     #[test]
     fn test_parse_stream_line_empty() {
+        // A blank line is legitimately "not a data event" -> Ok(None).
         let line = "";
         let response = GeminiClient::parse_stream_line(line);
-        assert!(response.is_none());
+        assert!(matches!(response, Ok(None)));
     }
 
     #[test]
     fn test_parse_stream_line_invalid_json() {
+        // A non-empty but unparseable line is a typed fault, not a dropped event.
         let line = "{invalid}";
         let response = GeminiClient::parse_stream_line(line);
-        assert!(response.is_none());
+        assert!(matches!(response, Err(LlmError::StreamParseError { .. })));
     }
 
     /// Regression: Gemini tool-call finish reasons must map to ToolUse.
@@ -3612,7 +3628,7 @@ mod tests {
     #[test]
     fn test_parse_function_call_with_thought_signature() -> Result<(), Box<dyn std::error::Error>> {
         let line = r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather","args":{"city":"Tokyo"}},"thoughtSignature":"sig_abc123"}]}}]}"#;
-        let response = GeminiClient::parse_stream_line(line).ok_or("missing response")?;
+        let response = GeminiClient::parse_stream_line(line)?.ok_or("missing response")?;
         let candidates = response.candidates.as_ref().ok_or("missing candidates")?;
         let parts = candidates[0]
             .content
@@ -3638,7 +3654,7 @@ mod tests {
     #[test]
     fn test_parse_text_with_thought_signature() -> Result<(), Box<dyn std::error::Error>> {
         let line = r#"{"candidates":[{"content":{"parts":[{"text":"Hello world","thoughtSignature":"sig_text_456"}]}}]}"#;
-        let response = GeminiClient::parse_stream_line(line).ok_or("missing response")?;
+        let response = GeminiClient::parse_stream_line(line)?.ok_or("missing response")?;
         let candidates = response.candidates.as_ref().ok_or("missing candidates")?;
         let parts = candidates[0]
             .content
@@ -3661,7 +3677,7 @@ mod tests {
     fn test_parse_text_with_thought_flag() -> Result<(), Box<dyn std::error::Error>> {
         let line =
             r#"{"candidates":[{"content":{"parts":[{"text":"thinking...","thought":true}]}}]}"#;
-        let response = GeminiClient::parse_stream_line(line).ok_or("missing response")?;
+        let response = GeminiClient::parse_stream_line(line)?.ok_or("missing response")?;
         let candidates = response.candidates.as_ref().ok_or("missing candidates")?;
         let parts = candidates[0]
             .content
@@ -3686,7 +3702,7 @@ mod tests {
             {"functionCall":{"name":"get_population","args":{"city":"Tokyo"}}}
         ]}}]}"#;
 
-        let response = GeminiClient::parse_stream_line(line).ok_or("missing response")?;
+        let response = GeminiClient::parse_stream_line(line)?.ok_or("missing response")?;
         let candidates = response.candidates.ok_or("missing candidates")?;
         let parts = candidates[0]
             .content

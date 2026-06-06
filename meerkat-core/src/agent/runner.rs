@@ -431,7 +431,11 @@ where
         }
         if let Some(previous) = previous {
             let previous_key = crate::handles::LeaseKey::from_auth_binding(previous);
-            let _ = handle.release_lease(&previous_key);
+            handle.release_lease(&previous_key).map_err(|err| {
+                AgentError::ConfigError(format!(
+                    "failed to release previous auth lease {previous_key} during rotation: {err}"
+                ))
+            })?;
         }
         if let Some(target) = target {
             let target_key = crate::handles::LeaseKey::from_auth_binding(target);
@@ -461,7 +465,17 @@ where
     /// Persist the currently committed visible tool set into canonical session metadata.
     pub(crate) fn publish_committed_visible_set(&mut self) -> Result<(), AgentError> {
         // Session metadata is a durable projection/export of the canonical
-        // visibility owner state so checkpoint/recovery stays aligned.
+        // visibility owner state so checkpoint/recovery stays aligned. The
+        // projection only exists when a generated MeerkatMachine authority owns
+        // it; standalone builds use a read-only local projection with nothing to
+        // persist, so this is a no-op there (not a durable-write fault). When
+        // the projection IS owned, a write failure is a genuine fault that must
+        // propagate — never be swallowed while a boundary-applied success is
+        // reported, which would diverge the recovery source from in-memory
+        // authority.
+        if !self.tool_scope.owns_durable_visibility_projection() {
+            return Ok(());
+        }
         let authorized_visibility_state =
             self.tool_scope
                 .authorized_visibility_state()

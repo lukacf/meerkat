@@ -7307,14 +7307,28 @@ impl SessionRuntime {
             receiver_dropped: Arc::clone(&sender.receiver_dropped),
         };
         Ok(Box::pin(futures::stream::unfold(
-            (rx, drop_guard),
-            |(mut rx, drop_guard)| async move {
-                loop {
-                    match rx.recv().await {
-                        Ok(event) => return Some((event, (rx, drop_guard))),
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(broadcast::error::RecvError::Closed) => return None,
+            (rx, drop_guard, session_id.clone()),
+            |(mut rx, drop_guard, stream_session_id)| async move {
+                // Every arm resolves the next stream item, so this is a single
+                // `recv` per poll (the `unfold` re-invokes us with the threaded
+                // receiver). A `Lagged` gap yields a typed `StreamTruncated`
+                // marker instead of being silently dropped.
+                match rx.recv().await {
+                    Ok(event) => Some((event, (rx, drop_guard, stream_session_id))),
+                    Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                        let marker = meerkat_core::EventEnvelope::new_session(
+                            stream_session_id.clone(),
+                            0,
+                            None,
+                            meerkat_core::event::AgentEvent::StreamTruncated {
+                                reason: format!(
+                                    "pending session event stream lagged; {dropped} events dropped (terminal event remains authoritative)"
+                                ),
+                            },
+                        );
+                        Some((marker, (rx, drop_guard, stream_session_id)))
                     }
+                    Err(broadcast::error::RecvError::Closed) => None,
                 }
             },
         )))
@@ -19259,6 +19273,69 @@ mod tests {
         })
         .await
         .expect("pending stream entry should be removed after listener close");
+    }
+
+    /// A pure observer that lags behind the pending broadcast sees a typed
+    /// `StreamTruncated` marker recording the gap instead of silently losing
+    /// the dropped events. This asserts the Rule-8 fix: backpressure-induced
+    /// drops are observable, mirroring `event_tap::tap_try_send`.
+    #[tokio::test]
+    async fn pending_session_stream_yields_stream_truncated_marker_on_lag() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+
+        // Subscribe to the pending (pre-materialization) broadcast but do NOT
+        // poll it, so the receiver falls behind the 128-slot ring buffer.
+        let mut stream = runtime
+            .subscribe_session_events(&session_id)
+            .await
+            .expect("subscribe pending session events");
+
+        let pending_streams = runtime
+            .pending_session_event_stream_state(&session_id)
+            .await
+            .expect("pending stream entry should exist before materialization");
+
+        // Force the non-polled receiver to lag by overflowing the broadcast
+        // ring (> PENDING_SESSION_EVENT_CHANNEL_CAPACITY sends).
+        for i in 0..(PENDING_SESSION_EVENT_CHANNEL_CAPACITY * 2) {
+            let envelope = EventEnvelope::new_session(
+                session_id.clone(),
+                0,
+                None,
+                AgentEvent::TextDelta {
+                    delta: format!("event-{i}"),
+                },
+            );
+            let _ = pending_streams.events.send(envelope);
+        }
+
+        // The first yielded item must be the synthetic StreamTruncated marker
+        // recording the gap, before any live (non-lagged) events resume.
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("pending stream lag marker timeout")
+            .expect("pending stream should yield a lag marker");
+
+        match &first.payload {
+            AgentEvent::StreamTruncated { reason } => {
+                assert!(
+                    reason.contains("lagged"),
+                    "StreamTruncated reason should describe the lag: {reason}"
+                );
+            }
+            other => panic!("expected StreamTruncated marker on lag, got {other:?}"),
+        }
+        assert_eq!(
+            first.source_session_id(),
+            Some(&session_id),
+            "lag marker should be session-scoped to the subscribed session"
+        );
     }
 
     /// turn/start with keep_alive override on a materialized session is not rejected.

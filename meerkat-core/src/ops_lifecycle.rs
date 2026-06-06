@@ -526,12 +526,15 @@ pub trait OpsLifecycleRegistry: Send + Sync {
 
     /// Read the generated completion-consumer cursor for this registry.
     ///
-    /// Implementations without generated cursor authority return `None`.
+    /// `Ok(None)` means this registry has no generated cursor authority.
+    /// `Err(OpsLifecycleError::Internal(_))` means the cursor authority is
+    /// corrupt (e.g. a poisoned registry lock) and must not be laundered into
+    /// the `None`/no-authority meaning by callers.
     fn completion_cursor(
         &self,
         _consumer: CompletionCursorConsumer,
-    ) -> Option<crate::completion_feed::CompletionSeq> {
-        None
+    ) -> Result<Option<crate::completion_feed::CompletionSeq>, OpsLifecycleError> {
+        Ok(None)
     }
 
     /// Advance a completion-consumer cursor through generated authority.

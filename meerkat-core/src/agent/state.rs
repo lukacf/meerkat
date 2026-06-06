@@ -1525,12 +1525,11 @@ where
                         };
                         match apply_result {
                             Ok(applied) => {
-                                if let Err(err) = self.publish_committed_visible_set() {
-                                    tracing::warn!(
-                                        error = %err,
-                                        "failed to persist canonical tool visibility state after boundary apply"
-                                    );
-                                }
+                                self.publish_committed_visible_set().map_err(|err| {
+                                    AgentError::InternalError(format!(
+                                        "failed to persist canonical tool visibility state after boundary apply: {err}"
+                                    ))
+                                })?;
                                 if applied.changed() {
                                     let status_info = ToolConfigChangeStatus::boundary_applied(
                                         applied.base_changed(),

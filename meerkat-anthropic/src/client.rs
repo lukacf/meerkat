@@ -875,13 +875,21 @@ impl AnthropicClient {
             .is_some_and(|authorizer| authorizer.label() == CLAUDE_AI_OAUTH_AUTHORIZER_LABEL)
     }
 
-    /// Parse an SSE event from the response
-    fn parse_sse_line(line: &str) -> Option<AnthropicEvent> {
-        if let Some(data) = Self::strip_data_prefix(line) {
-            serde_json::from_str(data).ok()
-        } else {
-            None
-        }
+    /// Parse an SSE event from the response.
+    ///
+    /// Returns `Ok(None)` when the line is not a `data:` event, and
+    /// `Err(LlmError::StreamParseError)` when it IS a `data:` event whose JSON
+    /// fails to parse — a malformed-but-present data event is a typed fault, not
+    /// a silently skippable non-event.
+    fn parse_sse_line(line: &str) -> Result<Option<AnthropicEvent>, LlmError> {
+        let Some(data) = Self::strip_data_prefix(line) else {
+            return Ok(None);
+        };
+        serde_json::from_str(data)
+            .map(Some)
+            .map_err(|error| LlmError::StreamParseError {
+                message: format!("invalid Anthropic SSE data event JSON: {error}"),
+            })
     }
 
     fn strip_data_prefix(line: &str) -> Option<&str> {
@@ -1088,7 +1096,6 @@ impl LlmClient for AnthropicClient {
             let mut last_stop_reason: Option<StopReason> = None;
             let mut usage = Usage::default();
             let mut saw_done = false;
-            let mut saw_event = false;
 
             macro_rules! handle_event {
                 ($event:expr) => {
@@ -1098,27 +1105,23 @@ impl LlmClient for AnthropicClient {
                                 match delta.delta_type.as_str() {
                                     "text_delta" => {
                                         if let Some(text) = delta.text {
-                                            saw_event = true;
                                             yield LlmEvent::TextDelta { delta: text, meta: None };
                                         }
                                     }
                                     "thinking_delta" => {
                                         // Emit incremental thinking content
                                         if let Some(text) = delta.thinking {
-                                            saw_event = true;
                                             yield LlmEvent::ReasoningDelta { delta: text };
                                         }
                                     }
                                     "signature_delta" => {
                                         // Signature arrives as separate delta before content_block_stop
                                         if let Some(sig) = delta.signature {
-                                            saw_event = true;
                                             current_thinking_signature = Some(sig);
                                         }
                                     }
                                     "input_json_delta" => {
                                         if let Some(partial_json) = delta.partial_json {
-                                            saw_event = true;
                                             if current_block_type.as_deref() == Some("server_tool_use") {
                                                 accumulated_server_tool_input.push_str(&partial_json);
                                             } else {
@@ -1134,7 +1137,6 @@ impl LlmClient for AnthropicClient {
                                     "compaction_delta" => {
                                         // Compaction summary arrives as single delta — emit as Reasoning with compaction meta
                                         if let Some(content) = delta.content {
-                                            saw_event = true;
                                             yield LlmEvent::ReasoningComplete {
                                                 text: String::new(),
                                                 meta: Some(Box::new(meerkat_core::ProviderMeta::AnthropicCompaction { content })),
@@ -1151,7 +1153,6 @@ impl LlmClient for AnthropicClient {
                                 match content_block.block_type.as_str() {
                                     "text" => {
                                         if let Some(citations) = content_block.extra.get("citations") {
-                                            saw_event = true;
                                             yield LlmEvent::ServerToolContent {
                                                 id: None,
                                                 name: "web_search_citations".to_string(),
@@ -1171,7 +1172,6 @@ impl LlmClient for AnthropicClient {
                                     "redacted_thinking" => {
                                         // Redacted by safety systems — emit as Reasoning with redacted meta
                                         if let Some(data) = content_block.data {
-                                            saw_event = true;
                                             yield LlmEvent::ReasoningComplete {
                                                 text: String::new(),
                                                 meta: Some(Box::new(meerkat_core::ProviderMeta::AnthropicRedacted { data })),
@@ -1186,7 +1186,6 @@ impl LlmClient for AnthropicClient {
                                         current_tool_id = Some(id.clone());
                                         current_tool_name = content_block.name.clone();
                                         accumulated_tool_args.clear();
-                                        saw_event = true;
                                         yield LlmEvent::ToolCallDelta {
                                             id,
                                             name: content_block.name,
@@ -1199,7 +1198,6 @@ impl LlmClient for AnthropicClient {
                                         accumulated_server_tool_input.clear();
                                     }
                                     "web_search_tool_result" => {
-                                        saw_event = true;
                                         yield LlmEvent::ServerToolContent {
                                             id: content_block.tool_use_id.clone(),
                                             name: "web_search".to_string(),
@@ -1240,7 +1238,6 @@ impl LlmClient for AnthropicClient {
                                             tool_id,
                                         ) {
                                             Ok(args_val) => {
-                                                saw_event = true;
                                                 yield LlmEvent::ToolCallComplete {
                                                     id: tool_id.clone(),
                                                     name: current_tool_name.take().unwrap_or_default(),
@@ -1249,7 +1246,6 @@ impl LlmClient for AnthropicClient {
                                                 };
                                             }
                                             Err(error) => {
-                                                saw_event = true;
                                                 if !saw_done {
                                                     yield LlmEvent::Done {
                                                         outcome: LlmDoneOutcome::Error { error },
@@ -1276,7 +1272,6 @@ impl LlmClient for AnthropicClient {
                                         .take()
                                         .unwrap_or_else(|| "server_tool".to_string());
                                     accumulated_server_tool_input.clear();
-                                    saw_event = true;
                                     yield LlmEvent::ServerToolContent {
                                         id,
                                         name,
@@ -1294,7 +1289,6 @@ impl LlmClient for AnthropicClient {
                         "message_delta" => {
                             if let Some(usage_update) = $event.usage {
                                 merge_usage(&mut usage, &usage_update);
-                                saw_event = true;
                                 yield LlmEvent::UsageUpdate {
                                     usage: usage.clone(),
                                 };
@@ -1303,7 +1297,6 @@ impl LlmClient for AnthropicClient {
                                 let reason = Self::map_stop_reason(finish_reason.as_str());
                                 last_stop_reason = Some(reason);
                                 if !saw_done {
-                                    saw_event = true;
                                     yield LlmEvent::Done {
                                         outcome: LlmDoneOutcome::Success { stop_reason: reason },
                                     };
@@ -1314,7 +1307,6 @@ impl LlmClient for AnthropicClient {
                         "message_start" => {
                             if let Some(usage_update) = $event.message.and_then(|m| m.usage) {
                                 merge_usage(&mut usage, &usage_update);
-                                saw_event = true;
                                 yield LlmEvent::UsageUpdate {
                                     usage: usage.clone(),
                                 };
@@ -1329,7 +1321,6 @@ impl LlmClient for AnthropicClient {
                                     .or(last_stop_reason)
                                     .unwrap_or(StopReason::EndTurn);
                                 last_stop_reason = Some(reason);
-                                saw_event = true;
                                 yield LlmEvent::Done {
                                     outcome: LlmDoneOutcome::Success { stop_reason: reason },
                                 };
@@ -1368,7 +1359,6 @@ impl LlmClient for AnthropicClient {
                             };
 
                             if !saw_done {
-                                saw_event = true;
                                 yield LlmEvent::Done {
                                     outcome: LlmDoneOutcome::Error { error },
                                 };
@@ -1388,14 +1378,24 @@ impl LlmClient for AnthropicClient {
                                 if !saw_done {
                                     let reason =
                                         last_stop_reason.unwrap_or(StopReason::EndTurn);
-                                    saw_event = true;
                                     yield LlmEvent::Done {
                                         outcome: LlmDoneOutcome::Success { stop_reason: reason },
                                     };
                                     saw_done = true;
                                 }
-                            } else if let Some(event) = Self::parse_sse_line($line) {
-                                handle_event!(event);
+                            } else {
+                                match Self::parse_sse_line($line) {
+                                    Ok(Some(event)) => { handle_event!(event); }
+                                    Ok(None) => {}
+                                    Err(error) => {
+                                        if !saw_done {
+                                            yield LlmEvent::Done {
+                                                outcome: LlmDoneOutcome::Error { error },
+                                            };
+                                        }
+                                        return;
+                                    }
+                                }
                             }
                         }
                     }
@@ -1420,16 +1420,6 @@ impl LlmClient for AnthropicClient {
                 }
             }
 
-            if !saw_done && saw_event {
-                tracing::warn!(
-                    model = %request.model,
-                    "Anthropic stream ended without terminal event; emitting synthetic Done"
-                );
-                let reason = last_stop_reason.unwrap_or(StopReason::EndTurn);
-                yield LlmEvent::Done {
-                    outcome: LlmDoneOutcome::Success { stop_reason: reason },
-                };
-            }
         });
 
         streaming::ensure_terminal_done(inner)
@@ -2317,18 +2307,27 @@ mod tests {
     #[test]
     fn test_parse_sse_line() {
         let line = r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
-        let event = AnthropicClient::parse_sse_line(line);
-        assert!(event.is_some());
-        assert_eq!(event.unwrap().event_type, "content_block_delta");
+        let event = AnthropicClient::parse_sse_line(line)
+            .expect("well-formed data event parses")
+            .expect("event present");
+        assert_eq!(event.event_type, "content_block_delta");
 
-        let done = AnthropicClient::parse_sse_line("data: [DONE]");
-        assert!(done.is_none());
-
+        // Non-`data:` lines are legitimate non-events -> Ok(None).
         let comment = AnthropicClient::parse_sse_line(": comment");
-        assert!(comment.is_none());
+        assert!(matches!(comment, Ok(None)));
 
         let event_line = AnthropicClient::parse_sse_line("event: message_start");
-        assert!(event_line.is_none());
+        assert!(matches!(event_line, Ok(None)));
+
+        // A `data:` line whose JSON fails to parse is a typed fault, not a
+        // silently-dropped non-event. (`[DONE]` is a sentinel handled by the
+        // caller before parse_sse_line is reached, so it is treated here as the
+        // non-JSON data payload it is.)
+        let done = AnthropicClient::parse_sse_line("data: [DONE]");
+        assert!(matches!(done, Err(LlmError::StreamParseError { .. })));
+
+        let malformed = AnthropicClient::parse_sse_line(r#"data: {"type": "content_block"#);
+        assert!(matches!(malformed, Err(LlmError::StreamParseError { .. })));
     }
 
     #[test]
@@ -3131,6 +3130,51 @@ mod tests {
                 .contains("invalid Anthropic tool call arguments JSON"),
             "error should name invalid Anthropic tool args: {error}"
         );
+    }
+
+    /// A clean EOF without any terminal event (no message_stop, message_delta,
+    /// or [DONE]) must NOT be laundered into a synthetic Done{Success}. It must
+    /// fall through to ensure_terminal_done and surface Done{Error{IncompleteResponse}},
+    /// matching the OpenAI/Gemini fall-through behavior.
+    #[tokio::test]
+    async fn test_stream_eof_without_terminal_fails_incomplete() {
+        let payload = [
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0}}}"#,
+            r#"data: {"type":"content_block_start","content_block":{"type":"text","text":""}}"#,
+            r#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}"#,
+            // Stream ends here WITHOUT content_block_stop / message_delta /
+            // message_stop / [DONE] (truncated mid-turn).
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_anthropic_stub_server(payload).await;
+        let client = AnthropicClient::builder("test-key".to_string())
+            .base_url(base_url)
+            .build()
+            .unwrap();
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut terminal = None;
+        while let Some(event) = stream.next().await {
+            if let LlmEvent::Done { outcome } =
+                event.expect("stream wrapper should convert errors to Done")
+            {
+                terminal = Some(outcome);
+                break;
+            }
+        }
+        server.abort();
+
+        match terminal.expect("expected a terminal Done event") {
+            LlmDoneOutcome::Error {
+                error: LlmError::IncompleteResponse { .. },
+            } => {}
+            other => panic!("expected Done{{Error{{IncompleteResponse}}}}, got {other:?}"),
+        }
     }
 
     /// Normal stream with message_stop should still work (baseline).

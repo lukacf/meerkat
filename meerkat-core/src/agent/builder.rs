@@ -109,6 +109,8 @@ pub enum AgentBuildPolicyError {
     ToolVisibilityCatalog { message: String },
     #[error("failed to persist canonical tool visibility state during restore: {message}")]
     ToolVisibilityPersist { message: String },
+    #[error("failed to seed agent completion cursor from generated ops authority: {message}")]
+    OpsCursorSeed { message: String },
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -535,6 +537,20 @@ impl AgentBuilder {
         };
         let compaction_cadence = crate::agent::compact::load_compaction_cadence(&session);
 
+        // Seed only from generated cursor authority. A completion feed without
+        // ops-lifecycle authority is read-only storage, not cursor truth for
+        // async completion delivery. A poisoned/corrupt cursor authority must
+        // fail the build loud rather than launder into a silent zero seed.
+        let applied_cursor = match self.ops_lifecycle.as_ref() {
+            Some(registry) => registry
+                .completion_cursor(crate::ops_lifecycle::CompletionCursorConsumer::AgentApplied)
+                .map_err(|err| AgentBuildPolicyError::OpsCursorSeed {
+                    message: err.to_string(),
+                })?
+                .unwrap_or(0),
+            None => 0,
+        };
+
         let mut agent = Agent {
             config: self.config,
             client,
@@ -565,18 +581,7 @@ impl AgentBuilder {
                 .unwrap_or_else(crate::event_tap::new_event_tap),
             system_context_state,
             default_event_tx: self.default_event_tx,
-            // Seed only from generated cursor authority. A completion feed
-            // without ops-lifecycle authority is read-only storage, not cursor
-            // truth for async completion delivery.
-            applied_cursor: self
-                .ops_lifecycle
-                .as_ref()
-                .and_then(|registry| {
-                    registry.completion_cursor(
-                        crate::ops_lifecycle::CompletionCursorConsumer::AgentApplied,
-                    )
-                })
-                .unwrap_or(0),
+            applied_cursor,
             ops_lifecycle: self.ops_lifecycle,
             completion_feed: self.completion_feed,
             epoch_cursor_state: self.epoch_cursor_state,

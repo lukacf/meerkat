@@ -656,8 +656,14 @@ async fn test_anthropic_message_stop_without_space_prefix_yields_done()
     Ok(())
 }
 
+/// Rule 8 (Terminal Truth Laundering): a stream that emits content but ends
+/// WITHOUT a terminal event (no `message_stop` / `message_delta` / `[DONE]`) is
+/// truncated, not successful. It must terminalize as a typed
+/// `LlmError::IncompleteResponse` (supplied by `ensure_terminal_done` once the
+/// former synthetic-`Done{Success}`-on-clean-EOF branch was removed) — never a
+/// laundered `Done{Success{EndTurn}}` that hides the truncation.
 #[tokio::test]
-async fn test_anthropic_stream_end_without_done_yields_success()
+async fn test_anthropic_stream_end_without_done_yields_incomplete()
 -> Result<(), Box<dyn std::error::Error>> {
     const SSE_BODY: &str = concat!(
         "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n",
@@ -680,8 +686,7 @@ async fn test_anthropic_stream_end_without_done_yields_success()
 
     let mut stream = client.stream(&request);
     let mut got_text = false;
-    let mut got_done = false;
-    let mut stop_reason = None;
+    let mut got_incomplete = false;
 
     while let Some(result) = stream.next().await {
         match result {
@@ -691,26 +696,33 @@ async fn test_anthropic_stream_end_without_done_yields_success()
                 }
             }
             Ok(LlmEvent::Done {
-                outcome:
-                    LlmDoneOutcome::Success {
-                        stop_reason: reason,
-                    },
+                outcome: LlmDoneOutcome::Success { stop_reason },
             }) => {
-                got_done = true;
-                stop_reason = Some(reason);
-                break;
+                return Err(format!(
+                    "truncated stream must not launder into Done{{Success}}; got stop_reason {stop_reason:?}"
+                )
+                .into());
             }
             Ok(LlmEvent::Done {
                 outcome: LlmDoneOutcome::Error { error },
-            }) => return Err(format!("Unexpected error: {error:?}").into()),
+            }) => {
+                assert!(
+                    matches!(error, LlmError::IncompleteResponse { .. }),
+                    "expected IncompleteResponse on truncated stream, got {error:?}"
+                );
+                got_incomplete = true;
+                break;
+            }
             Ok(_) => {}
-            Err(e) => return Err(format!("Unexpected error: {e:?}").into()),
+            Err(e) => return Err(format!("Unexpected stream error: {e:?}").into()),
         }
     }
 
-    assert!(got_text);
-    assert!(got_done);
-    assert_eq!(stop_reason, Some(StopReason::EndTurn));
+    assert!(got_text, "the content_block_delta text should still arrive");
+    assert!(
+        got_incomplete,
+        "stream-end-without-terminal must yield Done{{Error{{IncompleteResponse}}}}"
+    );
     Ok(())
 }
 

@@ -3249,9 +3249,13 @@ fn skill_entry(
 /// Get runtime capabilities with status resolved against config.
 async fn get_capabilities(
     State(state): State<AppState>,
-) -> Json<meerkat_contracts::CapabilitiesResponse> {
-    let config = state.config_store.get().await.unwrap_or_default();
-    Json(meerkat::surface::build_capabilities_response(&config))
+) -> Result<Json<meerkat_contracts::CapabilitiesResponse>, ApiError> {
+    let config = state
+        .config_store
+        .get()
+        .await
+        .map_err(|e| ApiError::Configuration(e.to_string()))?;
+    Ok(Json(meerkat::surface::build_capabilities_response(&config)))
 }
 
 fn rest_runtime_host_surface_options(
@@ -3312,7 +3316,11 @@ async fn get_runtime_health() -> Json<meerkat_contracts::RuntimeHostHealth> {
 async fn get_models_catalog(
     State(state): State<AppState>,
 ) -> Result<Json<meerkat_contracts::ModelsCatalogResponse>, ApiError> {
-    let config = state.config_store.get().await.unwrap_or_default();
+    let config = state
+        .config_store
+        .get()
+        .await
+        .map_err(|e| ApiError::Configuration(e.to_string()))?;
     let response = meerkat::surface::build_models_catalog_response(&config)
         .map_err(|e| ApiError::Configuration(e.to_string()))?;
     Ok(Json(response))
@@ -12533,6 +12541,76 @@ mod tests {
             let response = app.oneshot(request).await.unwrap();
             // Should be 405 Method Not Allowed (route doesn't exist for POST).
             assert_ne!(response.status(), StatusCode::OK);
+        }
+    }
+
+    /// Verify config-read endpoints propagate a typed `ConfigError` instead of
+    /// laundering it into `Config::default()` and returning a 200 with phantom
+    /// content.
+    mod config_fault_propagation_tests {
+        use super::*;
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        /// Config store whose `get()` always returns a typed fault.
+        struct FailingConfigStore;
+
+        #[async_trait]
+        impl ConfigStore for FailingConfigStore {
+            async fn get(&self) -> Result<Config, meerkat_core::ConfigError> {
+                Err(meerkat_core::ConfigError::Validation("boom".to_string()))
+            }
+
+            async fn set(&self, _config: Config) -> Result<(), meerkat_core::ConfigError> {
+                Err(meerkat_core::ConfigError::Validation("boom".to_string()))
+            }
+
+            async fn patch(
+                &self,
+                _delta: ConfigDelta,
+            ) -> Result<Config, meerkat_core::ConfigError> {
+                Err(meerkat_core::ConfigError::Validation("boom".to_string()))
+            }
+        }
+
+        async fn assert_config_fault_endpoint(uri: &str) {
+            let temp = TempDir::new().unwrap();
+            let mut state = AppState::load_from(temp.path().to_path_buf())
+                .await
+                .unwrap();
+            state.config_store = Arc::new(FailingConfigStore);
+            let app = router(state);
+
+            let request = axum::http::Request::builder()
+                .method("GET")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                status,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{uri} must return 500 on a config fault, got body: {}",
+                String::from_utf8_lossy(&body)
+            );
+            let payload: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                payload["code"], "CONFIGURATION_ERROR",
+                "{uri} must surface CONFIGURATION_ERROR on a config fault: {payload}"
+            );
+        }
+
+        #[tokio::test]
+        async fn capabilities_endpoint_propagates_config_fault() {
+            assert_config_fault_endpoint("/capabilities").await;
+        }
+
+        #[tokio::test]
+        async fn models_catalog_endpoint_propagates_config_fault() {
+            assert_config_fault_endpoint("/models/catalog").await;
         }
     }
 }

@@ -196,6 +196,8 @@ pub enum ToolScopeStageError {
     LockPoisoned,
     #[error("Tool visibility owner error: {message}")]
     Owner { message: String },
+    #[error("failed to persist durable tool visibility projection: {message}")]
+    DurableProjectionPersist { message: String },
 }
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
@@ -1466,6 +1468,17 @@ impl ToolScope {
                 message: generated_visibility_authority_required_message(context),
             })
         }
+    }
+
+    /// Whether this scope owns a durable (generated-MeerkatMachine) tool
+    /// visibility projection that must be persisted on boundary apply.
+    ///
+    /// Standalone builds use a read-only local projection
+    /// ([`ToolVisibilityAuthorityKind::LocalReadOnlyProjection`]) with no
+    /// durable session-metadata projection to write, so publishing the
+    /// committed visible set there is a legitimate no-op rather than a fault.
+    pub(crate) fn owns_durable_visibility_projection(&self) -> bool {
+        self.visibility_authority == ToolVisibilityAuthorityKind::GeneratedMachine
     }
 
     /// Returns the currently visible tools using base + active external filter composition.

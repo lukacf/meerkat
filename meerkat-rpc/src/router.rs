@@ -1702,10 +1702,10 @@ impl MethodRouter {
                     "skills/inspect is no longer served; resolve skills through the typed registry surface".to_string(),
                 )
             }
-            "capabilities/get" => {
-                let config = self.config_store.get().await.unwrap_or_default();
-                handlers::capabilities::handle_get(id, &config)
-            }
+            "capabilities/get" => match self.config_store.get().await {
+                Ok(config) => handlers::capabilities::handle_get(id, &config),
+                Err(e) => RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
+            },
             "runtime/host_info" => handlers::runtime_host::handle_info(
                 id,
                 &self.runtime,
@@ -1730,10 +1730,10 @@ impl MethodRouter {
             "approval/decide" => {
                 handlers::approval::handle_decide(id, params, self.runtime.clone()).await
             }
-            "models/catalog" => {
-                let config = self.config_store.get().await.unwrap_or_default();
-                handlers::models::handle_catalog(id, &config)
-            }
+            "models/catalog" => match self.config_store.get().await {
+                Ok(config) => handlers::models::handle_catalog(id, &config),
+                Err(e) => RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
+            },
             // Auth + realm methods (Phase 4d).
             "auth/profile/list" => {
                 handlers::auth::handle_auth_profile_list(id, params, &self.runtime).await
@@ -3636,7 +3636,36 @@ mod tests {
         meerkat::PersistenceBundle::new(store, Some(runtime_store), memory_blob_store())
     }
 
+    /// Config store whose `get()` always returns a typed fault, used to prove
+    /// that config-read handlers propagate `ConfigError` instead of laundering
+    /// it into `Config::default()`.
+    struct FailingConfigStore;
+
+    #[async_trait]
+    impl ConfigStore for FailingConfigStore {
+        async fn get(&self) -> Result<Config, meerkat_core::ConfigError> {
+            Err(meerkat_core::ConfigError::Validation("boom".to_string()))
+        }
+
+        async fn set(&self, _config: Config) -> Result<(), meerkat_core::ConfigError> {
+            Err(meerkat_core::ConfigError::Validation("boom".to_string()))
+        }
+
+        async fn patch(
+            &self,
+            _delta: meerkat_core::ConfigDelta,
+        ) -> Result<Config, meerkat_core::ConfigError> {
+            Err(meerkat_core::ConfigError::Validation("boom".to_string()))
+        }
+    }
+
     async fn test_router() -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
+        test_router_with_config_store(Arc::new(MemoryConfigStore::new(Config::default()))).await
+    }
+
+    async fn test_router_with_config_store(
+        config_store: Arc<dyn ConfigStore>,
+    ) -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let config = Config::default();
@@ -3648,8 +3677,6 @@ mod tests {
             runtime_backed_persistence(store),
             NotificationSink::noop(),
         );
-        let config_store: Arc<dyn ConfigStore> =
-            Arc::new(MemoryConfigStore::new(Config::default()));
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
             Arc::clone(&config_store),
@@ -3692,6 +3719,54 @@ mod tests {
         let sink = NotificationSink::new(notif_tx);
         let router = MethodRouter::new(runtime, config_store, sink);
         (router, notif_rx)
+    }
+
+    #[tokio::test]
+    async fn capabilities_get_propagates_config_fault() {
+        let (router, _rx) = test_router_with_config_store(Arc::new(FailingConfigStore)).await;
+        let response = router
+            .dispatch(RpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "capabilities/get".to_string(),
+                params: None,
+                id: Some(RpcId::Num(1)),
+            })
+            .await
+            .expect("response");
+        let value = serde_json::to_value(response).expect("response serializes");
+        assert!(
+            value["result"].is_null(),
+            "capabilities/get must not return a success payload on a config fault: {value}"
+        );
+        assert_eq!(
+            value["error"]["code"],
+            error::INTERNAL_ERROR,
+            "capabilities/get must surface INTERNAL_ERROR on a config fault: {value}"
+        );
+    }
+
+    #[tokio::test]
+    async fn models_catalog_propagates_config_fault() {
+        let (router, _rx) = test_router_with_config_store(Arc::new(FailingConfigStore)).await;
+        let response = router
+            .dispatch(RpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "models/catalog".to_string(),
+                params: None,
+                id: Some(RpcId::Num(1)),
+            })
+            .await
+            .expect("response");
+        let value = serde_json::to_value(response).expect("response serializes");
+        assert!(
+            value["result"].is_null(),
+            "models/catalog must not return a success payload on a config fault: {value}"
+        );
+        assert_eq!(
+            value["error"]["code"],
+            error::INTERNAL_ERROR,
+            "models/catalog must surface INTERNAL_ERROR on a config fault: {value}"
+        );
     }
 
     #[tokio::test]

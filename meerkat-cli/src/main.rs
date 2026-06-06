@@ -6912,11 +6912,12 @@ async fn delete_realm(
     let lease_status = meerkat_store::inspect_realm_leases_in(state_root, realm_id, true)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to inspect realm leases: {e}"))?;
-    if !lease_status.active.is_empty() && !force {
+    if lease_status.blocks_destructive_prune() && !force {
         return Err(anyhow::anyhow!(
-            "Realm '{}' appears active ({} live lease(s)). Use --force to override.",
+            "Realm '{}' appears active ({} live lease(s), {} unreadable lease file(s)). Use --force to override.",
             realm_id,
-            lease_status.active.len()
+            lease_status.active.len(),
+            lease_status.unparseable.len()
         ));
     }
 
@@ -7034,7 +7035,7 @@ async fn prune_realms_inner(
             meerkat_store::inspect_realm_leases_in(state_root, manifest.realm.as_str(), true)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to inspect realm leases: {e}"))?;
-        if !lease_status.active.is_empty() && !force {
+        if lease_status.blocks_destructive_prune() && !force {
             outcome.skipped_active += 1;
             continue;
         }
@@ -10124,10 +10125,14 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
 
     async fn materialize_session(
         &self,
+        occurrence: &meerkat::Occurrence,
         create: &meerkat::SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, meerkat::ScheduleDomainError> {
-        let session = Session::new();
+        // Deterministic per-occurrence id so a reclaim/redrive reuses the same
+        // session instead of orphaning a fresh random one in the
+        // materialize->bind crash window.
+        let session = Session::with_id(occurrence.materialized_session_id());
         let session_id = session.id().clone();
         let bindings = self
             .runtime_adapter
@@ -20005,6 +20010,48 @@ supports_reasoning = true
         lease.shutdown().await;
     }
 
+    #[tokio::test]
+    async fn test_delete_realm_blocks_when_lease_unreadable_without_force() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_root = temp.path().join("realms");
+        let realm_id = "corrupt-lease-realm";
+
+        let _manifest = meerkat_store::ensure_realm_manifest_in(
+            &state_root,
+            realm_id,
+            Some(meerkat_store::RealmBackend::Sqlite),
+            Some(meerkat_store::RealmOrigin::Generated),
+        )
+        .await
+        .expect("create manifest");
+
+        // A corrupt-but-present lease file is an unknown-state datum: it may
+        // belong to a still-live instance whose heartbeat was caught mid-write.
+        let paths = meerkat_store::realm_paths_in(&state_root, realm_id);
+        let lease_dir = meerkat_store::realm_lease_dir(&paths);
+        tokio::fs::create_dir_all(&lease_dir)
+            .await
+            .expect("create lease dir");
+        let corrupt_path = lease_dir.join("corrupt-instance.json");
+        tokio::fs::write(&corrupt_path, b"{ not json")
+            .await
+            .expect("write corrupt lease");
+
+        let blocked = delete_realm(&state_root, realm_id, false).await;
+        assert!(
+            blocked.is_err(),
+            "delete must block while a lease is unreadable (unknown liveness)"
+        );
+        // The inspect call must NOT have deleted the corrupt evidence.
+        assert!(
+            tokio::fs::try_exists(&corrupt_path).await.unwrap(),
+            "corrupt lease must not be auto-deleted by the inspect call"
+        );
+
+        let forced = delete_realm(&state_root, realm_id, true).await;
+        assert!(forced.is_ok(), "delete --force should proceed");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn test_prune_inner_reports_leftovers_on_partial_failure() {
@@ -20034,6 +20081,48 @@ supports_reasoning = true
 
         let restore = std::fs::Permissions::from_mode(0o755);
         let _ = std::fs::set_permissions(&state_root, restore);
+    }
+
+    #[tokio::test]
+    async fn test_prune_inner_skips_realm_with_unreadable_lease() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_root = temp.path().join("realms");
+        let realm_id = "corrupt-lease-prune";
+
+        let _manifest = meerkat_store::ensure_realm_manifest_in(
+            &state_root,
+            realm_id,
+            Some(meerkat_store::RealmBackend::Sqlite),
+            Some(meerkat_store::RealmOrigin::Generated),
+        )
+        .await
+        .expect("create manifest");
+
+        // A corrupt-but-present lease must be treated as possibly-live: the
+        // realm must be skipped, not pruned, and the realm root must survive.
+        let paths = meerkat_store::realm_paths_in(&state_root, realm_id);
+        let lease_dir = meerkat_store::realm_lease_dir(&paths);
+        tokio::fs::create_dir_all(&lease_dir)
+            .await
+            .expect("create lease dir");
+        let corrupt_path = lease_dir.join("corrupt-instance.json");
+        tokio::fs::write(&corrupt_path, b"{ not json")
+            .await
+            .expect("write corrupt lease");
+
+        let outcome = prune_realms_inner(&state_root, true, 0, false)
+            .await
+            .expect("prune outcome");
+        assert_eq!(outcome.skipped_active, 1);
+        assert_eq!(outcome.removed, 0);
+        assert!(
+            tokio::fs::try_exists(&paths.root).await.unwrap(),
+            "realm root must survive when a lease is unreadable"
+        );
+        assert!(
+            tokio::fs::try_exists(&corrupt_path).await.unwrap(),
+            "corrupt lease must not be auto-deleted by the inspect call"
+        );
     }
 
     #[test]

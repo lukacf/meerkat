@@ -826,28 +826,60 @@ pub(crate) fn spawn_runtime_loop_with_completions(
         // all-zero runtime-owned cursor must win over the feed watermark so a
         // fresh runtime loop cannot silently skip background completions that
         // land before the task reaches its first select iteration.
-        let initial_watermark = ops_lifecycle
-            .as_ref()
-            .and_then(|registry| {
-                let obs = registry.completion_cursor(
+        let initial_watermark = match ops_lifecycle.as_ref() {
+            Some(registry) => {
+                let obs = match registry.completion_cursor(
                     meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeObserved,
-                )?;
-                let inj = registry.completion_cursor(
+                ) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        tracing::error!(
+                            session_id = %authority_binding.session_id,
+                            error = %err,
+                            "runtime loop refused to seed idle-wake watermark from poisoned ops cursor authority"
+                        );
+                        return;
+                    }
+                };
+                let inj = match registry.completion_cursor(
                     meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeInjected,
-                )?;
-                Some(obs.max(inj))
-            })
-            .unwrap_or(0);
+                ) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        tracing::error!(
+                            session_id = %authority_binding.session_id,
+                            error = %err,
+                            "runtime loop refused to seed idle-wake watermark from poisoned ops cursor authority"
+                        );
+                        return;
+                    }
+                };
+                // `Ok(None)` from either consumer means no generated cursor
+                // authority for that consumer; treat the missing value as 0 so
+                // the watermark falls back to the legitimate no-authority floor.
+                obs.unwrap_or(0).max(inj.unwrap_or(0))
+            }
+            None => 0,
+        };
         let mut observed_seq: meerkat_core::completion_feed::CompletionSeq = initial_watermark;
-        let mut last_injected_seq: meerkat_core::completion_feed::CompletionSeq = ops_lifecycle
-            .as_ref()
-            .and_then(|registry| {
-                registry.completion_cursor(
+        let mut last_injected_seq: meerkat_core::completion_feed::CompletionSeq =
+            match ops_lifecycle.as_ref() {
+                Some(registry) => match registry.completion_cursor(
                     meerkat_core::ops_lifecycle::CompletionCursorConsumer::RuntimeInjected,
-                )
-            })
-            .filter(|&v| v > 0)
-            .unwrap_or(initial_watermark);
+                ) {
+                    Ok(Some(value)) if value > 0 => value,
+                    Ok(_) => initial_watermark,
+                    Err(err) => {
+                        tracing::error!(
+                            session_id = %authority_binding.session_id,
+                            error = %err,
+                            "runtime loop refused to seed idle-wake watermark from poisoned ops cursor authority"
+                        );
+                        return;
+                    }
+                },
+                None => initial_watermark,
+            };
 
         loop {
             // Build a future for the idle wake. Backed by the completion feed

@@ -2431,6 +2431,18 @@ impl Occurrence {
         validate_occurrence_machine_projection(self)
     }
 
+    /// The deterministic `SessionId` an on-demand materialization must use for
+    /// this occurrence.
+    ///
+    /// Derived solely from the stable `occurrence_id` (NOT `attempt_count`), so
+    /// a reclaim/redrive of the SAME occurrence re-materializes to the SAME
+    /// session id and is reused rather than orphaning a fresh random session in
+    /// the materialize→bind crash window. Distinct occurrences get distinct ids
+    /// because `occurrence_id` is unique.
+    pub fn materialized_session_id(&self) -> SessionId {
+        SessionId::from_uuid(self.occurrence_id.0)
+    }
+
     pub fn due_misfire_detail_at(&self, now_utc: DateTime<Utc>) -> String {
         self.misfire_policy.misfire_detail(self.due_at_utc, now_utc)
     }

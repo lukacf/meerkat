@@ -573,7 +573,7 @@ impl LlmClient for OpenAiCompatibleClient {
                                         };
                                         if matches!(stop_reason, StopReason::ToolUse) {
                                             for buffer in tool_buffers.values() {
-                                                if let Some(tool_call) = buffer.try_complete() {
+                                                if let Some(tool_call) = buffer.try_complete()? {
                                                     yield LlmEvent::ToolCallComplete {
                                                         id: tool_call.id,
                                                         name: tool_call.name,
@@ -891,6 +891,64 @@ mod tests {
         }
         assert!(saw_complete);
         assert!(saw_done);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn chat_completions_stream_malformed_tool_args_fail_closed() {
+        // A tool call whose accumulated argument JSON is truncated must NOT be
+        // silently dropped and laundered into Done{Success}. It must surface as
+        // a terminal Done{Error{StreamParseError}}.
+        let payload = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":4}}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .to_string();
+        let (base_url, handle) = spawn_chat_stub_server(payload).await;
+        let client = OpenAiCompatibleClient::new(
+            OpenAiCompatibleMode::ChatCompletions,
+            "remote-model".to_string(),
+            base_url,
+            None,
+            true,
+            false,
+            false,
+        );
+        let request = LlmRequest::new(
+            "gemma-4-31b",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+
+        let events: Vec<_> = client.stream(&request).collect().await;
+        let mut saw_complete = false;
+        let mut saw_success_done = false;
+        let mut terminal_error = None;
+        for event in events {
+            match event {
+                Ok(LlmEvent::ToolCallComplete { .. }) => saw_complete = true,
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Error { error },
+                }) => terminal_error = Some(error),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success { .. },
+                }) => saw_success_done = true,
+                Err(error) => terminal_error = Some(error),
+                _ => {}
+            }
+        }
+        assert!(
+            !saw_complete,
+            "malformed tool args must not produce a ToolCallComplete"
+        );
+        assert!(
+            !saw_success_done,
+            "malformed tool args must not be laundered into a successful Done"
+        );
+        assert!(
+            matches!(terminal_error, Some(LlmError::StreamParseError { .. })),
+            "expected terminal StreamParseError, got {terminal_error:?}"
+        );
         handle.abort();
     }
 

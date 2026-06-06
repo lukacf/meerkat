@@ -74,23 +74,27 @@ pub enum RpcMessage {
 
 impl RpcResponse {
     /// Construct a success response with the given result.
+    ///
+    /// If the result payload fails to serialize, this does NOT fabricate a
+    /// success-with-null reply: it surfaces the typed serialization fault as a
+    /// JSON-RPC internal error on the same id, preserving the contract that a
+    /// request gets either a result or an error, never a fabricated success.
     pub fn success(id: Option<RpcId>, result: impl Serialize) -> Self {
-        // Serialize the result to a RawValue. If serialization fails,
-        // fall back to a JSON null.
-        let raw = serde_json::value::to_raw_value(&result).unwrap_or_else(|_| {
-            // This is extremely unlikely to fail since we're serializing
-            // a type that impl Serialize, but we avoid unwrap in library code.
-            serde_json::value::to_raw_value(&serde_json::Value::Null).unwrap_or_else(|_| {
-                // Serializing null to RawValue cannot realistically fail.
-                // We use a const approach as last resort.
-                RawValue::from_string("null".to_string()).unwrap_or_default()
-            })
-        });
-        Self {
-            jsonrpc: "2.0".to_string(),
-            id,
-            result: Some(raw),
-            error: None,
+        match serde_json::value::to_raw_value(&result) {
+            Ok(raw) => Self {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: Some(raw),
+                error: None,
+            },
+            // Serializing the result payload failed. Surface the typed fault as
+            // a JSON-RPC internal error on the same id so the client sees the
+            // real terminal instead of an authoritative success carrying null.
+            Err(e) => Self::error(
+                id,
+                crate::error::INTERNAL_ERROR,
+                format!("failed to serialize RPC result: {e}"),
+            ),
         }
     }
 
@@ -199,6 +203,29 @@ mod tests {
         // Verify result content
         let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
         assert_eq!(parsed["result"]["status"], "ok");
+    }
+
+    #[test]
+    fn success_serialization_failure_yields_internal_error() {
+        // A payload whose Serialize impl always fails must NOT be laundered
+        // into a success-with-null envelope; it must become an error envelope.
+        struct AlwaysFails;
+        impl Serialize for AlwaysFails {
+            fn serialize<S: serde::Serializer>(&self, _s: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("boom"))
+            }
+        }
+
+        let resp = RpcResponse::success(Some(RpcId::Num(1)), AlwaysFails);
+        assert_eq!(resp.id, Some(RpcId::Num(1)));
+        assert!(resp.result.is_none());
+        let err = resp.error.as_ref().unwrap();
+        assert_eq!(err.code, error::INTERNAL_ERROR);
+
+        // On the wire it is an error envelope, never a fabricated success.
+        let serialized = serde_json::to_string(&resp).unwrap();
+        assert!(serialized.contains("\"error\""));
+        assert!(!serialized.contains("\"result\""));
     }
 
     #[test]

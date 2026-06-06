@@ -113,6 +113,20 @@ pub struct RealmLeaseRecord {
 pub struct RealmLeaseStatus {
     pub active: Vec<RealmLeaseRecord>,
     pub stale: Vec<RealmLeaseRecord>,
+    /// Corrupt-but-present lease files that failed to parse. Their liveness
+    /// cannot be ruled out, so they are recorded here and NEVER auto-deleted.
+    pub unparseable: Vec<PathBuf>,
+}
+
+impl RealmLeaseStatus {
+    /// True when any lease is live OR cannot be ruled out as live.
+    ///
+    /// A corrupt lease is an unknown-state datum (e.g. a still-live instance's
+    /// heartbeat caught mid-write), not proof of absence, so its presence must
+    /// block destructive prune just like a live lease does.
+    pub fn blocks_destructive_prune(&self) -> bool {
+        !self.active.is_empty() || !self.unparseable.is_empty()
+    }
 }
 
 pub struct RealmLeaseGuard {
@@ -424,10 +438,13 @@ pub async fn inspect_realm_leases_in(
                         }
                     }
                 }
+                // A lease that fails serde parse is malformed/unknown-state, not
+                // proof of absence. It may be a still-live instance's heartbeat
+                // caught mid-write. Record it as unparseable and NEVER delete it,
+                // even under cleanup_stale -- a corrupt lease must block
+                // destructive prune, not silently vanish.
                 Err(_) => {
-                    if cleanup_stale {
-                        let _ = tokio::fs::remove_file(&path).await;
-                    }
+                    status.unparseable.push(path.clone());
                 }
             },
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -1030,7 +1047,49 @@ mod tests {
             .unwrap();
         assert!(status.active.is_empty());
         assert_eq!(status.stale.len(), 1);
+        assert!(status.unparseable.is_empty());
         assert!(!tokio::fs::try_exists(&stale_path).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn lease_unparseable_is_recorded_and_not_deleted() {
+        let temp = tempfile::tempdir().unwrap();
+        let realms_root = temp.path().join("realms");
+        let realm_id = "lease-corrupt";
+        let paths = realm_paths_in(&realms_root, realm_id);
+        let lease_dir = realm_lease_dir(&paths);
+        tokio::fs::create_dir_all(&lease_dir).await.unwrap();
+
+        // A corrupt lease (e.g. a heartbeat write caught mid-rename) is an
+        // unknown-state datum -- not proof of absence.
+        let corrupt_path = lease_dir.join("corrupt-instance.json");
+        tokio::fs::write(&corrupt_path, b"{ not json")
+            .await
+            .unwrap();
+
+        // cleanup_stale=true is what every destructive/listing caller passes.
+        let status = inspect_realm_leases_in(&realms_root, realm_id, true)
+            .await
+            .unwrap();
+        assert!(status.active.is_empty());
+        assert!(status.stale.is_empty());
+        assert_eq!(status.unparseable.len(), 1);
+        // The corrupt file must NOT be auto-deleted even under cleanup_stale=true.
+        assert!(tokio::fs::try_exists(&corrupt_path).await.unwrap());
+        assert!(status.blocks_destructive_prune());
+    }
+
+    #[test]
+    fn blocks_destructive_prune_true_when_only_unparseable() {
+        let status = RealmLeaseStatus {
+            active: Vec::new(),
+            stale: Vec::new(),
+            unparseable: vec![PathBuf::from("/tmp/corrupt.json")],
+        };
+        assert!(status.blocks_destructive_prune());
+
+        let empty = RealmLeaseStatus::default();
+        assert!(!empty.blocks_destructive_prune());
     }
 
     #[tokio::test]

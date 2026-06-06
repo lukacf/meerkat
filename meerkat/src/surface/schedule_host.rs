@@ -93,8 +93,17 @@ pub trait SurfaceScheduleSessionHost: Send + Sync {
         binding: &SessionTargetBinding,
     ) -> Result<TargetProbeOutcome, ScheduleDomainError>;
 
+    /// Materialize the on-demand session for `occurrence`.
+    ///
+    /// The session id MUST be derived deterministically from the occurrence
+    /// identity (via [`Occurrence::materialized_session_id`]) so a redrive of
+    /// the same occurrence reuses the existing session instead of minting a
+    /// second orphan. Implementations are required to be create-or-reuse: a
+    /// second materialize for an occurrence whose deterministic session id
+    /// already exists is a no-op reuse, never a duplicate and never an error.
     async fn materialize_session(
         &self,
+        occurrence: &Occurrence,
         create: &SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError>;
@@ -215,6 +224,20 @@ impl SharedScheduleTargetAdapter {
                 action,
                 bound_session_id: None,
             } => {
+                // Layer B: defensive contractual reuse guard. The in-flight
+                // occurrence snapshot can be stale — a prior attempt may have
+                // committed the bound id to the authoritative schedule target
+                // (and pending occurrences) after this snapshot was claimed.
+                // Re-read the authoritative binding for THIS occurrence before
+                // materializing; if a session is already bound, reuse it and
+                // never mint a second one.
+                if let Some(bound) = self.authoritative_bound_session_id(occurrence).await {
+                    return Ok(ResolvedScheduledSession {
+                        session_id: bound.clone(),
+                        materialized_session_id: Some(bound),
+                        allow_system_prompt_override: false,
+                    });
+                }
                 let prompt_system_prompt = match action {
                     ScheduledSessionAction::Prompt { system_prompt, .. } => {
                         system_prompt.as_deref()
@@ -223,7 +246,7 @@ impl SharedScheduleTargetAdapter {
                 };
                 match self
                     .session_host
-                    .materialize_session(create, prompt_system_prompt)
+                    .materialize_session(occurrence, create, prompt_system_prompt)
                     .await
                 {
                     Ok(session_id) => {
@@ -256,6 +279,39 @@ impl SharedScheduleTargetAdapter {
                 }
             }
         }
+    }
+
+    /// Re-read the authoritative bound session id for `occurrence`.
+    ///
+    /// `bind_materialized_session_for_occurrence` commits the materialized id
+    /// to the schedule target (and pending occurrences). After a prior attempt
+    /// committed that bind but died before the in-flight snapshot was synced,
+    /// the occurrence handed to `resolve_session` can still report
+    /// `bound_session_id: None`. This consults the freshest authoritative
+    /// state — the re-read occurrence first, then the schedule target — so the
+    /// adapter never materializes a second session for an already-bound
+    /// occurrence. A read failure is treated as "no authoritative binding
+    /// known": the caller falls through to deterministic-id materialization,
+    /// which is itself create-or-reuse, so no orphan can result.
+    async fn authoritative_bound_session_id(&self, occurrence: &Occurrence) -> Option<SessionId> {
+        let store = self.schedule_service.store();
+
+        if let Ok(Some(current)) = store.get_occurrence(&occurrence.occurrence_id).await
+            && let TargetBinding::Session(binding) = &current.target_snapshot
+            && let Some(session_id) = binding.resolved_session_id()
+        {
+            return Some(session_id.clone());
+        }
+
+        if let Ok(Some(schedule)) = store.get_schedule(&occurrence.schedule_id).await
+            && schedule.revision == occurrence.schedule_revision
+            && let TargetBinding::Session(binding) = &schedule.target
+            && let Some(session_id) = binding.resolved_session_id()
+        {
+            return Some(session_id.clone());
+        }
+
+        None
     }
 }
 
@@ -633,6 +689,8 @@ pub fn schedule_attempt_idempotency_key(occurrence: &Occurrence) -> String {
 mod tests {
     use super::*;
 
+    use async_trait::async_trait;
+    use meerkat_schedule::ScheduleStore;
     use std::collections::BTreeMap;
 
     fn sample_occurrence() -> Occurrence {
@@ -770,5 +828,172 @@ mod tests {
             }
             other => panic!("unexpected completion error: {other}"),
         }
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A session host that must never be asked to materialize. Any
+    /// `materialize_session` call records a hit and returns an error so the
+    /// Layer B reuse guard regression is caught as a test failure rather than
+    /// a silent duplicate session.
+    struct PanicOnMaterializeHost {
+        materialize_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl SurfaceScheduleSessionHost for PanicOnMaterializeHost {
+        async fn probe_session_target(
+            &self,
+            _binding: &SessionTargetBinding,
+        ) -> Result<TargetProbeOutcome, ScheduleDomainError> {
+            Ok(TargetProbeOutcome::Ready)
+        }
+
+        async fn materialize_session(
+            &self,
+            _occurrence: &Occurrence,
+            _create: &SessionMaterializationSpec,
+            _prompt_system_prompt: Option<&str>,
+        ) -> Result<SessionId, ScheduleDomainError> {
+            self.materialize_calls.fetch_add(1, Ordering::SeqCst);
+            Err(ScheduleDomainError::Internal(
+                "Layer B reuse guard must reuse the bound session, never materialize".to_string(),
+            ))
+        }
+
+        async fn deliver_prompt(
+            &self,
+            _session_id: &SessionId,
+            occurrence: &Occurrence,
+            _dispatch: ScheduledPromptDispatch,
+        ) -> Result<DeliveryDispatch, ScheduleDomainError> {
+            Ok(immediate_completed_dispatch(occurrence, None))
+        }
+
+        async fn deliver_event(
+            &self,
+            _session_id: &SessionId,
+            occurrence: &Occurrence,
+            _event_type: String,
+            _payload: serde_json::Value,
+            _render_metadata: Option<RenderMetadata>,
+            _materialized_session_id: Option<SessionId>,
+        ) -> Result<DeliveryDispatch, ScheduleDomainError> {
+            Ok(immediate_completed_dispatch(occurrence, None))
+        }
+    }
+
+    fn materialize_on_demand_target() -> TargetBinding {
+        TargetBinding::session(SessionTargetBinding::materialize_on_demand(
+            SessionMaterializationSpec {
+                model: "claude-sonnet-4-6".to_string(),
+                system_prompt: None,
+                max_tokens: None,
+                provider: None,
+                output_schema: None,
+                structured_output_retries: None,
+                provider_params: None,
+                comms_name: None,
+                peer_meta: None,
+                labels: BTreeMap::new(),
+                preload_skills: Vec::new(),
+                additional_instructions: Vec::new(),
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                keep_alive: false,
+                app_context: None,
+            },
+            ScheduledSessionAction::Prompt {
+                prompt: ContentInput::Text("scheduled prompt".to_string()),
+                system_prompt: None,
+                render_metadata: None,
+                skill_refs: Vec::new(),
+                additional_instructions: Vec::new(),
+            },
+        ))
+    }
+
+    #[tokio::test]
+    async fn resolve_session_reuses_authoritative_bound_id_without_materializing_on_stale_snapshot()
+    {
+        let store =
+            Arc::new(meerkat_schedule::MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(meerkat_schedule::CreateScheduleRequest {
+                name: Some("layer-b-reuse".to_string()),
+                description: None,
+                trigger: meerkat_schedule::TriggerSpec::Once {
+                    due_at_utc: chrono::Utc::now() - ChronoDuration::seconds(1),
+                },
+                target: materialize_on_demand_target(),
+                misfire_policy: meerkat_schedule::MisfirePolicy::Skip,
+                overlap_policy: meerkat_schedule::OverlapPolicy::AllowConcurrent,
+                missing_target_policy: meerkat_schedule::MissingTargetPolicy::Skip,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await
+            .expect("schedule create should plan one occurrence");
+
+        let occurrence = service
+            .list_occurrences(&schedule.schedule_id)
+            .await
+            .expect("list occurrences")
+            .into_iter()
+            .next()
+            .expect("schedule should have planned one occurrence");
+
+        // A prior attempt materialized and committed the bound id to the
+        // authoritative schedule target (and pending occurrences).
+        let bound_id = SessionId::new();
+        service
+            .bind_materialized_session_for_occurrence(&occurrence, &bound_id)
+            .await
+            .expect("bind should commit the materialized session id");
+
+        // The in-flight occurrence snapshot is STALE: it still reports
+        // `bound_session_id: None`, exactly the window the residual described.
+        let mut stale = occurrence.clone();
+        stale.target_snapshot = materialize_on_demand_target();
+        let TargetBinding::Session(binding) = &stale.target_snapshot else {
+            panic!("expected a session target binding");
+        };
+        assert!(
+            binding.resolved_session_id().is_none(),
+            "stale snapshot must start unbound to exercise the reuse guard"
+        );
+
+        let materialize_calls = Arc::new(AtomicUsize::new(0));
+        let session_host: Arc<dyn SurfaceScheduleSessionHost> = Arc::new(PanicOnMaterializeHost {
+            materialize_calls: Arc::clone(&materialize_calls),
+        });
+        let mob_host: Arc<dyn SurfaceScheduleMobHost> = Arc::new(NoopScheduleMobHost::new(
+            "mob targets unsupported in this test",
+        ));
+        let adapter = SharedScheduleTargetAdapter::new(service, session_host, mob_host);
+
+        let TargetBinding::Session(stale_binding) = &stale.target_snapshot else {
+            panic!("expected a session target binding");
+        };
+        let resolved = adapter
+            .resolve_session(&stale, stale_binding)
+            .await
+            .expect("reuse guard should resolve without a delivery failure");
+
+        assert_eq!(resolved.session_id, bound_id);
+        assert_eq!(resolved.materialized_session_id, Some(bound_id));
+        assert!(
+            !resolved.allow_system_prompt_override,
+            "reused session must not allow a fresh system-prompt override"
+        );
+        assert_eq!(
+            materialize_calls.load(Ordering::SeqCst),
+            0,
+            "Layer B guard must reuse the bound id, never call materialize_session"
+        );
     }
 }

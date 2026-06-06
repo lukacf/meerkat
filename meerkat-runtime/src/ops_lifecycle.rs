@@ -1116,8 +1116,11 @@ impl ShellState {
             }
         }
 
-        // Satisfy a pending wait request if all its ops are now terminal.
-        self.maybe_satisfy_wait();
+        // Satisfy a pending wait request if all its ops are now terminal. On
+        // authority-invariant corruption this propagates the typed fault (and
+        // drops the barrier oneshot so the waiter resolves to Err) instead of
+        // reporting the op terminal with a silently-hung barrier.
+        self.maybe_satisfy_wait()?;
         Ok(())
     }
 
@@ -1755,17 +1758,29 @@ impl ShellState {
     /// `wait_request_id` is the shell-owned oneshot correlation id that
     /// selects which sender to notify; when the DSL barrier satisfies
     /// without a live correlation (post-recovery, or duplicate resolution),
-    /// the oneshot simply remains pending.
-    fn maybe_satisfy_wait(&mut self) {
+    /// the oneshot simply remains pending. That benign no-correlation case is
+    /// the only path that leaves the oneshot pending: on authority-invariant
+    /// corruption the pending sender is dropped so the waiter's
+    /// `WaitAllFuture` resolves to `Err` and the typed
+    /// [`OpsLifecycleError`] propagates to the terminal transition caller
+    /// instead of reporting the op complete with a silently-hung barrier.
+    fn maybe_satisfy_wait(&mut self) -> Result<(), OpsLifecycleError> {
         let satisfied = match self.try_satisfy_wait_all_authority() {
             Ok(Some(satisfied)) => satisfied,
-            Ok(None) => return,
+            Ok(None) => return Ok(()),
             Err(err) => {
-                tracing::error!(
-                    error = %err,
-                    "generated wait_all authority rejected satisfaction unexpectedly"
-                );
-                return;
+                // Authority-invariant corruption: do NOT report the op complete
+                // with a silently-pending barrier oneshot. Drop the sender so
+                // the waiter's `WaitAllFuture` resolves to `Err` via its
+                // `Poll::Ready(Err(_))` arm (the same mechanism
+                // `cancel_wait_all_internal` uses), then propagate the typed
+                // fault. The invariant is already broken, so we do not attempt
+                // a `CancelWaitAll` rollback on the corrupt machine.
+                if let Some(pending) = self.pending_wait.take() {
+                    drop(pending.sender);
+                }
+                self.wait_request_id = None;
+                return Err(err);
             }
         };
         let shell_wait_id = self.wait_request_id.take();
@@ -1791,6 +1806,7 @@ impl ShellState {
                 );
             }
         }
+        Ok(())
     }
 
     /// Persist a terminal snapshot if a persistence channel is wired.
@@ -3145,9 +3161,12 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         Some(self.completion_feed_handle())
     }
 
-    fn completion_cursor(&self, consumer: CompletionCursorConsumer) -> Option<CompletionSeq> {
-        let state = self.read_state().ok()?;
-        Some(state.completion_cursor(consumer))
+    fn completion_cursor(
+        &self,
+        consumer: CompletionCursorConsumer,
+    ) -> Result<Option<CompletionSeq>, OpsLifecycleError> {
+        let state = self.read_state()?;
+        Ok(Some(state.completion_cursor(consumer)))
     }
 
     fn advance_completion_cursor(
@@ -3668,6 +3687,105 @@ mod tests {
         assert!(state.wait_request_id.is_none());
         assert!(state.wait_operation_ids().unwrap().is_empty());
         assert!(!state.wait_active());
+    }
+
+    /// id 101: an authority-invariant corruption surfaced during a terminal
+    /// transition must NOT report the op terminal with a silently-hung barrier.
+    /// The terminal call must return the typed `Internal` fault, AND the awaited
+    /// `wait_all` future must resolve to `Err` (via the dropped-sender arm)
+    /// instead of hanging forever.
+    #[tokio::test]
+    async fn satisfy_wait_authority_fault_fails_terminal_and_unblocks_waiter() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let run_id = test_run_id();
+
+        let spec = background_spec("corrupt-barrier");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&op_id).unwrap();
+
+        // Activate a barrier whose waiter is still pending.
+        let wait_fut = registry.wait_all(&run_id, std::slice::from_ref(&op_id));
+        tokio::pin!(wait_fut);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut wait_fut)
+                .await
+                .is_err(),
+            "barrier waiter must still be pending before corruption"
+        );
+        assert!(registry.read_state().unwrap().wait_request_id.is_some());
+
+        // Corrupt the generated wait authority: an active wait_request_id with
+        // no wait_run_id forces `try_satisfy_wait_all_authority` down its
+        // non-GuardRejected `Internal` arm during the terminal transition.
+        {
+            let mut state = registry.write_state().unwrap();
+            let mut machine_state = state.dsl.0.state().clone();
+            machine_state.wait_run_id = None;
+            state.dsl = DslAuthority(Box::new(
+                mm_dsl::MeerkatMachineAuthority::recover_from_state(machine_state).unwrap(),
+            ));
+        }
+
+        // The terminal transition must FAIL with the typed authority fault, not
+        // report the op complete.
+        let err = registry
+            .complete_operation(
+                &op_id,
+                OperationResult {
+                    id: op_id.clone(),
+                    content: "done".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .expect_err("corrupt wait authority must fail the terminal transition");
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("active wait without run id")),
+            "unexpected terminal error: {err:?}"
+        );
+
+        // The waiter must resolve to Err (dropped sender), not hang.
+        let waiter_result = tokio::time::timeout(std::time::Duration::from_secs(1), &mut wait_fut)
+            .await
+            .expect("waiter must resolve, not hang, after authority corruption");
+        match waiter_result {
+            Err(OpsLifecycleError::Internal(message)) => assert!(
+                message.contains("wait_all completion channel dropped"),
+                "unexpected waiter error message: {message}"
+            ),
+            other => panic!("expected dropped-channel Internal error, got {other:?}"),
+        }
+    }
+
+    /// id 97: a poisoned registry lock must surface as a typed `Internal` fault
+    /// from `completion_cursor`, NOT laundered into `Ok(None)` (which means "no
+    /// generated cursor authority") or a bare `None`.
+    #[test]
+    fn completion_cursor_propagates_poison_not_none() {
+        let registry = std::sync::Arc::new(RuntimeOpsLifecycleRegistry::new());
+
+        // Poison the registry RwLock by panicking while holding the write guard.
+        let poison_registry = std::sync::Arc::clone(&registry);
+        let join = std::thread::spawn(move || {
+            let _guard = poison_registry.write_state().unwrap();
+            panic!("intentional panic to poison ops lifecycle registry lock");
+        });
+        assert!(
+            join.join().is_err(),
+            "poisoning thread must have panicked while holding the write guard"
+        );
+
+        let trait_ref: &dyn OpsLifecycleRegistry = registry.as_ref();
+        let result = trait_ref.completion_cursor(CompletionCursorConsumer::AgentApplied);
+        match result {
+            Err(OpsLifecycleError::Internal(message)) => assert!(
+                message.contains("ops lifecycle registry poisoned"),
+                "unexpected cursor error message: {message}"
+            ),
+            other => panic!("poisoned registry must surface typed Internal fault, got {other:?}"),
+        }
     }
 
     #[test]

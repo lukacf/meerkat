@@ -48,8 +48,6 @@ pub use artifact::FsArtifactStore;
 #[cfg(not(target_arch = "wasm32"))]
 pub use blob::FsBlobStore;
 #[cfg(not(target_arch = "wasm32"))]
-pub use index::SessionIndex;
-#[cfg(not(target_arch = "wasm32"))]
 pub use realm::{
     REALM_LEASE_HEARTBEAT_SECS, REALM_LEASE_STALE_TTL_SECS, RealmBackend, RealmLeaseGuard,
     RealmLeaseRecord, RealmLeaseStatus, RealmManifest, RealmManifestEntry, RealmOrigin, RealmPaths,

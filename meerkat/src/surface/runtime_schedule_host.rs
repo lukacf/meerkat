@@ -317,15 +317,23 @@ impl SurfaceScheduleSessionHost for RuntimeBackedScheduleSessionHost {
 
     async fn materialize_session(
         &self,
+        occurrence: &crate::Occurrence,
         create: &SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError> {
         let request = self.build_materialized_request(create, prompt_system_prompt)?;
         let keep_alive = request.build.as_ref().is_some_and(|build| build.keep_alive);
+        // Layer A: derive the materialized SessionId deterministically from the
+        // occurrence identity (NOT attempt_count) so a redrive reuses the same
+        // durable session via the create-or-reuse `resume_session` recovery
+        // path in `materialize_session`, instead of minting a fresh random id
+        // that would orphan the prior session on a crash/lease-expiry/cancel
+        // landing inside the materialize->bind window.
+        let session = Session::with_id(occurrence.materialized_session_id());
         let result = Box::pin(materialize_session(
             &self.service,
             &self.runtime_adapter,
-            Session::new(),
+            session,
             request,
             {
                 let service = Arc::clone(&self.service);
@@ -505,5 +513,70 @@ mod tests {
             .expect("valid realm slug");
 
         assert_eq!(build.preload_skills, Some(vec![key]));
+    }
+
+    fn sample_occurrence() -> crate::Occurrence {
+        let schedule = meerkat_schedule::Schedule::new(meerkat_schedule::CreateScheduleRequest {
+            name: Some("runtime-schedule-host-test".to_string()),
+            description: None,
+            trigger: meerkat_schedule::TriggerSpec::Interval(
+                meerkat_schedule::IntervalTriggerSpec {
+                    start_at_utc: chrono::Utc::now(),
+                    every_seconds: 60,
+                    end_at_utc: None,
+                },
+            ),
+            target: crate::TargetBinding::session(SessionTargetBinding::ExactSession {
+                session_id: SessionId::new(),
+                action: meerkat_schedule::ScheduledSessionAction::Prompt {
+                    prompt: ContentInput::Text("hello".to_string()),
+                    system_prompt: None,
+                    render_metadata: None,
+                    skill_refs: Vec::new(),
+                    additional_instructions: Vec::new(),
+                },
+            }),
+            misfire_policy: meerkat_schedule::MisfirePolicy::Skip,
+            overlap_policy: meerkat_schedule::OverlapPolicy::SkipIfRunning,
+            missing_target_policy: meerkat_schedule::MissingTargetPolicy::Skip,
+            labels: Default::default(),
+            planning_horizon_days: None,
+            planning_horizon_occurrences: None,
+        })
+        .expect("sample schedule creation should pass generated authority");
+        meerkat_schedule::Occurrence::planned_from_schedule(
+            &schedule,
+            meerkat_schedule::OccurrenceOrdinal(0),
+            chrono::Utc::now(),
+        )
+        .expect("sample occurrence planning should pass generated authority")
+    }
+
+    #[test]
+    fn materialized_session_id_is_deterministic_per_occurrence_and_attempt_invariant() {
+        let mut occurrence = sample_occurrence();
+        occurrence.attempt_count = 1;
+        let first = occurrence.materialized_session_id();
+
+        // Same occurrence id, a later reclaim attempt: the derived session id
+        // MUST collapse to the same value so a redrive reuses, not orphans.
+        occurrence.attempt_count = 7;
+        let after_reclaim = occurrence.materialized_session_id();
+        assert_eq!(
+            first, after_reclaim,
+            "materialized session id must be invariant across attempt_count"
+        );
+
+        // A distinct occurrence must derive a distinct session id.
+        let other = sample_occurrence();
+        assert_ne!(
+            occurrence.occurrence_id, other.occurrence_id,
+            "fixture occurrences must have distinct ids"
+        );
+        assert_ne!(
+            occurrence.materialized_session_id(),
+            other.materialized_session_id(),
+            "distinct occurrences must derive distinct session ids"
+        );
     }
 }

@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict, is_dataclass
 import json
+import logging
 import os
 import platform
 import shutil
@@ -147,6 +148,8 @@ from .types import (
     WorkItem,
     WorkItemListResult,
 )
+
+_logger = logging.getLogger(__name__)
 
 _MEERKAT_REPO = ("lukacf", "meerkat")
 _MEERKAT_BINARY = "rkat-rpc"
@@ -375,6 +378,7 @@ class MeerkatClient:
         self._methods: set[str] = set()
         self._dispatcher: _StdoutDispatcher | None = None
         self._tool_registry = ToolRegistry()
+        self._tool_registration_errors: dict[str, MeerkatError] = {}
 
     # -- Tool registration -------------------------------------------------
 
@@ -409,15 +413,38 @@ class MeerkatClient:
         description: str,
         input_schema: dict[str, Any] | None,
     ) -> None:
-        """Best-effort registration of a single tool with the server."""
+        """Register a single tool with the server post-connect.
+
+        Benign shutdown/disconnect faults return quietly (the local registry
+        still holds the definition and the next ``connect()`` re-sends it);
+        genuine server rejection / protocol faults are logged, recorded as
+        programmatically-distinguishable state, and re-raised.
+        """
         try:
             await self._request(
                 "tools/register",
                 {"tools": [{"name": name, "description": description or f"Tool: {name}",
                              "input_schema": input_schema or {"type": "object"}}]},
             )
-        except Exception:
-            pass  # Best-effort — server may be shutting down.
+        except MeerkatError as exc:
+            # Clean shutdown / disconnect is genuinely benign — the registry
+            # already holds the definition and a future connect() will re-send it.
+            if exc.code in ("CLIENT_CLOSED", "CONNECTION_CLOSED", "NOT_CONNECTED"):
+                return
+            # Server rejection / protocol error is a real fault. We are on a
+            # detached task (asyncio.ensure_future), so re-raising is invisible
+            # to the sync decorator caller. Record the typed fault as
+            # caller-inspectable state so the silent-never-registers failure is
+            # programmatically distinguishable, then log and re-raise.
+            self._tool_registration_errors[name] = exc
+            _logger.error(
+                "post-connect tool registration failed for %r: [%s] %s",
+                name, exc.code, exc.message,
+            )
+            raise
+        # Success: clear any stale fault recorded by a prior failed attempt so a
+        # later re-registration that succeeds no longer reports an error.
+        self._tool_registration_errors.pop(name, None)
 
     # -- Async context manager ---------------------------------------------
 

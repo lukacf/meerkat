@@ -109,17 +109,12 @@ impl JsonlStore {
 
             let contents = match fs::read_to_string(&path).await {
                 Ok(contents) => contents,
-                Err(err) => {
-                    tracing::warn!("failed to read session metadata sidecar: {path:?}: {err}");
-                    continue;
-                }
+                Err(err) => return Err(StoreError::Io(err)),
             };
 
             match serde_json::from_str::<SessionMeta>(&contents) {
                 Ok(meta) => sessions.push(meta),
-                Err(err) => {
-                    tracing::warn!("failed to parse session metadata sidecar: {path:?}: {err}");
-                }
+                Err(err) => return Err(StoreError::Serialization(err)),
             }
         }
 
@@ -683,6 +678,40 @@ mod tests {
         let sessions = store.list(SessionFilter::default()).await?;
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, id);
+        Ok(())
+    }
+
+    /// A corrupt `.meta` sidecar must surface as a typed `SessionStoreError`
+    /// rather than being silently dropped (laundered) from the reconciliation
+    /// set, which would otherwise yield an incomplete `list()` with no fault.
+    #[tokio::test]
+    async fn test_jsonl_store_list_surfaces_corrupt_metadata_sidecar()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let store_path = temp_dir.path().to_path_buf();
+
+        let id = {
+            let store = JsonlStore::new(store_path.clone());
+            let mut session = Session::new();
+            session.push(Message::User(UserMessage::text("Hello".to_string())));
+            let id = session.id().clone();
+            store.save(&session).await?;
+            id
+        };
+
+        // Corrupt the metadata sidecar so reconciliation can no longer parse it.
+        let meta_path = store_path.join(format!("{}.meta", id.0));
+        fs::write(&meta_path, b"{ this is not valid SessionMeta json").await?;
+
+        // A fresh store forces index reconciliation, which scans sidecars.
+        // The corrupt sidecar must propagate as a typed serialization error
+        // instead of an incomplete `Ok(short Vec)`.
+        let store = JsonlStore::new(store_path);
+        let result = store.list(SessionFilter::default()).await;
+        assert!(
+            matches!(result, Err(SessionStoreError::Serialization(_))),
+            "corrupt .meta must surface as SessionStoreError::Serialization, got {result:?}"
+        );
         Ok(())
     }
 

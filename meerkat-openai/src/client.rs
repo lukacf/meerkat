@@ -866,19 +866,27 @@ impl OpenAiClient {
         Ok((items, instructions))
     }
 
-    /// Parse an SSE event from the Responses API stream
-    fn parse_responses_sse_line(line: &str) -> Option<ResponsesStreamEvent> {
-        if let Some(data) = line
+    /// Parse an SSE event from the Responses API stream.
+    ///
+    /// Returns `Ok(None)` when the line is not a `data:` event or is the
+    /// `[DONE]` sentinel, and `Err(LlmError::StreamParseError)` when it IS a
+    /// real `data:` event whose JSON fails to parse — a malformed-but-present
+    /// event is a typed fault, not a silently skippable non-event.
+    fn parse_responses_sse_line(line: &str) -> Result<Option<ResponsesStreamEvent>, LlmError> {
+        let Some(data) = line
             .strip_prefix("data: ")
             .or_else(|| line.strip_prefix("data:"))
-        {
-            if data == "[DONE]" {
-                return None;
-            }
-            serde_json::from_str(data).ok()
-        } else {
-            None
+        else {
+            return Ok(None);
+        };
+        if data == "[DONE]" {
+            return Ok(None);
         }
+        serde_json::from_str(data)
+            .map(Some)
+            .map_err(|error| LlmError::StreamParseError {
+                message: format!("invalid OpenAI Responses SSE data event JSON: {error}"),
+            })
     }
 
     fn image_prompt(request: &ProviderImageGenerationRequest) -> String {
@@ -1339,7 +1347,7 @@ impl OpenAiClient {
                 let line = buffer[..newline_pos].trim();
                 let should_process = !line.is_empty() && !line.starts_with(':');
                 let parsed_event = if should_process {
-                    Self::parse_responses_sse_line(line)
+                    Self::parse_responses_sse_line(line)?
                 } else {
                     None
                 };
@@ -1606,7 +1614,7 @@ impl LlmClient for OpenAiClient {
                     }
                     let should_process = !line.is_empty() && !line.starts_with(':');
                     let parsed_event = if should_process {
-                        Self::parse_responses_sse_line(line)
+                        Self::parse_responses_sse_line(line)?
                     } else {
                         None
                     };
@@ -4325,9 +4333,9 @@ mod tests {
     #[test]
     fn test_parse_responses_sse_line_text_delta() {
         let line = r#"data: {"type":"response.output_text.delta","delta":"Hello"}"#;
-        let event = OpenAiClient::parse_responses_sse_line(line);
-        assert!(event.is_some());
-        let event = event.unwrap();
+        let event = OpenAiClient::parse_responses_sse_line(line)
+            .expect("well-formed data event parses")
+            .expect("event present");
         assert_eq!(event.event_type, "response.output_text.delta");
         assert_eq!(event.delta, Some("Hello".to_string()));
     }
@@ -4336,9 +4344,9 @@ mod tests {
     fn test_parse_responses_sse_line_reasoning_delta() {
         let line =
             r#"data: {"type":"response.reasoning_summary_text.delta","delta":"thinking..."}"#;
-        let event = OpenAiClient::parse_responses_sse_line(line);
-        assert!(event.is_some());
-        let event = event.unwrap();
+        let event = OpenAiClient::parse_responses_sse_line(line)
+            .expect("well-formed data event parses")
+            .expect("event present");
         assert_eq!(event.event_type, "response.reasoning_summary_text.delta");
         assert_eq!(event.delta, Some("thinking...".to_string()));
     }
@@ -4346,9 +4354,9 @@ mod tests {
     #[test]
     fn test_parse_responses_sse_line_function_call_done() {
         let line = r#"data: {"type":"response.function_call_arguments.done","call_id":"call_123","name":"get_weather","arguments":"{\"location\":\"Tokyo\"}"}"#;
-        let event = OpenAiClient::parse_responses_sse_line(line);
-        assert!(event.is_some());
-        let event = event.unwrap();
+        let event = OpenAiClient::parse_responses_sse_line(line)
+            .expect("well-formed data event parses")
+            .expect("event present");
         assert_eq!(event.event_type, "response.function_call_arguments.done");
         assert_eq!(event.call_id, Some("call_123".to_string()));
         assert_eq!(event.name, Some("get_weather".to_string()));
@@ -4358,12 +4366,11 @@ mod tests {
     #[test]
     fn test_parse_responses_sse_line_response_done() {
         let line = r#"data: {"type":"response.done","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Hi"}]}],"usage":{"input_tokens":10,"output_tokens":5}}}"#;
-        let event = OpenAiClient::parse_responses_sse_line(line);
-        assert!(event.is_some());
-        let event = event.unwrap();
+        let event = OpenAiClient::parse_responses_sse_line(line)
+            .expect("well-formed data event parses")
+            .expect("event present");
         assert_eq!(event.event_type, "response.done");
-        assert!(event.response.is_some());
-        let response = event.response.unwrap();
+        let response = event.response.expect("response present");
         assert_eq!(response["status"], "completed");
     }
 
@@ -4371,29 +4378,38 @@ mod tests {
     fn test_parse_responses_sse_line_done_marker() {
         let line = "data: [DONE]";
         let event = OpenAiClient::parse_responses_sse_line(line);
-        assert!(event.is_none());
+        assert!(matches!(event, Ok(None)));
     }
 
     #[test]
     fn test_parse_responses_sse_line_without_trailing_space() {
         let line = r#"data:{"type":"response.output_text.delta","delta":"hello"}"#;
         let event = OpenAiClient::parse_responses_sse_line(line);
-        assert!(event.is_some());
+        assert!(matches!(event, Ok(Some(_))));
     }
 
     #[test]
     fn test_parse_responses_sse_line_non_data_line() {
         let line = "event: message";
         let event = OpenAiClient::parse_responses_sse_line(line);
-        assert!(event.is_none());
+        assert!(matches!(event, Ok(None)));
+    }
+
+    #[test]
+    fn test_parse_responses_sse_line_malformed_data_event_is_typed_error() {
+        // A real `data:` line whose JSON is truncated is a typed fault, not a
+        // silently-dropped non-event.
+        let line = r#"data: {"type":"response.output_text.delta""#;
+        let event = OpenAiClient::parse_responses_sse_line(line);
+        assert!(matches!(event, Err(LlmError::StreamParseError { .. })));
     }
 
     #[test]
     fn test_parse_responses_sse_line_reasoning_item_with_encrypted() {
         let line = r#"data: {"type":"response.reasoning.done","item":{"id":"rs_abc123","summary":[{"type":"summary_text","text":"I need to think"}],"encrypted_content":"enc_xyz"}}"#;
-        let event = OpenAiClient::parse_responses_sse_line(line);
-        assert!(event.is_some());
-        let event = event.unwrap();
+        let event = OpenAiClient::parse_responses_sse_line(line)
+            .expect("well-formed data event parses")
+            .expect("event present");
         assert_eq!(event.event_type, "response.reasoning.done");
         let item = event.item.expect("should have item");
         assert_eq!(item["id"], "rs_abc123");

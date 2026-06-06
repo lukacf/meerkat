@@ -9478,18 +9478,14 @@ impl MobActor {
                         .await
                     {
                         if local_trust_created {
-                            let rollback_handoff = self.authorize_member_trust_unwiring(
+                            self.rollback_peer_only_trust(
                                 &edge,
+                                local_comms.as_ref(),
+                                &peer_meerkat_id,
+                                &peer_key,
                                 "wire_members_repair_rollback_trust_authority",
-                            )?;
-                            let _ = self
-                                .apply_trusted_peer_remove(
-                                    local_comms.as_ref(),
-                                    peer_key.clone(),
-                                    rollback_handoff
-                                        .unwiring_authority_for(&peer_meerkat_id, &peer_key)?,
-                                )
-                                .await;
+                            )
+                            .await;
                         }
                         return Err(MobError::from(error));
                     }
@@ -9579,18 +9575,14 @@ impl MobActor {
                         .await
                     {
                         if local_trust_created {
-                            let rollback_handoff = self.authorize_member_trust_unwiring(
+                            self.rollback_peer_only_trust(
                                 &edge,
+                                local_comms.as_ref(),
+                                &peer_meerkat_id,
+                                &peer_key,
                                 "wire_members_peer_only_repair_rollback_trust_authority",
-                            )?;
-                            let _ = self
-                                .apply_trusted_peer_remove(
-                                    local_comms.as_ref(),
-                                    peer_key.clone(),
-                                    rollback_handoff
-                                        .unwiring_authority_for(&peer_meerkat_id, &peer_key)?,
-                                )
-                                .await;
+                            )
+                            .await;
                         }
                         return Err(error);
                     }
@@ -9633,17 +9625,14 @@ impl MobActor {
                         .await
                     {
                         if peer_trust_created {
-                            let rollback_handoff = self.authorize_member_trust_unwiring(
+                            self.rollback_peer_only_trust(
                                 &edge,
+                                peer_comms.as_ref(),
+                                &local,
+                                &local_key,
                                 "wire_members_peer_only_repair_rollback_trust_authority",
-                            )?;
-                            let _ = self
-                                .apply_trusted_peer_remove(
-                                    peer_comms.as_ref(),
-                                    local_key.clone(),
-                                    rollback_handoff.unwiring_authority_for(&local, &local_key)?,
-                                )
-                                .await;
+                            )
+                            .await;
                         }
                         return Err(error);
                     }
@@ -9787,17 +9776,14 @@ impl MobActor {
                 .await
             {
                 if local_trust_created {
-                    let rollback_handoff = self.authorize_member_trust_unwiring(
+                    self.rollback_peer_only_trust(
                         &edge,
+                        local_comms.as_ref(),
+                        &peer_meerkat_id,
+                        &peer_key,
                         "wire_members_peer_only_rollback_trust_authority",
-                    )?;
-                    let _ = self
-                        .apply_trusted_peer_remove(
-                            local_comms.as_ref(),
-                            peer_key.clone(),
-                            rollback_handoff.unwiring_authority_for(&peer_meerkat_id, &peer_key)?,
-                        )
-                        .await;
+                    )
+                    .await;
                 }
                 self.rollback_peer_only_wire(
                     &edge,
@@ -9823,18 +9809,14 @@ impl MobActor {
                 Ok(stored) => stored,
                 Err(error) => {
                     if local_trust_created {
-                        let rollback_handoff = self.authorize_member_trust_unwiring(
+                        self.rollback_peer_only_trust(
                             &edge,
+                            local_comms.as_ref(),
+                            &peer_meerkat_id,
+                            &peer_key,
                             "wire_members_peer_only_event_rollback_trust_authority",
-                        )?;
-                        let _ = self
-                            .apply_trusted_peer_remove(
-                                local_comms.as_ref(),
-                                peer_key.clone(),
-                                rollback_handoff
-                                    .unwiring_authority_for(&peer_meerkat_id, &peer_key)?,
-                            )
-                            .await;
+                        )
+                        .await;
                     }
                     self.rollback_peer_only_wire(
                         &edge,
@@ -9902,17 +9884,14 @@ impl MobActor {
                 .await
             {
                 if peer_trust_created {
-                    let rollback_handoff = self.authorize_member_trust_unwiring(
+                    self.rollback_peer_only_trust(
                         &edge,
+                        peer_comms.as_ref(),
+                        &local,
+                        &local_key,
                         "wire_members_peer_only_rollback_trust_authority",
-                    )?;
-                    let _ = self
-                        .apply_trusted_peer_remove(
-                            peer_comms.as_ref(),
-                            local_key.clone(),
-                            rollback_handoff.unwiring_authority_for(&local, &local_key)?,
-                        )
-                        .await;
+                    )
+                    .await;
                 }
                 self.rollback_peer_only_wire(
                     &edge,
@@ -9938,17 +9917,14 @@ impl MobActor {
                 Ok(stored) => stored,
                 Err(error) => {
                     if peer_trust_created {
-                        let rollback_handoff = self.authorize_member_trust_unwiring(
+                        self.rollback_peer_only_trust(
                             &edge,
+                            peer_comms.as_ref(),
+                            &local,
+                            &local_key,
                             "wire_members_peer_only_event_rollback_trust_authority",
-                        )?;
-                        let _ = self
-                            .apply_trusted_peer_remove(
-                                peer_comms.as_ref(),
-                                local_key.clone(),
-                                rollback_handoff.unwiring_authority_for(&local, &local_key)?,
-                            )
-                            .await;
+                        )
+                        .await;
                     }
                     self.rollback_peer_only_wire(
                         &edge,
@@ -10632,6 +10608,56 @@ impl MobActor {
                     "wire_members_batch failed to rollback previously installed trust after trust failure"
                 );
             }
+        }
+    }
+
+    /// Compensate the comms-trust half of a failed peer-only wire.
+    ///
+    /// Mirrors [`Self::rollback_wire_side_effects`] for the peer-only paths:
+    /// the rollback-authority derivation never `?`-propagates (a derivation
+    /// failure must not abort the caller before its DSL `UnwireMembers` runs),
+    /// and every compensation fault is warn-logged rather than dropped via
+    /// `let _ =`. Callers invoke this strictly before `rollback_peer_only_wire`
+    /// so the DSL edge is always unwound regardless of the trust outcome.
+    async fn rollback_peer_only_trust(
+        &mut self,
+        edge: &mob_dsl::WiringEdge,
+        comms: &(dyn CoreCommsRuntime + '_),
+        identity: &AgentIdentity,
+        removal_key: &str,
+        context: &str,
+    ) {
+        let rollback_handoff = match self.authorize_member_trust_unwiring(edge, context) {
+            Ok(handoff) => handoff,
+            Err(err) => {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    %err,
+                    "peer-only wire rollback: failed to obtain generated trust removal authority"
+                );
+                return;
+            }
+        };
+        let authority = match rollback_handoff.unwiring_authority_for(identity, removal_key) {
+            Ok(authority) => authority,
+            Err(err) => {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    %err,
+                    "peer-only wire rollback: failed to build generated trust removal authority"
+                );
+                return;
+            }
+        };
+        if let Err(err) = self
+            .apply_trusted_peer_remove(comms, removal_key.to_string(), authority)
+            .await
+        {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                %err,
+                "peer-only wire rollback: failed to remove trust"
+            );
         }
     }
 

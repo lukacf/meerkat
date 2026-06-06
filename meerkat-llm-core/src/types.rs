@@ -433,23 +433,33 @@ impl ToolCallBuffer {
         self.args_json.push_str(delta);
     }
 
-    /// Try to complete the tool call (parse JSON args)
-    pub fn try_complete(&self) -> Option<meerkat_core::ToolCall> {
-        let name = self.name.as_ref()?;
+    /// Try to complete the tool call (parse JSON args).
+    ///
+    /// Returns `Ok(None)` for the legitimate benign "not a complete tool call"
+    /// states (no name yet, or empty args treated as an empty object). Returns
+    /// `Err(LlmError::StreamParseError)` only when non-empty accumulated args
+    /// fail to parse as JSON — a malformed/truncated tool call must surface as a
+    /// typed fault rather than silently vanishing.
+    pub fn try_complete(&self) -> Result<Option<meerkat_core::ToolCall>, LlmError> {
+        let Some(name) = self.name.as_ref() else {
+            return Ok(None);
+        };
 
         // Try to parse the accumulated JSON
         // Handle empty args (tools with no parameters) by treating as empty object
         let args: Value = if self.args_json.is_empty() {
             serde_json::json!({})
         } else {
-            serde_json::from_str(&self.args_json).ok()?
+            serde_json::from_str(&self.args_json).map_err(|error| LlmError::StreamParseError {
+                message: format!("invalid tool call arguments JSON for {}: {error}", self.id),
+            })?
         };
 
-        Some(meerkat_core::ToolCall::new(
+        Ok(Some(meerkat_core::ToolCall::new(
             self.id.clone(),
             name.clone(),
             args,
-        ))
+        )))
     }
 }
 
@@ -516,7 +526,7 @@ mod tests {
         buffer.name = Some("test_tool".to_string());
         buffer.args_json = r#"{"key": "value"}"#.to_string();
 
-        let completed = buffer.try_complete().ok_or("incomplete")?;
+        let completed = buffer.try_complete()?.ok_or("incomplete")?;
         assert_eq!(completed.id, "tc_1");
         assert_eq!(completed.name, "test_tool");
         assert_eq!(completed.args["key"], "value");
@@ -525,13 +535,18 @@ mod tests {
 
     #[test]
     fn test_tool_call_buffer_incomplete() {
+        // No name yet: legitimate benign "not a complete tool call" -> Ok(None).
         let buffer = ToolCallBuffer::new("tc_1".to_string());
-        assert!(buffer.try_complete().is_none());
+        assert!(matches!(buffer.try_complete(), Ok(None)));
 
+        // Name present but malformed/truncated args: typed StreamParseError fault.
         let mut buffer = ToolCallBuffer::new("tc_1".to_string());
         buffer.name = Some("test".to_string());
         buffer.args_json = r#"{"incomplete"#.to_string();
-        assert!(buffer.try_complete().is_none());
+        assert!(matches!(
+            buffer.try_complete(),
+            Err(LlmError::StreamParseError { .. })
+        ));
     }
 
     #[test]
@@ -540,7 +555,7 @@ mod tests {
         buffer.name = Some("get_todays_activities".to_string());
         buffer.args_json = String::new();
 
-        let completed = buffer.try_complete().ok_or("incomplete")?;
+        let completed = buffer.try_complete()?.ok_or("incomplete")?;
         assert_eq!(completed.id, "tc_1");
         assert_eq!(completed.name, "get_todays_activities");
         assert_eq!(completed.args, serde_json::json!({}));
@@ -614,7 +629,7 @@ mod tests {
         buffer.push_args(r#"{"key""#);
         buffer.push_args(r#": "value"}"#);
 
-        let completed = buffer.try_complete().ok_or("incomplete")?;
+        let completed = buffer.try_complete()?.ok_or("incomplete")?;
         assert_eq!(completed.args["key"], "value");
         Ok(())
     }
@@ -654,8 +669,8 @@ mod tests {
 
         let tool_calls: Vec<_> = buffers
             .into_values()
-            .filter_map(|b| b.try_complete())
-            .collect();
+            .filter_map(|b| b.try_complete().transpose())
+            .collect::<Result<Vec<_>, _>>()?;
 
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].name, "read_file");

@@ -40,7 +40,7 @@ fn open_connection(path: &Path) -> Result<Connection, StoreError> {
     Ok(conn)
 }
 
-/// SQLite-backed [`SessionIndex`] implementation.
+/// SQLite-backed session index implementation.
 pub struct SqliteSessionIndex {
     path: PathBuf,
 }
@@ -153,41 +153,5 @@ impl SqliteSessionIndex {
             metas.push(serde_json::from_slice(&bytes).map_err(StoreError::Serialization)?);
         }
         Ok(metas)
-    }
-}
-
-pub trait SessionIndex: Send + Sync {
-    fn lookup(&self, id: &SessionId) -> Option<SessionMeta>;
-
-    fn insert(&self, meta: SessionMeta);
-
-    fn list(&self, filter: SessionFilter) -> Vec<SessionMeta>;
-}
-
-impl SessionIndex for SqliteSessionIndex {
-    fn lookup(&self, id: &SessionId) -> Option<SessionMeta> {
-        match self.lookup_meta(id) {
-            Ok(meta) => meta,
-            Err(err) => {
-                tracing::warn!("session index lookup failed: {err}");
-                None
-            }
-        }
-    }
-
-    fn insert(&self, meta: SessionMeta) {
-        if let Err(err) = self.insert_meta(meta) {
-            tracing::warn!("session index insert failed: {err}");
-        }
-    }
-
-    fn list(&self, filter: SessionFilter) -> Vec<SessionMeta> {
-        match self.list_meta(filter) {
-            Ok(metas) => metas,
-            Err(err) => {
-                tracing::warn!("session index list failed: {err}");
-                Vec::new()
-            }
-        }
     }
 }

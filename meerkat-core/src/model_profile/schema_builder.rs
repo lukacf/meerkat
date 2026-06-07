@@ -7,7 +7,7 @@
 //! etc.), which conflated unrelated models into the same bucket.
 
 use crate::Provider;
-use crate::model_profile::capabilities::{ModelCapabilities, ThinkingSupport};
+use crate::model_profile::capabilities::{EffortLevel, ModelCapabilities, ThinkingSupport};
 use serde_json::{Value, json};
 
 /// Build the JSON Schema for a model's `provider_params`.
@@ -53,7 +53,7 @@ fn build_anthropic_schema(caps: &ModelCapabilities) -> Value {
     if !caps.effort_levels.is_empty() {
         props.insert(
             "effort".into(),
-            string_enum_schema("Output effort level.", caps.effort_levels),
+            effort_enum_schema("Output effort level.", caps.effort_levels),
         );
     }
     if caps.supports_inference_geo {
@@ -136,7 +136,7 @@ fn build_openai_schema(caps: &ModelCapabilities) -> Value {
     if caps.supports_reasoning && !caps.effort_levels.is_empty() {
         props.insert(
             "reasoning_effort".into(),
-            string_enum_schema("Reasoning effort level.", caps.effort_levels),
+            effort_enum_schema("Reasoning effort level.", caps.effort_levels),
         );
     }
     if caps.supports_legacy_penalties {
@@ -254,8 +254,16 @@ fn gemini_thinking_level_schema() -> Value {
     })
 }
 
-fn string_enum_schema(description: &str, values: &[&str]) -> Value {
-    let vs: Vec<Value> = values.iter().map(|s| Value::String((*s).into())).collect();
+/// Project a typed [`EffortLevel`] set into a JSON Schema string-enum.
+///
+/// The enum values derive from the typed vocabulary via
+/// [`EffortLevel::as_wire_str`], not from inline string literals, so the
+/// advertised schema cannot drift from the catalog's declared levels.
+fn effort_enum_schema(description: &str, levels: &[EffortLevel]) -> Value {
+    let vs: Vec<Value> = levels
+        .iter()
+        .map(|level| Value::String(level.as_wire_str().into()))
+        .collect();
     json!({
         "description": description,
         "type": "string",
@@ -378,6 +386,56 @@ mod tests {
             };
             check_prop("effort");
             check_prop("reasoning_effort");
+        }
+    }
+
+    /// Gate (row #30): the advertised effort/reasoning_effort enum values are
+    /// projected from the typed `EffortLevel` vocabulary, never from string
+    /// literals. Every emitted value must round-trip back to a typed level.
+    #[test]
+    fn effort_enum_values_derive_from_typed_effort_levels() {
+        use crate::model_profile::capabilities::EffortLevel;
+
+        let typed_wire = |s: &str| -> bool {
+            [
+                EffortLevel::None,
+                EffortLevel::Minimal,
+                EffortLevel::Low,
+                EffortLevel::Medium,
+                EffortLevel::High,
+                EffortLevel::Xhigh,
+                EffortLevel::Max,
+            ]
+            .iter()
+            .any(|level| level.as_wire_str() == s)
+        };
+
+        for caps in all_capabilities() {
+            let schema = build_params_schema(caps);
+            let declared: std::collections::BTreeSet<String> = caps
+                .effort_levels
+                .iter()
+                .map(|level| level.as_wire_str().to_string())
+                .collect();
+
+            for prop in ["effort", "reasoning_effort"] {
+                if let Some(values) = enum_values_for(&schema, prop) {
+                    for v in &values {
+                        assert!(
+                            typed_wire(v),
+                            "{}.{} emitted '{}' which is not a typed EffortLevel wire value",
+                            caps.id,
+                            prop,
+                            v
+                        );
+                    }
+                    assert_eq!(
+                        values, declared,
+                        "{}.{} enum must equal the catalog's typed effort_levels",
+                        caps.id, prop
+                    );
+                }
+            }
         }
     }
 

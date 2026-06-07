@@ -445,6 +445,28 @@ async fn explicit_web_search_fallback_is_visible_for_realtime_model() {
 }
 
 #[tokio::test]
+async fn explicit_web_search_enable_without_provider_errors() {
+    // #108: an explicit web-search Enable with no executor override, a model
+    // that lacks native search, and a default config (provider web search
+    // disabled) must fail closed — never silently build tool-less.
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp).builtins(true);
+    let mut build_config = AgentBuildConfig {
+        override_web_search: ToolCategoryOverride::Enable,
+        ..AgentBuildConfig::new("gpt-realtime-2")
+    };
+    build_config.llm_client_override = Some(Arc::new(MockLlmClient));
+    let result = factory.build_agent(build_config, &Config::default()).await;
+    let err = result
+        .err()
+        .expect("explicit web-search enable with no provider must fail closed");
+    assert!(
+        matches!(err, meerkat::BuildAgentError::CapabilityUnavailable { capability, .. } if capability == "web_search"),
+        "expected CapabilityUnavailable(web_search), got: {err:?}"
+    );
+}
+
+#[tokio::test]
 async fn web_search_fallback_stays_hidden_on_inherit() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp).builtins(true);

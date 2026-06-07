@@ -211,19 +211,37 @@ async fn get_code_assist_json<T: serde::de::DeserializeOwned>(
     })
 }
 
+/// Typed result of resolving the Google Code Assist managed project and tier.
+///
+/// This is the single typed owner of the loadCodeAssist/onboardUser policy
+/// decision: the runtime materializes both the resolved `project_id` and the
+/// `tier` it actually onboarded into [`meerkat_core::GoogleAuthMetadata`] from
+/// this one owner. The tier is no longer selected-then-discarded and re-derived
+/// from a separate stringly binding option. `tier` is `None` when the project
+/// came from an explicit hint and onboarding never ran (no tier was selected).
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+struct CodeAssistProjectResolution {
+    project_id: String,
+    tier: Option<String>,
+}
+
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 async fn resolve_code_assist_user_project(
     access_token: &str,
     binding: &ValidatedBinding,
     env: &ResolverEnvironment,
     base_url: &str,
-) -> Result<Option<String>, ProviderAuthError> {
+) -> Result<CodeAssistProjectResolution, ProviderAuthError> {
     let project_hint = backend_option_string(binding, "project_id")
         .or_else(|| (env.env_lookup)("GOOGLE_CLOUD_PROJECT"))
         .or_else(|| (env.env_lookup)("GCLOUD_PROJECT"))
         .or_else(|| (env.env_lookup)("CLOUDSDK_CORE_PROJECT"));
-    if project_hint.is_some() {
-        return Ok(project_hint);
+    if let Some(project_id) = project_hint.clone() {
+        // Explicit project hint: no onboarding runs, so no tier is selected.
+        return Ok(CodeAssistProjectResolution {
+            project_id,
+            tier: None,
+        });
     }
     let http = reqwest::Client::new();
     let mut load_body = serde_json::Map::new();
@@ -249,7 +267,10 @@ async fn resolve_code_assist_user_project(
         .clone()
         .or(project_hint.clone())
     {
-        return Ok(Some(project_id));
+        // loadCodeAssist returned a managed project: it also reports the
+        // account's current tier; surface it as the resolved tier of record.
+        let tier = load.current_tier.as_ref().and_then(|t| t.id.clone());
+        return Ok(CodeAssistProjectResolution { project_id, tier });
     }
     if load.current_tier.is_some() {
         return Err(ProviderAuthError::SourceResolutionFailed(
@@ -315,7 +336,7 @@ async fn resolve_code_assist_user_project(
         )
         .await?;
     }
-    operation
+    let project_id = operation
         .response
         .and_then(|response| response.cloudaicompanion_project)
         .and_then(|project| project.id)
@@ -324,8 +345,13 @@ async fn resolve_code_assist_user_project(
             ProviderAuthError::SourceResolutionFailed(
                 "Google Code Assist onboarding did not return a managed project".into(),
             )
-        })
-        .map(Some)
+        })?;
+    // The tier we just onboarded is the resolved tier of record — return it
+    // alongside the project rather than discarding it.
+    Ok(CodeAssistProjectResolution {
+        project_id,
+        tier: Some(tier_id.to_string()),
+    })
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
@@ -590,7 +616,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
                         .primary_secret
                         .clone()
                         .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))?;
-                    let code_assist_project_id =
+                    let code_assist_resolution =
                         if matches!(backend_kind, GoogleBackendKind::GoogleCodeAssist) {
                             let base_url = configured_or_default_base_url(
                                 backend_kind,
@@ -602,11 +628,24 @@ impl ProviderRuntime for GoogleProviderRuntime {
                                         .to_string(),
                                 )
                             })?;
-                            resolve_code_assist_user_project(&access, binding, env, &base_url)
-                                .await?
+                            Some(
+                                resolve_code_assist_user_project(&access, binding, env, &base_url)
+                                    .await?,
+                            )
                         } else {
                             None
                         };
+                    let code_assist_project_id = code_assist_resolution
+                        .as_ref()
+                        .map(|r| r.project_id.clone());
+                    // The resolved tier of record comes from the single typed
+                    // resolution owner (the onboarded/reported tier), falling
+                    // back to the explicit binding option only when onboarding
+                    // never ran and reported no tier.
+                    let code_assist_tier = code_assist_resolution
+                        .as_ref()
+                        .and_then(|r| r.tier.clone())
+                        .or_else(|| backend_option_string(binding, "tier"));
                     let mut google_email: Option<String> = None;
                     let mut google_user_id: Option<String> = None;
                     // Plan §4b.12: lift OIDC claims into AuthMetadata.
@@ -631,7 +670,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
                                     project_id: code_assist_project_id
                                         .or_else(|| backend_option_string(binding, "project_id")),
                                     region: backend_option_string(binding, "region"),
-                                    code_assist_tier: backend_option_string(binding, "tier"),
+                                    code_assist_tier,
                                 },
                             ));
                     }

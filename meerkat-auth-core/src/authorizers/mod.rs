@@ -8,13 +8,13 @@
 
 use std::sync::Arc;
 
-#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+#[cfg(any(feature = "azure-ad", feature = "gcp-auth", feature = "aws-sigv4"))]
 use chrono::{DateTime, Utc};
-#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+#[cfg(any(feature = "azure-ad", feature = "gcp-auth", feature = "aws-sigv4"))]
 use meerkat_core::AuthError;
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
 use meerkat_core::RefreshFailureObservation;
-#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+#[cfg(any(feature = "azure-ad", feature = "gcp-auth", feature = "aws-sigv4"))]
 use meerkat_core::handles::{
     AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, CredentialUseDisposition, CredentialUseIntent,
     DslTransitionError, GeneratedAuthLeaseHandle, LeaseKey,
@@ -27,7 +27,7 @@ use meerkat_core::handles::{
 pub type EnvLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 #[derive(Clone)]
-#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+#[cfg(any(feature = "azure-ad", feature = "gcp-auth", feature = "aws-sigv4"))]
 pub(crate) struct LeaseFreshnessObserver {
     handle: GeneratedAuthLeaseHandle,
     lease_key: LeaseKey,
@@ -38,12 +38,101 @@ const AUTH_LEASE_REFRESH_WAIT_POLL_MS: u64 = 10;
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
 const AUTH_LEASE_REFRESH_WAIT_TIMEOUT_SECS: u64 = 30;
 
-#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+#[cfg(any(feature = "azure-ad", feature = "gcp-auth", feature = "aws-sigv4"))]
 impl LeaseFreshnessObserver {
     pub(crate) fn new(handle: GeneratedAuthLeaseHandle, lease_key: LeaseKey) -> Self {
         Self { handle, lease_key }
     }
 
+    /// Consult the per-binding AuthMachine for a credential-use verdict at
+    /// `now` before signing with inline-resolved credential material (AWS
+    /// SigV4), acquiring a `Valid` lease the first time the binding is absent.
+    /// Unlike [`cached_token_is_fresh`](Self::cached_token_is_fresh) there is no
+    /// endpoint-fetched token to cache-coherence-check: SigV4 resolves the
+    /// credential inline per request, so the lease — not an implicit
+    /// always-fresh assumption — owns whether the credential is still usable.
+    ///
+    /// `expires_at` carries the credential's bound expiry when one is known
+    /// (STS session tokens); `None` models Env/Static credentials with no
+    /// expiry as an explicit `Valid` (no-expiry) lease phase via a far-future
+    /// sentinel rather than implicit always-fresh.
+    ///
+    /// The AuthMachine owns the `(lifecycle_phase, credential_present, intent)`
+    /// -> disposition policy. `Authorized` -> proceed to sign; `LeaseAbsent` ->
+    /// acquire a `Valid` lease and proceed (first use); `ReauthRequired` ->
+    /// `Err(UserReauthRequired)`; every refresh disposition (expired/expiring
+    /// STS credential) -> `Err(RefreshRequired)` so the signer fails closed
+    /// instead of signing with stale material.
+    #[cfg(feature = "aws-sigv4")]
+    pub(crate) fn ensure_valid_for_signing(
+        &self,
+        authorizer_label: &str,
+        now: DateTime<Utc>,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<(), AuthError> {
+        self.handle
+            .observe_credential_freshness(
+                &self.lease_key,
+                epoch_secs(now),
+                AUTH_LEASE_TTL_REFRESH_WINDOW_SECS,
+            )
+            .map_err(|err| self.observer_error(authorizer_label, "observe_freshness", err))?;
+        let disposition = self
+            .handle
+            .resolve_credential_use_admission(&self.lease_key, CredentialUseIntent::UseCredential)
+            .map_err(|err| {
+                self.observer_error(authorizer_label, "resolve_credential_use_admission", err)
+            })?;
+        match disposition {
+            CredentialUseDisposition::Authorized => Ok(()),
+            CredentialUseDisposition::LeaseAbsent => {
+                // First use of this binding: acquire a `Valid` lease so the
+                // AuthMachine — not the shell — owns the credential's validity.
+                // No-expiry Env/Static creds acquire with a far-future sentinel
+                // (`Valid`, no-expiry); STS creds acquire with their bound
+                // expiry so a later observation can move them to Expired.
+                let acquire_expiry = expires_at.map(epoch_secs).unwrap_or(u64::MAX);
+                self.handle
+                    .acquire_lease(&self.lease_key, acquire_expiry)
+                    .map_err(|err| self.observer_error(authorizer_label, "acquire_lease", err))?;
+                Ok(())
+            }
+            CredentialUseDisposition::ReauthRequired => Err(AuthError::UserReauthRequired),
+            CredentialUseDisposition::RefreshRequired
+            | CredentialUseDisposition::RefreshDisallowed
+            | CredentialUseDisposition::AlreadyRefreshing => Err(AuthError::RefreshRequired),
+        }
+    }
+
+    pub(crate) fn expires_at(&self) -> Option<DateTime<Utc>> {
+        let snapshot = self.handle.snapshot(&self.lease_key);
+        snapshot
+            .expires_at
+            .and_then(|secs| i64::try_from(secs).ok())
+            .and_then(|secs| DateTime::<Utc>::from_timestamp(secs, 0))
+    }
+
+    fn observer_error(
+        &self,
+        authorizer_label: &str,
+        action: &'static str,
+        err: DslTransitionError,
+    ) -> AuthError {
+        AuthError::Other(format!(
+            "{authorizer_label} auth lease {action} failed for {}: {err}",
+            self.lease_key
+        ))
+    }
+}
+
+/// Refresh-lifecycle methods used by the endpoint-fetched-token authorizers
+/// (Google ADC, Azure AD). The AWS SigV4 authorizer signs with credential
+/// material resolved inline per request and never fetches/caches a token from
+/// a refresh endpoint, so it consults
+/// [`LeaseFreshnessObserver::ensure_valid_for_signing`] only and does not
+/// compile this block.
+#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+impl LeaseFreshnessObserver {
     pub(crate) fn cached_token_is_fresh(
         &self,
         authorizer_label: &str,
@@ -143,14 +232,6 @@ impl LeaseFreshnessObserver {
         // answer — the shell must not recompute it with its own window
         // comparison.
         Ok(true)
-    }
-
-    pub(crate) fn expires_at(&self) -> Option<DateTime<Utc>> {
-        let snapshot = self.handle.snapshot(&self.lease_key);
-        snapshot
-            .expires_at
-            .and_then(|secs| i64::try_from(secs).ok())
-            .and_then(|secs| DateTime::<Utc>::from_timestamp(secs, 0))
     }
 
     pub(crate) async fn begin_refresh(
@@ -257,18 +338,6 @@ impl LeaseFreshnessObserver {
         }
         Ok(())
     }
-
-    fn observer_error(
-        &self,
-        authorizer_label: &str,
-        action: &'static str,
-        err: DslTransitionError,
-    ) -> AuthError {
-        AuthError::Other(format!(
-            "{authorizer_label} auth lease {action} failed for {}: {err}",
-            self.lease_key
-        ))
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -301,7 +370,7 @@ pub(crate) fn endpoint_failure_is_transient(status: u16) -> bool {
     matches!(status, 408 | 409 | 425 | 429 | 500..=599)
 }
 
-#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+#[cfg(any(feature = "azure-ad", feature = "gcp-auth", feature = "aws-sigv4"))]
 fn epoch_secs(ts: DateTime<Utc>) -> u64 {
     ts.timestamp().max(0) as u64
 }

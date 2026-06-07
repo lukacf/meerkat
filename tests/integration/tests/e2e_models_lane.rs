@@ -25,7 +25,9 @@ use meerkat_client::{
     types::LlmClient,
 };
 use meerkat_core::{Message, Provider, UserMessage};
-use meerkat_models::{CatalogEntry, ModelCapabilities, ThinkingSupport, capabilities_for, catalog};
+use meerkat_models::{
+    CatalogEntry, EffortLevel, ModelCapabilities, ThinkingSupport, capabilities_for, catalog,
+};
 
 // ---------------------------------------------------------------------------
 // API key resolution
@@ -236,10 +238,11 @@ async fn effort_levels_accepted() {
         }
         // Skip `none` — sending reasoning_effort=none is redundant with the
         // default on GPT-5.4 and doesn't prove the enum advertises correctly.
-        let levels: Vec<&&str> = caps
+        let levels: Vec<EffortLevel> = caps
             .effort_levels
             .iter()
-            .filter(|lvl| **lvl != "none")
+            .copied()
+            .filter(|lvl| *lvl != EffortLevel::None)
             .collect();
         if levels.is_empty() {
             continue;
@@ -252,13 +255,15 @@ async fn effort_levels_accepted() {
             }
         };
         for level in levels {
-            let params = match effort_provider_params(entry.provider, level) {
+            let params = match effort_provider_params(entry.provider, level.as_wire_str()) {
                 Some(p) => p,
                 None => continue,
             };
             eprintln!(
                 "-- effort model={} provider={} effort={}",
-                entry.id, entry.provider, level
+                entry.id,
+                entry.provider,
+                level.as_wire_str()
             );
             tried += 1;
             match run_chat(
@@ -271,7 +276,9 @@ async fn effort_levels_accepted() {
             .await
             {
                 Ok(_) => {}
-                Err(e) => failures.push(format!("{} effort={level}: {e}", entry.id)),
+                Err(e) => {
+                    failures.push(format!("{} effort={}: {e}", entry.id, level.as_wire_str()))
+                }
             }
         }
     }

@@ -3747,6 +3747,54 @@ mod tests {
         assert_eq!(body["reasoning"]["summary"], "auto");
     }
 
+    /// #46: the `supports_*_override` provider-tag fields are a typed,
+    /// fail-closed carve-out for off-catalog OpenAI-compatible endpoints.
+    /// When no override is present the capability MUST fall through to the
+    /// model catalog (the single typed owner), never default to a permissive
+    /// `true`. This is the fail-closed contract: an override only takes
+    /// effect when an off-catalog compatible client explicitly stamps it.
+    #[test]
+    fn request_capability_overrides_fall_back_to_catalog_when_absent() {
+        // A catalogued model with no override falls through to the catalog
+        // capability row — not to a hardcoded `true`.
+        let catalog_request = LlmRequest::new(
+            "gpt-5.4",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        );
+        assert_eq!(
+            OpenAiClient::request_supports_temperature(&catalog_request),
+            OpenAiClient::model_supports_temperature("gpt-5.4"),
+            "absent temperature override must fall through to the catalog row"
+        );
+        assert_eq!(
+            OpenAiClient::request_supports_reasoning_payload(&catalog_request),
+            OpenAiClient::model_supports_reasoning_payload("gpt-5.4"),
+            "absent reasoning override must fall through to the catalog row"
+        );
+
+        // An off-catalog compatible-endpoint alias has no catalog row, so the
+        // catalog says `false` (unknown -> false). With no override the
+        // capability stays fail-closed `false`.
+        let off_catalog_request = LlmRequest::new(
+            "gemma4:e2b",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        );
+        assert!(
+            !OpenAiClient::request_supports_temperature(&off_catalog_request),
+            "off-catalog alias with no override must fail closed to false"
+        );
+
+        // The off-catalog compatible endpoint opts in via the typed override
+        // (the only way the override is ever set — see
+        // `OpenAiCompatibleClient::request_with_remote_model`).
+        let with_override = off_catalog_request
+            .with_openai_tag_merge(|t| t.supports_temperature_override = Some(true));
+        assert!(
+            OpenAiClient::request_supports_temperature(&with_override),
+            "off-catalog endpoint sets the capability via the typed override"
+        );
+    }
+
     // =========================================================================
     // BlockAssistant Message Tests
     // =========================================================================

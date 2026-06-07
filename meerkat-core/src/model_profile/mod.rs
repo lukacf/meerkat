@@ -127,7 +127,7 @@ pub(crate) fn project_to_profile(caps: &ModelCapabilities) -> ModelProfile {
         image_input: caps.vision,
         image_tool_results: caps.image_tool_results,
         realtime: caps.realtime,
-        image_generation: catalog::default_image_generation_model(caps.provider).is_some(),
+        image_generation: caps.image_generation,
         params_schema: schema_builder::build_params_schema(caps),
         beta_headers: caps
             .beta_headers
@@ -359,6 +359,37 @@ mod tests {
                 entry.provider
             );
         }
+    }
+
+    /// Gate (row #92): `image_generation` is a model-owned catalog fact, not a
+    /// per-provider derivation. A Gemini text model's provider (Gemini) HAS an
+    /// image-generation default model, yet the text row itself declares
+    /// `image_generation = false` and the projected profile must report false —
+    /// proving the fact comes from the model row, not a provider lookup.
+    #[test]
+    fn image_generation_is_model_owned_not_provider_derived() {
+        // Gemini provider has an image-gen default, but the text model row does
+        // not itself generate images.
+        assert!(
+            catalog::default_image_generation_model(Provider::Gemini).is_some(),
+            "Gemini provider must have an image-generation default model"
+        );
+        let gemini_text = profile_for(Provider::Gemini, "gemini-3.5-flash")
+            .expect("gemini-3.5-flash must have a profile");
+        assert!(
+            !gemini_text.image_generation,
+            "Gemini text model must report image_generation=false despite the \
+             provider having an image-gen default"
+        );
+
+        // OpenAI text rows route through the hosted image tool: model-owned true.
+        let gpt = profile_for(Provider::OpenAI, "gpt-5.4").expect("gpt-5.4 must have a profile");
+        assert!(gpt.image_generation);
+
+        // Anthropic has no image-gen route: model-owned false.
+        let claude = profile_for(Provider::Anthropic, "claude-opus-4-8")
+            .expect("claude-opus-4-8 must have a profile");
+        assert!(!claude.image_generation);
     }
 
     #[test]

@@ -269,6 +269,110 @@ impl std::fmt::Display for CapabilityId {
     }
 }
 
+/// Typed key for a skill extension entry.
+///
+/// Extension keys follow a `namespace.key` convention (e.g. `vendor.policy`).
+/// The split is parsed once, fail-closed, at the construction boundary so the
+/// namespace/key form is a typed owner rather than a string re-split on every
+/// read. The namespace is the segment before the first `.`; the key is the
+/// remainder (which may itself contain dots, e.g. `vendor.sub.field`). The
+/// original string is preserved verbatim so the key round-trips on the wire.
+///
+/// Values stay open-ended `String` author metadata; only the key space is
+/// typed.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(try_from = "String", into = "String")]
+pub struct SkillExtensionKey {
+    /// Full original `namespace.key` string.
+    raw: String,
+    /// Byte offset of the `.` separating namespace from key, so accessors
+    /// borrow slices without re-splitting.
+    dot: usize,
+}
+
+impl SkillExtensionKey {
+    /// Parse a `namespace.key` extension key, fail-closed on malformed input.
+    ///
+    /// Rejects keys with no `.`, an empty namespace, or an empty key. Malformed
+    /// keys fail here at the parse boundary rather than silently surviving as
+    /// re-split strings downstream.
+    pub fn parse(value: &str) -> Result<Self, SkillError> {
+        let Some((namespace, key)) = value.split_once('.') else {
+            return Err(SkillError::Parse(
+                format!(
+                    "invalid extension key '{value}': extension keys must be namespaced as 'vendor.key'"
+                )
+                .into(),
+            ));
+        };
+        if namespace.is_empty() || key.is_empty() {
+            return Err(SkillError::Parse(
+                format!(
+                    "invalid extension key '{value}': expected non-empty namespace and key segments"
+                )
+                .into(),
+            ));
+        }
+        Ok(Self {
+            raw: value.to_string(),
+            dot: namespace.len(),
+        })
+    }
+
+    /// The namespace segment (before the first `.`).
+    pub fn namespace(&self) -> &str {
+        &self.raw[..self.dot]
+    }
+
+    /// The key segment (after the first `.`; may itself contain dots).
+    pub fn key(&self) -> &str {
+        &self.raw[self.dot + 1..]
+    }
+
+    /// The full original `namespace.key` string.
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+
+    /// The companion `<namespace>.version` key for this extension's namespace.
+    ///
+    /// Always well-formed (non-empty namespace, non-empty `version` key), so it
+    /// is constructed directly rather than re-parsed.
+    pub fn version_companion(&self) -> Self {
+        let namespace = self.namespace();
+        Self {
+            raw: format!("{namespace}.version"),
+            dot: namespace.len(),
+        }
+    }
+
+    /// Whether this key's key segment is exactly `version`.
+    pub fn is_version(&self) -> bool {
+        self.key() == "version"
+    }
+}
+
+impl TryFrom<String> for SkillExtensionKey {
+    type Error = SkillError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value)
+    }
+}
+
+impl From<SkillExtensionKey> for String {
+    fn from(value: SkillExtensionKey) -> Self {
+        value.raw
+    }
+}
+
+impl std::fmt::Display for SkillExtensionKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.raw)
+    }
+}
+
 /// Source transport class used for identity governance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -527,7 +631,9 @@ impl SkillDescriptor {
 pub struct SkillDocument {
     pub descriptor: SkillDescriptor,
     pub body: String,
-    pub extensions: IndexMap<String, String>,
+    /// Author-defined extension metadata. Keys are typed `namespace.key`
+    /// owners; values stay open-ended `String` author metadata.
+    pub extensions: IndexMap<SkillExtensionKey, String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -720,6 +826,24 @@ pub enum SkillError {
     RemapCycle {
         source_uuid: String,
         skill_name: String,
+    },
+
+    #[error(
+        "duplicate skill remap from {from}: a later remap to {new_to} would silently shadow the existing remap to {existing_to}"
+    )]
+    DuplicateRemap {
+        from: String,
+        existing_to: String,
+        new_to: String,
+    },
+
+    #[error(
+        "duplicate skill alias '{alias}': a later alias to {new_to} would silently shadow the existing alias to {existing_to}"
+    )]
+    DuplicateAlias {
+        alias: String,
+        existing_to: String,
+        new_to: String,
     },
 }
 
@@ -1275,6 +1399,48 @@ mod tests {
         assert_eq!(json, "\"builtins\"");
         let decoded: CapabilityId = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded, cap);
+    }
+
+    #[test]
+    fn test_skill_extension_key_parse_and_accessors() {
+        let key = SkillExtensionKey::parse("vendor.policy").expect("valid");
+        assert_eq!(key.namespace(), "vendor");
+        assert_eq!(key.key(), "policy");
+        assert_eq!(key.as_str(), "vendor.policy");
+        assert!(!key.is_version());
+
+        // Key segment may itself contain dots; only the first '.' splits.
+        let nested = SkillExtensionKey::parse("vendor.sub.field").expect("valid nested");
+        assert_eq!(nested.namespace(), "vendor");
+        assert_eq!(nested.key(), "sub.field");
+    }
+
+    #[test]
+    fn test_skill_extension_key_fail_closed() {
+        // No '.' separator.
+        assert!(SkillExtensionKey::parse("vendor").is_err());
+        // Empty namespace.
+        assert!(SkillExtensionKey::parse(".key").is_err());
+        // Empty key.
+        assert!(SkillExtensionKey::parse("vendor.").is_err());
+    }
+
+    #[test]
+    fn test_skill_extension_key_version_companion() {
+        let key = SkillExtensionKey::parse("vendor.policy").expect("valid");
+        let companion = key.version_companion();
+        assert_eq!(companion.as_str(), "vendor.version");
+        assert_eq!(companion.namespace(), "vendor");
+        assert!(companion.is_version());
+    }
+
+    #[test]
+    fn test_skill_extension_key_json_roundtrip() {
+        let key = SkillExtensionKey::parse("vendor.policy").expect("valid");
+        let json = serde_json::to_string(&key).expect("serialize");
+        assert_eq!(json, "\"vendor.policy\"");
+        let decoded: SkillExtensionKey = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, key);
     }
 
     #[test]

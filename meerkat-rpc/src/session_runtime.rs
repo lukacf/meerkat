@@ -167,7 +167,8 @@ impl ArchiveRuntimeMobState for RpcMobStateAdapter {
 // `meerkat::session_runtime::live_orchestration`. Re-exported here so
 // the existing call-sites and tests resolve the same symbols.
 use meerkat::session_runtime::live_orchestration::{
-    build_live_projection_snapshot_for_runtime, extract_system_prompt_from_seed_messages_runtime,
+    LiveConfigPropagationReport, build_live_projection_snapshot_for_runtime,
+    extract_system_prompt_from_seed_messages_runtime,
     live_channel_requires_close_for_identity_change, realtime_projection_messages,
     realtime_projection_root_system_message, realtime_projection_runtime_system_context,
 };
@@ -4031,12 +4032,15 @@ impl SessionRuntime {
     /// against a different global must still re-resolve when the global
     /// is patched, so the next `live/open` precheck enforces B19 against
     /// the new resolution).
-    pub async fn propagate_config_to_live_channels(&self, prior_global_model: Option<&str>) {
+    pub async fn propagate_config_to_live_channels(
+        &self,
+        prior_global_model: Option<&str>,
+    ) -> LiveConfigPropagationReport {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
         self.live_orchestrator(&snapshot, cleanup)
             .propagate_config_to_live_channels(prior_global_model)
-            .await;
+            .await
     }
 
     #[cfg(feature = "mob")]
@@ -21606,7 +21610,7 @@ mod tests {
         // (bound vs. resolved), not the global hot-swap path. Pass None
         // so the global-hot-swap loop short-circuits and the model-swap
         // close branch runs against the identity we just set.
-        runtime.propagate_config_to_live_channels(None).await;
+        let _propagation_report = runtime.propagate_config_to_live_channels(None).await;
 
         // R11 assertion: NO Refresh command was dispatched on the
         // model-swap path. The channel was closed instead.
@@ -21767,7 +21771,7 @@ mod tests {
 
         // G5 (P1): see sibling test for rationale. None preserves the
         // pre-G5 behavior the R11 sibling assertion needs.
-        runtime.propagate_config_to_live_channels(None).await;
+        let _propagation_report = runtime.propagate_config_to_live_channels(None).await;
 
         // CC2: precheck must succeed (gpt-realtime-2 is realtime + OpenAI),
         // so the no-swap branch must dispatch exactly one Refresh and leave

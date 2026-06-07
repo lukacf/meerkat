@@ -254,6 +254,64 @@ pub fn should_fire_live_propagation(
     prior.agent.model != new.agent.model
 }
 
+/// Why a per-session global hot-swap was skipped during config propagation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveHotSwapSkipReason {
+    /// The session's current model already matches the new global model, or a
+    /// session-scoped override is in effect — the swap would be a no-op.
+    NoOpOrOverride,
+    /// The session's live LLM identity could not be looked up.
+    IdentityLookupFailed(String),
+}
+
+/// Why a per-channel refresh was dropped (not delivered) during config
+/// propagation. Channels that were intentionally closed for a rejection are
+/// recorded separately as `closed`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveChannelRefreshFailure {
+    /// Building the refreshed open_config failed.
+    OpenConfigBuildFailed(String),
+    /// Stamping the snapshot version failed.
+    SnapshotVersionFailed(String),
+    /// Enqueueing the Refresh command failed.
+    EnqueueFailed(String),
+    /// The refresh queue acceptance was rejected by generated authority.
+    QueueAcceptanceRejected(String),
+}
+
+/// Aggregated typed outcome of [`propagate_config_to_live_channels`].
+///
+/// Replaces the prior pure-logging fan-out: each per-session hot-swap and
+/// per-channel refresh outcome is recorded so the caller (the config/patch
+/// handler) receives a structured report rather than relying on tracing to
+/// observe a propagation that silently failed.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[must_use]
+pub struct LiveConfigPropagationReport {
+    /// Sessions hot-swapped to the new global model.
+    pub swapped: Vec<SessionId>,
+    /// Sessions whose hot-swap was skipped, with the typed reason.
+    pub skipped: Vec<(SessionId, LiveHotSwapSkipReason)>,
+    /// Sessions whose hot-swap reconfigure failed.
+    pub swap_failed: Vec<(SessionId, String)>,
+    /// Live channels refreshed in place.
+    pub refreshed: Vec<SessionId>,
+    /// Live channels closed (identity swap / non-realtime / missing identity).
+    pub closed: Vec<SessionId>,
+    /// Live channels whose refresh was dropped, with the typed failure.
+    pub refresh_failed: Vec<(SessionId, LiveChannelRefreshFailure)>,
+}
+
+impl LiveConfigPropagationReport {
+    /// `true` when every channel was either refreshed, intentionally closed, or
+    /// deliberately skipped — i.e. no refresh was silently dropped and no
+    /// hot-swap failed unexpectedly.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.swap_failed.is_empty() && self.refresh_failed.is_empty()
+    }
+}
+
 /// Build the projection-root system message for a realtime session. The
 /// content is the union of the resolved `system_prompt` (or the first
 /// existing `System`/`SystemNotice` lead) and any session-build
@@ -402,6 +460,7 @@ mod orchestrator {
     use meerkat_session::PersistentSessionService;
 
     use super::{
+        LiveChannelRefreshFailure, LiveConfigPropagationReport, LiveHotSwapSkipReason,
         build_live_projection_snapshot_for_runtime,
         live_channel_requires_close_for_identity_change, precheck_identity,
         realtime_projection_messages, realtime_projection_runtime_system_context,
@@ -861,9 +920,13 @@ mod orchestrator {
         /// `prior_global_model` is retained on the signature so the
         /// `config/patch` handler does not have to be re-plumbed, but
         /// it is no longer consulted by the hot-swap rule.
-        pub async fn propagate_config_to_live_channels(&self, prior_global_model: Option<&str>) {
+        pub async fn propagate_config_to_live_channels(
+            &self,
+            prior_global_model: Option<&str>,
+        ) -> LiveConfigPropagationReport {
+            let mut report = LiveConfigPropagationReport::default();
             let Some(host) = self.host.as_ref() else {
-                return;
+                return report;
             };
             let channels = host.active_channels().await;
             let mut unique_sessions: Vec<SessionId> = Vec::new();
@@ -887,13 +950,10 @@ mod orchestrator {
                         match self.service.live_session_llm_identity(session_id).await {
                             Ok(identity) => identity.model,
                             Err(err) => {
-                                tracing::debug!(
-                                    target: "meerkat::session_runtime::live_orchestration",
-                                    ?session_id,
-                                    ?err,
-                                    "live identity lookup failed during config \
-                                     propagation; skipping global hot-swap"
-                                );
+                                report.skipped.push((
+                                    session_id.clone(),
+                                    LiveHotSwapSkipReason::IdentityLookupFailed(err.to_string()),
+                                ));
                                 continue;
                             }
                         };
@@ -907,15 +967,9 @@ mod orchestrator {
                         prior_global_model,
                         &new_global_model,
                     ) {
-                        tracing::debug!(
-                            target: "meerkat::session_runtime::live_orchestration",
-                            ?session_id,
-                            current_model = %current_model,
-                            prior_global_model = ?prior_global_model,
-                            new_global_model = %new_global_model,
-                            "skipping global hot-swap on config propagation \
-                             (override or already-synced)"
-                        );
+                        report
+                            .skipped
+                            .push((session_id.clone(), LiveHotSwapSkipReason::NoOpOrOverride));
                         continue;
                     }
                     let request = SessionLlmReconfigureRequest {
@@ -929,13 +983,11 @@ mod orchestrator {
                         .reconfigure_session_llm_identity(session_id, request)
                         .await
                     {
-                        tracing::debug!(
-                            target: "meerkat::session_runtime::live_orchestration",
-                            ?session_id,
-                            ?err,
-                            "hot-swap on config propagation failed; per-channel \
-                             precheck will fall back to current session identity"
-                        );
+                        report
+                            .swap_failed
+                            .push((session_id.clone(), err.to_string()));
+                    } else {
+                        report.swapped.push(session_id.clone());
                     }
                 }
             }
@@ -952,6 +1004,9 @@ mod orchestrator {
                             ?channel_id,
                             "skipping live channel absent from generated active-channel authority"
                         );
+                        // No SessionId is resolvable for this channel, so the
+                        // failure is recorded against the channel via tracing
+                        // above; there is no session key to attribute it to.
                         continue;
                     }
                 };
@@ -974,6 +1029,7 @@ mod orchestrator {
                         "non_realtime",
                     )
                     .await;
+                    report.closed.push(session_id.clone());
                     continue;
                 }
                 let open_config = match Box::pin(self.live_open_config_for_session(
@@ -991,6 +1047,10 @@ mod orchestrator {
                             ?err,
                             "failed to build refreshed open_config for live channel"
                         );
+                        report.refresh_failed.push((
+                            session_id.clone(),
+                            LiveChannelRefreshFailure::OpenConfigBuildFailed(err.to_string()),
+                        ));
                         continue;
                     }
                 };
@@ -1018,6 +1078,7 @@ mod orchestrator {
                             "missing_generated_identity",
                         )
                         .await;
+                        report.closed.push(session_id.clone());
                         continue;
                     }
                     Err(err) => {
@@ -1040,6 +1101,7 @@ mod orchestrator {
                             "generated_identity_lookup_failed",
                         )
                         .await;
+                        report.closed.push(session_id.clone());
                         continue;
                     }
                 };
@@ -1074,6 +1136,7 @@ mod orchestrator {
                         "model_swap",
                     )
                     .await;
+                    report.closed.push(session_id.clone());
                     continue;
                 }
                 let mut snapshot =
@@ -1088,6 +1151,10 @@ mod orchestrator {
                             ?err,
                             "skipping live channel: snapshot version stamp failed"
                         );
+                        report.refresh_failed.push((
+                            session_id.clone(),
+                            LiveChannelRefreshFailure::SnapshotVersionFailed(err.to_string()),
+                        ));
                         continue;
                     }
                 }
@@ -1105,6 +1172,12 @@ mod orchestrator {
                                 ?err,
                                 "live refresh queue acceptance was rejected by generated authority"
                             );
+                            report.refresh_failed.push((
+                                session_id.clone(),
+                                LiveChannelRefreshFailure::QueueAcceptanceRejected(err.to_string()),
+                            ));
+                        } else {
+                            report.refreshed.push(session_id.clone());
                         }
                     }
                     Err(err) => {
@@ -1115,9 +1188,14 @@ mod orchestrator {
                             ?err,
                             "failed to enqueue Refresh command to live channel"
                         );
+                        report.refresh_failed.push((
+                            session_id.clone(),
+                            LiveChannelRefreshFailure::EnqueueFailed(err.to_string()),
+                        ));
                     }
                 }
             }
+            report
         }
     }
 

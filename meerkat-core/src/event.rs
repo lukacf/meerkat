@@ -840,6 +840,16 @@ impl SkillResolutionFailureReason {
                 source_uuid: source_uuid.clone(),
                 skill_name: skill_name.clone(),
             },
+            // Registry-build configuration faults (duplicate remap/alias) are
+            // raised at `SourceIdentityRegistry::build` time, not at
+            // resolution time, so they do not need a dedicated wire variant in
+            // the resolution-failure mirror. Carry the structured message via
+            // `Unknown` rather than expanding the wire surface.
+            other @ (SkillError::DuplicateRemap { .. } | SkillError::DuplicateAlias { .. }) => {
+                Self::Unknown {
+                    message: other.to_string(),
+                }
+            }
         }
     }
 }

@@ -737,6 +737,13 @@ pub fn default_structured_output_retries() -> u32 {
     2
 }
 
+/// Default maximum number of agent-loop turns before a forced stop.
+///
+/// Canonical owner of the turn-cap default: the agent loop reads this when
+/// [`AgentConfig::max_turns`] is `None` rather than inventing a literal at the
+/// run-loop seam.
+pub const DEFAULT_MAX_TURNS: u32 = 100;
+
 /// Agent behavior configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

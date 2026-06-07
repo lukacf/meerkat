@@ -597,7 +597,10 @@ impl FactoryAgentBuilder {
 
     /// Create a new builder that resolves config from a store on each build.
     ///
-    /// If the store read fails, the builder falls back to `initial_config`.
+    /// A store read failure is propagated as a typed error on build; the
+    /// builder never serves the stale `initial_config` behind a store failure.
+    /// `initial_config` is the snapshot returned by [`Self::config`] and is used
+    /// only when no config store is configured.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new_with_config_store(
         factory: AgentFactory,
@@ -628,17 +631,22 @@ impl FactoryAgentBuilder {
         self
     }
 
-    async fn resolve_config(&self) -> Config {
+    /// Resolve the effective config for this build.
+    ///
+    /// When a config store is configured, the latest durable config is read
+    /// from it and a read failure is propagated as a typed error — the builder
+    /// never serves a stale `config_snapshot` behind a store failure. The
+    /// in-memory `config_snapshot` is returned only when no store is configured.
+    async fn resolve_config(&self) -> Result<Config, SessionError> {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(store) = &self.config_store {
-            match store.get().await {
-                Ok(config) => return config,
-                Err(err) => {
-                    tracing::warn!("Failed to read latest config from store: {err}");
-                }
-            }
+            return store.get().await.map_err(|err| {
+                SessionError::Agent(meerkat_core::error::AgentError::ConfigError(format!(
+                    "failed to read latest config from store: {err}"
+                )))
+            });
         }
-        self.config_snapshot.clone()
+        Ok(self.config_snapshot.clone())
     }
 
     /// Get a reference to the factory.
@@ -661,8 +669,12 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
         &self,
         identity: &meerkat_core::SessionLlmIdentity,
     ) -> Option<bool> {
+        // A config-store read failure yields `None` (capability unknown) rather
+        // than a stale-snapshot assertion: we never claim inline-video support
+        // from a config we could not freshly read.
         self.resolve_config()
             .await
+            .ok()?
             .model_registry()
             .ok()
             .and_then(|registry| registry.profile_for_provider(identity.provider, &identity.model))
@@ -750,7 +762,7 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             build_config.image_generation_executor_override = Some(executor);
         }
 
-        let config = self.resolve_config().await;
+        let config = self.resolve_config().await?;
 
         // Capture the session_context handle before build_agent consumes the
         // RuntimeBuildMode. Needed so the session task can fire
@@ -955,6 +967,69 @@ mod tests {
         assert_eq!(
             builder.model_supports_inline_video(&identity).await,
             Some(true)
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    struct FailingConfigStore;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[async_trait]
+    impl meerkat_core::ConfigStore for FailingConfigStore {
+        async fn get(&self) -> Result<Config, meerkat_core::config::ConfigError> {
+            Err(meerkat_core::config::ConfigError::InternalError(
+                "store unavailable".to_string(),
+            ))
+        }
+        async fn set(&self, _config: Config) -> Result<(), meerkat_core::config::ConfigError> {
+            Ok(())
+        }
+        async fn patch(
+            &self,
+            _delta: meerkat_core::config::ConfigDelta,
+        ) -> Result<Config, meerkat_core::config::ConfigError> {
+            Err(meerkat_core::config::ConfigError::InternalError(
+                "store unavailable".to_string(),
+            ))
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn build_agent_fails_closed_on_config_store_read_error() {
+        let initial_config = self_hosted_inline_video_config(false);
+        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(FailingConfigStore);
+        let mut builder = FactoryAgentBuilder::new_with_config_store(
+            AgentFactory::minimal(),
+            initial_config,
+            store,
+        );
+        builder.default_llm_client = Some(Arc::new(MockLlmClient::default()));
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let req = CreateSessionRequest {
+            model: "video-alias".to_string(),
+            prompt: "fail closed on stale config".to_string().into(),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions::default()),
+            labels: None,
+        };
+
+        let result = builder.build_agent(&req, event_tx).await;
+        // `FactoryAgent` is not `Debug`, so match the error out rather than
+        // `expect_err` (which would require the `Ok` type to be `Debug`).
+        let Err(err) = result else {
+            panic!("build must fail closed on config-store read error");
+        };
+        assert!(
+            err.to_string()
+                .contains("failed to read latest config from store"),
+            "expected a typed config-store error, got: {err}"
         );
     }
 

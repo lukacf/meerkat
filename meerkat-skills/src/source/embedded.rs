@@ -4,8 +4,9 @@ use std::collections::HashSet;
 
 use indexmap::IndexMap;
 use meerkat_core::skills::{
-    SkillDescriptor, SkillDocument, SkillError, SkillFilter, SkillKey, SkillSource,
-    SourceHealthSnapshot, SourceHealthThresholds, SourceUuid, apply_filter, classify_source_health,
+    SkillDescriptor, SkillDocument, SkillError, SkillExtensionKey, SkillFilter, SkillKey,
+    SkillSource, SourceHealthSnapshot, SourceHealthThresholds, SourceUuid, apply_filter,
+    classify_source_health,
 };
 
 use crate::registration::{RegistrationId, SkillRegistration, collect_registered_skills};
@@ -45,14 +46,18 @@ fn registration_to_descriptor(reg: &SkillRegistration) -> Result<SkillDescriptor
 }
 
 fn registration_to_document(reg: &SkillRegistration) -> Result<SkillDocument, SkillError> {
+    let mut extensions: IndexMap<SkillExtensionKey, String> =
+        IndexMap::with_capacity(reg.extensions.len());
+    for (k, v) in reg.extensions {
+        // Parse each embedded extension key through the typed `namespace.key`
+        // owner, fail-closed: a malformed key surfaces here rather than
+        // silently surviving as a re-split string.
+        extensions.insert(SkillExtensionKey::parse(k)?, (*v).to_string());
+    }
     Ok(SkillDocument {
         descriptor: registration_to_descriptor(reg)?,
         body: reg.body.to_string(),
-        extensions: reg
-            .extensions
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-            .collect::<IndexMap<_, _>>(),
+        extensions,
     })
 }
 

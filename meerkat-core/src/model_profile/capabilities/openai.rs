@@ -4,7 +4,7 @@
 //! `developers.openai.com/api/docs/models/*`, `developers.openai.com/api/docs/guides/reasoning`,
 //! `openai.com/index/*`, and the Codex model index.
 
-use super::{ModelCapabilities, ThinkingSupport};
+use super::{EffortLevel, ModelCapabilities, ThinkingSupport};
 use crate::Provider;
 use crate::model_profile::catalog::ModelTier;
 
@@ -14,13 +14,24 @@ use crate::model_profile::catalog::ModelTier;
 /// "Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."
 /// Earlier docs implying `minimal` support appear to apply only to older
 /// GPT-5.x models. Default is `none` — opt-in reasoning.
-const GPT5_RECENT_EFFORT: &[&str] = &["none", "low", "medium", "high", "xhigh"];
+const GPT5_RECENT_EFFORT: &[EffortLevel] = &[
+    EffortLevel::None,
+    EffortLevel::Low,
+    EffortLevel::Medium,
+    EffortLevel::High,
+    EffortLevel::Xhigh,
+];
 
 /// Reasoning-effort levels accepted by GPT-5.3 Codex.
 ///
 /// Source: https://developers.openai.com/api/docs/models/gpt-5.3-codex
 /// (Codex is a reasoning-only model — no `none`/`minimal`).
-const GPT5_3_CODEX_EFFORT: &[&str] = &["low", "medium", "high", "xhigh"];
+const GPT5_3_CODEX_EFFORT: &[EffortLevel] = &[
+    EffortLevel::Low,
+    EffortLevel::Medium,
+    EffortLevel::High,
+    EffortLevel::Xhigh,
+];
 
 /// Reasoning-effort levels accepted by `gpt-realtime-2`.
 ///
@@ -31,7 +42,13 @@ const GPT5_3_CODEX_EFFORT: &[&str] = &["low", "medium", "high", "xhigh"];
 /// "Developers can now select from minimal, low, medium, high, and xhigh
 /// reasoning levels, with low as the default" — gpt-realtime-2 introduced
 /// configurable reasoning over the audio-first streaming substrate.
-const REALTIME_2_EFFORT: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
+const REALTIME_2_EFFORT: &[EffortLevel] = &[
+    EffortLevel::Minimal,
+    EffortLevel::Low,
+    EffortLevel::Medium,
+    EffortLevel::High,
+    EffortLevel::Xhigh,
+];
 
 /// Capability rows for OpenAI catalog models.
 pub const CAPABILITIES: &[ModelCapabilities] = &[
@@ -53,6 +70,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: false,
         inline_video: false,
         realtime: false,
+        image_generation: true,
         supports_temperature: false,
         supports_top_p: false,
         supports_top_k: false,
@@ -86,6 +104,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: false,
         inline_video: false,
         realtime: false,
+        image_generation: true,
         supports_temperature: false,
         supports_top_p: false,
         supports_top_k: false,
@@ -126,6 +145,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: false,
         inline_video: false,
         realtime: false,
+        image_generation: true,
         // Primary docs on the model page do not definitively state
         // temperature acceptance when reasoning is `none`. Stay with the
         // conservative pre-refactor stance (reject) until confirmed.
@@ -168,6 +188,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: false,
         inline_video: false,
         realtime: false,
+        image_generation: true,
         supports_temperature: false,
         supports_top_p: false,
         supports_top_k: false,
@@ -206,6 +227,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: false,
         inline_video: false,
         realtime: false,
+        image_generation: true,
         supports_temperature: false,
         supports_top_p: false,
         supports_top_k: false,
@@ -263,6 +285,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: false,
         inline_video: false,
         realtime: true,
+        image_generation: true,
         supports_temperature: true,
         supports_top_p: true,
         supports_top_k: false,

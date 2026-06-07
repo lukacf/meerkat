@@ -122,8 +122,9 @@ pub use compact::{
     SESSION_COMPACTION_CADENCE_KEY, SessionCompactionCadence,
 };
 pub use memory::{
-    MemoryIndexBatch, MemoryIndexReceipt, MemoryIndexRequest, MemoryIndexScope, MemoryMetadata,
-    MemoryOwner, MemoryResult, MemorySearchScope, MemoryStore, MemoryStoreError,
+    EmbeddingModel, HnswParams, MemoryIndexBatch, MemoryIndexReceipt, MemoryIndexRequest,
+    MemoryIndexScope, MemoryMetadata, MemoryOwner, MemoryRankingPolicy, MemoryResult,
+    MemorySearchScope, MemorySource, MemoryStore, MemoryStoreError, MessageRange,
 };
 pub use model_registry::{
     ModelCapability, ModelRegistry, ModelRegistryEntry, SelfHostedServerRef,

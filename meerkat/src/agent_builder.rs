@@ -133,6 +133,13 @@ impl AgentBuilder {
         self.config.retry.initial_delay = policy.initial_delay;
         self.config.retry.max_delay = policy.max_delay;
         self.config.retry.multiplier = policy.multiplier;
+        // Carry the hard call-timeout policy through to the config snapshot so
+        // an explicit timeout survives to the factory/build seam and runtime
+        // retry accounting. A `None` policy means inherit (profile-derived).
+        self.config.retry.call_timeout_override = match policy.call_timeout {
+            Some(d) => meerkat_core::CallTimeoutOverride::Value(d),
+            None => meerkat_core::CallTimeoutOverride::Inherit,
+        };
         self
     }
 

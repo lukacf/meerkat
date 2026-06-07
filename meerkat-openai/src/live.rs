@@ -35,6 +35,10 @@ use tokio::sync::mpsc;
 
 pub use oai_rt_rs::ClientEvent as OpenAiLiveClientEvent;
 pub use oai_rt_rs::ServerEvent as OpenAiLiveServerEvent;
+/// Re-export of the realtime output voice type so external callers of
+/// [`openai_live_function_call_success_events`] can name the typed voice
+/// argument without depending on `oai-rt-rs` directly.
+pub use oai_rt_rs::protocol::models::Voice as OpenAiLiveVoice;
 
 /// Provider-owned attachment target for an OpenAI Realtime sideband session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -551,10 +555,11 @@ async fn configure_openai_live_session(
 ) -> Result<(), LlmError> {
     wait_for_openai_session_created(session).await?;
 
+    let policy = OpenAiRealtimePolicy::resolve(&open_config.llm_identity);
     session
         .send_raw(ClientEvent::SessionUpdate {
             event_id: None,
-            session: Box::new(openai_session_update(open_config)),
+            session: Box::new(openai_session_update(open_config, &policy)),
         })
         .await?;
 
@@ -607,7 +612,10 @@ fn session_update_with_audio_text_modality(
     }
 }
 
-fn openai_session_update(open_config: &RealtimeSessionOpenConfig) -> SessionUpdate {
+fn openai_session_update(
+    open_config: &RealtimeSessionOpenConfig,
+    policy: &OpenAiRealtimePolicy,
+) -> SessionUpdate {
     let turn_detection = match open_config.turning_mode {
         RealtimeTurningMode::ProviderManaged => Some(Nullable::Value(TurnDetection::ServerVad {
             threshold: None,
@@ -634,21 +642,22 @@ fn openai_session_update(open_config: &RealtimeSessionOpenConfig) -> SessionUpda
             openai_realtime_instructions(
                 &open_config.seed_messages,
                 &open_config.runtime_system_context,
+                policy.output_language_instruction.clone(),
             ),
             Some(AudioConfig {
                 input: Some(InputAudioConfig {
                     format: Some(AudioFormat::pcm_24khz()),
                     turn_detection,
                     transcription: Some(Nullable::Value(InputAudioTranscription {
-                        model: Some(openai_realtime_transcription_model()),
-                        language: openai_realtime_input_language(),
+                        model: Some(policy.transcription_model.clone()),
+                        language: policy.input_language.clone(),
                         prompt: None,
                     })),
                     noise_reduction: None,
                 }),
                 output: Some(OutputAudioConfig {
                     format: Some(AudioFormat::pcm_24khz()),
-                    voice: Some(openai_realtime_voice()),
+                    voice: Some(policy.voice.clone()),
                     speed: None,
                     language: None,
                 }),
@@ -658,7 +667,10 @@ fn openai_session_update(open_config: &RealtimeSessionOpenConfig) -> SessionUpda
     }
 }
 
-fn openai_projection_session_update(open_config: &RealtimeSessionOpenConfig) -> SessionUpdate {
+fn openai_projection_session_update(
+    open_config: &RealtimeSessionOpenConfig,
+    policy: &OpenAiRealtimePolicy,
+) -> SessionUpdate {
     SessionUpdate {
         // R5-2 follow-up: even the projection refresh path must pin
         // `Audio`. OpenAI's session-merge semantics preserve unset
@@ -670,6 +682,7 @@ fn openai_projection_session_update(open_config: &RealtimeSessionOpenConfig) -> 
             openai_realtime_instructions(
                 &open_config.seed_messages,
                 &open_config.runtime_system_context,
+                policy.output_language_instruction.clone(),
             ),
             None,
             Some(openai_realtime_tools(&open_config.visible_tools)),
@@ -702,10 +715,12 @@ fn openai_projection_session_update(open_config: &RealtimeSessionOpenConfig) -> 
 /// audio config it was opened with.
 fn openai_refresh_session_update_from_snapshot(
     snapshot: &meerkat_core::live_adapter::LiveProjectionSnapshot,
+    policy: &OpenAiRealtimePolicy,
 ) -> SessionUpdate {
     let instructions = openai_refresh_instructions_from_snapshot(
         snapshot.system_prompt.as_deref(),
         &snapshot.runtime_system_context,
+        policy.output_language_instruction.clone(),
     );
 
     // OpenAI Realtime only supports `audio/pcm` at 24 kHz today
@@ -770,8 +785,8 @@ fn openai_refresh_session_update_from_snapshot(
 fn openai_refresh_instructions_from_snapshot(
     system_prompt: Option<&str>,
     runtime_system_context: &[PendingSystemContextAppend],
+    language_pin: Option<String>,
 ) -> Option<String> {
-    let language_pin = openai_realtime_output_language_instruction();
     let authoritative_context =
         openai_realtime_authoritative_system_context(runtime_system_context);
     let trimmed_prompt = system_prompt
@@ -796,43 +811,89 @@ fn openai_refresh_instructions_from_snapshot(
     }
 }
 
-fn openai_realtime_voice() -> Voice {
-    Voice::from(
-        std::env::var("RKAT_REALTIME_OPENAI_VOICE")
-            .ok()
-            .or_else(|| std::env::var("OPENAI_REALTIME_VOICE").ok())
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "marin".to_string()),
-    )
-}
+/// Default realtime output voice. Provider-owned operational default for
+/// the OpenAI realtime adapter; carried as a typed value on
+/// [`OpenAiRealtimePolicy`] rather than re-read from process env at every
+/// `session.update` / `response.create` build site.
+const OPENAI_REALTIME_DEFAULT_VOICE: &str = "marin";
 
 /// Default ISO-639 language code for realtime input transcription.
 ///
 /// OpenAI's realtime transcription model auto-detects input language when
 /// unset, which lets short or noisy English audio drift into other
 /// languages (s71/s72 observed Japanese/Chinese drift). Pin the
-/// transcription language up front; callers who run multilingual
-/// deployments can opt out via `RKAT_REALTIME_INPUT_LANGUAGE` (set to a
-/// different ISO code) or `RKAT_REALTIME_INPUT_LANGUAGE=auto` to restore
-/// auto-detection.
+/// transcription language up front via the typed policy default.
 const OPENAI_REALTIME_DEFAULT_INPUT_LANGUAGE: &str = "en";
 /// Default ISO-639 language code for realtime output (text + audio
 /// transcript). Shares the default with input so the two modalities
-/// stay coherent under drift. `RKAT_REALTIME_OUTPUT_LANGUAGE=none`
-/// skips the instruction entirely.
+/// stay coherent under drift.
 const OPENAI_REALTIME_DEFAULT_OUTPUT_LANGUAGE: &str = "en";
 
-fn openai_realtime_input_language() -> Option<String> {
-    let raw = std::env::var("RKAT_REALTIME_INPUT_LANGUAGE")
-        .ok()
-        .or_else(|| std::env::var("OPENAI_REALTIME_INPUT_LANGUAGE").ok());
-    resolve_realtime_input_language(raw.as_deref())
+/// Typed, model-keyed operational policy for an OpenAI realtime session.
+///
+/// #69 / #149: the realtime voice, input transcription language, output
+/// language pin, and input transcription model are provider-owned
+/// operational defaults — not process-environment policy. This struct is
+/// the single typed owner of those facts. It is resolved once at
+/// session-open time from the session's [`SessionLlmIdentity`] (the
+/// realtime model) and then carried on [`OpenAiRealtimeSession`] /
+/// threaded into every `session.update` + `response.create` build site.
+///
+/// No `std::env::var` reads: the defaults are compile-time typed values,
+/// and the transcription model is keyed off the active realtime model so
+/// it follows model identity rather than a hardcoded literal scattered
+/// across the wire-build helpers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OpenAiRealtimePolicy {
+    /// Output voice for spoken audio responses.
+    voice: Voice,
+    /// Pinned input transcription language (ISO-639). `None` restores the
+    /// provider's native auto-detection.
+    input_language: Option<String>,
+    /// Rendered output-language instruction block. `None` skips the pin.
+    output_language_instruction: Option<String>,
+    /// Input audio transcription model, keyed off the active realtime
+    /// model identity.
+    transcription_model: String,
 }
 
-/// Pure-function core of [`openai_realtime_input_language`] — takes the
-/// raw env value (or `None` when unset) and applies the "blank →
+impl OpenAiRealtimePolicy {
+    /// Resolve the typed realtime policy from the session's LLM identity.
+    ///
+    /// All values derive from typed defaults / the model identity; nothing
+    /// is read from process env. The transcription model follows the
+    /// active realtime model so a future realtime model keys its own
+    /// transcription companion here rather than through a bare literal at
+    /// the `session.update` build site.
+    fn resolve(identity: &meerkat_core::SessionLlmIdentity) -> Self {
+        Self {
+            voice: Voice::from(OPENAI_REALTIME_DEFAULT_VOICE.to_string()),
+            input_language: resolve_realtime_input_language(None),
+            output_language_instruction: resolve_realtime_output_language_instruction(None),
+            transcription_model: openai_realtime_transcription_model_for(identity),
+        }
+    }
+}
+
+impl Default for OpenAiRealtimePolicy {
+    /// Adapter-default policy used by sessions opened without a stamped
+    /// identity (external attach / test doubles). Re-resolved against the
+    /// real identity by [`OpenAiRealtimeSession::set_current_identity`]
+    /// when the factory stamps the open-time model.
+    fn default() -> Self {
+        Self {
+            voice: Voice::from(OPENAI_REALTIME_DEFAULT_VOICE.to_string()),
+            input_language: resolve_realtime_input_language(None),
+            output_language_instruction: resolve_realtime_output_language_instruction(None),
+            transcription_model: OPENAI_REALTIME_DEFAULT_TRANSCRIPTION_MODEL.to_string(),
+        }
+    }
+}
+
+/// Pure-function core of the realtime input-language policy — takes the
+/// configured value (or `None` when unset) and applies the "blank →
 /// default, `auto` → None, otherwise pass through" policy. Split so
-/// unit tests can exercise the policy without touching process env.
+/// unit tests can exercise the policy directly.
 fn resolve_realtime_input_language(raw: Option<&str>) -> Option<String> {
     let value = raw
         .map(str::trim)
@@ -846,25 +907,16 @@ fn resolve_realtime_input_language(raw: Option<&str>) -> Option<String> {
     }
 }
 
-/// Instruction block that pins the realtime model's output language.
+/// Pure-function core of the realtime output-language policy.
 ///
 /// Realtime models produce two parallel outputs (`output_text` and
 /// `output_audio_transcript`). Without an explicit directive they can
 /// drift to a different language if input transcription loses
 /// confidence. Pinning output language at session init keeps the two
-/// outputs coherent (both English by default). Callers who want a
-/// different default can set `RKAT_REALTIME_OUTPUT_LANGUAGE` to a
-/// different ISO code or `none` to skip the directive.
-fn openai_realtime_output_language_instruction() -> Option<String> {
-    let raw = std::env::var("RKAT_REALTIME_OUTPUT_LANGUAGE")
-        .ok()
-        .or_else(|| std::env::var("OPENAI_REALTIME_OUTPUT_LANGUAGE").ok());
-    resolve_realtime_output_language_instruction(raw.as_deref())
-}
-
-/// Pure-function core of [`openai_realtime_output_language_instruction`] —
-/// takes the raw env value (or `None` when unset) and applies the
-/// "blank → default, `none` → None, otherwise render directive" policy.
+/// outputs coherent (both English by default). Takes the configured
+/// value (or `None` when unset) and applies the "blank → default,
+/// `none` → None, otherwise render directive" policy. Split so unit
+/// tests can exercise the policy directly.
 fn resolve_realtime_output_language_instruction(raw: Option<&str>) -> Option<String> {
     let value = raw
         .map(str::trim)
@@ -921,7 +973,7 @@ fn openai_text_only_response_config() -> ResponseConfig {
     }
 }
 
-fn openai_audio_response_config() -> ResponseConfig {
+fn openai_audio_response_config(voice: &Voice) -> ResponseConfig {
     // Text-first reconstruction still relies on OpenAI holding an in-memory
     // conversation cache between turns. When we have to reconstruct or nudge a
     // stalled provider response, asking the server to "respond somehow" is too
@@ -940,7 +992,7 @@ fn openai_audio_response_config() -> ResponseConfig {
             input: None,
             output: Some(OutputAudioConfig {
                 format: Some(AudioFormat::pcm_24khz()),
-                voice: Some(openai_realtime_voice()),
+                voice: Some(voice.clone()),
                 speed: None,
                 language: None,
             }),
@@ -954,19 +1006,28 @@ fn openai_audio_response_config() -> ResponseConfig {
     }
 }
 
-fn openai_realtime_transcription_model() -> String {
-    [
-        "RKAT_OPENAI_REALTIME_TRANSCRIPTION_MODEL",
-        "OPENAI_REALTIME_TRANSCRIPTION_MODEL",
-        "RKAT_REALTIME_OPENAI_TRANSCRIPTION_MODEL",
-        "OPENAI_REALTIME_TRANSCRIBE_MODEL",
-        "RKAT_REALTIME_OPENAI_TRANSCRIBE_MODEL",
-    ]
-    .into_iter()
-    .find_map(|key| std::env::var(key).ok())
-    .map(|value| value.trim().to_string())
-    .filter(|value| !value.is_empty())
-    .unwrap_or_else(|| "gpt-4o-mini-transcribe".to_string())
+/// Default input transcription model for the OpenAI realtime adapter when
+/// the active realtime model has no model-specific transcription companion.
+const OPENAI_REALTIME_DEFAULT_TRANSCRIPTION_MODEL: &str = "gpt-4o-mini-transcribe";
+
+/// Resolve the input audio transcription model for a realtime session,
+/// keyed off the active realtime model identity.
+///
+/// #149: previously a process-env ladder collapsing onto a bare literal at
+/// the `session.update` build site. The transcription model is a
+/// provider-owned operational fact that follows the realtime model, so it
+/// resolves from the typed model identity here. A future realtime model
+/// keys its own transcription companion through this match instead of an
+/// inline literal scattered across wire builders.
+fn openai_realtime_transcription_model_for(_identity: &meerkat_core::SessionLlmIdentity) -> String {
+    // gpt-realtime-2 (and the current gpt-realtime family) pair with the
+    // mini transcription model for input ASR. The `_identity` parameter is
+    // the model-keyed resolution seam: a future realtime model with a
+    // different transcription companion branches on `_identity.model` here,
+    // never via an inline literal at a `session.update` build site. Today
+    // every OpenAI realtime model shares the one companion, so the resolver
+    // returns the shared default.
+    OPENAI_REALTIME_DEFAULT_TRANSCRIPTION_MODEL.to_string()
 }
 
 fn openai_realtime_tools(visible_tools: &[ToolDef]) -> Vec<Tool> {
@@ -1011,12 +1072,13 @@ pub(crate) fn parse_tool_call_args(
 fn openai_realtime_instructions(
     seed_messages: &[Message],
     runtime_system_context: &[PendingSystemContextAppend],
+    language_pin: Option<String>,
 ) -> Option<String> {
     // Language pin goes first so output_text and output_audio_transcript
     // stay coherent with the caller's expected language even when
-    // transcription confidence on input dips. Callers opt out via
-    // `RKAT_REALTIME_OUTPUT_LANGUAGE=none`.
-    let language_pin = openai_realtime_output_language_instruction();
+    // transcription confidence on input dips. The pin is the typed
+    // `OpenAiRealtimePolicy.output_language_instruction` resolved at
+    // session-open (no per-build env read).
 
     if let Some(authoritative_context) =
         openai_realtime_authoritative_system_context(runtime_system_context)
@@ -1290,10 +1352,43 @@ fn trace_openai_realtime_lifecycle(message: impl AsRef<str>) {
     eprintln!("[openai-realtime-lifecycle] {}", message.as_ref());
 }
 
-fn openai_realtime_capabilities() -> RealtimeCapabilities {
+/// Canonical OpenAI realtime model used to project the factory-level
+/// (identity-free) capability advertisement. The factory `capabilities()`
+/// seam has no per-session identity, so it advertises the current
+/// canonical realtime model's catalog-derived capabilities — keeping even
+/// that advertisement model-owned rather than a hand-written literal.
+const OPENAI_CANONICAL_REALTIME_MODEL: &str = "gpt-realtime-2";
+
+/// #68: project the realtime capability set from the typed model profile
+/// keyed by the session's [`SessionLlmIdentity`].
+///
+/// Capabilities follow model identity: the per-model catalog row
+/// (`ModelProfile`) owns whether the model accepts inline video
+/// (`inline_video`), which drives the `Video` input/output kinds and
+/// `video_supported`. Text + audio and the realtime transport facts
+/// (turning modes, interrupt, transcript, tool lifecycle, the 24 kHz PCM
+/// audio formats) are invariants of the OpenAI realtime transport itself
+/// and are not catalog-row-varying today.
+///
+/// When the provider/model pair has no catalog row the projection falls
+/// back to the transport-invariant base (no video) rather than synthesizing
+/// capability facts from a model-name prefix.
+fn openai_realtime_capabilities_for(
+    identity: &meerkat_core::SessionLlmIdentity,
+) -> RealtimeCapabilities {
+    let video = meerkat_core::model_profile::profile_for(identity.provider, &identity.model)
+        .is_some_and(|profile| profile.inline_video);
+
+    let mut input_kinds = vec![RealtimeInputKind::Text, RealtimeInputKind::Audio];
+    let mut output_kinds = vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio];
+    if video {
+        input_kinds.push(RealtimeInputKind::Video);
+        output_kinds.push(RealtimeOutputKind::Video);
+    }
+
     RealtimeCapabilities {
-        input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
-        output_kinds: vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio],
+        input_kinds,
+        output_kinds,
         turning_modes: vec![
             RealtimeTurningMode::ProviderManaged,
             RealtimeTurningMode::ExplicitCommit,
@@ -1301,7 +1396,7 @@ fn openai_realtime_capabilities() -> RealtimeCapabilities {
         interrupt_supported: true,
         transcript_supported: true,
         tool_lifecycle_events_supported: true,
-        video_supported: false,
+        video_supported: video,
         audio_input_format: Some(RealtimeAudioFormat::pcm(
             OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ,
             OPENAI_REALTIME_AUDIO_CHANNELS,
@@ -1311,6 +1406,19 @@ fn openai_realtime_capabilities() -> RealtimeCapabilities {
             OPENAI_REALTIME_AUDIO_CHANNELS,
         )),
     }
+}
+
+/// Identity-free capability advertisement for the factory seam, projected
+/// from the canonical realtime model's catalog row (see
+/// [`OPENAI_CANONICAL_REALTIME_MODEL`]).
+fn openai_realtime_capabilities_default() -> RealtimeCapabilities {
+    openai_realtime_capabilities_for(&meerkat_core::SessionLlmIdentity {
+        model: OPENAI_CANONICAL_REALTIME_MODEL.to_string(),
+        provider: Provider::OpenAI,
+        self_hosted_server_id: None,
+        provider_params: None,
+        auth_binding: None,
+    })
 }
 
 /// Provider-neutral realtime session adapter backed by an OpenAI sideband session.
@@ -1397,6 +1505,13 @@ pub struct OpenAiRealtimeSession {
     /// `provider_id` since a provider swap (Anthropic ↔ OpenAI) cannot be
     /// done in place on a hosted realtime session either.
     current_provider_id: Option<Provider>,
+    /// #69 / #149: typed, model-keyed realtime operational policy (voice,
+    /// input/output language, input transcription model). Resolved from the
+    /// open-time `SessionLlmIdentity` in `set_current_identity` and consumed
+    /// by every `response.create` / refresh-`session.update` build site so
+    /// these facts are typed values that follow model identity, not process
+    /// env reads scattered across the adapter.
+    realtime_policy: OpenAiRealtimePolicy,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1430,7 +1545,12 @@ impl OpenAiRealtimeSession {
     pub fn new(raw: Box<dyn OpenAiLiveSession>, turning_mode: RealtimeTurningMode) -> Self {
         Self {
             raw: Some(raw),
-            capabilities: openai_realtime_capabilities(),
+            // #68: capabilities follow model identity. Sessions opened
+            // without a stamped identity (external attach / test doubles)
+            // start from the canonical realtime-model projection and are
+            // re-resolved against the real identity in
+            // `set_current_identity` when the factory stamps it.
+            capabilities: openai_realtime_capabilities_default(),
             turning_mode,
             has_staged_input: false,
             has_staged_audio: false,
@@ -1455,6 +1575,7 @@ impl OpenAiRealtimeSession {
             pending_truncations: BTreeMap::new(),
             current_model_id: None,
             current_provider_id: None,
+            realtime_policy: OpenAiRealtimePolicy::default(),
         }
     }
 
@@ -1472,9 +1593,16 @@ impl OpenAiRealtimeSession {
     /// detect mid-session model/provider swaps and reject them with a
     /// typed error (the OpenAI Realtime API has no mutable `model` field
     /// on `session.update`, so a model swap requires close + reopen).
-    pub fn set_current_identity(&mut self, model_id: impl Into<String>, provider: Provider) {
-        self.current_model_id = Some(model_id.into());
-        self.current_provider_id = Some(provider);
+    ///
+    /// #68 / #69 / #149: stamping the identity is also where the typed,
+    /// model-keyed realtime capabilities and operational policy are
+    /// resolved, so both follow the session's model identity rather than a
+    /// static literal / process env.
+    pub fn set_current_identity(&mut self, identity: &meerkat_core::SessionLlmIdentity) {
+        self.current_model_id = Some(identity.model.clone());
+        self.current_provider_id = Some(identity.provider);
+        self.capabilities = openai_realtime_capabilities_for(identity);
+        self.realtime_policy = OpenAiRealtimePolicy::resolve(identity);
     }
 
     fn effective_nudge_timeout_ms(&self) -> u64 {
@@ -2358,10 +2486,11 @@ impl OpenAiRealtimeSession {
         &mut self,
         open_config: &RealtimeSessionOpenConfig,
     ) -> Result<(), LlmError> {
+        let session_update = openai_projection_session_update(open_config, &self.realtime_policy);
         self.raw_mut()?
             .send_raw(ClientEvent::SessionUpdate {
                 event_id: None,
-                session: Box::new(openai_projection_session_update(open_config)),
+                session: Box::new(session_update),
             })
             .await?;
 
@@ -2383,10 +2512,12 @@ impl OpenAiRealtimeSession {
         &mut self,
         snapshot: &meerkat_core::live_adapter::LiveProjectionSnapshot,
     ) -> Result<(), LlmError> {
+        let session_update =
+            openai_refresh_session_update_from_snapshot(snapshot, &self.realtime_policy);
         self.raw_mut()?
             .send_raw(ClientEvent::SessionUpdate {
                 event_id: None,
-                session: Box::new(openai_refresh_session_update_from_snapshot(snapshot)),
+                session: Box::new(session_update),
             })
             .await?;
 
@@ -2468,7 +2599,9 @@ impl OpenAiRealtimeSession {
         // typed `InvalidRequest` rejection rather than silently dropping
         // the override.
         let response_config = match response_modality {
-            None | Some(LiveResponseModality::Audio) => openai_audio_response_config(),
+            None | Some(LiveResponseModality::Audio) => {
+                openai_audio_response_config(&self.realtime_policy.voice)
+            }
             Some(LiveResponseModality::Text) => openai_text_only_response_config(),
             Some(_) => {
                 return Err(LlmError::InvalidRequest {
@@ -2586,10 +2719,12 @@ impl RealtimeSession for OpenAiRealtimeSession {
                             &synthetic_item_id,
                             &text,
                         );
+                        let response_config =
+                            openai_audio_response_config(&self.realtime_policy.voice);
                         self.raw_mut()?
                             .send_raw(ClientEvent::ResponseCreate {
                                 event_id: None,
-                                response: Some(Box::new(openai_audio_response_config())),
+                                response: Some(Box::new(response_config)),
                             })
                             .await?;
                         self.has_staged_input = false;
@@ -2683,7 +2818,11 @@ impl RealtimeSession for OpenAiRealtimeSession {
                 ))
                 .await?;
         } else {
-            let events = openai_live_function_call_success_events(call_id, &output);
+            let events = openai_live_function_call_success_events(
+                call_id,
+                &output,
+                &self.realtime_policy.voice,
+            );
             for event in events {
                 self.raw_mut()?.send_raw(event).await?;
             }
@@ -2781,11 +2920,13 @@ impl RealtimeSession for OpenAiRealtimeSession {
                         trace_openai_realtime_lifecycle(
                             "provider response nudge timeout expired; sending response.create",
                         );
+                        let nudge_response_config =
+                            openai_audio_response_config(&self.realtime_policy.voice);
                         match self
                             .raw_mut()?
                             .send_raw(ClientEvent::ResponseCreate {
                                 event_id: None,
-                                response: Some(Box::new(openai_audio_response_config())),
+                                response: Some(Box::new(nudge_response_config)),
                             })
                             .await
                         {
@@ -2943,7 +3084,7 @@ impl OpenAiRealtimeSessionFactory {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
     fn capabilities(&self) -> RealtimeCapabilities {
-        openai_realtime_capabilities()
+        openai_realtime_capabilities_default()
     }
 
     async fn open_session(
@@ -2960,10 +3101,7 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
         // `LiveAdapterCommand::Refresh { snapshot }` arm can detect a
         // mid-session model swap and reject it (the OpenAI Realtime API
         // does not accept a `model` field on `session.update`).
-        session.set_current_identity(
-            open_config.llm_identity.model.clone(),
-            open_config.llm_identity.provider,
-        );
+        session.set_current_identity(&open_config.llm_identity);
         session
             .seed_history_projection(
                 &open_config.seed_messages,
@@ -3003,10 +3141,7 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
         // `LiveAdapterCommand::Refresh { snapshot }` arm can detect a
         // mid-session model swap and reject it (the OpenAI Realtime API
         // does not accept a `model` field on `session.update`).
-        session.set_current_identity(
-            open_config.llm_identity.model.clone(),
-            open_config.llm_identity.provider,
-        );
+        session.set_current_identity(&open_config.llm_identity);
         // E25 + A9: seed canonical history at session-open time. The
         // `LiveAdapterCommand::Open { snapshot }` arm in
         // `execute_openai_live_command` re-runs the same path against any
@@ -3042,9 +3177,15 @@ where
 
 /// Build the raw client events needed to submit a function-call output and
 /// continue the provider response.
+///
+/// `voice` is the typed realtime output voice for the continuation
+/// `response.create`; callers pass the session's resolved
+/// [`OpenAiRealtimePolicy`] voice so spoken output stays consistent with
+/// the rest of the channel rather than re-reading a process-env default.
 pub fn openai_live_function_call_success_events(
     call_id: impl Into<String>,
     output: impl Into<String>,
+    voice: &Voice,
 ) -> Vec<ClientEvent> {
     vec![
         ClientEvent::ConversationItemCreate {
@@ -3059,7 +3200,7 @@ pub fn openai_live_function_call_success_events(
         },
         ClientEvent::ResponseCreate {
             event_id: None,
-            response: Some(Box::new(openai_audio_response_config())),
+            response: Some(Box::new(openai_audio_response_config(voice))),
         },
     ]
 }
@@ -4539,16 +4680,20 @@ mod tests {
         }
     }
 
+    fn sample_realtime_identity() -> SessionLlmIdentity {
+        SessionLlmIdentity {
+            model: "gpt-realtime-2".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        }
+    }
+
     fn sample_open_config(turning_mode: RealtimeTurningMode) -> RealtimeSessionOpenConfig {
         RealtimeSessionOpenConfig::new(
             turning_mode,
-            SessionLlmIdentity {
-                model: "gpt-realtime-2".to_string(),
-                provider: Provider::OpenAI,
-                self_hosted_server_id: None,
-                provider_params: None,
-                auth_binding: None,
-            },
+            sample_realtime_identity(),
             vec![ToolDef {
                 name: "send_request".into(),
                 description: "Send a request to another mob member.".to_string(),
@@ -4712,20 +4857,121 @@ mod tests {
         );
     }
 
+    /// #68: advertised realtime capabilities follow the model's catalog
+    /// row. The canonical realtime model (`gpt-realtime-2`) carries
+    /// `inline_video = false` today, so video must NOT be advertised — and
+    /// the projection must read that from the catalog, not a static literal.
+    #[test]
+    fn realtime_capabilities_follow_catalog_model_row() {
+        let realtime = sample_realtime_identity();
+        let caps = openai_realtime_capabilities_for(&realtime);
+
+        // Text + audio are realtime-transport invariants for OpenAI.
+        assert!(caps.input_kinds.contains(&RealtimeInputKind::Text));
+        assert!(caps.input_kinds.contains(&RealtimeInputKind::Audio));
+        assert!(caps.output_kinds.contains(&RealtimeOutputKind::Text));
+        assert!(caps.output_kinds.contains(&RealtimeOutputKind::Audio));
+
+        // Video tracks the catalog row's `inline_video`. The capability is
+        // projected from the typed profile, so it must agree with the
+        // catalog rather than a hand-written literal.
+        let profile = meerkat_core::model_profile::profile_for(realtime.provider, &realtime.model)
+            .expect("gpt-realtime-2 must be catalogued");
+        assert_eq!(
+            caps.video_supported, profile.inline_video,
+            "video_supported must project the catalog inline_video, not a static literal"
+        );
+        assert_eq!(
+            caps.input_kinds.contains(&RealtimeInputKind::Video),
+            profile.inline_video,
+            "Video input kind must follow the catalog inline_video flag"
+        );
+
+        // The factory-level (identity-free) advertisement projects the same
+        // canonical-model capabilities.
+        assert_eq!(openai_realtime_capabilities_default(), caps);
+    }
+
+    /// #68: capabilities are model-keyed, so an uncatalogued model still
+    /// gets the transport-invariant base (no synthesized video) rather than
+    /// a name-prefix heuristic.
+    #[test]
+    fn realtime_capabilities_fail_closed_on_uncatalogued_model() {
+        let identity = SessionLlmIdentity {
+            model: "totally-unknown-realtime-model".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let caps = openai_realtime_capabilities_for(&identity);
+        assert!(
+            !caps.video_supported,
+            "uncatalogued model must not synthesize video capability"
+        );
+        assert!(!caps.input_kinds.contains(&RealtimeInputKind::Video));
+    }
+
+    /// #69 / #149: the realtime voice, input/output language, and input
+    /// transcription model resolve from the typed, model-keyed policy — no
+    /// process-env reads. This is the typed-owner contract for those facts.
+    #[test]
+    fn realtime_policy_resolves_typed_defaults_from_identity() {
+        let policy = OpenAiRealtimePolicy::resolve(&sample_realtime_identity());
+
+        // Voice is the typed provider default, not an env read.
+        assert_eq!(policy.voice, Voice::from(OPENAI_REALTIME_DEFAULT_VOICE));
+
+        // Input language is the s71/s72 English pin by default.
+        assert_eq!(policy.input_language.as_deref(), Some("en"));
+
+        // Output language pin renders the English directive by default.
+        let pin = policy
+            .output_language_instruction
+            .as_deref()
+            .expect("default output policy pins a language");
+        assert!(
+            pin.contains("English"),
+            "default pin must name English: {pin}"
+        );
+
+        // #149: transcription model is sourced model-keyed from the typed
+        // resolver, never a process-env ladder.
+        assert_eq!(
+            policy.transcription_model,
+            openai_realtime_transcription_model_for(&sample_realtime_identity())
+        );
+    }
+
+    /// #149: the transcription model is keyed off the active realtime model
+    /// identity (typed owner), not a bare literal scattered across the
+    /// `session.update` build site or a process-env ladder.
+    #[test]
+    fn realtime_transcription_model_is_model_keyed() {
+        let realtime = sample_realtime_identity();
+        assert_eq!(
+            openai_realtime_transcription_model_for(&realtime),
+            OPENAI_REALTIME_DEFAULT_TRANSCRIPTION_MODEL
+        );
+    }
+
     #[test]
     fn openai_realtime_instructions_prepend_language_pin_when_seed_has_system_only() {
         let seed_messages = vec![Message::System(meerkat_core::SystemMessage::new(
             "You are a helpful realtime operator.".to_string(),
         ))];
 
-        let instructions = openai_realtime_instructions(&seed_messages, &[])
-            .expect("system seed must yield instructions");
+        let instructions = openai_realtime_instructions(
+            &seed_messages,
+            &[],
+            resolve_realtime_output_language_instruction(None),
+        )
+        .expect("system seed must yield instructions");
 
         // Language pin surfaces ahead of the system prompt so the
         // realtime model's two output streams (text + audio) share a
         // single language bias even under transcription drift. The
-        // default is English unless RKAT_REALTIME_OUTPUT_LANGUAGE
-        // opts out; tests run without that env set on CI.
+        // pin is the typed `OpenAiRealtimePolicy` default (English).
         let language_pin_idx = instructions.find("Respond in English");
         let system_prompt_idx = instructions.find("You are a helpful realtime operator");
         match (language_pin_idx, system_prompt_idx) {
@@ -4746,8 +4992,12 @@ mod tests {
             meerkat_core::SYSTEM_CONTEXT_SEPARATOR
         )))];
 
-        let instructions = openai_realtime_instructions(&seed_messages, &[])
-            .expect("system prompt should still produce instructions");
+        let instructions = openai_realtime_instructions(
+            &seed_messages,
+            &[],
+            resolve_realtime_output_language_instruction(None),
+        )
+        .expect("system prompt should still produce instructions");
 
         assert!(
             instructions.contains("You are the realtime operator."),
@@ -4777,8 +5027,12 @@ mod tests {
             accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
         }];
 
-        let instructions = openai_realtime_instructions(&seed_messages, &runtime_system_context)
-            .expect("typed runtime context should produce instructions");
+        let instructions = openai_realtime_instructions(
+            &seed_messages,
+            &runtime_system_context,
+            resolve_realtime_output_language_instruction(None),
+        )
+        .expect("typed runtime context should produce instructions");
 
         assert!(
             instructions.contains("Authoritative Meerkat runtime facts"),
@@ -4823,8 +5077,12 @@ mod tests {
             accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
         }];
 
-        let instructions = openai_realtime_instructions(&seed_messages, &runtime_system_context)
-            .expect("terminal peer response should produce instructions");
+        let instructions = openai_realtime_instructions(
+            &seed_messages,
+            &runtime_system_context,
+            resolve_realtime_output_language_instruction(None),
+        )
+        .expect("terminal peer response should produce instructions");
 
         assert!(
             instructions.contains("Resolved terminal peer-response facts"),
@@ -4887,8 +5145,12 @@ mod tests {
             accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
         }];
 
-        let instructions = openai_realtime_instructions(&seed_messages, &runtime_system_context)
-            .expect("terminal peer response should produce instructions");
+        let instructions = openai_realtime_instructions(
+            &seed_messages,
+            &runtime_system_context,
+            resolve_realtime_output_language_instruction(None),
+        )
+        .expect("terminal peer response should produce instructions");
 
         let runtime_index = instructions
             .find("Resolved terminal peer-response facts")
@@ -4924,8 +5186,12 @@ mod tests {
             }),
         ];
 
-        let instructions = openai_realtime_instructions(&seed_messages, &[])
-            .expect("reconstruction instructions should exist");
+        let instructions = openai_realtime_instructions(
+            &seed_messages,
+            &[],
+            resolve_realtime_output_language_instruction(None),
+        )
+        .expect("reconstruction instructions should exist");
 
         assert!(
             instructions.contains("You are the realtime operator."),
@@ -6697,6 +6963,8 @@ mod tests {
                     openai_realtime_instructions(
                         &open_config.seed_messages,
                         &open_config.runtime_system_context,
+                        OpenAiRealtimePolicy::resolve(&open_config.llm_identity)
+                            .output_language_instruction,
                     )
                     .as_deref()
                 );
@@ -7424,7 +7692,8 @@ mod tests {
                                 ..
                             }),
                             ..
-                        }) if model == &openai_realtime_transcription_model()
+                        }) if model
+                            == &openai_realtime_transcription_model_for(&open_config.llm_identity)
                     )
             )
         }));
@@ -7635,6 +7904,7 @@ mod tests {
         let events = openai_live_function_call_success_events(
             "call_1",
             serde_json::json!({ "hello": "world" }).to_string(),
+            &OpenAiRealtimePolicy::default().voice,
         );
 
         assert_eq!(events.len(), 2);
@@ -8101,7 +8371,7 @@ mod tests {
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
         // Stamp identity so the model-swap guard sees a stable origin.
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
+        session.set_current_identity(&sample_realtime_identity());
         let adapter = OpenAiLiveAdapter::new(session);
 
         // Drain initial Ready so the pump is in its select! loop.
@@ -8219,7 +8489,7 @@ mod tests {
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
         // Stamp identity so the model-swap guard sees a stable origin
         // and proceeds (matching model + provider).
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
+        session.set_current_identity(&sample_realtime_identity());
         let adapter = OpenAiLiveAdapter::new(session);
 
         // Drain initial Ready so the pump is in its select! loop.
@@ -8341,7 +8611,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
+        session.set_current_identity(&sample_realtime_identity());
         let adapter = OpenAiLiveAdapter::new(session);
 
         // Drain Ready.
@@ -8455,7 +8725,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
+        session.set_current_identity(&sample_realtime_identity());
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -8527,7 +8797,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
+        session.set_current_identity(&sample_realtime_identity());
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -8602,7 +8872,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
+        session.set_current_identity(&sample_realtime_identity());
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -8743,7 +9013,6 @@ mod tests {
     /// surface" from a real provider outage.
     #[tokio::test(flavor = "current_thread")]
     async fn send_input_image_chunk_is_rejected_as_config_rejected() {
-        use meerkat_core::Provider;
         use meerkat_core::live_adapter::LiveInputChunk;
 
         let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
@@ -8753,7 +9022,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
+        session.set_current_identity(&sample_realtime_identity());
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -8814,7 +9083,6 @@ mod tests {
     /// `"video_frame_input_not_implemented"` reason.
     #[tokio::test(flavor = "current_thread")]
     async fn send_input_video_frame_chunk_is_rejected_as_config_rejected() {
-        use meerkat_core::Provider;
         use meerkat_core::live_adapter::LiveInputChunk;
 
         let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
@@ -8824,7 +9092,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
+        session.set_current_identity(&sample_realtime_identity());
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -8893,7 +9161,6 @@ mod tests {
     /// returning "sent" success to the caller.
     #[tokio::test(flavor = "current_thread")]
     async fn send_input_rejects_mismatched_sample_rate_with_typed_format_mismatch() {
-        use meerkat_core::Provider;
         use meerkat_core::live_adapter::LiveInputChunk;
 
         let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
@@ -8903,7 +9170,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
+        session.set_current_identity(&sample_realtime_identity());
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -8982,7 +9249,6 @@ mod tests {
     /// with the typed `AudioInputFormatMismatch` variant.
     #[tokio::test(flavor = "current_thread")]
     async fn send_input_rejects_mismatched_channels_with_typed_format_mismatch() {
-        use meerkat_core::Provider;
         use meerkat_core::live_adapter::LiveInputChunk;
 
         let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
@@ -8992,7 +9258,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
+        session.set_current_identity(&sample_realtime_identity());
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -9065,7 +9331,6 @@ mod tests {
     /// happy path.
     #[tokio::test(flavor = "current_thread")]
     async fn send_input_accepts_pcm_24k_mono_unchanged() {
-        use meerkat_core::Provider;
         use meerkat_core::live_adapter::LiveInputChunk;
 
         let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
@@ -9075,7 +9340,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime-2", Provider::OpenAI);
+        session.set_current_identity(&sample_realtime_identity());
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(

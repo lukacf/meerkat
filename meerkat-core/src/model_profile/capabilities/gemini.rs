@@ -36,6 +36,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: true,
         inline_video: true,
         realtime: false,
+        image_generation: false,
         supports_temperature: true,
         // top_p/top_k support is not explicitly stated on the Gemini 3.x
         // model pages. Match the legacy schema which advertised both.
@@ -78,6 +79,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: true,
         inline_video: true,
         realtime: false,
+        image_generation: false,
         supports_temperature: true,
         supports_top_p: true,
         supports_top_k: true,
@@ -116,6 +118,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: true,
         inline_video: true,
         realtime: false,
+        image_generation: false,
         supports_temperature: true,
         supports_top_p: true,
         supports_top_k: true,

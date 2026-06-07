@@ -307,6 +307,12 @@ pub struct SessionBuildOptions {
     /// Used for surface-supplied runtime state such as session-local tool
     /// visibility. The factory validates special keys before applying them.
     pub initial_metadata_entries: BTreeMap<String, serde_json::Value>,
+    /// Session-local initial tool-visibility filter applied at agent build.
+    ///
+    /// A typed carrier (not a metadata-string side channel) that rides the
+    /// build options so it survives deferred-session materialization, where the
+    /// `AgentBuildConfig` is reconstructed from these options.
+    pub initial_tool_filter: Option<crate::tool_scope::ToolFilter>,
     /// Environment variables injected into shell tool subprocesses for this agent.
     /// Set by the application's `SessionAgentBuilder` — never by the LLM.
     /// Values are not included in the agent's context window.
@@ -1016,6 +1022,7 @@ impl Default for SessionBuildOptions {
             app_context: None,
             additional_instructions: None,
             initial_metadata_entries: BTreeMap::new(),
+            initial_tool_filter: None,
             shell_env: None,
             call_timeout_override: crate::CallTimeoutOverride::Inherit,
             resume_override_mask: ResumeOverrideMask::default(),
@@ -1070,6 +1077,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("app_context", &self.app_context.is_some())
             .field("additional_instructions", &self.additional_instructions)
             .field("initial_metadata_entries", &self.initial_metadata_entries)
+            .field("initial_tool_filter", &self.initial_tool_filter.is_some())
             .field("call_timeout_override", &self.call_timeout_override)
             .field("resume_override_mask", &self.resume_override_mask)
             .field("mob_tools", &self.mob_tools.is_some())

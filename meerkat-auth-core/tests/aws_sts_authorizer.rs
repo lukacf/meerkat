@@ -9,8 +9,36 @@
 #![cfg(all(not(target_arch = "wasm32"), feature = "aws-sigv4"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::sync::Arc;
+
 use meerkat_auth_core::authorizers::{AwsCredentialProvider, AwsStsAuthorizer};
-use meerkat_core::{HttpAuthorizationRequest, HttpAuthorizer};
+use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase, GeneratedAuthLeaseHandle, LeaseKey};
+use meerkat_core::{
+    AuthError, BindingId, HttpAuthorizationRequest, HttpAuthorizer, ProfileId, RealmId,
+};
+
+fn generated_auth_lease_handle_for_test(
+    handle: Arc<meerkat_runtime::RuntimeAuthLeaseHandle>,
+) -> GeneratedAuthLeaseHandle {
+    meerkat_runtime::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(handle)
+        .expect("runtime AuthLeaseHandle is certified by generated AuthMachine authority")
+}
+
+fn lease_key() -> LeaseKey {
+    LeaseKey::new(
+        RealmId::parse("dev").unwrap(),
+        BindingId::parse("bedrock").unwrap(),
+        Some(ProfileId::parse("aws-sigv4").unwrap()),
+    )
+}
+
+fn bedrock_request(headers: &mut Vec<(String, String)>) -> HttpAuthorizationRequest<'_> {
+    HttpAuthorizationRequest {
+        method: "POST",
+        url: "https://bedrock-runtime.us-east-1.amazonaws.com/model/x/invoke",
+        headers,
+    }
+}
 
 fn static_provider() -> AwsCredentialProvider {
     AwsCredentialProvider::Static {
@@ -132,4 +160,113 @@ async fn label_is_stable() {
 
     let b = AwsStsAuthorizer::with_service("eu-west-1", "lambda", static_provider());
     assert_eq!(b.label(), "aws-sigv4(lambda/eu-west-1)");
+}
+
+/// Row #49 gate: a wired AWS authorizer consults the per-binding AuthMachine
+/// lease before signing. On first use the binding is absent, so the authorizer
+/// acquires a `Valid` (no-expiry) lease for the Static credentials and signs —
+/// the lease, not an implicit always-fresh assumption, now owns validity.
+#[tokio::test]
+async fn sigv4_acquires_valid_lease_on_first_use_then_signs() {
+    let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+    let key = lease_key();
+    let authorizer = AwsStsAuthorizer::new("us-east-1", static_provider())
+        .with_auth_lease_observer(
+            generated_auth_lease_handle_for_test(Arc::clone(&handle)),
+            key.clone(),
+        );
+
+    // Absent before first use.
+    assert_eq!(handle.snapshot(&key).phase, None);
+
+    let mut headers = vec![(
+        "host".to_string(),
+        "bedrock-runtime.us-east-1.amazonaws.com".to_string(),
+    )];
+    let mut req = bedrock_request(&mut headers);
+    authorizer.authorize(&mut req).await.unwrap();
+
+    // The authorizer signed (proof the freshness verdict admitted use) ...
+    assert!(headers.iter().any(
+        |(k, v)| k.eq_ignore_ascii_case("authorization") && v.starts_with("AWS4-HMAC-SHA256 ")
+    ));
+    // ... and the AuthMachine lease — not a wall-clock assumption — now owns
+    // the credential's validity, held as an explicit no-expiry `Valid` phase.
+    assert_eq!(handle.snapshot(&key).phase, Some(AuthLeasePhase::Valid));
+}
+
+/// Row #49 gate: a reauth-required lease yields a typed `UserReauthRequired`
+/// disposition before any SigV4 signing happens — no silent `SystemTime::now()`
+/// sign with credential material the lease has rejected.
+#[tokio::test]
+async fn sigv4_reauth_required_lease_blocks_signing_with_typed_disposition() {
+    let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+    let key = lease_key();
+    handle.acquire_lease(&key, u64::MAX).unwrap();
+    handle.mark_reauth_required(&key).unwrap();
+    assert_eq!(
+        handle.snapshot(&key).phase,
+        Some(AuthLeasePhase::ReauthRequired)
+    );
+
+    let authorizer = AwsStsAuthorizer::new("us-east-1", static_provider())
+        .with_auth_lease_observer(
+            generated_auth_lease_handle_for_test(Arc::clone(&handle)),
+            key,
+        );
+
+    let mut headers = vec![(
+        "host".to_string(),
+        "bedrock-runtime.us-east-1.amazonaws.com".to_string(),
+    )];
+    let mut req = bedrock_request(&mut headers);
+    let err = authorizer.authorize(&mut req).await.unwrap_err();
+    assert!(
+        matches!(err, AuthError::UserReauthRequired),
+        "reauth-required lease must surface UserReauthRequired, got {err:?}"
+    );
+    // Fail closed: nothing was signed.
+    assert!(
+        !headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+    );
+}
+
+/// Row #49 gate: an expired credential lease (STS session token past its bound
+/// expiry) refuses to sign and surfaces a typed `RefreshRequired` rather than
+/// silently re-signing with the stale credential.
+#[tokio::test]
+async fn sigv4_expired_lease_blocks_signing_with_typed_disposition() {
+    let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+    let key = lease_key();
+    // Acquire with a near-past expiry, then observe freshness in the future so
+    // the AuthMachine moves the lease to Expired.
+    handle.acquire_lease(&key, 1_000).unwrap();
+    handle
+        .observe_credential_freshness(&key, 1_000_000, 60)
+        .unwrap();
+    assert_eq!(handle.snapshot(&key).phase, Some(AuthLeasePhase::Expired));
+
+    let authorizer = AwsStsAuthorizer::new("us-east-1", static_provider())
+        .with_auth_lease_observer(
+            generated_auth_lease_handle_for_test(Arc::clone(&handle)),
+            key,
+        );
+
+    let mut headers = vec![(
+        "host".to_string(),
+        "bedrock-runtime.us-east-1.amazonaws.com".to_string(),
+    )];
+    let mut req = bedrock_request(&mut headers);
+    let err = authorizer.authorize(&mut req).await.unwrap_err();
+    assert!(
+        matches!(err, AuthError::RefreshRequired),
+        "expired lease must surface RefreshRequired, got {err:?}"
+    );
+    assert!(
+        !headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+    );
 }

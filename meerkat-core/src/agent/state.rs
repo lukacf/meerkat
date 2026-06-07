@@ -383,9 +383,13 @@ where
             CallTimeoutOverride::Disabled => None,
             CallTimeoutOverride::Inherit => {
                 // Consult the injected resolver with the current model/provider.
+                // Cross the provider string boundary once here, at the LLM-client
+                // seam; an unparseable provider yields no typed default and falls
+                // through to the retry policy.
                 self.model_defaults_resolver
                     .as_ref()
-                    .and_then(|r| r.call_timeout_for(self.client.provider(), self.client.model()))
+                    .zip(crate::Provider::parse_strict(self.client.provider()))
+                    .and_then(|(r, provider)| r.call_timeout_for(provider, self.client.model()))
                     // Fall through to RetryPolicy.call_timeout for direct builder users.
                     .or(self.retry_policy.call_timeout)
             }
@@ -828,7 +832,10 @@ where
     async fn execute_turn_effects(
         &mut self,
         transition: &TurnExecutionTransition,
-        turn_count: u32,
+        // Retained in the signature as the turn context effects execute within;
+        // no longer consumed since compaction indexing stopped using the turn
+        // as a source-identity proxy (#152).
+        _turn_count: u32,
         event_tx: &Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<(), AgentError> {
         for effect in &transition.effects {
@@ -904,10 +911,7 @@ where
                         .await;
 
                         if let Ok(outcome) = outcome {
-                            match self
-                                .index_compaction_discards(&outcome.discarded, turn_count)
-                                .await
-                            {
+                            match self.index_compaction_discards(&outcome.discarded).await {
                                 crate::memory::MemoryIndexDelivery::Rejected {
                                     error,
                                     attempted_entries,
@@ -1007,7 +1011,6 @@ where
     async fn index_compaction_discards(
         &self,
         discarded: &[Message],
-        turn_count: u32,
     ) -> crate::memory::MemoryIndexDelivery {
         let session_id = self.session.id().clone();
         let scope = crate::memory::MemoryIndexScope::for_session(session_id.clone());
@@ -1015,14 +1018,20 @@ where
             return crate::memory::MemoryIndexDelivery::NoStore { scope };
         };
         let mut requests = Vec::new();
-        for message in discarded {
+        // Compaction discards the front prefix of session history, so a
+        // discarded entry's index IS its offset in the original transcript.
+        // The typed source carries that offset as the canonical origin handle,
+        // not the compaction turn number (which was only a proxy).
+        for (offset, message) in discarded.iter().enumerate() {
             let content = message.as_indexable_text();
             if content.is_empty() {
                 continue;
             }
             let metadata = crate::memory::MemoryMetadata {
                 session_id: session_id.clone(),
-                turn: Some(turn_count),
+                source: crate::memory::MemorySource::Compaction {
+                    source_range: crate::memory::MessageRange::single(offset as u64),
+                },
                 indexed_at: crate::time_compat::SystemTime::now(),
             };
             let request =
@@ -1205,7 +1214,10 @@ where
         event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
         let mut turn_count = 0u32;
-        let max_turns = self.config.max_turns.unwrap_or(100);
+        let max_turns = self
+            .config
+            .max_turns
+            .unwrap_or(crate::config::DEFAULT_MAX_TURNS);
         let mut tool_call_count = 0u32;
         let mut event_stream_open = true;
         let mut run_has_visible_or_actionable_output = false;
@@ -3603,7 +3615,7 @@ mod tests {
             batch: MemoryIndexBatch,
         ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
             if self.fail_indexing {
-                return Err(MemoryStoreError::Index("injected failure".to_string()));
+                return Err(MemoryStoreError::Storage("injected failure".to_string()));
             }
             let (receipt_scope, requests) = batch.into_parts();
             let indexed_entries = requests.len();
@@ -3612,7 +3624,7 @@ mod tests {
                 .fail_after_successful_entries
                 .is_some_and(|successful_entries| indexed_entries > successful_entries)
             {
-                return Err(MemoryStoreError::Index("injected failure".to_string()));
+                return Err(MemoryStoreError::Storage("injected failure".to_string()));
             }
             for request in requests {
                 let (scope, content, metadata) = request.into_parts();

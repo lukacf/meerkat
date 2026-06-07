@@ -4389,6 +4389,7 @@ async fn create_session_inner(
         app_context: req.app_context,
         additional_instructions: req.additional_instructions,
         initial_metadata_entries: std::collections::BTreeMap::new(),
+        initial_tool_filter: None,
         shell_env: req.shell_env,
         resume_override_mask,
         call_timeout_override: Default::default(),
@@ -5422,6 +5423,7 @@ async fn continue_session_inner(
             app_context: None,
             additional_instructions: None,
             initial_metadata_entries: std::collections::BTreeMap::new(),
+            initial_tool_filter: None,
             shell_env: None,
             resume_override_mask: ResumeOverrideMask {
                 model: req.model.is_some(),

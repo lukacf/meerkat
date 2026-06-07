@@ -135,11 +135,29 @@ impl SourceIdentityRegistry {
                     to_skill_name: remap.to.skill_name.to_string(),
                 });
             }
+            // Fail-closed on a duplicate `from`: a second remap for the same
+            // source key would silently shadow the first under last-writer-wins.
+            if let Some(existing) = remap_index.get(&remap.from) {
+                return Err(SkillError::DuplicateRemap {
+                    from: remap.from.to_string(),
+                    existing_to: existing.to_string(),
+                    new_to: remap.to.to_string(),
+                });
+            }
             remap_index.insert(remap.from, remap.to);
         }
 
-        let mut alias_index = HashMap::new();
+        let mut alias_index: HashMap<String, SkillKey> = HashMap::new();
         for alias in aliases {
+            // Fail-closed on a duplicate alias: a second alias for the same name
+            // would silently shadow the first under last-writer-wins.
+            if let Some(existing) = alias_index.get(&alias.alias) {
+                return Err(SkillError::DuplicateAlias {
+                    alias: alias.alias,
+                    existing_to: existing.to_string(),
+                    new_to: alias.to.to_string(),
+                });
+            }
             alias_index.insert(alias.alias, alias.to);
         }
 
@@ -155,13 +173,25 @@ impl SourceIdentityRegistry {
         })
     }
 
-    /// Look up a raw alias string and, if present, return the canonical
-    /// (remapped) `SkillKey`.
-    pub fn resolve_alias(&self, alias: &str) -> Option<SkillKey> {
-        self.aliases
-            .get(alias)
-            .cloned()
-            .and_then(|key| self.apply_remaps(key).ok())
+    /// Look up a raw alias string and return the canonical (remapped) `SkillKey`.
+    ///
+    /// Routes the aliased key through the full lifecycle-enforcing [`resolve`]
+    /// rather than a bare remap, so an alias can never return a
+    /// canonical-looking key that points at a disabled or retired source.
+    /// Returns [`SkillError::UnknownSkillAlias`] when the alias name is absent.
+    ///
+    /// [`resolve`]: Self::resolve
+    pub fn resolve_alias(&self, alias: &str) -> Result<SkillKey, SkillError> {
+        let Some(key) = self.aliases.get(alias) else {
+            return Err(SkillError::UnknownSkillAlias {
+                alias: alias.to_string(),
+            });
+        };
+        self.resolve(key).map(|resolved| resolved.key).map_err(|e| {
+            SkillError::Load(
+                format!("source identity resolution failed for alias '{alias}': {e}").into(),
+            )
+        })
     }
 
     /// Produce the canonical (remapped) `SkillKey` for a `SkillRef`. Does NOT
@@ -501,6 +531,85 @@ mod tests {
             resolved,
             key("a93d587d-8f44-438f-8189-6e8cf549f6e7", "mail-extractor")
         );
+    }
+
+    #[test]
+    fn registry_rejects_duplicate_remap_from() {
+        let result = SourceIdentityRegistry::build(
+            vec![record("dc256086-0d2f-4f61-a307-320d4148107f", "fp-a")],
+            vec![],
+            vec![
+                SkillKeyRemap {
+                    from: key("dc256086-0d2f-4f61-a307-320d4148107f", "email-extractor"),
+                    to: key("dc256086-0d2f-4f61-a307-320d4148107f", "mail-extractor"),
+                    reason: None,
+                },
+                // Second remap for the same `from` must fail closed rather than
+                // silently shadowing the first under last-writer-wins.
+                SkillKeyRemap {
+                    from: key("dc256086-0d2f-4f61-a307-320d4148107f", "email-extractor"),
+                    to: key("dc256086-0d2f-4f61-a307-320d4148107f", "other-extractor"),
+                    reason: None,
+                },
+            ],
+            vec![],
+        );
+        assert!(matches!(result, Err(SkillError::DuplicateRemap { .. })));
+    }
+
+    #[test]
+    fn registry_rejects_duplicate_alias() {
+        let result = SourceIdentityRegistry::build(
+            vec![record("dc256086-0d2f-4f61-a307-320d4148107f", "fp-a")],
+            vec![],
+            vec![],
+            vec![
+                SkillAlias {
+                    alias: "legacy-email".to_string(),
+                    to: key("dc256086-0d2f-4f61-a307-320d4148107f", "email-extractor"),
+                },
+                // Second alias under the same name must fail closed.
+                SkillAlias {
+                    alias: "legacy-email".to_string(),
+                    to: key("dc256086-0d2f-4f61-a307-320d4148107f", "other-extractor"),
+                },
+            ],
+        );
+        assert!(matches!(result, Err(SkillError::DuplicateAlias { .. })));
+    }
+
+    #[test]
+    fn resolve_alias_rejects_disabled_source() {
+        let registry = SourceIdentityRegistry::build(
+            vec![record_with_status(
+                "dc256086-0d2f-4f61-a307-320d4148107f",
+                "fp-a",
+                SourceIdentityStatus::Disabled,
+            )],
+            vec![],
+            vec![],
+            vec![SkillAlias {
+                alias: "legacy-email".to_string(),
+                to: key("dc256086-0d2f-4f61-a307-320d4148107f", "email-extractor"),
+            }],
+        )
+        .expect("registry should build");
+
+        // The alias name exists, but it points at a disabled source. Lifecycle
+        // enforcement must refuse it rather than return a canonical-looking key.
+        let err = registry
+            .resolve_alias("legacy-email")
+            .expect_err("disabled-source alias must be rejected");
+        assert!(matches!(err, SkillError::Load(_)));
+    }
+
+    #[test]
+    fn resolve_alias_unknown_alias_errors() {
+        let registry = SourceIdentityRegistry::default();
+        let err = registry
+            .resolve_alias("nope")
+            .expect_err("unknown alias must error");
+        assert!(matches!(err, SkillError::UnknownSkillAlias { .. }));
     }
 
     #[test]

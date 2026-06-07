@@ -2954,9 +2954,7 @@ mod tests {
             tools: Arc::from(tools),
         }));
         if let Some(filter) = initial_filter {
-            build
-                .set_initial_tool_filter(filter)
-                .expect("initial tool filter should serialize");
+            build.set_initial_tool_filter(filter);
         }
 
         let agent = factory

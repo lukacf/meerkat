@@ -255,6 +255,7 @@ impl McpScheduleContext {
             additional_instructions: (!create.additional_instructions.is_empty())
                 .then(|| create.additional_instructions.clone()),
             initial_metadata_entries: std::collections::BTreeMap::new(),
+            initial_tool_filter: None,
             shell_env: None,
             resume_override_mask: Default::default(),
             blob_store_override: None,

@@ -9,8 +9,8 @@
 use async_trait::async_trait;
 use hnsw_rs::prelude::{DistCosine, Hnsw};
 use meerkat_core::memory::{
-    MemoryIndexBatch, MemoryIndexReceipt, MemoryMetadata, MemoryResult, MemorySearchScope,
-    MemoryStore, MemoryStoreError,
+    EmbeddingModel, HnswParams, MemoryIndexBatch, MemoryIndexReceipt, MemoryMetadata,
+    MemoryRankingPolicy, MemoryResult, MemorySearchScope, MemoryStore, MemoryStoreError,
 };
 use meerkat_core::types::SessionId;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -33,31 +33,80 @@ CREATE TABLE IF NOT EXISTS memory_text (
     content BLOB NOT NULL
 )";
 
-/// Vocabulary dimension for bag-of-words vectors.
-const VOCAB_DIM: usize = 4096;
+/// Default vocabulary dimension for the bag-of-words embedding model.
+const DEFAULT_VOCAB_DIM: usize = 4096;
 
-/// Maximum neighbors per layer in HNSW.
-const MAX_NB_CONNECTION: usize = 16;
-/// Maximum HNSW layers.
-const MAX_LAYER: usize = 16;
-/// Construction-time exploration factor.
-const EF_CONSTRUCTION: usize = 200;
 /// Minimum max-elements hint for an allocated HNSW index.
 const MIN_INDEX_ELEMENTS_HINT: usize = 1;
+
+/// Default semantic-memory ranking policy: hash-based bag-of-words embeddings
+/// with the baseline HNSW parameters.
+pub fn default_ranking_policy() -> MemoryRankingPolicy {
+    MemoryRankingPolicy::new(
+        Arc::new(BagOfWordsEmbeddingModel::new(DEFAULT_VOCAB_DIM)),
+        HnswParams::default(),
+    )
+}
+
+/// Simple bag-of-words embedding model using hash-based dimensionality
+/// reduction.
+///
+/// Each word is hashed to a bucket in `[0, vocab_dim)` and its presence
+/// increments that dimension; the vector is then L2-normalized for cosine
+/// distance compatibility.
+///
+/// This is a baseline. For production quality, substitute a proper embedding
+/// model (e.g., sentence-transformers via ONNX runtime) by injecting a
+/// different [`MemoryRankingPolicy`].
+pub struct BagOfWordsEmbeddingModel {
+    vocab_dim: usize,
+}
+
+impl BagOfWordsEmbeddingModel {
+    pub fn new(vocab_dim: usize) -> Self {
+        Self { vocab_dim }
+    }
+}
+
+impl EmbeddingModel for BagOfWordsEmbeddingModel {
+    fn dimension(&self) -> usize {
+        self.vocab_dim
+    }
+
+    fn embed(&self, text: &str) -> Vec<f32> {
+        let mut vec = vec![0.0f32; self.vocab_dim];
+        for word in text.split_whitespace() {
+            let hash = word.bytes().fold(0usize, |acc, b| {
+                acc.wrapping_mul(31)
+                    .wrapping_add(b.to_ascii_lowercase() as usize)
+            }) % self.vocab_dim;
+            vec[hash] += 1.0;
+        }
+
+        let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            for x in &mut vec {
+                *x /= norm;
+            }
+        }
+
+        vec
+    }
+}
 
 fn open_connection(path: &Path) -> Result<Connection, MemoryStoreError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(MemoryStoreError::Io)?;
     }
-    let conn = Connection::open(path).map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+    let conn = Connection::open(path).map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
     conn.busy_timeout(Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))
-        .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+        .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
     conn.pragma_update(None, "journal_mode", "WAL")
-        .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+        .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
     conn.pragma_update(None, "synchronous", "FULL")
-        .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+        .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
     conn.execute_batch(CREATE_MEMORY_SCHEMA_SQL)
-        .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+        .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
     Ok(conn)
 }
 
@@ -67,12 +116,12 @@ fn bounded_index_elements_hint(entries: usize) -> usize {
     entries.max(MIN_INDEX_ELEMENTS_HINT)
 }
 
-fn new_hnsw_index(max_elements_hint: usize) -> MemoryHnswIndex {
+fn new_hnsw_index(max_elements_hint: usize, params: HnswParams) -> MemoryHnswIndex {
     Hnsw::<'static, f32, DistCosine>::new(
-        MAX_NB_CONNECTION,
+        params.max_nb_connection,
         bounded_index_elements_hint(max_elements_hint),
-        MAX_LAYER,
-        EF_CONSTRUCTION,
+        params.max_layer,
+        params.ef_construction,
         DistCosine {},
     )
 }
@@ -84,10 +133,10 @@ struct ScopedHnswIndex {
 }
 
 impl ScopedHnswIndex {
-    fn new(max_elements_hint: usize) -> Self {
+    fn new(max_elements_hint: usize, params: HnswParams) -> Self {
         let max_elements_hint = bounded_index_elements_hint(max_elements_hint);
         Self {
-            index: new_hnsw_index(max_elements_hint),
+            index: new_hnsw_index(max_elements_hint, params),
             #[cfg(test)]
             max_elements_hint,
         }
@@ -108,13 +157,27 @@ pub struct HnswMemoryStore {
     next_id: AtomicUsize,
     insert_lock: Mutex<()>,
     path: PathBuf,
+    /// Injected typed ranking policy: the authority for embedding generation
+    /// and HNSW index parameters (not store-local constants).
+    policy: MemoryRankingPolicy,
 }
 
 impl HnswMemoryStore {
-    /// Open or create a memory store at the given directory.
+    /// Open or create a memory store at the given directory using the default
+    /// ranking policy ([`default_ranking_policy`]).
     pub fn open(dir: impl AsRef<Path>) -> Result<Self, MemoryStoreError> {
+        Self::open_with_policy(dir, default_ranking_policy())
+    }
+
+    /// Open or create a memory store at the given directory with an injected
+    /// typed ranking policy that owns embedding generation and HNSW parameters.
+    pub fn open_with_policy(
+        dir: impl AsRef<Path>,
+        policy: MemoryRankingPolicy,
+    ) -> Result<Self, MemoryStoreError> {
         let dir = dir.as_ref();
         std::fs::create_dir_all(dir).map_err(MemoryStoreError::Io)?;
+        let hnsw_params = policy.hnsw_params();
 
         let db_path = dir.join("memory.sqlite3");
         let conn = open_connection(&db_path)?;
@@ -125,11 +188,12 @@ impl HnswMemoryStore {
                     row.get(0)
                 })
                 .optional()
-                .map_err(|e| MemoryStoreError::Index(e.to_string()))?
+                .map_err(|e| MemoryStoreError::Storage(e.to_string()))?
                 .flatten();
             match max_id {
-                Some(value) => usize::try_from(value + 1)
-                    .map_err(|_| MemoryStoreError::Index("point ID out of range".to_string()))?,
+                Some(value) => {
+                    usize::try_from(value + 1).map_err(|_| MemoryStoreError::PointIdOutOfRange)?
+                }
                 None => 0,
             }
         };
@@ -138,13 +202,13 @@ impl HnswMemoryStore {
         {
             let mut count_stmt = conn
                 .prepare("SELECT metadata_json FROM memory_metadata")
-                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+                .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
             let metadata_rows = count_stmt
                 .query_map([], |row| row.get::<_, Vec<u8>>(0))
-                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+                .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
             for metadata_json in metadata_rows {
                 let metadata_json =
-                    metadata_json.map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+                    metadata_json.map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
                 let metadata: MemoryMetadata = serde_json::from_slice(&metadata_json)
                     .map_err(|e| MemoryStoreError::Embedding(e.to_string()))?;
                 *session_counts.entry(metadata.session_id).or_default() += 1;
@@ -160,7 +224,7 @@ impl HnswMemoryStore {
                  JOIN memory_metadata m ON m.point_id = t.point_id \
                  ORDER BY t.point_id ASC",
             )
-            .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+            .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((
@@ -169,22 +233,22 @@ impl HnswMemoryStore {
                     row.get::<_, Vec<u8>>(2)?,
                 ))
             })
-            .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+            .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
         for row in rows {
             let (point_id, text, metadata_json) =
-                row.map_err(|e| MemoryStoreError::Index(e.to_string()))?;
-            let point_id = usize::try_from(point_id)
-                .map_err(|_| MemoryStoreError::Index("point ID out of range".to_string()))?;
+                row.map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
+            let point_id =
+                usize::try_from(point_id).map_err(|_| MemoryStoreError::PointIdOutOfRange)?;
             let metadata: MemoryMetadata = serde_json::from_slice(&metadata_json)
                 .map_err(|e| MemoryStoreError::Embedding(e.to_string()))?;
             let text = String::from_utf8_lossy(&text);
-            let embedding = text_to_embedding(&text);
+            let embedding = policy.embed(&text);
             let max_elements_hint = *session_counts
                 .get(&metadata.session_id)
                 .unwrap_or(&MIN_INDEX_ELEMENTS_HINT);
             indices
                 .entry(metadata.session_id)
-                .or_insert_with(|| ScopedHnswIndex::new(max_elements_hint))
+                .or_insert_with(|| ScopedHnswIndex::new(max_elements_hint, hnsw_params))
                 .insert(&embedding, point_id);
         }
 
@@ -194,6 +258,7 @@ impl HnswMemoryStore {
             next_id: AtomicUsize::new(next_id),
             insert_lock: Mutex::new(()),
             path: dir.to_path_buf(),
+            policy,
         })
     }
 
@@ -251,59 +316,56 @@ impl MemoryStore for HnswMemoryStore {
             let (_scope, content, metadata) = request.into_parts();
             let meta_json = serde_json::to_vec(&metadata)
                 .map_err(|e| MemoryStoreError::Embedding(e.to_string()))?;
-            let embedding = text_to_embedding(&content);
+            let embedding = self.policy.embed(&content);
             entries.push((content, meta_json, embedding));
         }
 
         let db_path = self.db_path.clone();
         let indices = Arc::clone(&self.indices);
         let session_id = receipt_scope.session_id().clone();
+        let hnsw_params = self.policy.hnsw_params();
 
         // Keep point ID allocation coupled to a successful write.
         let _guard = self.insert_lock.lock().await;
         let point_id = self.next_id.load(Ordering::Acquire);
         let next_id = point_id
             .checked_add(indexed_entries)
-            .ok_or_else(|| MemoryStoreError::Index("point ID overflow".to_string()))?;
+            .ok_or(MemoryStoreError::PointIdOverflow)?;
         let point_ids: Vec<i64> = (point_id..next_id)
-            .map(|id| {
-                i64::try_from(id)
-                    .map_err(|_| MemoryStoreError::Index("point ID out of range".to_string()))
-            })
+            .map(|id| i64::try_from(id).map_err(|_| MemoryStoreError::PointIdOutOfRange))
             .collect::<Result<_, _>>()?;
 
         let insert_result = tokio::task::spawn_blocking(move || {
             let mut conn = open_connection(&db_path)?;
             let tx = conn
                 .transaction()
-                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+                .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
             for (point_id_i64, (content, meta_json, _embedding)) in point_ids.iter().zip(&entries) {
                 tx.execute(
                     "INSERT INTO memory_metadata (point_id, metadata_json) VALUES (?1, ?2)",
                     params![point_id_i64, meta_json],
                 )
-                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+                .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
                 tx.execute(
                     "INSERT INTO memory_text (point_id, content) VALUES (?1, ?2)",
                     params![point_id_i64, content.as_bytes()],
                 )
-                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+                .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
             }
             tx.commit()
-                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+                .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
 
             let index_result = (|| {
                 let mut indices = indices
                     .write()
-                    .map_err(|_| MemoryStoreError::Index("HNSW index lock poisoned".to_string()))?;
+                    .map_err(|_| MemoryStoreError::LockPoisoned)?;
                 let index = indices
                     .entry(session_id)
-                    .or_insert_with(|| ScopedHnswIndex::new(indexed_entries));
+                    .or_insert_with(|| ScopedHnswIndex::new(indexed_entries, hnsw_params));
                 for (point_id, (_content, _meta_json, embedding)) in point_ids.iter().zip(&entries)
                 {
-                    let point_id = usize::try_from(*point_id).map_err(|_| {
-                        MemoryStoreError::Index("point ID out of range".to_string())
-                    })?;
+                    let point_id = usize::try_from(*point_id)
+                        .map_err(|_| MemoryStoreError::PointIdOutOfRange)?;
                     index.insert(embedding, point_id);
                 }
                 Ok::<(), MemoryStoreError>(())
@@ -313,28 +375,28 @@ impl MemoryStore for HnswMemoryStore {
                 let mut cleanup = open_connection(&db_path)?;
                 let tx = cleanup
                     .transaction()
-                    .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+                    .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
                 for point_id_i64 in &point_ids {
                     tx.execute(
                         "DELETE FROM memory_metadata WHERE point_id = ?1",
                         params![point_id_i64],
                     )
-                    .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+                    .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
                     tx.execute(
                         "DELETE FROM memory_text WHERE point_id = ?1",
                         params![point_id_i64],
                     )
-                    .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+                    .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
                 }
                 tx.commit()
-                    .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+                    .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
                 return Err(error);
             }
 
             Ok::<(), MemoryStoreError>(())
         })
         .await
-        .map_err(|e| MemoryStoreError::Index(format!("index task join failed: {e}")))?;
+        .map_err(|e| MemoryStoreError::TaskJoin(format!("index task join failed: {e}")))?;
 
         if let Err(error) = insert_result {
             self.next_id.store(next_id, Ordering::Release);
@@ -361,26 +423,24 @@ impl MemoryStore for HnswMemoryStore {
         let scope = scope.clone();
         let db_path = self.db_path.clone();
         let indices = Arc::clone(&self.indices);
+        let embedding_model = Arc::clone(self.policy.embedding_model());
+        let ef_search = self.policy.hnsw_params().ef_search;
 
         tokio::task::spawn_blocking(move || {
-            let embedding = text_to_embedding(&query);
+            let embedding = embedding_model.embed(&query);
             let neighbors = {
-                let indices = indices
-                    .read()
-                    .map_err(|_| MemoryStoreError::Index("HNSW index lock poisoned".to_string()))?;
+                let indices = indices.read().map_err(|_| MemoryStoreError::LockPoisoned)?;
                 let Some(index) = indices.get(scope.session_id()) else {
                     return Ok(Vec::new());
                 };
-                index
-                    .index
-                    .search(&embedding, limit, limit.max(EF_CONSTRUCTION))
+                index.index.search(&embedding, limit, limit.max(ef_search))
             };
 
             let conn = open_connection(&db_path)?;
             let mut results = Vec::with_capacity(neighbors.len());
             for neighbor in &neighbors {
                 let point_id = i64::try_from(neighbor.d_id)
-                    .map_err(|_| MemoryStoreError::Index("point ID out of range".to_string()))?;
+                    .map_err(|_| MemoryStoreError::PointIdOutOfRange)?;
 
                 let content = match conn
                     .query_row(
@@ -389,7 +449,7 @@ impl MemoryStore for HnswMemoryStore {
                         |row| row.get::<_, Vec<u8>>(0),
                     )
                     .optional()
-                    .map_err(|e| MemoryStoreError::Index(e.to_string()))?
+                    .map_err(|e| MemoryStoreError::Storage(e.to_string()))?
                 {
                     Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
                     None => continue,
@@ -402,7 +462,7 @@ impl MemoryStore for HnswMemoryStore {
                         |row| row.get::<_, Vec<u8>>(0),
                     )
                     .optional()
-                    .map_err(|e| MemoryStoreError::Index(e.to_string()))?
+                    .map_err(|e| MemoryStoreError::Storage(e.to_string()))?
                 {
                     Some(bytes) => serde_json::from_slice(&bytes)
                         .map_err(|e| MemoryStoreError::Embedding(e.to_string()))?,
@@ -426,43 +486,17 @@ impl MemoryStore for HnswMemoryStore {
             Ok::<Vec<MemoryResult>, MemoryStoreError>(results)
         })
         .await
-        .map_err(|e| MemoryStoreError::Index(format!("search task join failed: {e}")))?
+        .map_err(|e| MemoryStoreError::TaskJoin(format!("search task join failed: {e}")))?
     }
-}
-
-/// Simple bag-of-words embedding using hash-based dimensionality reduction.
-///
-/// Each word is hashed to a bucket in `[0, VOCAB_DIM)` and its presence
-/// increments that dimension. The vector is then L2-normalized for cosine
-/// distance compatibility.
-///
-/// This is a baseline. For production quality, replace with a proper
-/// embedding model (e.g., sentence-transformers via ONNX runtime).
-fn text_to_embedding(text: &str) -> [f32; VOCAB_DIM] {
-    let mut vec = [0.0f32; VOCAB_DIM];
-    for word in text.split_whitespace() {
-        let hash = word.bytes().fold(0usize, |acc, b| {
-            acc.wrapping_mul(31)
-                .wrapping_add(b.to_ascii_lowercase() as usize)
-        }) % VOCAB_DIM;
-        vec[hash] += 1.0;
-    }
-
-    let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        for x in &mut vec {
-            *x /= norm;
-        }
-    }
-
-    vec
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use meerkat_core::memory::{MemoryIndexRequest, MemoryIndexScope, MemoryMetadata};
+    use meerkat_core::memory::{
+        MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemorySource, MessageRange,
+    };
     use meerkat_core::types::SessionId;
     use std::time::SystemTime;
     use tempfile::TempDir;
@@ -470,7 +504,9 @@ mod tests {
     fn meta(session_id: &SessionId) -> MemoryMetadata {
         MemoryMetadata {
             session_id: session_id.clone(),
-            turn: Some(1),
+            source: MemorySource::Compaction {
+                source_range: MessageRange::single(0),
+            },
             indexed_at: SystemTime::now(),
         }
     }
@@ -712,5 +748,104 @@ mod tests {
         );
         assert!(results[0].score <= 1.0);
         assert!(results[0].score >= 0.0);
+    }
+
+    /// Embedding model that maps every input to a single fixed bucket, so all
+    /// content collapses to one ranking vector regardless of text.
+    struct ConstantEmbeddingModel {
+        dim: usize,
+    }
+
+    impl EmbeddingModel for ConstantEmbeddingModel {
+        fn dimension(&self) -> usize {
+            self.dim
+        }
+
+        fn embed(&self, _text: &str) -> Vec<f32> {
+            let mut v = vec![0.0f32; self.dim];
+            v[0] = 1.0;
+            v
+        }
+    }
+
+    #[tokio::test]
+    async fn test_injected_policy_is_ranking_authority() {
+        let session_id = SessionId::new();
+        let scope = MemorySearchScope::for_session(session_id.clone());
+
+        // Default policy: distinct text embeds distinctly, so an unrelated query
+        // does not perfectly match indexed content.
+        let default_score = {
+            let dir = TempDir::new().unwrap();
+            let store = HnswMemoryStore::open(dir.path().join("memory")).unwrap();
+            store
+                .index_scoped(request("alpha beta gamma", &session_id))
+                .await
+                .unwrap();
+            let results = store
+                .search(&scope, "completely unrelated query", 1)
+                .await
+                .unwrap();
+            results.first().map(|r| r.score)
+        };
+
+        // Injected constant policy: every text collapses to the same vector, so
+        // the unrelated query matches the indexed content with score ~1.0.
+        let constant_score = {
+            let dir = TempDir::new().unwrap();
+            let policy = MemoryRankingPolicy::new(
+                Arc::new(ConstantEmbeddingModel { dim: 16 }),
+                HnswParams::default(),
+            );
+            let store =
+                HnswMemoryStore::open_with_policy(dir.path().join("memory"), policy).unwrap();
+            store
+                .index_scoped(request("alpha beta gamma", &session_id))
+                .await
+                .unwrap();
+            let results = store
+                .search(&scope, "completely unrelated query", 1)
+                .await
+                .unwrap();
+            results.first().map(|r| r.score)
+        };
+
+        // The injected policy is the authority: ranking output differs from the
+        // default hard-coded scheme.
+        let constant_score = constant_score.expect("constant policy matches all content");
+        assert!(
+            constant_score > 0.99,
+            "constant embedding policy must rank unrelated text as a match, got {constant_score}"
+        );
+        assert!(
+            default_score.map(|s| s < 0.99).unwrap_or(true),
+            "default policy must not rank unrelated text as a perfect match"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_distinct_failures_surface_as_distinct_typed_variants() {
+        // Embedding/metadata serialization failures vs storage faults are
+        // distinguishable typed variants, not a single stringly arm.
+        assert_eq!(
+            MemoryStoreError::Embedding("x".into()).error_code(),
+            "memory_embedding"
+        );
+        assert_eq!(
+            MemoryStoreError::Storage("x".into()).error_code(),
+            "memory_storage"
+        );
+        assert_eq!(
+            MemoryStoreError::LockPoisoned.error_code(),
+            "memory_lock_poisoned"
+        );
+        assert_eq!(
+            MemoryStoreError::PointIdOverflow.error_code(),
+            "memory_point_id_overflow"
+        );
+        assert_eq!(
+            MemoryStoreError::PointIdOutOfRange.error_code(),
+            "memory_point_id_out_of_range"
+        );
     }
 }

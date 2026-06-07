@@ -281,14 +281,10 @@ pub async fn handle_create(
     );
     build_config.override_web_search =
         ToolCategoryOverride::from_override(params.enable_web_search);
-    if let Some(tool_filter) = params.tool_filter
-        && let Err(err) = build_config.set_initial_tool_filter(tool_filter)
-    {
-        return RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            format!("Invalid tool_filter: {err}"),
-        );
+    if let Some(tool_filter) = params.tool_filter {
+        // The typed tool filter is carried directly now (no string side
+        // channel that could fail to serialize), so this is infallible.
+        build_config.set_initial_tool_filter(tool_filter);
     }
     // Mob tools factory — injected via FactoryAgentBuilder.default_mob_tools or
     // AgentFactory.mob_tools. No per-handler wiring needed; the factory resolves

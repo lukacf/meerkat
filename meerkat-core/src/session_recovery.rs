@@ -552,6 +552,7 @@ pub fn resolve_effective_turn_config(
             .or_else(|| build_state.app_context.clone()),
         additional_instructions: build_state.additional_instructions.clone(),
         initial_metadata_entries: std::collections::BTreeMap::new(),
+        initial_tool_filter: None,
         shell_env: overrides
             .shell_env
             .clone()

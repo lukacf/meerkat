@@ -7,6 +7,7 @@
 //! The resolver is invoked at **call time** (not build time) so that
 //! hot-swapped model/provider identity is reflected in the resolved defaults.
 
+use crate::Provider;
 use std::time::Duration;
 
 /// Resolver for model-specific operational defaults.
@@ -17,5 +18,9 @@ use std::time::Duration;
 pub trait ModelOperationalDefaultsResolver: Send + Sync {
     /// Return the profile-derived default call timeout for the given model/provider,
     /// or `None` if the model is unknown or has no profiled default.
-    fn call_timeout_for(&self, provider: &str, model: &str) -> Option<Duration>;
+    ///
+    /// The provider is the typed [`Provider`] owner: callers cross the string
+    /// boundary once (at the LLM-client seam) rather than re-parsing a provider
+    /// string the resolver implementation already needs typed.
+    fn call_timeout_for(&self, provider: Provider, model: &str) -> Option<Duration>;
 }

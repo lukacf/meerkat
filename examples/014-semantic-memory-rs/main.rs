@@ -26,7 +26,8 @@ use std::sync::Arc;
 
 use meerkat::{AgentBuilder, AgentFactory, AnthropicClient, ToolGatewayBuilder};
 use meerkat_core::memory::{
-    MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemoryStore as _,
+    MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemorySource, MemoryStore as _,
+    MessageRange,
 };
 use meerkat_memory::{MemorySearchDispatcher, SimpleMemoryStore};
 use meerkat_store::{JsonlStore, StoreAdapter};
@@ -98,7 +99,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (i, fact) in facts.iter().enumerate() {
         let metadata = MemoryMetadata {
             session_id: memory_session_id.clone(),
-            turn: Some(i as u32 + 1),
+            source: MemorySource::Compaction {
+                source_range: MessageRange::single(i as u64),
+            },
             indexed_at: now,
         };
         let request = MemoryIndexRequest::new(

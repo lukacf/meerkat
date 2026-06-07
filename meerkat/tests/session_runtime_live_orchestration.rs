@@ -422,8 +422,10 @@ mod orchestrator_e2e {
     async fn propagate_config_to_live_channels_no_host_is_noop() {
         let fx = build_fixture();
         let orch = orchestrator(&fx);
-        // Reaches the early-return branch and does not panic.
-        orch.propagate_config_to_live_channels(None).await;
+        // Reaches the early-return branch and returns an empty, clean report.
+        let report = orch.propagate_config_to_live_channels(None).await;
+        assert!(report.is_clean());
+        assert_eq!(report, Default::default());
     }
 
     /// `precheck_live_open` must reject a deferred staged session whose

@@ -247,9 +247,16 @@ pub async fn handle_set(
                 // live sessions stale until the SDK reconnected. See
                 // the helper for the exact field set.
                 if should_fire_live_propagation(&prior, &snapshot.config) {
-                    runtime
+                    let report = runtime
                         .propagate_config_to_live_channels(Some(&prior_global_model))
                         .await;
+                    if !report.is_clean() {
+                        tracing::warn!(
+                            swap_failed = ?report.swap_failed,
+                            refresh_failed = ?report.refresh_failed,
+                            "live config propagation to active channels reported failures"
+                        );
+                    }
                 }
                 RpcResponse::success(id, config_response_body(snapshot))
             }
@@ -274,9 +281,16 @@ pub async fn handle_set(
             Ok(()) => {
                 runtime.set_skill_identity_registry(registry);
                 if should_fire_live_propagation(&prior, &config) {
-                    runtime
+                    let report = runtime
                         .propagate_config_to_live_channels(Some(&prior_global_model))
                         .await;
+                    if !report.is_clean() {
+                        tracing::warn!(
+                            swap_failed = ?report.swap_failed,
+                            refresh_failed = ?report.refresh_failed,
+                            "live config propagation to active channels reported failures"
+                        );
+                    }
                 }
                 RpcResponse::success(
                     id,
@@ -380,9 +394,16 @@ pub async fn handle_patch(
                 // See `should_fire_live_propagation` for the exact
                 // field set.
                 if should_fire_live_propagation(&current, &snapshot.config) {
-                    runtime
+                    let report = runtime
                         .propagate_config_to_live_channels(Some(&prior_global_model))
                         .await;
+                    if !report.is_clean() {
+                        tracing::warn!(
+                            swap_failed = ?report.swap_failed,
+                            refresh_failed = ?report.refresh_failed,
+                            "live config propagation to active channels reported failures"
+                        );
+                    }
                 }
                 RpcResponse::success(id, config_response_body(snapshot))
             }
@@ -433,9 +454,16 @@ pub async fn handle_patch(
                 // R3-2-4 (P1): gate on prior-vs-new diff. See
                 // `should_fire_live_propagation` for the field set.
                 if should_fire_live_propagation(&current, &config) {
-                    runtime
+                    let report = runtime
                         .propagate_config_to_live_channels(Some(&prior_global_model))
                         .await;
+                    if !report.is_clean() {
+                        tracing::warn!(
+                            swap_failed = ?report.swap_failed,
+                            refresh_failed = ?report.refresh_failed,
+                            "live config propagation to active channels reported failures"
+                        );
+                    }
                 }
                 RpcResponse::success(
                     id,

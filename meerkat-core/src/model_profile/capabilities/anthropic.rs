@@ -5,7 +5,7 @@
 //! feature pages (`effort`, `extended-thinking`, `adaptive-thinking`,
 //! `context-windows`, `compaction`, `structured-outputs`).
 
-use super::{BetaHeader, BetaValue, ModelCapabilities, ThinkingSupport};
+use super::{BetaHeader, BetaValue, EffortLevel, ModelCapabilities, ThinkingSupport};
 use crate::Provider;
 use crate::model_profile::catalog::ModelTier;
 
@@ -52,16 +52,27 @@ const BETA_OUTPUT_300K: BetaValue<u32> = BetaValue {
 
 /// Effort tiers accepted by Opus 4.8 and Opus 4.7; `xhigh` sits between
 /// `high` and `max`.
-const OPUS_48_47_EFFORT: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+const OPUS_48_47_EFFORT: &[EffortLevel] = &[
+    EffortLevel::Low,
+    EffortLevel::Medium,
+    EffortLevel::High,
+    EffortLevel::Xhigh,
+    EffortLevel::Max,
+];
 
 /// Effort tiers accepted by Sonnet 4.6.
-const SONNET_46_EFFORT: &[&str] = &["low", "medium", "high", "max"];
+const SONNET_46_EFFORT: &[EffortLevel] = &[
+    EffortLevel::Low,
+    EffortLevel::Medium,
+    EffortLevel::High,
+    EffortLevel::Max,
+];
 
 /// Effort tiers accepted by Opus 4.5 (verified against the live API:
 /// "This model does not support effort level 'max'. Supported levels: high,
 /// low, medium." — so `max` is rejected on 4.5 despite the docs listing the
 /// model on the effort page.)
-const OPUS_45_EFFORT: &[&str] = &["low", "medium", "high"];
+const OPUS_45_EFFORT: &[EffortLevel] = &[EffortLevel::Low, EffortLevel::Medium, EffortLevel::High];
 
 // ── Catalog rows ─────────────────────────────────────────────────────────
 
@@ -100,6 +111,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: true,
         inline_video: false,
         realtime: false,
+        image_generation: false,
         supports_temperature: false,
         supports_top_p: false,
         supports_top_k: false,
@@ -147,6 +159,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: true,
         inline_video: false,
         realtime: false,
+        image_generation: false,
         supports_temperature: false,
         supports_top_p: false,
         supports_top_k: false,
@@ -191,6 +204,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: true,
         inline_video: false,
         realtime: false,
+        image_generation: false,
         supports_temperature: true,
         supports_top_p: true,
         supports_top_k: true,
@@ -239,6 +253,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: true,
         inline_video: false,
         realtime: false,
+        image_generation: false,
         supports_temperature: true,
         supports_top_p: true,
         supports_top_k: true,
@@ -278,6 +293,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: true,
         inline_video: false,
         realtime: false,
+        image_generation: false,
         supports_temperature: true,
         supports_top_p: true,
         supports_top_k: true,
@@ -311,6 +327,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: true,
         inline_video: false,
         realtime: false,
+        image_generation: false,
         supports_temperature: true,
         supports_top_p: true,
         supports_top_k: true,
@@ -356,6 +373,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         image_tool_results: true,
         inline_video: false,
         realtime: false,
+        image_generation: false,
         supports_temperature: true,
         supports_top_p: true,
         supports_top_k: true,

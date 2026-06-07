@@ -115,14 +115,16 @@ impl MemoryStore for SimpleMemoryStore {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use meerkat_core::memory::MemoryIndexRequest;
+    use meerkat_core::memory::{MemoryIndexRequest, MemorySource, MessageRange};
     use meerkat_core::types::SessionId;
     use std::time::SystemTime;
 
     fn meta(session_id: &SessionId) -> MemoryMetadata {
         MemoryMetadata {
             session_id: session_id.clone(),
-            turn: Some(1),
+            source: MemorySource::Compaction {
+                source_range: MessageRange::single(0),
+            },
             indexed_at: SystemTime::now(),
         }
     }

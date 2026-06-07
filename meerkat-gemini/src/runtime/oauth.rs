@@ -20,13 +20,14 @@ use futures::future::BoxFuture;
 use thiserror::Error;
 
 use meerkat_auth_core::auth_oauth::{
-    OAuthEndpoints, OAuthError, OAuthTokenRequestFormat, OAuthTokenResult, PkcePair,
-    exchange_authorization_code, exchange_refresh_token, oauth_refresh_error,
+    OAuthEndpoints, OAuthError, OAuthTokenResult, PkcePair, exchange_authorization_code,
+    exchange_refresh_token, oauth_refresh_error,
 };
 use meerkat_auth_core::auth_store::{
     InMemoryCoordinator, PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
     RefreshFn, TokenKey, TokenStore,
 };
+use meerkat_auth_core::oauth_flow::OAuthProviderIdentity;
 
 pub type TokenCommitFn = Box<
     dyn FnOnce(PersistedTokens) -> BoxFuture<'static, Result<PersistedTokens, RefreshError>>
@@ -35,64 +36,34 @@ pub type TokenCommitFn = Box<
 >;
 
 // ---------------------------------------------------------------------
-// Constants (verified against gemini-cli oauth2.ts:72-94)
+// Provider OAuth declaration
 // ---------------------------------------------------------------------
 //
-// The client ID and client secret below are published by the Gemini CLI
-// as part of its open-source distribution and are non-sensitive per the
-// OAuth2 "installed application" spec:
-// https://developers.google.com/identity/protocols/oauth2#installed
-//
-// They are split via `concat!` so GitHub push-protection's pattern
-// matcher doesn't flag them as undisclosed secrets.
+// The Google Code Assist OAuth declaration (client_id, client_secret,
+// authorize/token/device-code endpoints, scopes) is owned by the single
+// provider-owned `OAuthProviderIdentity::GoogleCodeAssist` in auth-core. The
+// runtime reads it through that seam rather than re-declaring the same
+// constants (dogma §123: one OAuth declaration, projected through the auth
+// seam). The client secret is non-sensitive per the OAuth2 "installed
+// application" spec (see Gemini CLI `oauth2.ts:76-81`).
 
-pub const CODE_ASSIST_CLIENT_ID: &str = concat!(
-    "6812558",
-    "09395-oo8ft2oprdrnp9e3aqf6av3hmdib135j",
-    ".apps.googleusercontent.com",
-);
-
-/// Non-sensitive per OAuth2 "installed application" spec (see Gemini CLI
-/// note in `oauth2.ts:76-81`).
-pub const CODE_ASSIST_CLIENT_SECRET: &str = concat!("GOCSP", "X-4uHgMPm", "-1o7Sk-geV6Cu5clXFsxl");
-
-pub const GOOGLE_AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
-pub const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-pub const GOOGLE_DEVICE_CODE_URL: &str = "https://oauth2.googleapis.com/device/code";
-pub const GOOGLE_USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
-
-pub const CODE_ASSIST_SCOPES: &[&str] = &[
-    "https://www.googleapis.com/auth/cloud-platform",
-    "https://www.googleapis.com/auth/userinfo.email",
-    "https://www.googleapis.com/auth/userinfo.profile",
-];
+/// The Google Code Assist OAuth client secret as declared by the auth-core
+/// owner. `Option` because authless/secret-less providers carry none; the
+/// token-exchange seam consumes it as `Option<&str>` directly (no fail-open
+/// default substitution).
+fn code_assist_client_secret() -> Option<&'static str> {
+    OAuthProviderIdentity::GoogleCodeAssist.client_secret()
+}
 
 // ---------------------------------------------------------------------
 // Endpoints
 // ---------------------------------------------------------------------
 
+/// Project the Google Code Assist OAuth endpoints from the auth-core owner.
+/// Delegates to `OAuthProviderIdentity::GoogleCodeAssist.endpoints`, which
+/// also applies the test endpoint override.
 pub fn code_assist_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints {
-    let endpoints = OAuthEndpoints {
-        client_id: CODE_ASSIST_CLIENT_ID.into(),
-        authorize_url: GOOGLE_AUTHORIZE_URL.into(),
-        token_url: GOOGLE_TOKEN_URL.into(),
-        device_code_url: Some(GOOGLE_DEVICE_CODE_URL.into()),
-        redirect_uri: redirect_uri.into(),
-        scopes: CODE_ASSIST_SCOPES
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect(),
-        extra_authorize_params: Vec::new(),
-        token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
-        include_state_in_token_exchange: false,
-        extra_token_params: Vec::new(),
-        refresh_scopes: Vec::new(),
-        extra_headers: Vec::new(),
-    };
-    meerkat_auth_core::oauth_flow::apply_test_oauth_endpoint_override(
-        meerkat_auth_core::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
-        endpoints,
-    )
+    OAuthProviderIdentity::GoogleCodeAssist.endpoints(redirect_uri)
 }
 
 // ---------------------------------------------------------------------
@@ -230,7 +201,7 @@ impl GoogleCodeAssistOAuthRuntime {
                     &http,
                     &endpoints,
                     &refresh_token,
-                    Some(CODE_ASSIST_CLIENT_SECRET),
+                    code_assist_client_secret(),
                 )
                 .await
                 .map_err(oauth_refresh_error)?;
@@ -288,7 +259,7 @@ impl GoogleCodeAssistOAuthRuntime {
             &self.endpoints,
             code,
             pkce_verifier,
-            Some(CODE_ASSIST_CLIENT_SECRET),
+            code_assist_client_secret(),
         )
         .await?;
         let tokens = oauth_result_to_persisted(result, PersistedAuthMode::GoogleOauth, None)?;
@@ -356,12 +327,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn code_assist_constants_match_gemini_cli_source() {
-        // Both values match gemini-cli/.../code_assist/oauth2.ts:72-81.
-        // Split via concat! in source + test to satisfy GitHub
-        // push-protection scanners.
+    fn code_assist_endpoints_project_the_single_auth_core_owner() {
+        // dogma §123: the runtime carries no duplicate OAuth constants — it
+        // projects the single provider-owned declaration in auth-core. This
+        // verifies the projected endpoints + secret carry the gemini-cli
+        // values (oauth2.ts:72-81). Literals are split via concat! to satisfy
+        // GitHub push-protection scanners.
+        let endpoints = code_assist_endpoints("http://127.0.0.1:0/callback");
         assert_eq!(
-            CODE_ASSIST_CLIENT_ID,
+            endpoints.client_id,
             concat!(
                 "681",
                 "255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j",
@@ -369,24 +343,24 @@ mod tests {
             ),
         );
         assert_eq!(
-            CODE_ASSIST_CLIENT_SECRET,
-            concat!("GOCS", "PX-4uHgMPm-1o7Sk", "-geV6Cu5clXFsxl"),
+            code_assist_client_secret(),
+            Some(concat!("GOCS", "PX-4uHgMPm-1o7Sk", "-geV6Cu5clXFsxl")),
         );
         assert_eq!(
-            GOOGLE_AUTHORIZE_URL,
+            endpoints.authorize_url,
             "https://accounts.google.com/o/oauth2/v2/auth"
         );
-        assert_eq!(GOOGLE_TOKEN_URL, "https://oauth2.googleapis.com/token");
+        assert_eq!(endpoints.token_url, "https://oauth2.googleapis.com/token");
         assert_eq!(
-            GOOGLE_DEVICE_CODE_URL,
-            "https://oauth2.googleapis.com/device/code"
+            endpoints.device_code_url.as_deref(),
+            Some("https://oauth2.googleapis.com/device/code")
         );
         assert_eq!(
-            CODE_ASSIST_SCOPES,
-            &[
-                "https://www.googleapis.com/auth/cloud-platform",
-                "https://www.googleapis.com/auth/userinfo.email",
-                "https://www.googleapis.com/auth/userinfo.profile",
+            endpoints.scopes,
+            vec![
+                "https://www.googleapis.com/auth/cloud-platform".to_string(),
+                "https://www.googleapis.com/auth/userinfo.email".to_string(),
+                "https://www.googleapis.com/auth/userinfo.profile".to_string(),
             ]
         );
     }

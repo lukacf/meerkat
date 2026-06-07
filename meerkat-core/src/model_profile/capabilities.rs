@@ -34,7 +34,8 @@ use crate::model_profile::catalog::ModelTier;
 /// Fields group into:
 /// - identity (`id`, `provider`, `display_name`, `tier`, `model_family`)
 /// - context/output (`context_window`, `max_output_tokens`, plus `_beta` variants)
-/// - modalities (`vision`, `image_tool_results`, `inline_video`, `realtime`)
+/// - modalities (`vision`, `image_tool_results`, `inline_video`, `realtime`,
+///   `image_generation`)
 /// - sampling (`supports_temperature`, `supports_top_p`, `supports_top_k`)
 /// - reasoning (`thinking`, `supports_reasoning`, `effort_levels`)
 /// - features (`supports_web_search`, `supports_inference_geo`,
@@ -75,6 +76,13 @@ pub struct ModelCapabilities {
     /// Whether the model supports a realtime bidirectional streaming transport
     /// (e.g. OpenAI `*-realtime*` endpoints, Gemini `*-live*` endpoints).
     pub realtime: bool,
+    /// Whether this specific model can drive Meerkat image generation.
+    ///
+    /// This is a per-MODEL fact owned by the catalog row, not a per-provider
+    /// derivation: a provider may have an image-generation default model while
+    /// an individual text row on the same provider cannot itself generate
+    /// images (it would require swapping to the provider's native image model).
+    pub image_generation: bool,
 
     // ── Sampling ──────────────────────────────────────────────────────
     /// Whether the API accepts a non-default `temperature` on this model.
@@ -93,8 +101,8 @@ pub struct ModelCapabilities {
     /// Accepted values for effort control. Empty slice = unsupported.
     /// Applies to both Anthropic `output_config.effort` and OpenAI
     /// `reasoning.effort`; the two schemas live in different request shapes but
-    /// share the enum here since the levels are all strings.
-    pub effort_levels: &'static [&'static str],
+    /// share the typed [`EffortLevel`] vocabulary.
+    pub effort_levels: &'static [EffortLevel],
 
     // ── Features ──────────────────────────────────────────────────────
     /// Provider-native web search tool support.
@@ -156,6 +164,46 @@ pub enum ThinkingSupport {
     /// Legacy `thinking_budget` is also accepted when
     /// `supports_thinking_budget_legacy = true`.
     GeminiThinkingLevel,
+}
+
+/// Reasoning/effort control level, the shared typed vocabulary behind both
+/// Anthropic `output_config.effort` and OpenAI `reasoning.effort`.
+///
+/// The two providers expose effort in different request shapes but draw from
+/// the same level vocabulary; modeling it as a typed enum keeps the catalog
+/// value-domain compiler-checked instead of relying on raw string literals.
+/// Each catalog row declares its accepted subset via `effort_levels`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EffortLevel {
+    /// OpenAI `reasoning.effort: "none"` — reasoning disabled.
+    None,
+    /// OpenAI realtime `reasoning.effort: "minimal"`.
+    Minimal,
+    /// Lowest active reasoning effort.
+    Low,
+    /// Medium reasoning effort.
+    Medium,
+    /// High reasoning effort.
+    High,
+    /// Extended-high reasoning effort (e.g. Opus 4.8, GPT-5 recent).
+    Xhigh,
+    /// Maximum reasoning effort (Anthropic-only top tier).
+    Max,
+}
+
+impl EffortLevel {
+    /// The wire string the provider APIs accept for this level.
+    pub const fn as_wire_str(self) -> &'static str {
+        match self {
+            EffortLevel::None => "none",
+            EffortLevel::Minimal => "minimal",
+            EffortLevel::Low => "low",
+            EffortLevel::Medium => "medium",
+            EffortLevel::High => "high",
+            EffortLevel::Xhigh => "xhigh",
+            EffortLevel::Max => "max",
+        }
+    }
 }
 
 /// Lookup a model's capabilities by typed provider + id.

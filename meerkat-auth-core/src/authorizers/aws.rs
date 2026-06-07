@@ -19,9 +19,11 @@ use aws_credential_types::Credentials as SdkCredentials;
 use aws_sigv4::http_request::{
     SignableBody, SignableRequest, SignatureLocation, SigningSettings, sign,
 };
+use chrono::{DateTime, Utc};
 use thiserror::Error;
 
-use super::EnvLookup;
+use super::{EnvLookup, LeaseFreshnessObserver};
+use meerkat_core::handles::{GeneratedAuthLeaseHandle, LeaseKey};
 use meerkat_core::{AuthError, HttpAuthorizationRequest, HttpAuthorizer};
 
 #[derive(Debug, Error)]
@@ -105,6 +107,12 @@ pub struct AwsStsAuthorizer {
     service: String,
     provider: AwsCredentialProvider,
     label: String,
+    /// AuthMachine freshness owner. When wired, the authorizer consults the
+    /// per-binding lease for a credential-use verdict before signing rather
+    /// than implicitly treating its resolved credential material as
+    /// always-fresh. Optional so hermetic tests and surfaces without a runtime
+    /// lease handle still construct the authorizer.
+    lease_observer: Option<LeaseFreshnessObserver>,
 }
 
 impl AwsStsAuthorizer {
@@ -126,7 +134,20 @@ impl AwsStsAuthorizer {
             service,
             provider,
             label,
+            lease_observer: None,
         }
+    }
+
+    /// Wire the per-binding AuthMachine lease so the authorizer consults
+    /// credential-use freshness before signing. Mirrors the Google/Azure
+    /// authorizers' `with_auth_lease_observer`.
+    pub fn with_auth_lease_observer(
+        mut self,
+        handle: GeneratedAuthLeaseHandle,
+        lease_key: LeaseKey,
+    ) -> Self {
+        self.lease_observer = Some(LeaseFreshnessObserver::new(handle, lease_key));
+        self
     }
 
     pub fn region(&self) -> &str {
@@ -141,6 +162,7 @@ impl AwsStsAuthorizer {
         &self,
         creds: &SdkCredentials,
         req: &HttpAuthorizationRequest<'_>,
+        signing_time: DateTime<Utc>,
     ) -> Result<Vec<(String, String)>, AwsAuthError> {
         let identity = creds.clone().into();
         let mut settings = SigningSettings::default();
@@ -149,7 +171,9 @@ impl AwsStsAuthorizer {
             .identity(&identity)
             .region(&self.region)
             .name(&self.service)
-            .time(std::time::SystemTime::now())
+            // Sign against the same instant the lease freshness verdict was
+            // taken at, not an independent buried wall-clock read.
+            .time(std::time::SystemTime::from(signing_time))
             .settings(settings)
             .build()
             .map_err(|e| AwsAuthError::Sign(e.to_string()))?;
@@ -194,8 +218,25 @@ impl HttpAuthorizer for AwsStsAuthorizer {
                 Ok(())
             }
             other => {
+                // Single authoritative `now`: the same instant feeds the
+                // AuthMachine freshness verdict and the SigV4 signing time, so
+                // a request is never signed against a clock the lease did not
+                // admit. SigV4 credentials (especially STS session tokens) are
+                // time-bound; the lease — not a buried `SystemTime::now()` —
+                // owns whether they are still usable.
+                let now = Utc::now();
                 let creds = other.resolve_sigv4().map_err(AuthError::from)?;
-                let signed = self.sign_sigv4(&creds, req).map_err(AuthError::from)?;
+                if let Some(observer) = &self.lease_observer {
+                    // Fail closed: expired/missing/refresh-needed creds surface
+                    // a typed reauth/refresh disposition rather than silently
+                    // signing with stale or absent material. Env/Static creds
+                    // carry no expiry, so the lease holds them as an explicit
+                    // `Valid` (no-expiry) phase rather than implicit
+                    // always-fresh.
+                    let credential_expiry = creds.expiry().map(DateTime::<Utc>::from);
+                    observer.ensure_valid_for_signing(&self.label, now, credential_expiry)?;
+                }
+                let signed = self.sign_sigv4(&creds, req, now).map_err(AuthError::from)?;
                 for (k, v) in signed {
                     req.headers.push((k, v));
                 }
@@ -206,5 +247,11 @@ impl HttpAuthorizer for AwsStsAuthorizer {
 
     fn label(&self) -> &str {
         &self.label
+    }
+
+    fn expires_at(&self) -> Option<DateTime<Utc>> {
+        self.lease_observer
+            .as_ref()
+            .and_then(LeaseFreshnessObserver::expires_at)
     }
 }

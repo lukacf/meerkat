@@ -37,11 +37,32 @@ use super::{
     select_tool_catalog_mode,
 };
 
+/// Policy governing whether core construction composes the built-in default
+/// system prompt for a new session that carries no explicit prompt.
+///
+/// Default-prompt composition is a facade/runtime-composition concern, not a
+/// core-builder concern: the canonical composition seam owns prompt assembly
+/// and always hands core either an explicit prompt (`system_prompt`) or none.
+/// Standalone core construction therefore suppresses the default unless a
+/// caller explicitly opts in, so core never silently owns prompt policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DefaultSystemPromptPolicy {
+    /// Leave a new session without an explicit prompt unprompted. The caller
+    /// (composition seam) owns supplying any default it wants.
+    #[default]
+    Suppress,
+    /// Compose the built-in default prompt for a new session that has no
+    /// explicit prompt. Reserved for callers that have no upstream composition
+    /// seam (standalone tooling, examples).
+    ComposeDefault,
+}
+
 /// Builder for creating an Agent
 #[derive(Default)]
 pub struct AgentBuilder {
     pub(super) config: AgentConfig,
     pub(super) system_prompt: Option<String>,
+    pub(super) default_system_prompt_policy: DefaultSystemPromptPolicy,
     pub(super) budget_limits: Option<BudgetLimits>,
     pub(super) retry_policy: RetryPolicy,
     pub(super) session: Option<Session>,
@@ -194,6 +215,7 @@ impl AgentBuilder {
         Self {
             config: AgentConfig::default(),
             system_prompt: None,
+            default_system_prompt_policy: DefaultSystemPromptPolicy::default(),
             budget_limits: None,
             retry_policy: RetryPolicy::default(),
             session: None,
@@ -250,6 +272,14 @@ impl AgentBuilder {
     /// Set the system prompt
     pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = Some(prompt.into());
+        self
+    }
+
+    /// Set the default-system-prompt policy for new sessions that carry no
+    /// explicit prompt. Defaults to [`DefaultSystemPromptPolicy::Suppress`], so
+    /// callers without an upstream composition seam must opt in explicitly.
+    pub fn default_system_prompt_policy(mut self, policy: DefaultSystemPromptPolicy) -> Self {
+        self.default_system_prompt_policy = policy;
         self
     }
 
@@ -448,7 +478,10 @@ impl AgentBuilder {
                 .unwrap_or_default(),
         ));
 
-        // Apply system prompt: use builder's prompt if set, otherwise compose default for new sessions
+        // Apply system prompt: use the builder's explicit prompt if set;
+        // otherwise compose the built-in default ONLY when a caller opts in via
+        // `DefaultSystemPromptPolicy::ComposeDefault`. The composition seam owns
+        // default-prompt policy, so standalone core stays unprompted by default.
         let has_system_prompt = matches!(session.messages().first(), Some(Message::System(_)));
         if let Some(prompt) = self.system_prompt {
             session
@@ -459,8 +492,16 @@ impl AgentBuilder {
                 .map_err(|err| AgentBuildPolicyError::SystemPromptAuthority {
                     message: err.to_string(),
                 })?;
-        } else if !has_system_prompt {
-            // Only set default prompt for new sessions without an existing system prompt
+        } else if !has_system_prompt
+            && matches!(
+                self.default_system_prompt_policy,
+                DefaultSystemPromptPolicy::ComposeDefault
+            )
+        {
+            // Default-prompt composition only runs when a caller explicitly
+            // opts in. The canonical composition seam (facade/runtime) always
+            // hands core an explicit prompt or none, so it never reaches here;
+            // standalone core construction stays unprompted unless asked.
             #[cfg(not(target_arch = "wasm32"))]
             {
                 session
@@ -551,8 +592,19 @@ impl AgentBuilder {
             None => 0,
         };
 
+        // Resolve the turn-cap default at the build/composition seam so the run
+        // loop reads an already-resolved value and never privately invents the
+        // default mid-loop. `DEFAULT_MAX_TURNS` (config.rs) remains the single
+        // named owner of the default; `config.max_turns` stays `Option<u32>`
+        // for surfaces, but the agent the loop drives always carries a resolved
+        // `Some(_)`.
+        let mut resolved_config = self.config;
+        if resolved_config.max_turns.is_none() {
+            resolved_config.max_turns = Some(crate::config::DEFAULT_MAX_TURNS);
+        }
+
         let mut agent = Agent {
-            config: self.config,
+            config: resolved_config,
             client,
             tools,
             tool_scope,
@@ -1481,6 +1533,63 @@ mod tests {
                 );
             }
             other => panic!("First message should be System, got: {other:?}"),
+        }
+    }
+
+    /// Dogma gate (#308): standalone core construction with no explicit prompt
+    /// and the default `Suppress` policy must NOT silently inject a default
+    /// system prompt. Default-prompt policy is owned by the composition seam.
+    #[tokio::test]
+    async fn standalone_builder_suppresses_default_system_prompt_by_default() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let agent = AgentBuilder::new()
+            // Note: no .system_prompt(), no .default_system_prompt_policy()
+            .build_standalone(client, tools, store)
+            .await;
+
+        let has_system_prompt = agent
+            .session()
+            .messages()
+            .iter()
+            .any(|message| matches!(message, Message::System(_)));
+        assert!(
+            !has_system_prompt,
+            "standalone build without an explicit prompt or opt-in policy must leave the session unprompted"
+        );
+    }
+
+    /// Dogma gate (#308): a caller without an upstream composition seam can opt
+    /// in to default-prompt composition explicitly. On non-wasm the composed
+    /// default is a non-empty prompt; on wasm it is the empty wasm default.
+    #[tokio::test]
+    async fn standalone_builder_composes_default_prompt_when_policy_opts_in() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let agent = AgentBuilder::new()
+            .default_system_prompt_policy(DefaultSystemPromptPolicy::ComposeDefault)
+            .build_standalone(client, tools, store)
+            .await;
+
+        let messages = agent.session().messages();
+        match messages.first() {
+            Some(Message::System(sys)) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                assert!(
+                    !sys.content.is_empty(),
+                    "ComposeDefault must compose a non-empty default system prompt"
+                );
+                #[cfg(target_arch = "wasm32")]
+                assert!(
+                    sys.content.is_empty(),
+                    "wasm ComposeDefault uses the empty wasm default prompt"
+                );
+            }
+            other => panic!("ComposeDefault should inject a System message, got: {other:?}"),
         }
     }
 

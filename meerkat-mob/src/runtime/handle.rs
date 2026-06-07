@@ -3027,7 +3027,16 @@ impl MobHandle {
                 tracing::error!("unexpected command result variant");
                 Default::default()
             }
-            Err(_) => None,
+            Err(error) => {
+                // A genuine query/transport fault is collapsed to `None` here
+                // only because the public signature predates typed-fault
+                // propagation; surface the fault so it is not silently
+                // indistinguishable from a true absent member. The typed fix
+                // is to return `Result<Option<_>, MobError>` (cross-crate
+                // callsite cascade tracked in the dogma remediation plan).
+                tracing::error!(%error, "get_member machine command failed");
+                None
+            }
         }
     }
 
@@ -4033,7 +4042,16 @@ impl MobHandle {
                 tracing::error!("unexpected command result variant");
                 Default::default()
             }
-            Err(_) => Vec::new(),
+            Err(error) => {
+                // A genuine query/transport fault is collapsed to an empty
+                // match here only because the public signature predates
+                // typed-fault propagation; surface the fault so it is not
+                // silently indistinguishable from a true empty match. The
+                // typed fix is to return `Result<Vec<_>, MobError>` (cross-crate
+                // callsite cascade tracked in the dogma remediation plan).
+                tracing::error!(%error, "list_members_matching machine command failed");
+                Vec::new()
+            }
         }
     }
 
@@ -4987,9 +5005,7 @@ impl MobHandle {
             roster.get(identity).cloned()
         }?;
         let MemberRef::BackendPeer {
-            session_id,
-            bootstrap_token,
-            ..
+            bootstrap_token, ..
         } = &entry.member_ref
         else {
             return None;
@@ -4999,7 +5015,20 @@ impl MobHandle {
             mob_id: self.definition.id.clone(),
             agent_identity: identity.clone(),
         };
-        let bridge_session_present = session_id.is_some();
+        // Bridge-session presence is a machine-owned fact: read it from
+        // `MobMachineState.member_session_bindings` (the authority), not from
+        // the roster `MemberRef.session_id` compatibility mirror. The mirror
+        // can diverge transiently from the projected machine state, which would
+        // make the `NotRequired`/`binding_mode` derivation lie. The bootstrap
+        // proof, by contrast, is not yet a machine fact (the machine tracks
+        // `member_peer_ids`/`member_peer_endpoints` but not rebind proof), so
+        // `has_bootstrap_token` still reads the roster `MemberRef`; lowering the
+        // `Available`/`Unavailable` distinction into a machine-owned
+        // rebind-capability fact is the cross-boundary residual.
+        let bridge_session_present = {
+            let machine_state = self.machine_state_watch_rx.borrow().clone();
+            Self::machine_bridge_session_id_for_identity(identity, &machine_state).is_some()
+        };
         let has_bootstrap_token = bootstrap_token
             .as_ref()
             .is_some_and(|token| !token.is_empty());
@@ -5916,6 +5945,89 @@ mod tests {
         assert_eq!(projected.runtime_mode, MobRuntimeMode::TurnDriven);
         assert_eq!(projected.status, MobMemberStatus::Active);
         assert!(projected.labels.is_empty());
+    }
+
+    /// Gate for dogma row #314: the external-member observation's
+    /// `bridge_session_present` (which drives both `binding_mode` and the
+    /// `NotRequired` rebind branch) must be read from the machine-owned
+    /// `member_session_bindings` fact, not recomputed from the roster
+    /// `MemberRef.session_id` compatibility mirror.
+    ///
+    /// `project_external_member_observation` now consults
+    /// `machine_bridge_session_id_for_identity`, so this locks that the helper
+    /// reports binding presence from machine authority: present when the
+    /// machine bound a bridge session at spawn, absent (peer-only) otherwise.
+    #[test]
+    fn external_member_bridge_presence_reads_machine_session_binding_fact() {
+        fn spawn_member(
+            authority: &mut mob_dsl::MobMachineAuthority,
+            identity: &AgentIdentity,
+            bridge_session_id: Option<mob_dsl::SessionId>,
+        ) {
+            let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+            let runtime_id = AgentRuntimeId::initial(identity.clone());
+            let profile_digest = format!("{}-profile-digest", identity.as_str());
+            mob_dsl::MobMachineMutator::apply(
+                authority,
+                mob_dsl::MobMachineInput::AuthorizeSpawnProfile {
+                    agent_identity: dsl_identity.clone(),
+                    profile_name: "worker-profile".to_string(),
+                    model: "test-model".to_string(),
+                    profile_material_digest: profile_digest.clone(),
+                    tool_config_digest: "tools".to_string(),
+                    skills_digest: "skills".to_string(),
+                    provider_params_digest: None,
+                    output_schema_digest: None,
+                    external_addressable: true,
+                },
+            )
+            .expect("profile authority should admit");
+            mob_dsl::MobMachineMutator::apply(
+                authority,
+                mob_dsl::MobMachineInput::Spawn {
+                    agent_identity: dsl_identity,
+                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&runtime_id),
+                    fence_token: mob_dsl::FenceToken::from_domain(FenceToken::new(0)),
+                    generation: mob_dsl::Generation::from_domain(runtime_id.generation),
+                    profile_material_digest: profile_digest,
+                    external_addressable: true,
+                    runtime_mode: mob_dsl::SpawnPolicyRuntimeMode::TurnDriven,
+                    bridge_session_id,
+                    replacing: None,
+                },
+            )
+            .expect("spawn should admit");
+        }
+
+        let bridge_backed = AgentIdentity::from("w-bridge");
+        let peer_only = AgentIdentity::from("w-peer");
+        let bridge_session = SessionId::new();
+
+        let mut authority = mob_dsl::MobMachineAuthority::new();
+        spawn_member(
+            &mut authority,
+            &bridge_backed,
+            Some(mob_dsl::SessionId::from_domain(&bridge_session)),
+        );
+        spawn_member(&mut authority, &peer_only, None);
+
+        let state = authority.state();
+
+        // Bridge-session-backed member: the machine fact owns the binding, so
+        // presence is reported as the bound session (drives `NotRequired`).
+        assert_eq!(
+            MobHandle::machine_bridge_session_id_for_identity(&bridge_backed, state),
+            Some(bridge_session),
+            "bridge-session-backed member must read its binding from MobMachineState.member_session_bindings",
+        );
+
+        // Peer-only member: no machine session binding, so the observation must
+        // treat the bridge session as absent regardless of any roster mirror.
+        assert_eq!(
+            MobHandle::machine_bridge_session_id_for_identity(&peer_only, state),
+            None,
+            "peer-only member must report no bridge session from machine authority",
+        );
     }
 
     #[test]

@@ -54,7 +54,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-pub use builder::{AgentBuildPolicyError, AgentBuilder};
+pub use builder::{AgentBuildPolicyError, AgentBuilder, DefaultSystemPromptPolicy};
 pub use runner::AgentRunner;
 
 /// Trait for LLM clients that can be used with the agent

@@ -26,7 +26,9 @@ use meerkat_core::live_adapter::{
 use meerkat_core::types::{Message, SessionId};
 #[cfg(feature = "live-webrtc")]
 use meerkat_live::{LIVE_WEBRTC_ANSWER_METHOD, LiveWebrtcState};
-use meerkat_live::{LiveAdapterHost, LiveAdapterHostError, LiveChannelId, LiveWsState};
+use meerkat_live::{
+    LiveAdapterHost, LiveAdapterHostError, LiveChannelCloseObservation, LiveChannelId, LiveWsState,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error;
@@ -761,45 +763,33 @@ async fn close_live_channel_after_open_failure(
     session_id: &SessionId,
     channel_id: &LiveChannelId,
 ) {
+    // #355: open-failure cleanup is fail-closed, not best-effort. A graceful
+    // close (`reserve` -> generated close authority -> host commit) clears the
+    // machine-owned channel binding (`live_active_channel_by_session` /
+    // `live_channel_session_by_channel` / `live_channel_identity_by_channel`)
+    // only on a *committed* close. If the generated close authority rejects,
+    // omits the host commit handoff, or the host commit itself fails, the
+    // binding stays installed — a half-installed channel for an open that never
+    // succeeded. In every such case we fall through to
+    // `abandon_live_open_admission`, the same generated eviction the
+    // `ChannelNotFound` arm already uses, so a failed open never leaves an
+    // orphaned `by_session` / `channels` entry behind. The graceful close is
+    // attempted first because it retains a queryable closed-channel status; the
+    // abandon path is the harder fail-closed eviction reserved for the failure
+    // arms (and for a channel the host never registered).
     match host.reserve_channel_close_observation(channel_id).await {
         Ok(observation) => {
-            let authority = match runtime
-                .runtime_adapter()
-                .resolve_live_close_result(session_id, &observation)
-                .await
-            {
-                Ok(authority) => authority,
-                Err(err) => {
-                    tracing::warn!(
-                        target: "meerkat_rpc::handlers::live",
-                        ?channel_id,
-                        ?session_id,
-                        ?err,
-                        "generated live-close authority rejected open-failure cleanup"
-                    );
-                    return;
-                }
-            };
-            let Some(close_commit_authority) = authority.channel_close_commit_authority() else {
-                tracing::warn!(
-                    target: "meerkat_rpc::handlers::live",
-                    ?channel_id,
-                    ?session_id,
-                    "generated live-close result omitted host commit authority"
-                );
-                return;
-            };
-            if let Err(err) = host
-                .commit_channel_close_observation(&observation, close_commit_authority)
-                .await
-            {
-                tracing::warn!(
-                    target: "meerkat_rpc::handlers::live",
-                    ?channel_id,
-                    ?session_id,
-                    ?err,
-                    "host live-close commit failed after generated open-failure cleanup"
-                );
+            let committed = commit_live_close_for_open_failure(
+                host,
+                runtime,
+                session_id,
+                channel_id,
+                &observation,
+            )
+            .await;
+            if !committed {
+                // The binding was not cleared by a committed close; evict it.
+                abandon_live_open_admission(runtime, session_id, channel_id).await;
             }
         }
         Err(LiveAdapterHostError::ChannelNotFound(_)) => {
@@ -811,10 +801,67 @@ async fn close_live_channel_after_open_failure(
                 ?channel_id,
                 ?session_id,
                 ?err,
-                "failed to close live channel after open failure"
+                "failed to close live channel after open failure; evicting admission"
             );
+            abandon_live_open_admission(runtime, session_id, channel_id).await;
         }
     }
+}
+
+/// Attempt a generated graceful close for an open-failure cleanup.
+///
+/// Returns `true` only when the host commit succeeded (the machine-owned
+/// channel binding is now cleared). Returns `false` — after logging the typed
+/// cause — when the generated close authority rejected, omitted the host commit
+/// handoff, or the host commit failed; the caller then fail-closes by abandoning
+/// the open admission so no half-installed binding survives (#355).
+async fn commit_live_close_for_open_failure(
+    host: &LiveAdapterHost,
+    runtime: &Arc<SessionRuntime>,
+    session_id: &SessionId,
+    channel_id: &LiveChannelId,
+    observation: &LiveChannelCloseObservation,
+) -> bool {
+    let authority = match runtime
+        .runtime_adapter()
+        .resolve_live_close_result(session_id, observation)
+        .await
+    {
+        Ok(authority) => authority,
+        Err(err) => {
+            tracing::warn!(
+                target: "meerkat_rpc::handlers::live",
+                ?channel_id,
+                ?session_id,
+                ?err,
+                "generated live-close authority rejected open-failure cleanup; evicting admission"
+            );
+            return false;
+        }
+    };
+    let Some(close_commit_authority) = authority.channel_close_commit_authority() else {
+        tracing::warn!(
+            target: "meerkat_rpc::handlers::live",
+            ?channel_id,
+            ?session_id,
+            "generated live-close result omitted host commit authority; evicting admission"
+        );
+        return false;
+    };
+    if let Err(err) = host
+        .commit_channel_close_observation(observation, close_commit_authority)
+        .await
+    {
+        tracing::warn!(
+            target: "meerkat_rpc::handlers::live",
+            ?channel_id,
+            ?session_id,
+            ?err,
+            "host live-close commit failed after generated open-failure cleanup; evicting admission"
+        );
+        return false;
+    }
+    true
 }
 
 pub struct LiveOpenHandlerContext<'a> {
@@ -2446,6 +2493,58 @@ mod tests {
 
         assert_eq!(reply["status"], "closed");
         assert_eq!(reply["closed"], true);
+    }
+
+    /// #355: open-failure cleanup is fail-closed. When the graceful close path
+    /// cannot commit (generated close authority rejects, omits the host commit
+    /// handoff, or the host commit fails), `close_live_channel_after_open_failure`
+    /// falls back to `abandon_live_open_admission` so the machine-owned channel
+    /// binding is evicted and never leaves a half-installed channel behind.
+    ///
+    /// This pins the underlying eviction contract the cleanup now routes to: an
+    /// admitted open installs a binding observable via
+    /// `live_session_for_active_channel`; abandoning the admission (the
+    /// fail-closed action the failure arms take) clears it, so a non-committed
+    /// close cannot orphan a `by_session` / `channels` entry.
+    #[tokio::test]
+    async fn open_failure_abandon_evicts_half_installed_channel_binding() {
+        let machine = meerkat_runtime::meerkat_machine::MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
+        let channel_id = LiveChannelId::random_uuid();
+        let identity = test_live_identity();
+        let open_authority = machine
+            .resolve_live_open_admission(&session_id, &channel_id, &identity)
+            .await
+            .expect("generated live open admission");
+        assert!(
+            open_authority.channel_open_authority().is_some(),
+            "admitted open must carry the generated host handoff"
+        );
+
+        // Binding is installed: the half-installed state a failed open leaves
+        // behind when the graceful close cannot commit.
+        assert_eq!(
+            machine.live_session_for_active_channel(&channel_id).await,
+            Some(session_id.clone()),
+            "admitted open must install a channel binding"
+        );
+
+        // Fail-closed eviction the cleanup falls back to on a non-committed
+        // close (authority reject / missing commit handoff / commit failure).
+        machine
+            .abandon_live_open_admission(&session_id, &channel_id)
+            .await
+            .expect("abandon must evict the half-installed admission");
+
+        assert_eq!(
+            machine.live_session_for_active_channel(&channel_id).await,
+            None,
+            "#355: open-failure abandon must leave no orphaned channel binding"
+        );
     }
 
     #[test]

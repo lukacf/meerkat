@@ -1180,7 +1180,7 @@ where
             structured_output: None,
             extraction_error: Some(extraction_error.clone()),
             schema_warnings: self.extraction_state.take_schema_warnings(),
-            skill_diagnostics: self.collect_skill_diagnostics().await,
+            skill_diagnostics: self.resolve_skill_diagnostics_for_result().await,
         };
         self.save_session_best_effort().await;
         self.emit_extraction_failed_event(&extraction_error, event_tx.as_ref())
@@ -1236,10 +1236,17 @@ where
         event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
         let mut turn_count = 0u32;
-        let max_turns = self
-            .config
-            .max_turns
-            .unwrap_or(crate::config::DEFAULT_MAX_TURNS);
+        // The turn cap is resolved once at the build/composition seam
+        // (`AgentBuilder::build_inner` applies `DEFAULT_MAX_TURNS` when the
+        // surface left `config.max_turns` unset). The loop reads that resolved
+        // value rather than re-deriving the default here; a missing resolution
+        // is a build-seam invariant violation, not a license to invent a cap.
+        let max_turns = self.config.max_turns.ok_or_else(|| {
+            AgentError::InternalError(
+                "agent turn cap was not resolved at the build seam: config.max_turns is None"
+                    .to_string(),
+            )
+        })?;
         let mut tool_call_count = 0u32;
         let mut event_stream_open = true;
         let mut run_has_visible_or_actionable_output = false;
@@ -2540,7 +2547,9 @@ where
                                     structured_output: None,
                                     extraction_error: Some(extraction_error.clone()),
                                     schema_warnings: self.extraction_state.take_schema_warnings(),
-                                    skill_diagnostics: self.collect_skill_diagnostics().await,
+                                    skill_diagnostics: self
+                                        .resolve_skill_diagnostics_for_result()
+                                        .await,
                                 };
                                 self.save_session_best_effort().await;
                                 self.emit_extraction_failed_event(
@@ -2571,7 +2580,7 @@ where
                             structured_output,
                             extraction_error: None,
                             schema_warnings,
-                            skill_diagnostics: self.collect_skill_diagnostics().await,
+                            skill_diagnostics: self.resolve_skill_diagnostics_for_result().await,
                         };
                         // Validation passed — complete via authority
                         let t = self.apply_turn_input(
@@ -2711,7 +2720,7 @@ where
                             structured_output: None,
                             extraction_error: None,
                             schema_warnings: None,
-                            skill_diagnostics: self.collect_skill_diagnostics().await,
+                            skill_diagnostics: self.resolve_skill_diagnostics_for_result().await,
                         };
                         self.run_completed_hooks_before_terminal(
                             &mut result,
@@ -2887,7 +2896,7 @@ where
                 structured_output: None,
                 extraction_error: None,
                 schema_warnings: None,
-                skill_diagnostics: self.collect_skill_diagnostics().await,
+                skill_diagnostics: self.resolve_skill_diagnostics_for_result().await,
             }),
             SurfaceResultClass::HardFailure => {
                 let cause_kind = match self.require_machine_terminal_failure_cause_kind(format!(
@@ -2916,14 +2925,59 @@ where
         }
     }
 
-    async fn collect_skill_diagnostics(&self) -> Option<crate::skills::SkillRuntimeDiagnostics> {
-        let runtime = self.skill_engine.as_ref()?;
-        let source_health = runtime.health_snapshot().await.ok()?;
-        let quarantined = runtime.quarantined_diagnostics().await.unwrap_or_default();
-        Some(crate::skills::SkillRuntimeDiagnostics {
+    /// Collect skill-runtime diagnostics for the terminal `RunResult`.
+    ///
+    /// Returns `Ok(None)` when there is no skill engine (genuinely absent),
+    /// `Ok(Some(_))` when diagnostics were collected, and `Err(_)` when a typed
+    /// collection fault occurred. This keeps a collection fault distinguishable
+    /// from "healthy/absent" rather than laundering a typed `SkillError` into a
+    /// whole-`None` (`health_snapshot().ok()?`) or an empty list
+    /// (`quarantined_diagnostics().unwrap_or_default()`).
+    ///
+    /// Dogma row #239 (in-lane portion): the source seam no longer swallows the
+    /// typed fault. Surfacing the fault *as a typed signal inside the wire-
+    /// crossing run result* additionally requires a typed failure variant on
+    /// `meerkat_core::skills::SkillRuntimeDiagnostics` (it is embedded directly
+    /// in `meerkat_contracts::wire::WireRunResult`), which is an out-of-lane
+    /// wire-schema change requiring `make regen-schemas`.
+    async fn collect_skill_diagnostics(
+        &self,
+    ) -> Result<Option<crate::skills::SkillRuntimeDiagnostics>, crate::skills::SkillError> {
+        let Some(runtime) = self.skill_engine.as_ref() else {
+            return Ok(None);
+        };
+        let source_health = runtime.health_snapshot().await?;
+        let quarantined = runtime.quarantined_diagnostics().await?;
+        Ok(Some(crate::skills::SkillRuntimeDiagnostics {
             source_health,
             quarantined,
-        })
+        }))
+    }
+
+    /// Resolve skill diagnostics for the terminal `RunResult` while making any
+    /// typed collection fault explicit at the agent boundary.
+    ///
+    /// Until the wire-crossing `SkillRuntimeDiagnostics` gains a typed failure
+    /// variant (out-of-lane, see [`Self::collect_skill_diagnostics`]), a
+    /// collection fault cannot be recorded *inside* the run result; it is
+    /// surfaced here as an explicit, typed `tracing` warning instead of being
+    /// silently dropped at the `health_snapshot`/`quarantined_diagnostics`
+    /// seams. This preserves run-success semantics while ending the silent
+    /// fail-open.
+    async fn resolve_skill_diagnostics_for_result(
+        &self,
+    ) -> Option<crate::skills::SkillRuntimeDiagnostics> {
+        match self.collect_skill_diagnostics().await {
+            Ok(diagnostics) => diagnostics,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "skill diagnostics collection failed; reporting absent diagnostics \
+                     (typed run-result signal pending out-of-lane wire change)"
+                );
+                None
+            }
+        }
     }
 }
 
@@ -3204,6 +3258,141 @@ mod tests {
             let missing = key.clone();
             async move { Err(crate::skills::SkillError::NotFound { key: missing }) }
         }
+    }
+
+    /// Skill engine whose health probe fails, used to assert that
+    /// `collect_skill_diagnostics` surfaces the typed collection fault instead
+    /// of laundering it into a whole-`None` diagnostics value (dogma row #239).
+    struct FailingHealthSkillEngine;
+
+    impl SkillEngine for FailingHealthSkillEngine {
+        fn inventory_section(
+            &self,
+        ) -> impl Future<Output = Result<String, crate::skills::SkillError>> + Send {
+            async move { Ok(String::new()) }
+        }
+
+        fn resolve_and_render(
+            &self,
+            _keys: &[SkillKey],
+        ) -> impl Future<Output = Result<Vec<ResolvedSkill>, crate::skills::SkillError>> + Send
+        {
+            async move { Ok(Vec::new()) }
+        }
+
+        fn collections(
+            &self,
+        ) -> impl Future<Output = Result<Vec<SkillCollection>, crate::skills::SkillError>> + Send
+        {
+            async move { Ok(Vec::new()) }
+        }
+
+        fn list_skills(
+            &self,
+            _filter: &SkillFilter,
+        ) -> impl Future<Output = Result<Vec<SkillDescriptor>, crate::skills::SkillError>> + Send
+        {
+            async move { Ok(Vec::new()) }
+        }
+
+        fn quarantined_diagnostics(
+            &self,
+        ) -> impl Future<
+            Output = Result<
+                Vec<crate::skills::SkillQuarantineDiagnostic>,
+                crate::skills::SkillError,
+            >,
+        > + Send {
+            async move { Ok(Vec::new()) }
+        }
+
+        fn health_snapshot(
+            &self,
+        ) -> impl Future<
+            Output = Result<crate::skills::SourceHealthSnapshot, crate::skills::SkillError>,
+        > + Send {
+            async move {
+                Err(crate::skills::SkillError::Load(
+                    "skill source health probe failed".into(),
+                ))
+            }
+        }
+
+        fn list_artifacts(
+            &self,
+            key: &SkillKey,
+        ) -> impl Future<
+            Output = Result<Vec<crate::skills::SkillArtifact>, crate::skills::SkillError>,
+        > + Send {
+            let missing = key.clone();
+            async move { Err(crate::skills::SkillError::NotFound { key: missing }) }
+        }
+
+        fn read_artifact(
+            &self,
+            key: &SkillKey,
+            _artifact_path: &str,
+        ) -> impl Future<
+            Output = Result<crate::skills::SkillArtifactContent, crate::skills::SkillError>,
+        > + Send {
+            let missing = key.clone();
+            async move { Err(crate::skills::SkillError::NotFound { key: missing }) }
+        }
+
+        fn invoke_function(
+            &self,
+            key: &SkillKey,
+            _function_name: &str,
+            _arguments: Value,
+        ) -> impl Future<Output = Result<Value, crate::skills::SkillError>> + Send {
+            let missing = key.clone();
+            async move { Err(crate::skills::SkillError::NotFound { key: missing }) }
+        }
+    }
+
+    /// Dogma row #239 (in-lane portion): a typed skill-diagnostics collection
+    /// fault must remain distinguishable from "healthy/absent". The source seam
+    /// no longer launders `health_snapshot()`/`quarantined_diagnostics()` errors
+    /// into a whole-`None`/empty value; `collect_skill_diagnostics` returns the
+    /// typed `SkillError` so the fault is surfaced rather than swallowed.
+    #[tokio::test]
+    async fn collect_skill_diagnostics_surfaces_typed_collection_fault() {
+        let skill_runtime = Arc::new(crate::skills::SkillRuntime::new(Arc::new(
+            FailingHealthSkillEngine,
+        )));
+        let agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_skill_engine(skill_runtime)
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        match agent.collect_skill_diagnostics().await {
+            Err(crate::skills::SkillError::Load(message)) => {
+                assert!(
+                    message.contains("health probe failed"),
+                    "expected typed health-probe fault, got: {message}"
+                );
+            }
+            Err(other) => panic!("expected typed Load fault, got: {other:?}"),
+            Ok(diagnostics) => panic!(
+                "collection fault must not launder into a healthy/absent diagnostics value, \
+                 got: {diagnostics:?}"
+            ),
+        }
+    }
+
+    /// With no skill engine attached, the diagnostics collection is genuinely
+    /// absent (`Ok(None)`) — distinct from the collection-fault case above.
+    #[tokio::test]
+    async fn collect_skill_diagnostics_absent_engine_is_ok_none() {
+        let agent = build_agent(Arc::new(StaticLlmClient)).await;
+        assert!(
+            matches!(agent.collect_skill_diagnostics().await, Ok(None)),
+            "absent skill engine must report Ok(None), not a fault"
+        );
     }
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -7353,6 +7542,48 @@ mod tests {
             snapshot.terminal_cause_kind,
             Some(crate::TurnTerminalCauseKind::TurnLimitReached)
         );
+    }
+
+    /// Dogma row #272: the agent-loop turn cap default is resolved at the
+    /// build/composition seam, not privately invented inside `run_loop`.
+    ///
+    /// With `config.max_turns` left unset, the builder resolves the named
+    /// `DEFAULT_MAX_TURNS` owner into the agent's config, so the resolved value
+    /// is assertable on the built agent and the loop reads it rather than
+    /// re-deriving the default.
+    #[tokio::test]
+    async fn max_turns_default_is_resolved_at_build_seam_not_in_loop() {
+        // `build_agent` uses `AgentBuilder::new()` whose default config leaves
+        // `max_turns = None`; the build seam must resolve it.
+        let agent = build_agent(Arc::new(StaticLlmClient)).await;
+        assert_eq!(
+            agent.config.max_turns,
+            Some(crate::config::DEFAULT_MAX_TURNS),
+            "build seam must resolve the turn-cap default into the agent config"
+        );
+    }
+
+    /// Dogma row #272: the loop terminalizes via the machine-owned
+    /// `TurnLimitReached` at the build-resolved cap value, with no literal
+    /// fallback default invented inside `run_loop`.
+    #[tokio::test]
+    async fn run_loop_terminalizes_at_build_resolved_turn_cap() {
+        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
+        // The build seam resolved a non-`None` cap; force it to a tiny value so
+        // the loop trips the turn limit immediately, proving the loop reads the
+        // resolved value rather than a privately-invented default.
+        agent.config.max_turns = Some(0);
+
+        let err = agent
+            .run("prompt".to_string().into())
+            .await
+            .expect_err("turn limit should terminalize the run");
+        match err {
+            AgentError::TerminalFailure { cause_kind, .. } => {
+                assert_eq!(cause_kind, crate::TurnTerminalCauseKind::TurnLimitReached);
+            }
+            other => panic!("expected machine-owned turn-limit terminal failure, got {other:?}"),
+        }
     }
 
     #[tokio::test]

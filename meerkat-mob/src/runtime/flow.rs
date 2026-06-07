@@ -814,7 +814,13 @@ impl FlowEngine {
                                 .await?;
                             return Ok(Ok(value));
                         }
-                        Err(reason) => {
+                        Err(fault) => {
+                            // The parse boundary produced a typed `StepOutputFault`.
+                            // The emitter notice and (still string-shaped)
+                            // `StepTargetFailure` reason render it via `Display`;
+                            // the machine-owned terminal classification of the
+                            // typed fault is the remaining cross-boundary step.
+                            let reason = fault.to_string();
                             if attempt < max_retries {
                                 attempt += 1;
                                 self.emitter
@@ -822,7 +828,7 @@ impl FlowEngine {
                                         run_id.clone(),
                                         step_id.clone(),
                                         target.clone(),
-                                        reason.clone(),
+                                        reason,
                                     )
                                     .await?;
                                 continue;
@@ -1963,12 +1969,49 @@ fn step_status_from_flow_run(status: flow_run::StepRunStatus) -> StepRunStatus {
     }
 }
 
+/// Typed classification of why a step's raw output could not be turned into a
+/// usable [`Value`].
+///
+/// Parsing is a boundary: the step's transport text is normalized (code-fence
+/// stripping) and parsed exactly once here, and any failure is carried as a
+/// typed fault rather than a free-form string. The retry-vs-fail decision and
+/// the machine-owned terminal classification consume this typed fault; the
+/// `Display` form is only the human-readable rendering for emitter notices and
+/// the (still string-shaped) `StepTargetFailure` reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StepOutputFault {
+    /// JSON output was expected but the (code-fence-normalized) text did not
+    /// parse as JSON.
+    MalformedJson {
+        step_id: StepId,
+        target: MeerkatId,
+        error: String,
+        excerpt: String,
+    },
+}
+
+impl std::fmt::Display for StepOutputFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StepOutputFault::MalformedJson {
+                step_id,
+                target,
+                error,
+                excerpt,
+            } => write!(
+                f,
+                "malformed JSON output for step '{step_id}' target '{target}': {error}; raw_output={excerpt:?}"
+            ),
+        }
+    }
+}
+
 fn parse_output_value(
     raw: &str,
     step_id: &StepId,
     target: &MeerkatId,
     format: &StepOutputFormat,
-) -> Result<Value, String> {
+) -> Result<Value, StepOutputFault> {
     if matches!(format, StepOutputFormat::Text) {
         return Ok(Value::String(raw.to_string()));
     }
@@ -1979,7 +2022,8 @@ fn parse_output_value(
     }
 
     // LLMs sometimes wrap JSON in markdown code fences (```json ... ```).
-    // Strip them and retry before reporting a parse error.
+    // Strip them and retry before reporting a parse error. Code-fence stripping
+    // is a parse normalization; its failure produces the typed fault below.
     let stripped = strip_code_fences(raw);
     serde_json::from_str(&stripped).map_err(|error| {
         let excerpt = if raw.chars().count() > 200 {
@@ -1987,9 +2031,12 @@ fn parse_output_value(
         } else {
             raw.to_string()
         };
-        format!(
-            "malformed JSON output for step '{step_id}' target '{target}': {error}; raw_output={excerpt:?}"
-        )
+        StepOutputFault::MalformedJson {
+            step_id: step_id.clone(),
+            target: target.clone(),
+            error: error.to_string(),
+            excerpt,
+        }
     })
 }
 
@@ -1999,7 +2046,7 @@ fn completed_output_value(
     step_id: &StepId,
     target: &MeerkatId,
     format: &StepOutputFormat,
-) -> Result<Value, String> {
+) -> Result<Value, StepOutputFault> {
     match (format, structured_output) {
         (StepOutputFormat::Json, Some(value)) => Ok(value),
         _ => parse_output_value(raw, step_id, target, format),
@@ -2657,7 +2704,7 @@ mod template_tests {
 
 #[cfg(test)]
 mod completed_output_value_tests {
-    use super::{StepOutputFormat, completed_output_value};
+    use super::{StepOutputFault, StepOutputFormat, completed_output_value, parse_output_value};
     use crate::ids::{AgentIdentity, StepId};
 
     #[test]
@@ -2686,6 +2733,46 @@ mod completed_output_value_tests {
         .expect("text output should be accepted as raw text");
 
         assert_eq!(value, serde_json::json!("plain text"));
+    }
+
+    #[test]
+    fn malformed_json_output_yields_typed_fault_not_free_form_string() {
+        let step_id = StepId::from("step-1");
+        let target = AgentIdentity::from("worker-1");
+        let fault = parse_output_value(
+            "this is not json at all",
+            &step_id,
+            &target,
+            &StepOutputFormat::Json,
+        )
+        .expect_err("non-JSON output for a JSON-format step must fail");
+
+        // The fault is a typed, classifiable variant (not an opaque string),
+        // carrying the step/target identity so the machine-owned terminal
+        // classification can route retry-vs-fail without re-parsing prose.
+        match fault {
+            StepOutputFault::MalformedJson {
+                step_id: faulted_step,
+                target: faulted_target,
+                ..
+            } => {
+                assert_eq!(faulted_step, step_id);
+                assert_eq!(faulted_target, target);
+            }
+        }
+    }
+
+    #[test]
+    fn code_fence_normalization_recovers_fenced_json_before_faulting() {
+        let value = parse_output_value(
+            "```json\n{\"answer\": 42}\n```",
+            &StepId::from("step-1"),
+            &AgentIdentity::from("worker-1"),
+            &StepOutputFormat::Json,
+        )
+        .expect("fenced JSON should parse after code-fence normalization");
+
+        assert_eq!(value, serde_json::json!({"answer": 42}));
     }
 }
 

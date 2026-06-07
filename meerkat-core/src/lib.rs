@@ -88,9 +88,9 @@ pub mod web_search;
 pub use agent::{
     Agent, AgentBuildPolicyError, AgentBuilder, AgentExecutionSnapshot, AgentLlmClient,
     AgentLlmClientDecorator, AgentRunner, AgentSessionStore, AgentToolDispatcher, BindOutcome,
-    CommsCapabilityError, CommsRuntime, CurrentTurnContent, DispatcherCapabilities,
-    ExternalToolUpdate, FilteredToolDispatcher, LlmStreamResult, ToolDispatchContext,
-    select_tool_catalog_mode, should_compose_tool_catalog_control_plane,
+    CommsCapabilityError, CommsRuntime, CurrentTurnContent, DefaultSystemPromptPolicy,
+    DispatcherCapabilities, ExternalToolUpdate, FilteredToolDispatcher, LlmStreamResult,
+    ToolDispatchContext, select_tool_catalog_mode, should_compose_tool_catalog_control_plane,
 };
 pub use approval::{
     ApprovalActionKind, ApprovalDecision, ApprovalDecisionRecord, ApprovalError, ApprovalId,
@@ -314,9 +314,10 @@ pub use turn_execution_authority::{
 };
 pub use types::{
     ArtifactRef, AssistantBlock, AssistantMessage, BlockAssistantMessage, CommsNoticeKind,
-    ContentBlock, ContentInput, ExtractionError, HandlingMode, ImageData, Message, OutputSchema,
-    ProviderMeta, RunResult, SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, SessionId, StopReason,
-    SystemMessage, SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage,
+    ContentBlock, ContentInput, ExtractionError, HandlingMode, ImageData, MemoryIndexExclusion,
+    MemoryIndexableContent, Message, OutputSchema, ProviderMeta, RunResult,
+    SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, SessionId, StopReason, SystemMessage,
+    SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage,
     SystemNoticePeer, SystemPromptMutationKind, ToolCall, ToolCallIter, ToolCallView, ToolDef,
     ToolIdentity, ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind,
     TranscriptSource, TranscriptUserRole, Usage, UserMessage, VideoData,

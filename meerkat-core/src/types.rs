@@ -925,16 +925,19 @@ impl Message {
         }
     }
 
-    /// Extract text content suitable for semantic indexing.
+    /// Classify this message for semantic indexing as a typed decision.
     ///
-    /// Returns user and assistant text content. System messages and
-    /// tool results are excluded (system prompts are not conversation
-    /// content, tool results are structured data).
-    pub fn as_indexable_text(&self) -> String {
+    /// The include/exclude policy is an explicit typed value, not a hidden
+    /// empty-string convention: conversation turns (user/assistant) project to
+    /// [`MemoryIndexableContent::Indexable`], while system prompts, synthetic
+    /// system notices, and tool results carry a typed
+    /// [`MemoryIndexExclusion`] reason so a consumer (e.g. the memory store)
+    /// can see and own indexability rather than inferring it from an empty
+    /// flattened `String`.
+    pub fn indexable_content(&self) -> MemoryIndexableContent {
         match self {
-            Message::SystemNotice(_) => String::new(),
-            Message::User(u) => u.text_content(),
-            Message::Assistant(a) => a.content.clone(),
+            Message::User(u) => MemoryIndexableContent::Indexable(u.text_content()),
+            Message::Assistant(a) => MemoryIndexableContent::Indexable(a.content.clone()),
             Message::BlockAssistant(ba) => {
                 let mut result = String::new();
                 for text in ba.text_blocks() {
@@ -943,11 +946,75 @@ impl Message {
                     }
                     result.push_str(text);
                 }
-                result
+                MemoryIndexableContent::Indexable(result)
             }
-            Message::System(_) | Message::ToolResults { .. } => String::new(),
+            Message::System(_) => {
+                MemoryIndexableContent::Excluded(MemoryIndexExclusion::SystemPrompt)
+            }
+            Message::SystemNotice(_) => {
+                MemoryIndexableContent::Excluded(MemoryIndexExclusion::SystemNotice)
+            }
+            Message::ToolResults { .. } => {
+                MemoryIndexableContent::Excluded(MemoryIndexExclusion::ToolResults)
+            }
         }
     }
+
+    /// Extract text content suitable for semantic indexing.
+    ///
+    /// Text projection of [`Message::indexable_content`]: excluded messages
+    /// (system prompts, system notices, tool results) project to an empty
+    /// string. Prefer [`Message::indexable_content`] when the indexability
+    /// decision itself matters.
+    pub fn as_indexable_text(&self) -> String {
+        self.indexable_content().into_indexable_text()
+    }
+}
+
+/// Typed indexability decision for a [`Message`] in semantic-memory indexing.
+///
+/// Replaces the empty-`String` "this message is not indexable" convention with
+/// an explicit, exhaustive decision the consumer can match on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryIndexableContent {
+    /// Conversation content to index, projected to plain text.
+    Indexable(String),
+    /// Message excluded from indexing, with the typed reason.
+    Excluded(MemoryIndexExclusion),
+}
+
+impl MemoryIndexableContent {
+    /// Whether this message contributes content to the index.
+    pub fn is_indexable(&self) -> bool {
+        matches!(self, MemoryIndexableContent::Indexable(_))
+    }
+
+    /// The indexable text, or empty string for excluded messages.
+    pub fn into_indexable_text(self) -> String {
+        match self {
+            MemoryIndexableContent::Indexable(text) => text,
+            MemoryIndexableContent::Excluded(_) => String::new(),
+        }
+    }
+
+    /// Borrow the indexable text, if any.
+    pub fn indexable_text(&self) -> Option<&str> {
+        match self {
+            MemoryIndexableContent::Indexable(text) => Some(text.as_str()),
+            MemoryIndexableContent::Excluded(_) => None,
+        }
+    }
+}
+
+/// Typed reason a [`Message`] is excluded from semantic-memory indexing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryIndexExclusion {
+    /// System prompt — not conversation content.
+    SystemPrompt,
+    /// Synthetic/runtime system notice — not conversation content.
+    SystemNotice,
+    /// Tool results — structured data, not conversation prose.
+    ToolResults,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

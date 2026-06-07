@@ -27,11 +27,14 @@
 
 use meerkat::session_runtime::errors::LiveOpenPrecheckError;
 use meerkat::session_runtime::live_orchestration::{
+    LiveChannelRefreshFailure, LiveConfigPropagationReport, LiveHotSwapSkipReason,
     apply_precheck_gates, extract_system_prompt_from_seed_messages_runtime,
     live_channel_requires_close_for_identity_change, should_apply_global_model_hot_swap,
     should_fire_live_propagation,
 };
-use meerkat_core::types::{Message, SystemMessage, SystemNoticeKind, SystemNoticeMessage};
+use meerkat_core::types::{
+    Message, SessionId, SystemMessage, SystemNoticeKind, SystemNoticeMessage,
+};
 use meerkat_core::{Provider, SessionLlmIdentity};
 
 #[test]
@@ -264,6 +267,94 @@ fn should_fire_live_propagation_only_consults_agent_model_today() {
     new.agent.system_prompt = Some("flipped".to_string());
     assert_eq!(prior.agent.model, new.agent.model);
     assert!(!should_fire_live_propagation(&prior, &new));
+}
+
+// ---------------------------------------------------------------------------
+// `LiveConfigPropagationReport` is the typed aggregate that
+// `propagate_config_to_live_channels` returns to the config/patch caller.
+// It replaces the prior pure-logging fan-out: a per-channel refresh that
+// fails (open_config build / snapshot stamp / enqueue / queue acceptance)
+// or a per-session hot-swap that fails must be enumerated in the report so
+// the caller observes the failure instead of relying on tracing to notice a
+// propagation that silently completed. These tests pin that contract
+// independently of the host-backed fan-out (which lands richer coverage in
+// `orchestrator_e2e` once a fault-injecting host fixture exists).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn propagation_report_default_is_clean_and_empty() {
+    // No host / nothing to propagate → an empty report that reads clean.
+    let report = LiveConfigPropagationReport::default();
+    assert!(report.is_clean());
+    assert!(report.swapped.is_empty());
+    assert!(report.skipped.is_empty());
+    assert!(report.swap_failed.is_empty());
+    assert!(report.refreshed.is_empty());
+    assert!(report.closed.is_empty());
+    assert!(report.refresh_failed.is_empty());
+}
+
+#[test]
+fn propagation_report_with_forced_channel_failure_is_not_clean_and_enumerates_it() {
+    // Part 2 gate: a propagation run with a forced per-channel failure
+    // must return a report enumerating the failure rather than silently
+    // completing. A refresh that could not be enqueued is recorded as a
+    // typed `LiveChannelRefreshFailure::EnqueueFailed`, and `is_clean()`
+    // flips false so the caller can react.
+    let refreshed = SessionId::new();
+    let failed = SessionId::new();
+    let report = LiveConfigPropagationReport {
+        refreshed: vec![refreshed.clone()],
+        refresh_failed: vec![(
+            failed.clone(),
+            LiveChannelRefreshFailure::EnqueueFailed("live channel closed".to_string()),
+        )],
+        ..Default::default()
+    };
+
+    assert!(
+        !report.is_clean(),
+        "a dropped per-channel refresh must not read as a clean propagation"
+    );
+    assert_eq!(report.refreshed, vec![refreshed]);
+    assert_eq!(report.refresh_failed.len(), 1);
+    let (session, failure) = &report.refresh_failed[0];
+    assert_eq!(session, &failed);
+    match failure {
+        LiveChannelRefreshFailure::EnqueueFailed(detail) => {
+            assert_eq!(detail, "live channel closed");
+        }
+        other => panic!("expected EnqueueFailed, got {other:?}"),
+    }
+}
+
+#[test]
+fn propagation_report_with_swap_failure_is_not_clean() {
+    // A per-session hot-swap reconfigure failure must also surface in the
+    // report (not be swallowed) and flip `is_clean()` false.
+    let failed = SessionId::new();
+    let report = LiveConfigPropagationReport {
+        swap_failed: vec![(failed.clone(), "reconfigure rejected".to_string())],
+        ..Default::default()
+    };
+    assert!(!report.is_clean());
+    assert_eq!(report.swap_failed.len(), 1);
+    assert_eq!(report.swap_failed[0].0, failed);
+}
+
+#[test]
+fn propagation_report_deliberate_skip_and_close_stay_clean() {
+    // A deliberate no-op/override skip and an intentional channel close are
+    // expected outcomes, not faults: the report still reads clean so the
+    // caller does not treat a correct propagation as a failure.
+    let skipped = SessionId::new();
+    let closed = SessionId::new();
+    let report = LiveConfigPropagationReport {
+        skipped: vec![(skipped, LiveHotSwapSkipReason::NoOpOrOverride)],
+        closed: vec![closed],
+        ..Default::default()
+    };
+    assert!(report.is_clean());
 }
 
 #[test]

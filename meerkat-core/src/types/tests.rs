@@ -1787,6 +1787,53 @@ mod content_block_tests {
         assert!(text.contains("[image: image/png]"));
     }
 
+    /// Dogma gate (#319): the indexability decision is an explicit typed value,
+    /// not a silent empty-`String` convention. Conversation turns are
+    /// `Indexable`; system prompts, system notices, and tool results carry a
+    /// typed `MemoryIndexExclusion` reason a consumer can see and own.
+    #[test]
+    fn indexable_content_carries_typed_inclusion_policy() {
+        let user = Message::User(UserMessage::text("hello".to_string()));
+        match user.indexable_content() {
+            MemoryIndexableContent::Indexable(text) => assert_eq!(text, "hello"),
+            other => panic!("user content should be indexable, got: {other:?}"),
+        }
+
+        let system = Message::System(SystemMessage::new("You are a helpful assistant."));
+        assert_eq!(
+            system.indexable_content(),
+            MemoryIndexableContent::Excluded(MemoryIndexExclusion::SystemPrompt),
+        );
+
+        let notice = Message::SystemNotice(SystemNoticeMessage::new(
+            SystemNoticeKind::BackgroundJob,
+            "Background job still running.",
+        ));
+        assert_eq!(
+            notice.indexable_content(),
+            MemoryIndexableContent::Excluded(MemoryIndexExclusion::SystemNotice),
+        );
+
+        let tool_results = Message::tool_results(vec![ToolResult::new(
+            "call-1".to_string(),
+            "structured output".to_string(),
+            false,
+        )]);
+        assert_eq!(
+            tool_results.indexable_content(),
+            MemoryIndexableContent::Excluded(MemoryIndexExclusion::ToolResults),
+        );
+
+        // The text projection stays consistent with the typed decision: only
+        // indexable messages produce text, excluded ones project to empty.
+        assert_eq!(user.as_indexable_text(), "hello");
+        assert!(system.as_indexable_text().is_empty());
+        assert!(notice.as_indexable_text().is_empty());
+        assert!(tool_results.as_indexable_text().is_empty());
+        assert!(!system.indexable_content().is_indexable());
+        assert_eq!(user.indexable_content().indexable_text(), Some("hello"));
+    }
+
     // ContentInput tests
     #[test]
     fn content_input_from_string() {

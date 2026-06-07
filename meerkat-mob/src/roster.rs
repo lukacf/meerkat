@@ -184,9 +184,22 @@ impl Roster {
     pub fn apply(&mut self, event: &MobEvent) {
         match &event.kind {
             MobEventKind::MemberSpawned(member_spawned) => {
-                let member_ref = member_spawned.bridge_member_ref.clone().unwrap_or_else(|| {
-                    MemberRef::from_bridge_session_id(SessionId::from_uuid(uuid::Uuid::nil()))
-                });
+                // Fail closed on a malformed spawn event: a member with no
+                // bridge member ref cannot be admitted with a real backend
+                // identity, so skip the projection rather than fabricate a
+                // synthetic nil-UUID `MemberRef`. Mirrors the invalid
+                // `ExternalPeerWired` descriptor handling below. The
+                // production spawn path always populates `bridge_member_ref`
+                // (`actor.rs` `with_bridge_member_ref(Some(..))`); an absent
+                // ref only appears for legacy/malformed stored events.
+                let Some(member_ref) = member_spawned.bridge_member_ref.clone() else {
+                    tracing::warn!(
+                        agent_identity = %member_spawned.agent_identity,
+                        role = %member_spawned.role,
+                        "skipping MemberSpawned with no bridge_member_ref during roster projection"
+                    );
+                    return;
+                };
                 self.add(RosterAddEntry {
                     agent_identity: member_spawned.agent_identity.clone(),
                     generation: member_spawned.generation,
@@ -1179,6 +1192,32 @@ mod tests {
     }
 
     #[test]
+    fn test_project_skips_member_spawned_without_bridge_member_ref() {
+        // A `MemberSpawnedEvent::new(..)` with no bridge member ref must be
+        // skipped (fail closed) rather than admitted with a fabricated
+        // nil-UUID identity. `MemberSpawnedEvent::new` leaves
+        // `bridge_member_ref = None`.
+        let identity = AgentIdentity::from("no-ref");
+        let events = vec![make_event(
+            1,
+            MobEventKind::MemberSpawned(crate::event::MemberSpawnedEvent::new(
+                identity.clone(),
+                Generation::INITIAL,
+                FenceToken::new(1),
+                AgentRuntimeId::initial(identity.clone()),
+                ProfileName::from("worker"),
+            )),
+        )];
+        let roster = Roster::project(&events);
+        assert!(
+            roster.is_empty(),
+            "MemberSpawned without bridge_member_ref must not project a fabricated entry"
+        );
+        assert!(roster.get_by_identity(&identity).is_none());
+        assert!(roster.is_index_coherent());
+    }
+
+    #[test]
     fn test_project_never_produces_retiring() {
         let sid = session_id();
         let events = vec![make_event(
@@ -1372,13 +1411,16 @@ mod tests {
         let identity = AgentIdentity::from("researcher");
         let events = vec![make_event(
             1,
-            MobEventKind::MemberSpawned(crate::event::MemberSpawnedEvent::new(
-                identity.clone(),
-                Generation::INITIAL,
-                FenceToken::new(1),
-                AgentRuntimeId::initial(identity.clone()),
-                ProfileName::from("research"),
-            )),
+            MobEventKind::MemberSpawned(
+                crate::event::MemberSpawnedEvent::new(
+                    identity.clone(),
+                    Generation::INITIAL,
+                    FenceToken::new(1),
+                    AgentRuntimeId::initial(identity.clone()),
+                    ProfileName::from("research"),
+                )
+                .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(session_id()))),
+            ),
         )];
         let roster = Roster::project(&events);
         assert!(roster.is_index_coherent());
@@ -1395,13 +1437,16 @@ mod tests {
         let events = vec![
             make_event(
                 1,
-                MobEventKind::MemberSpawned(crate::event::MemberSpawnedEvent::new(
-                    identity.clone(),
-                    Generation::INITIAL,
-                    FenceToken::new(1),
-                    AgentRuntimeId::initial(identity.clone()),
-                    ProfileName::from("worker"),
-                )),
+                MobEventKind::MemberSpawned(
+                    crate::event::MemberSpawnedEvent::new(
+                        identity.clone(),
+                        Generation::INITIAL,
+                        FenceToken::new(1),
+                        AgentRuntimeId::initial(identity.clone()),
+                        ProfileName::from("worker"),
+                    )
+                    .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(session_id()))),
+                ),
             ),
             make_event(
                 2,

@@ -3717,11 +3717,14 @@ async fn unregister_session_aborts_spawned_drain_and_clears_suppression() {
 
     adapter.unregister_session(&sid).await;
     adapter.wait_comms_drain(&sid).await;
+    // Ephemeral unregister fully removes the session: there is no durable store
+    // to retain a Destroyed marker (unlike the persistent cold-reregister and
+    // recovery-contract paths, which DO preserve canonical Destroyed truth via
+    // the store). A subsequent runtime_state lookup therefore resolves to
+    // NotFound — the session is gone — rather than a retained NotReady/Destroyed.
     assert!(matches!(
         adapter.runtime_state(&sid).await,
-        Err(RuntimeDriverError::NotReady {
-            state: RuntimeState::Destroyed
-        })
+        Err(RuntimeDriverError::NotFound { .. })
     ));
 }
 

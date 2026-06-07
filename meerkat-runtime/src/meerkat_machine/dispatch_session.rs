@@ -387,7 +387,8 @@ impl MeerkatMachine {
         match command {
             MeerkatMachineCommand::RegisterSession { session_id } => {
                 // Guard: DestroyedShapeInvariant — a destroyed binding must
-                // never be resurrected.
+                // never be resurrected. A session already resident in memory as
+                // Destroyed cannot be re-registered.
                 if matches!(
                     self.existing_session_runtime_state(&session_id).await,
                     Some(RuntimeState::Destroyed)
@@ -396,6 +397,22 @@ impl MeerkatMachine {
                 }
                 let sid = session_id.clone();
                 self.register_session_inner(session_id).await?;
+                // Cold re-registration (e.g. after a process restart) of a
+                // session whose DURABLE runtime state is Destroyed RECOVERS the
+                // canonical terminal truth rather than resurrecting it: the
+                // pre-recovery guard above could not observe it (the session was
+                // not yet resident), but `register_session_inner` has now loaded
+                // the Destroyed authority into memory. Staging RegisterSession on
+                // it would (correctly) be rejected by the DSL — RegisterSession
+                // is a resurrection input the DestroyedShapeInvariant forbids
+                // from Destroyed — so skip it: the recovered terminal state is
+                // already the canonical truth this command must preserve.
+                if matches!(
+                    self.existing_session_runtime_state(&sid).await,
+                    Some(RuntimeState::Destroyed)
+                ) {
+                    return Ok(MeerkatMachineCommandResult::Unit);
+                }
                 let _ = self
                     .stage_session_dsl_input(
                         &sid,

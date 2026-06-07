@@ -120,10 +120,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_stdin_line_json_with_body() {
-        assert_eq!(
-            parse_stdin_line(r#"{"body":"hello"}"#, StdinLineFormat::Json),
-            "hello"
+    fn test_parse_stdin_line_json_renders_structured_payload_whole() {
+        // Row #241: a structured JSON line is rendered whole (pretty-printed)
+        // through the typed `classify_plain_line` authority — it is NOT
+        // collapsed to a guessed `body` field. The body-field-extraction
+        // folklore was removed; this test pins the typed-contract behavior.
+        let rendered = parse_stdin_line(r#"{"body":"hello"}"#, StdinLineFormat::Json);
+        assert_ne!(
+            rendered, "hello",
+            "structured JSON must not be collapsed to a guessed body field"
+        );
+        assert!(
+            rendered.contains("\"body\""),
+            "renders the whole structured payload"
+        );
+        assert!(rendered.contains("hello"));
+        assert!(
+            rendered.contains('\n'),
+            "structured payload is pretty-printed"
         );
     }
 

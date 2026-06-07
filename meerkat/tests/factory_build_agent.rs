@@ -456,7 +456,13 @@ async fn explicit_web_search_enable_without_provider_errors() {
         ..AgentBuildConfig::new("gpt-realtime-2")
     };
     build_config.llm_client_override = Some(Arc::new(MockLlmClient));
-    let result = factory.build_agent(build_config, &Config::default()).await;
+    // OpenAI provider web search defaults to enabled; the #108 fail-closed path
+    // only triggers when the capability is genuinely undeliverable, so disable
+    // the provider-native fallback to match this test's stated premise (a model
+    // that lacks native search AND no provider web search to fall back to).
+    let mut config = Config::default();
+    config.provider_tools.openai.web_search = false;
+    let result = factory.build_agent(build_config, &config).await;
     let err = result
         .err()
         .expect("explicit web-search enable with no provider must fail closed");
@@ -1171,13 +1177,18 @@ async fn build_agent_with_resume_uses_stored_metadata() {
     };
     session.set_session_metadata(original_metadata).unwrap();
 
-    // Resume with the same model (simulating the normal resume flow)
+    // Resume with the same model (simulating the normal resume flow).
+    // The resumed metadata enables WorkGraph (tooling.workgraph = Enable);
+    // post-#109 an explicit WorkGraph enable must be deliverable, so the build
+    // is realm-scoped (the typed RealmId owns the WorkGraph store scope) rather
+    // than relying on the removed "default" slug fallback.
     let build_config = AgentBuildConfig {
         llm_client_override: Some(Arc::new(MockLlmClient)),
         resume_session: Some(session),
         provider: Some(Provider::OpenAI),
         max_tokens: Some(1024),
         provider_params: Some(json!({ "temperature": 0.1 })),
+        realm_id: Some(meerkat_core::RealmId::parse("dev").expect("valid realm")),
         ..AgentBuildConfig::new("gpt-5.4")
     };
 

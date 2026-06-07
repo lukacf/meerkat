@@ -333,6 +333,9 @@ fn auth_error_from_wire(error: meerkat_contracts::WireAuthError) -> meerkat_core
         meerkat_contracts::WireAuthError::RefreshFailed { detail } => {
             meerkat_core::AuthError::RefreshFailed(detail)
         }
+        meerkat_contracts::WireAuthError::ResolveRequired { detail } => {
+            meerkat_core::AuthError::ResolveRequired(detail)
+        }
         meerkat_contracts::WireAuthError::InteractiveLoginRequired => {
             meerkat_core::AuthError::InteractiveLoginRequired
         }

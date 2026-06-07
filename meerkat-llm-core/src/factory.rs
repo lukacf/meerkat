@@ -12,16 +12,27 @@
 /// Error types surfaced by LLM-client construction.
 #[derive(Debug, thiserror::Error)]
 pub enum FactoryError {
-    /// The requested provider is not supported.
+    /// The requested provider/transport combination is not supported. The
+    /// payload is a human-facing reason (e.g. "self_hosted requires the openai
+    /// feature"), not a parsed identity — display-only.
     #[error("Unsupported provider: {0}")]
     UnsupportedProvider(String),
 
-    /// Client creation failed (including missing credentials).
-    ///
-    /// Phase 6.3 collapsed the legacy `MissingApiKey(provider)` variant
-    /// into this broader failure variant; producers emit a message of
-    /// the form "Missing API key for provider: <p>" when credentials
-    /// are absent, preserving downstream text-based error parsing.
+    /// Provider auth/binding resolution failed, carrying the typed
+    /// [`ProviderAuthError`] cause so callers branch on the auth/binding/
+    /// resolution kind rather than re-parsing a flattened string.
+    #[error("provider auth resolution failed: {0}")]
+    ProviderAuth(#[from] crate::provider_runtime::errors::ProviderAuthError),
+
+    /// Building the concrete LLM client from a resolved connection failed,
+    /// carrying the typed [`ProviderClientError`] cause rather than a flattened
+    /// string.
+    #[error("provider client build failed: {0}")]
+    ClientBuild(#[from] crate::provider_runtime::errors::ProviderClientError),
+
+    /// Client creation failed for a reason with no richer typed cause (config
+    /// load, unknown model, lower-level client-build error). The payload is an
+    /// opaque, display-only message — no production code branches on its text.
     #[error("Failed to create client: {0}")]
     ClientCreationFailed(String),
 }
@@ -35,14 +46,19 @@ mod tests {
         let err = FactoryError::UnsupportedProvider("test".into());
         assert_eq!(err.to_string(), "Unsupported provider: test");
 
-        let err =
-            FactoryError::ClientCreationFailed("Missing API key for provider: anthropic".into());
-        assert_eq!(
-            err.to_string(),
-            "Failed to create client: Missing API key for provider: anthropic"
-        );
-
         let err = FactoryError::ClientCreationFailed("timeout".into());
         assert_eq!(err.to_string(), "Failed to create client: timeout");
+    }
+
+    #[test]
+    fn provider_auth_cause_is_carried_typed_not_flattened() {
+        // A provider auth/binding resolution failure is carried as the typed
+        // `ProviderAuthError` (via `#[from]`), not flattened into a
+        // `ClientCreationFailed` string — callers can match the typed cause.
+        let cause = crate::provider_runtime::errors::ProviderAuthError::NoRuntimeRegistered(
+            meerkat_core::Provider::OpenAI,
+        );
+        let err: FactoryError = cause.into();
+        assert!(matches!(err, FactoryError::ProviderAuth(_)));
     }
 }

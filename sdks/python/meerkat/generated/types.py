@@ -2716,6 +2716,10 @@ class WireAuthErrorRefreshFailed(TypedDict, total=False):
     detail: Required[str]
     kind: Required[Literal['refresh_failed']]
 
+class WireAuthErrorResolveRequired(TypedDict, total=False):
+    detail: Required[str]
+    kind: Required[Literal['resolve_required']]
+
 class WireAuthErrorInteractiveLoginRequired(TypedDict, total=False):
     kind: Required[Literal['interactive_login_required']]
 
@@ -2730,7 +2734,7 @@ class WireAuthErrorOther(TypedDict, total=False):
     detail: Required[str]
     kind: Required[Literal['other']]
 
-WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther
+WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorResolveRequired | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther
 
 # Wire-safe content block (no `source_path` — internal only).
 class WireContentBlockText(TypedDict, total=False):

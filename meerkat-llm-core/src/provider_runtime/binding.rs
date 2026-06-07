@@ -302,7 +302,11 @@ impl AuthLease for DynamicLease {
         &self.source_label
     }
     async fn refresh(&self, reason: AuthRefreshReason) -> Result<(), AuthError> {
-        Err(AuthError::RefreshFailed(format!(
+        // A dynamic lease has no in-place refresh: the caller must re-resolve
+        // the typed auth binding through the resolver. Surface that as the
+        // typed `ResolveRequired`, not a generic `RefreshFailed` (no refresh
+        // was attempted), so callers can branch on re-resolution explicitly.
+        Err(AuthError::ResolveRequired(format!(
             "dynamic lease '{}' cannot refresh in place for reason {reason:?}; re-resolve the typed auth_binding",
             self.source_label
         )))
@@ -358,7 +362,7 @@ mod tests {
             .refresh(AuthRefreshReason::Manual)
             .await
             .expect_err("dynamic refresh must not report success without work");
-        assert!(matches!(err, AuthError::RefreshFailed(_)));
+        assert!(matches!(err, AuthError::ResolveRequired(_)));
     }
 
     #[tokio::test]

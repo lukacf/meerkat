@@ -65,7 +65,7 @@ pub async fn resolve_simple_secret(
             let resolver = env
                 .external_resolvers
                 .get(handle)
-                .ok_or_else(|| ProviderAuthError::ExternalResolverMissing(handle.clone()))?;
+                .ok_or_else(|| ProviderAuthError::ExternalResolverMissing(handle.to_string()))?;
             let envelope = resolver.resolve(binding).await?;
             extract_secret_from_envelope(envelope)
         }
@@ -1168,7 +1168,7 @@ pub async fn resolve_external_authorizer(
     let resolver = env
         .external_resolvers
         .get(handle)
-        .ok_or_else(|| ProviderAuthError::ExternalResolverMissing(handle.clone()))?;
+        .ok_or_else(|| ProviderAuthError::ExternalResolverMissing(handle.to_string()))?;
     let envelope = resolver.resolve(binding).await?;
     materialize_external_auth_lease(
         binding,

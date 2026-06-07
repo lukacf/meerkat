@@ -111,6 +111,18 @@ pub struct SurfaceSessionRecoveryContext {
     pub agent_llm_client_decorator: Option<crate::AgentLlmClientDecorator>,
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     pub checkpointer: Option<Arc<dyn SessionCheckpointer>>,
+    /// Runtime build mode supplied by the host, with a fail-closed presence
+    /// assertion.
+    ///
+    /// This is deliberately a `(value, required)` pair rather than a collapsed
+    /// enum: `require_runtime_build_mode` is the host-plumbing contract ("a
+    /// runtime-backed surface MUST hand us a mode"), and `runtime_build_mode`
+    /// carries it. All four combinations are meaningful — when `required` is
+    /// set and the mode is absent the recover path fails closed with
+    /// `MissingRuntimeBuildMode` (guarded by a test); when not required the
+    /// mode is genuinely optional (standalone/ephemeral surfaces). No facts are
+    /// reduced to a verdict here, so there is no illegal state to make
+    /// unrepresentable.
     pub runtime_build_mode: Option<RuntimeBuildMode>,
     pub require_runtime_build_mode: bool,
     pub realm_id: Option<crate::RealmId>,

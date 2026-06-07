@@ -350,9 +350,9 @@ pub use auth::{
 pub use connection::{
     AuthBindingRef, AuthProfile, AuthProfileConfig, BackendProfile, BackendProfileConfig,
     BindingId, BindingOrigin, BindingPolicy, ConnectionTargetError, CredentialSourceSpec,
-    IdentityError, MemberCommsName, MemberCommsNameError, MobMemberBinding, PeerRole, ProfileId,
-    ProviderBinding, ProviderBindingConfig, ProviderBindingError, RealmConfigSection,
-    RealmConnectionSet, RealmId, ResolvedConnectionTarget, mob_realm_id,
+    ExternalResolverId, IdentityError, MemberCommsName, MemberCommsNameError, MobMemberBinding,
+    PeerRole, ProfileId, ProviderBinding, ProviderBindingConfig, ProviderBindingError,
+    RealmConfigSection, RealmConnectionSet, RealmId, ResolvedConnectionTarget, mob_realm_id,
     resolve_auth_binding_candidates_for_provider, resolve_auth_binding_or_default_for_provider,
     resolve_realm_binding_target_for_provider,
 };

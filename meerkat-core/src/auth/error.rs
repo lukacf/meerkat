@@ -43,6 +43,13 @@ pub enum AuthError {
     /// Refresh attempt failed (network, revoked token, etc.).
     #[error("refresh failed: {0}")]
     RefreshFailed(String),
+    /// The lease cannot be refreshed in place; the caller must re-resolve the
+    /// typed auth binding through the resolver. Distinct from
+    /// [`AuthError::RefreshFailed`] (a refresh was attempted and failed) and
+    /// [`AuthError::RefreshRequired`] (the credential needs a refresh before
+    /// provider use): re-resolution discards this lease and resolves anew.
+    #[error("re-resolution required: {0}")]
+    ResolveRequired(String),
     /// Interactive login is needed (OAuth, managed store not populated,
     /// platform default requiring browser flow, etc.).
     #[error("interactive login required")]
@@ -73,6 +80,7 @@ impl AuthError {
             Self::UserReauthRequired => AuthErrorKind::UserReauthRequired,
             Self::Expired => AuthErrorKind::Expired,
             Self::RefreshFailed(_) => AuthErrorKind::RefreshFailed,
+            Self::ResolveRequired(_) => AuthErrorKind::ResolveRequired,
             Self::InteractiveLoginRequired => AuthErrorKind::InteractiveLoginRequired,
             Self::HostOwnedUnavailable => AuthErrorKind::HostOwnedUnavailable,
             Self::Io(_) => AuthErrorKind::Io,
@@ -97,6 +105,7 @@ pub enum AuthErrorKind {
     UserReauthRequired,
     Expired,
     RefreshFailed,
+    ResolveRequired,
     InteractiveLoginRequired,
     HostOwnedUnavailable,
     Io,
@@ -137,6 +146,10 @@ mod tests {
             AuthErrorKind::RefreshFailed,
         );
         assert_eq!(
+            AuthError::ResolveRequired("x".into()).kind(),
+            AuthErrorKind::ResolveRequired,
+        );
+        assert_eq!(
             AuthError::InteractiveLoginRequired.kind(),
             AuthErrorKind::InteractiveLoginRequired,
         );
@@ -158,6 +171,7 @@ mod tests {
             AuthError::UserReauthRequired,
             AuthError::Expired,
             AuthError::RefreshFailed("timeout".into()),
+            AuthError::ResolveRequired("re-resolve binding".into()),
             AuthError::InteractiveLoginRequired,
             AuthError::HostOwnedUnavailable,
             AuthError::Io("file missing".into()),

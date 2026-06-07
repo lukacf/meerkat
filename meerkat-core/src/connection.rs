@@ -432,6 +432,45 @@ pub struct AuthProfile {
     pub metadata_defaults: AuthMetadataDefaults,
 }
 
+/// Typed identity of an externally-registered auth resolver.
+///
+/// Resolver handles are free-form names chosen by the host at registration, so
+/// this is carried as a string on the wire; the newtype keeps it a distinct
+/// typed identity in memory (and as the resolver-registry map key) so it cannot
+/// be confused with any other arbitrary string.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(transparent)]
+pub struct ExternalResolverId(String);
+
+impl ExternalResolverId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ExternalResolverId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for ExternalResolverId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for ExternalResolverId {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
 /// Where credentials come from.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -456,7 +495,7 @@ pub enum CredentialSourceSpec {
         fallback: Vec<String>,
     },
     ExternalResolver {
-        handle: String,
+        handle: ExternalResolverId,
     },
     PlatformDefault,
     /// External command that prints a bearer token on stdout. Reference:

@@ -2700,7 +2700,7 @@ impl AgentFactory {
         let connection = provider_registry
             .resolve(&realm, &auth_binding, &env)
             .await
-            .map_err(|e| FactoryError::ClientCreationFailed(e.to_string()))?;
+            .map_err(FactoryError::ProviderAuth)?;
         if let (Some(handle), Some(lease_auth_binding)) =
             (auth_lease_handle, lease_auth_binding.as_ref())
         {
@@ -2708,7 +2708,7 @@ impl AgentFactory {
         }
         provider_registry
             .build_client(connection)
-            .map_err(|e| FactoryError::ClientCreationFailed(e.to_string()))
+            .map_err(FactoryError::ClientBuild)
     }
 
     /// Build the per-request LLM policy for a (re)configured identity.
@@ -2934,7 +2934,7 @@ impl AgentFactory {
             let connection = provider_registry
                 .resolve(&realm, &auth_binding, &env)
                 .await
-                .map_err(|e| FactoryError::ClientCreationFailed(e.to_string()))?;
+                .map_err(FactoryError::ProviderAuth)?;
 
             if let Some(handle) = auth_lease_handle {
                 Self::publish_auth_lease(&handle, &auth_binding, &connection)?;

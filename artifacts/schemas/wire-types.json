@@ -32687,6 +32687,22 @@
       },
       {
         "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "resolve_required",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "detail"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
           "kind": {
             "const": "interactive_login_required",
             "type": "string"
@@ -33282,6 +33298,22 @@
               },
               "kind": {
                 "const": "refresh_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "resolve_required",
                 "type": "string"
               }
             },

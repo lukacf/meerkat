@@ -1247,6 +1247,16 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Drain", "Reset", "Stop", "Exit", "Recover"],
             ),
             NamedTypeBinding::string_enum(
+                "RuntimeEventKind",
+                &[
+                    "InputLifecycle",
+                    "RunLifecycle",
+                    "RuntimeStateChange",
+                    "Topology",
+                    "Projection",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "RuntimeEffectKind",
                 &["CancelAfterBoundary", "StopRuntimeExecutor"],
             ),

@@ -150,11 +150,7 @@ impl TestPeerInteractionHandle {
 }
 
 impl meerkat_core::handles::PeerInteractionHandle for TestPeerInteractionHandle {
-    fn request_sent(
-        &self,
-        corr_id: PeerCorrelationId,
-        _to: String,
-    ) -> Result<(), DslTransitionError> {
+    fn request_sent(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
         self.outbound
             .lock()
             .insert(corr_id, OutboundPeerRequestState::Sent);

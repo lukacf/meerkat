@@ -239,8 +239,29 @@ impl MeerkatMachine {
                     self.lookup_entry(&runtime_id).await?;
 
                 // DSL-first: stage PublishEvent before driver mutation.
-                // Compute event_kind before consuming the event.
-                let event_kind = format!("{:?}", std::mem::discriminant(&event.event));
+                // Classify the event into the typed RuntimeEventKind discriminant
+                // before consuming the event — the DSL carries the closed enum, not
+                // a Debug-derived discriminant string. Exhaustive match (RuntimeEvent
+                // is #[non_exhaustive] but defined in this crate, so a new variant is
+                // a compile error here rather than a silent fallthrough).
+                use crate::runtime_event::RuntimeEvent;
+                let event_kind = match &event.event {
+                    RuntimeEvent::InputLifecycle(_) => {
+                        crate::meerkat_machine::dsl::RuntimeEventKind::InputLifecycle
+                    }
+                    RuntimeEvent::RunLifecycle(_) => {
+                        crate::meerkat_machine::dsl::RuntimeEventKind::RunLifecycle
+                    }
+                    RuntimeEvent::RuntimeStateChange(_) => {
+                        crate::meerkat_machine::dsl::RuntimeEventKind::RuntimeStateChange
+                    }
+                    RuntimeEvent::Topology(_) => {
+                        crate::meerkat_machine::dsl::RuntimeEventKind::Topology
+                    }
+                    RuntimeEvent::Projection(_) => {
+                        crate::meerkat_machine::dsl::RuntimeEventKind::Projection
+                    }
+                };
                 let previous_dsl_state = self
                     .stage_session_dsl_input(
                         &session_id,

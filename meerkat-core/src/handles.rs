@@ -1867,14 +1867,10 @@ pub enum PeerTerminalDisposition {
 /// are strict projections of DSL state, with the invariant "channel live
 /// iff `corr_id ∈ pending ∧ state ≠ terminal`" enforced by the effect.
 pub trait PeerInteractionHandle: Send + Sync {
-    /// Fire `PeerRequestSent { corr_id, to }`.
+    /// Fire `PeerRequestSent { corr_id }`.
     ///
     /// Guard: `corr_id` is not already in `pending_peer_requests`.
-    fn request_sent(
-        &self,
-        corr_id: PeerCorrelationId,
-        to: String,
-    ) -> Result<(), DslTransitionError>;
+    fn request_sent(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
 
     /// Fire `PeerResponseProgressArrived { corr_id }`.
     ///

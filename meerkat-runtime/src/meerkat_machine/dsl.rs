@@ -1988,6 +1988,21 @@ pub enum RuntimeNoticeKind {
     Recover,
 }
 
+/// Closed top-level classifier for a published `RuntimeEvent`, mirroring the
+/// five `RuntimeEvent` discriminants in `meerkat-runtime` (`InputLifecycle`,
+/// `RunLifecycle`, `RuntimeStateChange`, `Topology`, `Projection`). Replaces the
+/// former Debug-derived discriminant *string* on `PublishEvent.kind` so the DSL
+/// carries a typed discriminant the shell maps exhaustively.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeEventKind {
+    #[default]
+    InputLifecycle,
+    RunLifecycle,
+    RuntimeStateChange,
+    Topology,
+    Projection,
+}
+
 /// Closed classifier for runtime-loop executor effects emitted as neutral DSL
 /// facts before the runtime shell converts them to sealed executable effects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]

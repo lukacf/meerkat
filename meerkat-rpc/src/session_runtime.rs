@@ -11197,7 +11197,7 @@ mod tests {
         operator_comms
             .peer_interaction_handle()
             .expect("operator peer request authority")
-            .request_sent(corr_id, sender_public_key.to_peer_id().to_string())
+            .request_sent(corr_id)
             .expect("seed outbound request before terminal peer response");
         sender
             .peer_interaction_handle()

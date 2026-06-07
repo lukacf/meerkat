@@ -3722,7 +3722,6 @@ mod tests {
         fn request_sent(
             &self,
             _corr_id: meerkat_core::PeerCorrelationId,
-            _to: String,
         ) -> Result<(), meerkat_core::handles::DslTransitionError> {
             Ok(())
         }

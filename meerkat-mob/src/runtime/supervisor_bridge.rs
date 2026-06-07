@@ -1108,7 +1108,7 @@ mod tests {
             .peer_interaction_handle()
             .expect("supervisor runtime installs peer interaction authority");
         handle
-            .request_sent(corr_id, "worker-peer".to_string())
+            .request_sent(corr_id)
             .expect("request should be recorded by generated authority");
 
         MobSupervisorBridge::record_response_terminal(
@@ -1144,7 +1144,7 @@ mod tests {
             .peer_interaction_handle()
             .expect("supervisor runtime installs peer interaction authority");
         handle
-            .request_sent(corr_id, "worker-peer".to_string())
+            .request_sent(corr_id)
             .expect("request should be recorded by generated authority");
 
         MobSupervisorBridge::record_request_timed_out(&runtime, request_envelope_id)

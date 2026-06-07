@@ -774,7 +774,7 @@ impl CoreCommsRuntime for CommsRuntime {
                     None
                 };
 
-                if let Err(err) = peer_handle.request_sent(corr_id, to.peer_id.to_string()) {
+                if let Err(err) = peer_handle.request_sent(corr_id) {
                     tracing::warn!(
                         error = %err,
                         corr_id = %corr_id,
@@ -992,7 +992,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 let (peer_handle, stream_handle) =
                     self.require_peer_request_response_authority("PeerRequest")?;
 
-                if let Err(err) = peer_handle.request_sent(corr_id, to.peer_id.to_string()) {
+                if let Err(err) = peer_handle.request_sent(corr_id) {
                     tracing::warn!(
                         error = %err,
                         corr_id = %corr_id,
@@ -4506,7 +4506,6 @@ mod tests {
         fn request_sent(
             &self,
             corr_id: meerkat_core::PeerCorrelationId,
-            _to: String,
         ) -> Result<(), meerkat_core::handles::DslTransitionError> {
             let mut outbound = self.outbound.lock();
             if outbound.contains_key(&corr_id) {
@@ -5790,7 +5789,6 @@ mod tests {
         meerkat_core::handles::PeerInteractionHandle::request_sent(
             receiver_peer_handle.as_ref(),
             corr_id,
-            sender_name.clone(),
         )
         .expect("receiver machine authority should expect the response");
 

@@ -931,6 +931,22 @@ pub enum RuntimeNoticeKind {
     Recover,
 }
 
+/// Closed top-level classifier for a published `RuntimeEvent`, mirroring the
+/// five `RuntimeEvent` enum discriminants in `meerkat-runtime`
+/// (`InputLifecycle`, `RunLifecycle`, `RuntimeStateChange`, `Topology`,
+/// `Projection`). Replaces the former Debug-derived discriminant *string* on
+/// `PublishEvent.kind` so the DSL carries a typed discriminant the shell maps
+/// exhaustively, never a `format!("{:?}", discriminant(..))` text fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeEventKind {
+    #[default]
+    InputLifecycle,
+    RunLifecycle,
+    RuntimeStateChange,
+    Topology,
+    Projection,
+}
+
 /// Closed classifier for runtime-loop executor effects emitted as neutral DSL
 /// facts before `meerkat-runtime` converts them to sealed executable effects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -3251,7 +3267,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 work_id: WorkId,
                 origin: Enum<WorkOrigin>,
             },
-            PublishEvent { kind: String },
+            PublishEvent { kind: Enum<RuntimeEventKind> },
             RuntimeState { runtime_id: String },
             ModelRoutingStatus { session_id: SessionId },
             SetModelRoutingBaseline { baseline_model: String, realtime_capable: bool },
@@ -3817,7 +3833,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             // Peer interaction lifecycle inputs (W1-A). Shell fires these on
             // outbound send, response arrival (progress or terminal),
             // timeout, inbound request arrival, and inbound reply completion.
-            PeerRequestSent { corr_id: PeerCorrelationId, to: String },
+            PeerRequestSent { corr_id: PeerCorrelationId },
             PeerResponseProgressArrived { corr_id: PeerCorrelationId },
             PeerResponseTerminalArrived { corr_id: PeerCorrelationId, disposition: PeerTerminalDisposition },
             PeerResponseRejected { corr_id: PeerCorrelationId },
@@ -18272,7 +18288,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition PeerRequestSent {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input PeerRequestSent { corr_id, to }
+            on input PeerRequestSent { corr_id }
             guard "not_already_pending" { !self.pending_peer_requests.contains_key(corr_id) }
             update {
                 self.pending_peer_requests.insert(corr_id, OutboundPeerRequestState::Sent);

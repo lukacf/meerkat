@@ -322,7 +322,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AbortAll`
 - `Wait`(session_id: SessionId)
 - `Ingest`(session_id: SessionId, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, work_id: WorkId, origin: WorkOrigin)
-- `PublishEvent`(kind: String)
+- `PublishEvent`(kind: RuntimeEventKind)
 - `RuntimeState`(runtime_id: String)
 - `ModelRoutingStatus`(session_id: SessionId)
 - `SetModelRoutingBaseline`(baseline_model: String, realtime_capable: Bool)
@@ -502,7 +502,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `McpServerFailed`(server_id: McpServerId, error: String)
 - `McpServerDisconnected`(server_id: McpServerId)
 - `McpServerReload`(server_id: McpServerId)
-- `PeerRequestSent`(corr_id: PeerCorrelationId, to: String)
+- `PeerRequestSent`(corr_id: PeerCorrelationId)
 - `PeerResponseProgressArrived`(corr_id: PeerCorrelationId)
 - `PeerResponseTerminalArrived`(corr_id: PeerCorrelationId, disposition: PeerTerminalDisposition)
 - `PeerResponseRejected`(corr_id: PeerCorrelationId)
@@ -13702,7 +13702,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PeerRequestSentIdle`
 - From: `Idle`
-- On: `PeerRequestSent`(corr_id, to)
+- On: `PeerRequestSent`(corr_id)
 - Guards:
   - `not_already_pending`
 - Emits: `PeerInteractionStateChanged`
@@ -13710,7 +13710,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PeerRequestSentAttached`
 - From: `Attached`
-- On: `PeerRequestSent`(corr_id, to)
+- On: `PeerRequestSent`(corr_id)
 - Guards:
   - `not_already_pending`
 - Emits: `PeerInteractionStateChanged`
@@ -13718,7 +13718,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PeerRequestSentRunning`
 - From: `Running`
-- On: `PeerRequestSent`(corr_id, to)
+- On: `PeerRequestSent`(corr_id)
 - Guards:
   - `not_already_pending`
 - Emits: `PeerInteractionStateChanged`
@@ -13726,7 +13726,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PeerRequestSentRetired`
 - From: `Retired`
-- On: `PeerRequestSent`(corr_id, to)
+- On: `PeerRequestSent`(corr_id)
 - Guards:
   - `not_already_pending`
 - Emits: `PeerInteractionStateChanged`
@@ -13734,7 +13734,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PeerRequestSentStopped`
 - From: `Stopped`
-- On: `PeerRequestSent`(corr_id, to)
+- On: `PeerRequestSent`(corr_id)
 - Guards:
   - `not_already_pending`
 - Emits: `PeerInteractionStateChanged`

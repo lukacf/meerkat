@@ -7482,6 +7482,68 @@ impl std::fmt::Display for RuntimeEpochId {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RuntimeEventKind {
+    #[default]
+    #[serde(rename = "InputLifecycle")]
+    InputLifecycle,
+    #[serde(rename = "RunLifecycle")]
+    RunLifecycle,
+    #[serde(rename = "RuntimeStateChange")]
+    RuntimeStateChange,
+    #[serde(rename = "Topology")]
+    Topology,
+    #[serde(rename = "Projection")]
+    Projection,
+}
+impl RuntimeEventKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::InputLifecycle => "InputLifecycle",
+            Self::RunLifecycle => "RunLifecycle",
+            Self::RuntimeStateChange => "RuntimeStateChange",
+            Self::Topology => "Topology",
+            Self::Projection => "Projection",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeEventKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "InputLifecycle" => Ok(Self::InputLifecycle),
+            "RunLifecycle" => Ok(Self::RunLifecycle),
+            "RuntimeStateChange" => Ok(Self::RuntimeStateChange),
+            "Topology" => Ok(Self::Topology),
+            "Projection" => Ok(Self::Projection),
+            other => Err(format!("invalid RuntimeEventKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeEventKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeEventKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RuntimeIngressAdmission {
     #[default]
     #[serde(rename = "Open")]
@@ -10427,7 +10489,7 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PublishEvent {
-        pub kind: String,
+        pub kind: RuntimeEventKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RuntimeState {
@@ -11395,7 +11457,6 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerRequestSent {
         pub corr_id: PeerCorrelationId,
-        pub to: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerResponseProgressArrived {

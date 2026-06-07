@@ -3827,7 +3827,6 @@ mod tests {
             .dsl_apply(
                 mm_dsl::MeerkatMachineInput::PeerRequestSent {
                     corr_id: request_id.into(),
-                    to: peer_id.to_string(),
                 },
                 "PeerRequestSent(test)",
             )

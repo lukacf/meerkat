@@ -463,6 +463,10 @@ mod counter {
                 CounterStopped { final_value: u64 },
             }
 
+            disposition Started => local,
+            disposition LimitReached => local,
+            disposition CounterStopped => local,
+
             transition StartIdle {
                 on input Start
                 guard { !self.active }

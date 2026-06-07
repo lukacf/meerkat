@@ -51,6 +51,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "McpLiveOpStatus": schema_for!(crate::wire::McpLiveOpStatus),
         "McpLiveOperation": schema_for!(crate::wire::McpLiveOperation),
         "McpLiveOpResponse": schema_for!(crate::wire::McpLiveOpResponse),
+        "StreamReadStatus": schema_for!(crate::wire::StreamReadStatus),
         "WireTrustedPeerSpec": schema_for!(crate::wire::WireTrustedPeerSpec),
         "MobPeerTarget": schema_for!(crate::wire::MobPeerTarget),
         "WireMobBackendKind": schema_for!(crate::wire::WireMobBackendKind),

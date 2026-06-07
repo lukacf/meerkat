@@ -22,6 +22,7 @@ pub mod runtime;
 mod schedule;
 mod session;
 pub mod skills;
+mod stream_read;
 pub mod supervisor_bridge;
 mod usage;
 
@@ -176,6 +177,7 @@ pub use session::{
     WireToolCall, WireToolResult, WireToolResultContent, WireTranscriptSource,
 };
 pub use skills::{SkillEntry, SkillInspectResponse, SkillListResponse, SkillSourceProvenance};
+pub use stream_read::StreamReadStatus;
 pub use supervisor_bridge::{
     BridgeAck, BridgeBindPayload, BridgeBindResponse, BridgeCapabilities, BridgeCommand,
     BridgeCommandDecodeError, BridgeDeliveryCompletion, BridgeDeliveryOutcome,

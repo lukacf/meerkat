@@ -2616,10 +2616,10 @@ async fn handle_meerkat_event_stream_read(
             Some(timeout) => match tokio::time::timeout(timeout, stream.next()).await {
                 Ok(item) => item,
                 Err(_) => {
-                    return wrap_tool_payload(json!({
-                        "stream_id": input.stream_id,
-                        "status": "timeout"
-                    }));
+                    return stream_read_payload(
+                        &input.stream_id,
+                        meerkat_contracts::StreamReadStatus::Timeout,
+                    );
                 }
             },
         }
@@ -2627,13 +2627,8 @@ async fn handle_meerkat_event_stream_read(
 
     match next_event {
         Some(envelope) => {
-            let envelope_json = serde_json::to_value(&envelope)
-                .map_err(|e| format!("Failed to serialize stream event: {e}"))?;
-            wrap_tool_payload(json!({
-                "stream_id": input.stream_id,
-                "status": "event",
-                "event": envelope_json
-            }))
+            let status = stream_read_event_status(&envelope)?;
+            stream_read_payload(&input.stream_id, status)
         }
         None => {
             state
@@ -2641,10 +2636,10 @@ async fn handle_meerkat_event_stream_read(
                 .lock()
                 .await
                 .remove(&input.stream_id);
-            wrap_tool_payload(json!({
-                "stream_id": input.stream_id,
-                "status": "closed"
-            }))
+            stream_read_payload(
+                &input.stream_id,
+                meerkat_contracts::StreamReadStatus::Closed,
+            )
         }
     }
 }
@@ -2726,23 +2721,18 @@ async fn handle_meerkat_mob_event_stream_read(
                     Some(timeout) => match tokio::time::timeout(timeout, stream.next()).await {
                         Ok(item) => item,
                         Err(_) => {
-                            return wrap_tool_payload(json!({
-                                "stream_id": input.stream_id,
-                                "status": "timeout"
-                            }));
+                            return stream_read_payload(
+                                &input.stream_id,
+                                meerkat_contracts::StreamReadStatus::Timeout,
+                            );
                         }
                     },
                 }
             };
             match next_event {
                 Some(envelope) => {
-                    let event_json = serde_json::to_value(&envelope)
-                        .map_err(|e| format!("Failed to serialize event: {e}"))?;
-                    wrap_tool_payload(json!({
-                        "stream_id": input.stream_id,
-                        "status": "event",
-                        "event": event_json
-                    }))
+                    let status = stream_read_event_status(&envelope)?;
+                    stream_read_payload(&input.stream_id, status)
                 }
                 None => {
                     state
@@ -2750,10 +2740,10 @@ async fn handle_meerkat_mob_event_stream_read(
                         .lock()
                         .await
                         .remove(&input.stream_id);
-                    wrap_tool_payload(json!({
-                        "stream_id": input.stream_id,
-                        "status": "closed"
-                    }))
+                    stream_read_payload(
+                        &input.stream_id,
+                        meerkat_contracts::StreamReadStatus::Closed,
+                    )
                 }
             }
         }
@@ -2766,10 +2756,10 @@ async fn handle_meerkat_mob_event_stream_read(
                         match tokio::time::timeout(timeout, router_handle.event_rx.recv()).await {
                             Ok(item) => item,
                             Err(_) => {
-                                return wrap_tool_payload(json!({
-                                    "stream_id": input.stream_id,
-                                    "status": "timeout"
-                                }));
+                                return stream_read_payload(
+                                    &input.stream_id,
+                                    meerkat_contracts::StreamReadStatus::Timeout,
+                                );
                             }
                         }
                     }
@@ -2777,13 +2767,8 @@ async fn handle_meerkat_mob_event_stream_read(
             };
             match next_event {
                 Some(attributed) => {
-                    let event_json = serde_json::to_value(&attributed)
-                        .map_err(|e| format!("Failed to serialize attributed event: {e}"))?;
-                    wrap_tool_payload(json!({
-                        "stream_id": input.stream_id,
-                        "status": "event",
-                        "event": event_json
-                    }))
+                    let status = stream_read_event_status(&attributed)?;
+                    stream_read_payload(&input.stream_id, status)
                 }
                 None => {
                     state
@@ -2791,10 +2776,10 @@ async fn handle_meerkat_mob_event_stream_read(
                         .lock()
                         .await
                         .remove(&input.stream_id);
-                    wrap_tool_payload(json!({
-                        "stream_id": input.stream_id,
-                        "status": "closed"
-                    }))
+                    stream_read_payload(
+                        &input.stream_id,
+                        meerkat_contracts::StreamReadStatus::Closed,
+                    )
                 }
             }
         }
@@ -4065,6 +4050,47 @@ fn wrap_tool_payload(payload: Value) -> Result<Value, String> {
             "text": text
         }]
     }))
+}
+
+/// Build a stream-read tool payload from the typed
+/// [`meerkat_contracts::StreamReadStatus`] contract.
+///
+/// A stream read resolves into exactly one terminal shape — a delivered event,
+/// an expired timeout, or a closed stream — and that shape is the single typed
+/// authority for read status. The transport-level `stream_id` is carried by the
+/// enclosing response (one fact, one owner), so surfaces never hand-roll
+/// `status: "event" | "timeout" | "closed"` string conventions.
+fn stream_read_payload(
+    stream_id: &str,
+    status: meerkat_contracts::StreamReadStatus,
+) -> Result<Value, String> {
+    let mut payload = serde_json::to_value(&status)
+        .map_err(|err| format!("Failed to serialize stream read status: {err}"))?;
+    match &mut payload {
+        Value::Object(map) => {
+            map.insert(
+                "stream_id".to_string(),
+                Value::String(stream_id.to_string()),
+            );
+        }
+        _ => {
+            return Err("stream read status did not serialize to a JSON object".to_string());
+        }
+    }
+    wrap_tool_payload(payload)
+}
+
+/// Build a [`meerkat_contracts::StreamReadStatus::Event`] from a serializable
+/// event envelope, riding the body as opaque `Box<RawValue>` (never matched at
+/// this layer).
+fn stream_read_event_status(
+    envelope: &impl serde::Serialize,
+) -> Result<meerkat_contracts::StreamReadStatus, String> {
+    let body = serde_json::to_string(envelope)
+        .map_err(|err| format!("Failed to serialize stream event: {err}"))?;
+    let event = serde_json::value::RawValue::from_string(body)
+        .map_err(|err| format!("Failed to encode stream event: {err}"))?;
+    Ok(meerkat_contracts::StreamReadStatus::Event { event })
 }
 
 fn compose_external_tool_dispatchers(

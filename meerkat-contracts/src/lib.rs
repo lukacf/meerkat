@@ -298,6 +298,7 @@ pub use wire::{
     SkillListResponse,
     SkillSourceProvenance,
     SkillsParams,
+    StreamReadStatus,
     StructuredOutputParams,
     SupervisorRotationReportWire,
     TranscriptRewriteMessage,

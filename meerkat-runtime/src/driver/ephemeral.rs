@@ -2118,16 +2118,13 @@ impl EphemeralRuntimeDriver {
                         InputLifecycleState::Abandoned,
                         "ResolveStagedRollback->Abandon",
                     )?;
-                    self.events.push(
-                        self.make_envelope(RuntimeEvent::InputLifecycle(
+                    self.events
+                        .push(self.make_envelope(RuntimeEvent::InputLifecycle(
                             InputLifecycleEvent::Abandoned {
                                 input_id: input_id.clone(),
-                                reason: mm_dsl::InputAbandonReason::MaxAttemptsExhausted
-                                    .as_str()
-                                    .to_string(),
+                                reason: InputAbandonReason::MaxAttemptsExhausted { attempts },
                             },
-                        )),
-                    );
+                        )));
                 }
                 other => {
                     return Err(RuntimeDriverError::Internal(format!(
@@ -3035,7 +3032,6 @@ impl EphemeralRuntimeDriver {
             })
             .collect();
         let dsl_reason = mm_dsl::InputAbandonReason::from(&reason);
-        let reason_label = dsl_reason.as_str();
         let mut count = 0;
         for id in &non_terminal_ids {
             let key = Self::dsl_key(id);
@@ -3065,7 +3061,7 @@ impl EphemeralRuntimeDriver {
                 .push(self.make_envelope(RuntimeEvent::InputLifecycle(
                     InputLifecycleEvent::Abandoned {
                         input_id: id.clone(),
-                        reason: reason_label.to_string(),
+                        reason: reason.clone(),
                     },
                 )));
         }
@@ -3078,7 +3074,6 @@ impl EphemeralRuntimeDriver {
         reason: InputAbandonReason,
     ) -> Result<usize, RuntimeDriverError> {
         let dsl_reason = mm_dsl::InputAbandonReason::from(&reason);
-        let reason_label = dsl_reason.as_str();
         let mut count = 0;
         for input_id in input_ids {
             if self.input_phase(input_id) != Some(InputLifecycleState::Staged) {
@@ -3107,7 +3102,7 @@ impl EphemeralRuntimeDriver {
                 .push(self.make_envelope(RuntimeEvent::InputLifecycle(
                     InputLifecycleEvent::Abandoned {
                         input_id: input_id.clone(),
-                        reason: reason_label.to_string(),
+                        reason: reason.clone(),
                     },
                 )));
         }

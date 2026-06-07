@@ -3,13 +3,14 @@
 //! Five categories: InputLifecycle, RunLifecycle, RuntimeState, Topology, Projection.
 
 use chrono::{DateTime, Utc};
+use meerkat_core::TurnErrorMetadata;
 use meerkat_core::lifecycle::{InputId, RunId};
 use serde::{Deserialize, Serialize};
 
 use crate::identifiers::{
     CausationId, CorrelationId, EventCodeId, LogicalRuntimeId, RuntimeEventId,
 };
-use crate::input_state::InputLifecycleState;
+use crate::input_state::{InputAbandonReason, InputLifecycleState};
 use crate::runtime_state::RuntimeState;
 
 /// Envelope for all runtime events.
@@ -92,7 +93,13 @@ pub enum InputLifecycleEvent {
     /// Input consumed (run completed successfully).
     Consumed { input_id: InputId, run_id: RunId },
     /// Input abandoned (retire/reset/destroy).
-    Abandoned { input_id: InputId, reason: String },
+    ///
+    /// Carries the typed abandon cause (`InputAbandonReason`) sourced from the
+    /// terminal outcome, not a stringified label.
+    Abandoned {
+        input_id: InputId,
+        reason: InputAbandonReason,
+    },
     /// Input state transitioned.
     StateTransitioned {
         input_id: InputId,
@@ -128,10 +135,14 @@ pub enum RunLifecycleEvent {
     /// A run completed successfully.
     Completed { run_id: RunId },
     /// A run failed.
+    ///
+    /// Carries the typed turn-failure cause (`TurnErrorMetadata`) instead of a
+    /// stringified error. Recoverability is conveyed by
+    /// `TurnErrorMetadata::retryable`; human-readable diagnostics remain in
+    /// `TurnErrorMetadata::detail`.
     Failed {
         run_id: RunId,
-        error: String,
-        recoverable: bool,
+        error: TurnErrorMetadata,
     },
     /// A run was cancelled.
     Cancelled { run_id: RunId },
@@ -282,20 +293,44 @@ mod tests {
 
     #[test]
     fn run_lifecycle_failed_serde() {
+        let mut metadata = TurnErrorMetadata::runtime_apply_failure("timeout");
+        metadata.retryable = Some(true);
         let event = RuntimeEvent::RunLifecycle(RunLifecycleEvent::Failed {
             run_id: RunId::new(),
-            error: "timeout".into(),
-            recoverable: true,
+            error: metadata,
         });
         let json = serde_json::to_value(&event).unwrap();
         let parsed: RuntimeEvent = serde_json::from_value(json).unwrap();
-        assert!(matches!(
-            parsed,
-            RuntimeEvent::RunLifecycle(RunLifecycleEvent::Failed {
-                recoverable: true,
-                ..
-            })
-        ));
+        let RuntimeEvent::RunLifecycle(RunLifecycleEvent::Failed { error, .. }) = parsed else {
+            panic!("expected run lifecycle failed event");
+        };
+        assert_eq!(error.retryable, Some(true));
+        assert_eq!(
+            error.kind,
+            meerkat_core::TurnTerminalCauseKind::RuntimeApplyFailure
+        );
+    }
+
+    #[test]
+    fn input_lifecycle_abandoned_carries_typed_reason() {
+        let event = RuntimeEvent::InputLifecycle(InputLifecycleEvent::Abandoned {
+            input_id: InputId::new(),
+            reason: InputAbandonReason::MaxAttemptsExhausted { attempts: 3 },
+        });
+        let json = serde_json::to_value(&event).unwrap();
+        // RuntimeEvent is adjacently tagged (category/data), so the inner
+        // InputLifecycleEvent `code` discriminator lives under `data`.
+        assert_eq!(json["category"], "input_lifecycle");
+        assert_eq!(json["data"]["code"], "abandoned");
+        let parsed: RuntimeEvent = serde_json::from_value(json).unwrap();
+        let RuntimeEvent::InputLifecycle(InputLifecycleEvent::Abandoned { reason, .. }) = parsed
+        else {
+            panic!("expected input lifecycle abandoned event");
+        };
+        assert_eq!(
+            reason,
+            InputAbandonReason::MaxAttemptsExhausted { attempts: 3 }
+        );
     }
 
     #[test]

@@ -30124,6 +30124,54 @@
     "title": "SkillListResponse",
     "type": "object"
   },
+  "StreamReadStatus": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Typed terminal status for a single event-stream read.\n\nInternally tagged on `status` to match the canonical read response shape:\n`{ \"status\": \"event\", \"event\": { .. } }`, `{ \"status\": \"timeout\" }`, or\n`{ \"status\": \"closed\" }`. The transport-level stream identifier is carried\nby the enclosing response, not by this status (one fact, one owner).\n\nNot `PartialEq`: the `Event.event` body rides as `Box<RawValue>` — opaque\ncaller-observed JSON (a serialized core `EventEnvelope<AgentEvent>`) that is\nnever pattern-matched at this layer. Allow-listed per `dogma-blind-spots`\n§7, identical to `SessionExternalEventEnvelope`.",
+    "oneOf": [
+      {
+        "description": "An event was delivered from the stream before the read deadline.",
+        "properties": {
+          "event": true,
+          "status": {
+            "const": "event",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "event"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The read deadline expired before any event was available. The stream\nremains open and may be read again.",
+        "properties": {
+          "status": {
+            "const": "timeout",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The stream was exhausted (closed). No further events will arrive.",
+        "properties": {
+          "status": {
+            "const": "closed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "StreamReadStatus"
+  },
   "SupervisorRotationReportWire": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Confirmed supervisor rotation report returned by `mob/rotate_supervisor`.",

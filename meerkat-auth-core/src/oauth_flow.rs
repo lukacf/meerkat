@@ -68,11 +68,15 @@ const GOOGLE_SCOPES: &[&str] = &[
 const TEST_OAUTH_ENDPOINT_OVERRIDE_ENV: &str = "MEERKAT_TEST_OAUTH_ENDPOINT_OVERRIDE";
 const TEST_OAUTH_BASE_URL_ENV: &str = "MEERKAT_TEST_OAUTH_BASE_URL";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OAuthProviderIdentity {
+    #[serde(rename = "anthropic_claude_ai")]
     AnthropicClaudeAi,
+    #[serde(rename = "anthropic_console_api_key")]
     AnthropicConsoleApiKey,
+    #[serde(rename = "openai_chatgpt")]
     OpenAiChatGpt,
+    #[serde(rename = "google_code_assist")]
     GoogleCodeAssist,
 }
 
@@ -465,7 +469,7 @@ pub struct OAuthFlowRegistrySnapshot {
 pub struct PersistedOAuthBrowserFlow {
     pub state: String,
     pub target: AuthBindingRef,
-    pub provider: String,
+    pub provider: OAuthProviderIdentity,
     pub redirect_uri: String,
     pub pkce_verifier: String,
     pub created_at_millis: u64,
@@ -475,7 +479,7 @@ pub struct PersistedOAuthBrowserFlow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedOAuthDeviceFlow {
     pub target: AuthBindingRef,
-    pub provider: String,
+    pub provider: OAuthProviderIdentity,
     pub device_code: String,
     pub created_at_millis: u64,
     pub expires_at_millis: u64,
@@ -1057,7 +1061,7 @@ impl OAuthFlowRegistry {
                 Some(PersistedOAuthBrowserFlow {
                     state: state.clone(),
                     target: record.target.clone(),
-                    provider: record.provider.canonical_alias().to_string(),
+                    provider: record.provider,
                     redirect_uri: record.redirect_uri.clone(),
                     pkce_verifier: record.pkce_verifier.clone(),
                     created_at_millis: now_millis.saturating_sub(elapsed_millis),
@@ -1077,7 +1081,7 @@ impl OAuthFlowRegistry {
                 let created_elapsed = state.record.created_at.elapsed();
                 Some(PersistedOAuthDeviceFlow {
                     target: state.record.target.clone(),
-                    provider: state.record.provider.canonical_alias().to_string(),
+                    provider: state.record.provider,
                     device_code: state.record.device_code.clone(),
                     created_at_millis: now_millis
                         .saturating_sub(duration_millis_u64(created_elapsed)),
@@ -1518,6 +1522,64 @@ mod tests {
             profile: None,
             origin: meerkat_core::BindingOrigin::Configured,
         }
+    }
+
+    #[test]
+    fn oauth_provider_identity_survives_serde_round_trip() {
+        // The persisted snapshot must carry the typed identity discriminant, not a
+        // re-derivable canonical alias string. Every variant round-trips through
+        // serde without an alias-string intermediary.
+        for identity in [
+            OAuthProviderIdentity::AnthropicClaudeAi,
+            OAuthProviderIdentity::AnthropicConsoleApiKey,
+            OAuthProviderIdentity::OpenAiChatGpt,
+            OAuthProviderIdentity::GoogleCodeAssist,
+        ] {
+            let json = serde_json::to_string(&identity).expect("serialize identity");
+            let restored: OAuthProviderIdentity =
+                serde_json::from_str(&json).expect("deserialize identity");
+            assert_eq!(identity, restored);
+        }
+    }
+
+    #[test]
+    fn persisted_browser_flow_round_trips_typed_provider() {
+        let persisted = PersistedOAuthBrowserFlow {
+            state: "state-token".to_string(),
+            target: target(),
+            provider: OAuthProviderIdentity::AnthropicClaudeAi,
+            redirect_uri: "https://example/callback".to_string(),
+            pkce_verifier: "verifier".to_string(),
+            created_at_millis: 1_000,
+            expires_at_millis: 61_000,
+        };
+        let json = serde_json::to_string(&persisted).expect("serialize browser flow");
+        let restored: PersistedOAuthBrowserFlow =
+            serde_json::from_str(&json).expect("deserialize browser flow");
+        assert_eq!(restored.provider, OAuthProviderIdentity::AnthropicClaudeAi);
+        assert_eq!(persisted, restored);
+    }
+
+    #[test]
+    fn persisted_device_flow_round_trips_typed_provider() {
+        let persisted = PersistedOAuthDeviceFlow {
+            target: target(),
+            provider: OAuthProviderIdentity::GoogleCodeAssist,
+            device_code: "device-code".to_string(),
+            created_at_millis: 1_000,
+            expires_at_millis: 61_000,
+        };
+        let json = serde_json::to_string(&persisted).expect("serialize device flow");
+        let restored: PersistedOAuthDeviceFlow =
+            serde_json::from_str(&json).expect("deserialize device flow");
+        assert_eq!(restored.provider, OAuthProviderIdentity::GoogleCodeAssist);
+        assert_eq!(persisted, restored);
+    }
+
+    #[test]
+    fn from_alias_rejects_unknown_alias() {
+        assert!(OAuthProviderIdentity::from_alias("unknown").is_none());
+        assert!(OAuthProviderIdentity::from_alias("").is_none());
     }
 
     #[test]

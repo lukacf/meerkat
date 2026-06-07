@@ -28,14 +28,14 @@ use crate::wire::session::WireStopReason;
 
 /// Wire-safe projection of [`meerkat_core::Provider`].
 ///
-/// The core `Provider` enum uses `#[serde(rename_all = "snake_case")]` which
-/// transforms `OpenAI` to `"open_a_i"` on the wire -- not the conventional
-/// `"openai"`. `WireProvider` pins the correct wire names with explicit
-/// `#[serde(rename)]` on each variant so SDK consumers see `"openai"`,
-/// `"anthropic"`, `"gemini"`, etc.
-///
-/// Includes an `Unknown { debug: String }` variant for future-proofing per
-/// the wire-mirror dogma used throughout this module.
+/// `WireProvider` pins each provider's canonical wire name with an explicit
+/// `#[serde(rename)]` (`"openai"`, `"anthropic"`, `"gemini"`, …). The core
+/// `Provider` enum now agrees (its `OpenAI` variant carries an explicit
+/// `#[serde(rename = "openai")]` so `rename_all = "snake_case"` can no longer
+/// mangle it into `"open_a_i"`); `WireProvider` exists as the dedicated wire
+/// mirror so SDK consumers get a stable, explicitly-named contract plus the
+/// fail-loud `Unknown` sentinel below, per the wire-mirror dogma used
+/// throughout this module.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[non_exhaustive]

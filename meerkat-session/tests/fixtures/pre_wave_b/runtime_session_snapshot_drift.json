@@ -10,7 +10,7 @@
             "session_metadata": {
                 "model": "gpt-4o-mini",
                 "max_tokens": 4096,
-                "provider": "open_a_i",
+                "provider": "openai",
                 "tooling": {},
                 "comms_name": null,
                 "provider_params": {

@@ -620,9 +620,10 @@ pub struct LiveProjectionSnapshot {
     pub system_prompt: Option<String>,
     pub model_id: String,
     // Typed in memory (the realtime refresh guard compares
-    // `Provider == Provider`), but serialized with the canonical provider
-    // names (`"openai"`, not the derive's `"open_a_i"`) so the durable/adapter
-    // wire shape matches the prior `String` carrier exactly.
+    // `Provider == Provider`), but presented as a plain canonical provider
+    // string on the wire (schema is `String`) so the durable/adapter shape
+    // matches the prior `String` carrier exactly, with lenient deserialization
+    // of an opaque carrier value into `Provider::Other`.
     #[serde(with = "crate::provider::provider_canonical_str")]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub provider_id: Provider,

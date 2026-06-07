@@ -566,6 +566,10 @@ pub enum ImageGenerationWarning {
 #[serde(tag = "provider", rename_all = "snake_case")]
 pub enum ProviderImageMetadata {
     NotEmitted,
+    // `rename_all = "snake_case"` tags this variant `"open_ai"`, diverging from
+    // the canonical provider name `"openai"` (see `Provider::as_str`). Pin the
+    // canonical discriminator so the `provider` tag matches every other seam.
+    #[serde(rename = "openai")]
     OpenAi(OpenAiImageMetadata),
     Gemini(GeminiImageMetadata),
 }

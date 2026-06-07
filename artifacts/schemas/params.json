@@ -2107,7 +2107,7 @@
         "description": "Supported LLM providers.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
@@ -2819,7 +2819,7 @@
         "description": "Supported LLM providers.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
@@ -11774,7 +11774,7 @@
             "$ref": "#/$defs/OpenAiImageMetadata",
             "properties": {
               "provider": {
-                "const": "open_ai",
+                "const": "openai",
                 "type": "string"
               }
             },
@@ -14010,7 +14010,7 @@
         "description": "Supported LLM providers.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"

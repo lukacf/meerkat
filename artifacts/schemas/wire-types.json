@@ -1902,7 +1902,7 @@
         "description": "Supported LLM providers.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
@@ -1927,7 +1927,7 @@
             "$ref": "#/$defs/OpenAiImageMetadata",
             "properties": {
               "provider": {
-                "const": "open_ai",
+                "const": "openai",
                 "type": "string"
               }
             },
@@ -14014,7 +14014,7 @@
         "description": "Supported LLM providers.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
@@ -14039,7 +14039,7 @@
             "$ref": "#/$defs/OpenAiImageMetadata",
             "properties": {
               "provider": {
-                "const": "open_ai",
+                "const": "openai",
                 "type": "string"
               }
             },
@@ -18214,7 +18214,7 @@
         "description": "Supported LLM providers.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
@@ -25827,7 +25827,7 @@
         "description": "Supported LLM providers.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
@@ -27088,7 +27088,7 @@
         "description": "Supported LLM providers.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
@@ -28629,7 +28629,7 @@
         "description": "Supported LLM providers.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
@@ -30435,7 +30435,7 @@
             "$ref": "#/$defs/OpenAiImageMetadata",
             "properties": {
               "provider": {
-                "const": "open_ai",
+                "const": "openai",
                 "type": "string"
               }
             },
@@ -31951,7 +31951,7 @@
             "$ref": "#/$defs/OpenAiImageMetadata",
             "properties": {
               "provider": {
-                "const": "open_ai",
+                "const": "openai",
                 "type": "string"
               }
             },
@@ -35400,7 +35400,7 @@
             "$ref": "#/$defs/OpenAiImageMetadata",
             "properties": {
               "provider": {
-                "const": "open_ai",
+                "const": "openai",
                 "type": "string"
               }
             },
@@ -36814,7 +36814,7 @@
         ]
       },
       "WireProvider": {
-        "description": "Wire-safe projection of [`meerkat_core::Provider`].\n\nThe core `Provider` enum uses `#[serde(rename_all = \"snake_case\")]` which\ntransforms `OpenAI` to `\"open_a_i\"` on the wire -- not the conventional\n`\"openai\"`. `WireProvider` pins the correct wire names with explicit\n`#[serde(rename)]` on each variant so SDK consumers see `\"openai\"`,\n`\"anthropic\"`, `\"gemini\"`, etc.\n\nIncludes an `Unknown { debug: String }` variant for future-proofing per\nthe wire-mirror dogma used throughout this module.",
+        "description": "Wire-safe projection of [`meerkat_core::Provider`].\n\n`WireProvider` pins each provider's canonical wire name with an explicit\n`#[serde(rename)]` (`\"openai\"`, `\"anthropic\"`, `\"gemini\"`, …). The core\n`Provider` enum now agrees (its `OpenAI` variant carries an explicit\n`#[serde(rename = \"openai\")]` so `rename_all = \"snake_case\"` can no longer\nmangle it into `\"open_a_i\"`); `WireProvider` exists as the dedicated wire\nmirror so SDK consumers get a stable, explicitly-named contract plus the\nfail-loud `Unknown` sentinel below, per the wire-mirror dogma used\nthroughout this module.",
         "oneOf": [
           {
             "enum": [
@@ -37809,7 +37809,7 @@
         ]
       },
       "WireProvider": {
-        "description": "Wire-safe projection of [`meerkat_core::Provider`].\n\nThe core `Provider` enum uses `#[serde(rename_all = \"snake_case\")]` which\ntransforms `OpenAI` to `\"open_a_i\"` on the wire -- not the conventional\n`\"openai\"`. `WireProvider` pins the correct wire names with explicit\n`#[serde(rename)]` on each variant so SDK consumers see `\"openai\"`,\n`\"anthropic\"`, `\"gemini\"`, etc.\n\nIncludes an `Unknown { debug: String }` variant for future-proofing per\nthe wire-mirror dogma used throughout this module.",
+        "description": "Wire-safe projection of [`meerkat_core::Provider`].\n\n`WireProvider` pins each provider's canonical wire name with an explicit\n`#[serde(rename)]` (`\"openai\"`, `\"anthropic\"`, `\"gemini\"`, …). The core\n`Provider` enum now agrees (its `OpenAI` variant carries an explicit\n`#[serde(rename = \"openai\")]` so `rename_all = \"snake_case\"` can no longer\nmangle it into `\"open_a_i\"`); `WireProvider` exists as the dedicated wire\nmirror so SDK consumers get a stable, explicitly-named contract plus the\nfail-loud `Unknown` sentinel below, per the wire-mirror dogma used\nthroughout this module.",
         "oneOf": [
           {
             "enum": [
@@ -39957,7 +39957,7 @@
         "description": "Supported LLM providers.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
@@ -40747,7 +40747,7 @@
             "$ref": "#/$defs/OpenAiImageMetadata",
             "properties": {
               "provider": {
-                "const": "open_ai",
+                "const": "openai",
                 "type": "string"
               }
             },
@@ -42535,7 +42535,7 @@
             "$ref": "#/$defs/OpenAiImageMetadata",
             "properties": {
               "provider": {
-                "const": "open_ai",
+                "const": "openai",
                 "type": "string"
               }
             },
@@ -44766,7 +44766,7 @@
             "$ref": "#/$defs/OpenAiImageMetadata",
             "properties": {
               "provider": {
-                "const": "open_ai",
+                "const": "openai",
                 "type": "string"
               }
             },

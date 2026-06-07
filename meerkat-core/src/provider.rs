@@ -8,6 +8,12 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
     Anthropic,
+    // `rename_all = "snake_case"` mangles `OpenAI` into `"open_a_i"`, which
+    // diverges from the canonical `as_str()` name `"openai"` that every other
+    // seam (and durable data) uses. Pin the canonical wire/schema name on the
+    // variant so the derived `Serialize`/`Deserialize` and the generated
+    // `schemars` schema all agree on `"openai"` — one representation, no shim.
+    #[serde(rename = "openai")]
     OpenAI,
     Gemini,
     SelfHosted,
@@ -68,14 +74,16 @@ impl Provider {
     ];
 }
 
-/// Serde helper that (de)serializes a [`Provider`] using its canonical
-/// [`Provider::as_str`] names (`"openai"`, `"self_hosted"`, …) rather than the
-/// derived `#[serde(rename_all = "snake_case")]` output (which mangles
-/// `OpenAI` into `"open_a_i"`).
+/// Serde helper for seams that carry the provider as a plain `String` on the
+/// wire (e.g. `LiveProjectionSnapshot.provider_id`, whose JSON schema is
+/// `String`) but hold a typed [`Provider`] in memory.
 ///
-/// Use this at typed seams that previously carried the provider as a canonical
-/// `String` and must keep that exact wire/durable shape after being retyped to
-/// the [`Provider`] enum (e.g. `LiveProjectionSnapshot.provider_id`).
+/// Serialization matches the canonical [`Provider::as_str`] names — identical
+/// to the enum's own derived output now that [`Provider::OpenAI`] is pinned to
+/// `"openai"`. Deserialization is intentionally lenient (`Provider::from_name`,
+/// unknown → [`Provider::Other`]) so an opaque provider string carried by such
+/// a seam round-trips into the catch-all variant rather than failing closed —
+/// the leniency the plain-`String` carrier had before it was retyped.
 pub mod provider_canonical_str {
     use super::Provider;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};

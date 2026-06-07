@@ -69,7 +69,7 @@ fn migrate_metadata_scenario(name: &str) -> Result<meerkat_core::Session, Sessio
     let mut session_metadata = json!({
         "model": "gpt-4o-mini",
         "max_tokens": 4096,
-        "provider": "open_a_i",
+        "provider": "openai",
         "tooling": {},
         "comms_name": null,
     });

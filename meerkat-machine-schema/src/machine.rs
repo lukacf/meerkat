@@ -312,9 +312,13 @@ impl MachineSchema {
         }
         validate_string_enum_named_variants_machine(self)?;
 
-        // Validate effect dispositions: every rule must reference a known effect variant,
-        // no duplicates, and when dispositions are present every effect must be covered.
-        if !self.effect_dispositions.is_empty() {
+        // Validate effect dispositions: every rule must reference a known effect
+        // variant with no duplicates, and — unconditionally (#294) — when the
+        // machine declares any effect, every effect variant must carry a
+        // disposition. An empty `effect_dispositions` vector on a machine that
+        // has effects is a coverage gap, not a pass (the gate that RMAT treats
+        // as coverage truth must not be silently satisfiable by emptiness).
+        {
             let mut disposed_variants: IndexSet<&str> = IndexSet::new();
             for rule in &self.effect_dispositions {
                 if !effect_variants.contains(rule.effect_variant.as_str()) {
@@ -1890,6 +1894,25 @@ mod tests {
             Err(MachineSchemaError::MissingNamedTypeBinding {
                 name: "ToolSourceKind".into(),
             })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_effect_declaring_machine_with_empty_dispositions() {
+        // #294: effect-disposition coverage is unconditional. A machine that
+        // declares effects but carries an empty `effect_dispositions` vector is
+        // a coverage gap, not a pass — clearing the dispositions of an
+        // otherwise-valid machine must fail closed with MissingEffectDisposition
+        // (previously the `if !is_empty()` gate let zero coverage through).
+        let mut schema = meerkat_machine();
+        assert_eq!(schema.validate(), Ok(()));
+        schema.effect_dispositions.clear();
+        assert!(
+            matches!(
+                schema.validate(),
+                Err(MachineSchemaError::MissingEffectDisposition { .. })
+            ),
+            "empty dispositions on an effect-declaring machine must fail closed"
         );
     }
 

@@ -36,8 +36,8 @@ use serde::{Deserialize, Serialize};
 /// runtime policy. This ownership expansion is deliberate — see dogma rule §11.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ModelProfile {
-    /// Canonical provider string.
-    pub provider: String,
+    /// Provider that serves this model.
+    pub provider: Provider,
     /// Model family identifier (e.g., `"claude-opus-4"`, `"gpt-5"`, `"gemini-3"`).
     pub model_family: String,
     /// Whether the model accepts a `temperature` parameter.
@@ -116,7 +116,7 @@ pub fn inline_video_support_for(provider: Provider, model: &str) -> Option<bool>
 /// Project a capability record into the [`ModelProfile`] surface.
 pub(crate) fn project_to_profile(caps: &ModelCapabilities) -> ModelProfile {
     ModelProfile {
-        provider: caps.provider.as_str().to_string(),
+        provider: caps.provider,
         model_family: caps.model_family.to_string(),
         supports_temperature: caps.supports_temperature,
         supports_thinking: caps.thinking != ThinkingSupport::None,

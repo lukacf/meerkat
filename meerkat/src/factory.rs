@@ -5440,7 +5440,7 @@ mod tests {
         // Profile advertises web-search support and config enables the provider
         // tool — without the override this would resolve the native body.
         let profile = meerkat_core::model_profile::ModelProfile {
-            provider: Provider::OpenAI.as_str().to_string(),
+            provider: Provider::OpenAI,
             model_family: "gpt-5".to_string(),
             supports_temperature: false,
             supports_thinking: false,

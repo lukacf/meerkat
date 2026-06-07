@@ -319,7 +319,7 @@ fn append_self_hosted(
             base_url: normalize_base_url(&server.base_url),
         };
         let profile = ModelProfile {
-            provider: Provider::SelfHosted.as_str().to_string(),
+            provider: Provider::SelfHosted,
             model_family: model.family.clone(),
             supports_temperature: model.supports_temperature,
             supports_thinking: model.supports_thinking,

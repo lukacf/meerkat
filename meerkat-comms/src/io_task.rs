@@ -815,11 +815,17 @@ mod tests {
             client_write.write_all(&bytes).await.unwrap();
         });
 
-        handle_connection(server, true, &receiver_keypair, &inbox_sender)
-            .await
-            .unwrap();
+        // ROW #300: an invalid signature is a rejected admission surfaced as a
+        // typed auth fault, not a silent `Ok(())` the listener would treat as a
+        // clean connection.
+        let outcome = handle_connection(server, true, &receiver_keypair, &inbox_sender).await;
+        assert!(
+            matches!(outcome, Err(IoTaskError::InvalidSignature { .. })),
+            "invalid signature must classify as a typed admission rejection, got {outcome:?}"
+        );
 
-        // No ack sent - connection closes without data
+        // No ack sent - the connection is dropped on the rejection rather than
+        // acknowledged.
         let result = read_one_envelope(&mut client_read).await;
         assert!(result.is_err(), "Should not send ack for invalid signature");
 

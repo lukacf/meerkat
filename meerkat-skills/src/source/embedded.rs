@@ -65,16 +65,24 @@ struct EmbeddedScan {
     total_count: u32,
 }
 
-/// Scan the inventory once, recording every skipped/invalid/colliding
-/// registration so inventory truth carries typed source-health instead of a
-/// silently filtered best-effort list.
+/// Scan the ambient `inventory` registry once into a typed [`EmbeddedScan`].
 fn scan_registrations() -> EmbeddedScan {
+    scan_registration_iter(collect_registered_skills())
+}
+
+/// Scan a registration set once, recording every skipped/invalid/colliding
+/// registration so inventory truth carries typed source-health instead of a
+/// silently filtered best-effort list. Pure over its input so the counting is
+/// exercisable independently of the ambient `inventory` registry.
+fn scan_registration_iter<'a>(
+    registrations: impl IntoIterator<Item = &'a SkillRegistration>,
+) -> EmbeddedScan {
     let mut descriptors: Vec<SkillDescriptor> = Vec::new();
     let mut seen: HashSet<SkillKey> = HashSet::new();
     let mut invalid_count: u32 = 0;
     let mut total_count: u32 = 0;
 
-    for reg in collect_registered_skills() {
+    for reg in registrations {
         total_count = total_count.saturating_add(1);
         match registration_to_descriptor(reg) {
             Ok(desc) => {
@@ -260,28 +268,81 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn health_snapshot_reports_typed_counts_not_default() {
-        // Row #220: embedded health must carry real inventory counts, not a
-        // Default snapshot. The embedded inventory ships valid registrations,
-        // so total_count is populated and the source classifies Healthy.
+    async fn health_snapshot_agrees_with_list_one_scan() {
+        // Row #220: the live source's health is computed from the SAME scan as
+        // `list()` — one truth, not two. `total_count` accounts for every
+        // registration considered and the valid ones are exactly what `list()`
+        // returns; the shipped builtins carry no parse/collision failures, so
+        // `invalid_count` is zero and the source classifies Healthy. (The
+        // ambient `inventory` registry may be empty in an isolated unit build;
+        // this asserts the cross-read invariant, not a specific population.)
         let source = EmbeddedSkillSource::new();
         let listed = source.list(&SkillFilter::default()).await.unwrap();
         let health = source.health_snapshot().await.unwrap();
 
-        assert!(
-            health.total_count >= listed.len() as u32,
-            "health total_count must account for every registration considered"
-        );
-        assert!(
-            health.total_count > 0,
-            "embedded inventory must report a non-empty total_count"
-        );
-        // All shipped builtin registrations are valid, so health is Healthy and
-        // carries a zero invalid_count (not a Default placeholder).
         assert_eq!(health.invalid_count, 0);
+        assert_eq!(
+            health.total_count,
+            listed.len() as u32,
+            "health total_count must equal the count of valid listed registrations"
+        );
         assert_eq!(
             health.state,
             meerkat_core::skills::SourceHealthState::Healthy
+        );
+    }
+
+    #[test]
+    fn embedded_scan_reports_real_counts_not_default() {
+        // Row #220: the scan is the typed source of health truth, not a Default
+        // placeholder. Every registration considered is counted (`total`); a
+        // builtin-key collision and a parse failure are each counted invalid.
+        // A `Default` snapshot would report (total 0, invalid 0); a real scan
+        // over these known-bad registrations cannot.
+        let valid = SkillRegistration {
+            id: "task-workflow",
+            name: "Task Workflow",
+            description: "",
+            scope: SkillScope::Builtin,
+            requires_capabilities: &[],
+            body: "",
+            extensions: &[],
+        };
+        // Same id => same builtin key as `valid`: a fail-closed collision.
+        let collision = SkillRegistration {
+            id: "task-workflow",
+            name: "Task Workflow (duplicate)",
+            description: "",
+            scope: SkillScope::Builtin,
+            requires_capabilities: &[],
+            body: "",
+            extensions: &[],
+        };
+        // Capitalised id is not a canonical slug: a parse failure.
+        let invalid_slug = SkillRegistration {
+            id: "EmailExtractor",
+            name: "Email Extractor",
+            description: "",
+            scope: SkillScope::Builtin,
+            requires_capabilities: &[],
+            body: "",
+            extensions: &[],
+        };
+
+        let scan = scan_registration_iter([&valid, &collision, &invalid_slug]);
+
+        assert_eq!(
+            scan.total_count, 3,
+            "every registration considered is counted"
+        );
+        assert_eq!(
+            scan.invalid_count, 2,
+            "the key collision and the invalid slug are both counted invalid"
+        );
+        assert_eq!(
+            scan.descriptors.len(),
+            1,
+            "only the first registration of a colliding key survives"
         );
     }
 }

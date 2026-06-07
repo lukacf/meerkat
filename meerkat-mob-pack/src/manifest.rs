@@ -185,13 +185,15 @@ mod tests {
     #[test]
     fn test_manifest_rejects_unknown_surface_selector() {
         // An unknown surface selector fails closed at deserialization rather
-        // than surviving as opaque manifest text.
+        // than surviving as opaque manifest text. `surfaces` is a top-level
+        // manifest field, so it precedes the `[mobpack]` table.
         let err = toml::from_str::<MobpackManifest>(
             r#"
+surfaces = ["cli", "ftp"]
+
 [mobpack]
 name = "x"
 version = "1.0.0"
-surfaces = ["cli", "ftp"]
 "#,
         );
         assert!(err.is_err());

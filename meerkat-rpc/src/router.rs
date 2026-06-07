@@ -5292,7 +5292,16 @@ mod tests {
     #[async_trait::async_trait]
     impl meerkat_client::realtime_session::RealtimeSessionFactory for RecordingLiveFactory {
         fn capabilities(&self) -> meerkat_contracts::RealtimeCapabilities {
-            meerkat_contracts::RealtimeCapabilities::default()
+            // #176: the live WS transport resolves its audio policy from the
+            // factory's typed `RealtimeCapabilities`. A realistic realtime
+            // factory advertises PCM 24 kHz mono in both directions (the only
+            // binary format the WS transport negotiates), so `live/open`
+            // resolves a typed audio policy instead of failing closed.
+            meerkat_contracts::RealtimeCapabilities {
+                audio_input_format: Some(meerkat_contracts::RealtimeAudioFormat::pcm(24_000, 1)),
+                audio_output_format: Some(meerkat_contracts::RealtimeAudioFormat::pcm(24_000, 1)),
+                ..meerkat_contracts::RealtimeCapabilities::default()
+            }
         }
 
         async fn open_session(

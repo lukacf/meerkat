@@ -357,7 +357,17 @@ fn resolve_message_blocks(
         return Ok(None);
     };
     let body = body.trim();
-    if !body.is_empty() && !blocks_text_contains(&blocks, body) {
+    // Single content authority: when the caller supplies their own text
+    // block(s), those blocks own the message content and the convenience
+    // `body` field is ignored — the carried body is later projected from the
+    // blocks (`project_body_from_blocks`) so the two cannot diverge. The
+    // `body` is only lifted into a leading text block when the caller supplied
+    // no text of their own (e.g. body + image blocks), so its text is not
+    // silently dropped.
+    let has_text_block = blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Text { .. }));
+    if !body.is_empty() && !has_text_block {
         blocks.insert(
             0,
             ContentBlock::Text {
@@ -383,25 +393,6 @@ fn project_body_from_blocks(blocks: &[ContentBlock]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn blocks_text_contains(blocks: &[ContentBlock], expected: &str) -> bool {
-    if blocks
-        .iter()
-        .any(|block| matches!(block, ContentBlock::Text { text } if text.trim() == expected))
-    {
-        return true;
-    }
-    blocks
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.trim()),
-            _ => None,
-        })
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
-        == expected
 }
 
 fn resolve_tool_block(

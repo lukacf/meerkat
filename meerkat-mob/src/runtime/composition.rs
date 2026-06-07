@@ -776,10 +776,16 @@ mod tests {
             let route = effect
                 .generated_input_route()
                 .expect("cached variant id must resolve to a generated input route");
-            // The seam producer instance owning this route is the generated
-            // `mob` instance — the route was resolved by the cached producer
-            // effect-variant id, not a hand-authored slug.
-            assert_eq!(route.instance_id, mob_producer_instance_id());
+            // `TypedRoutedInput.instance_id` is the *input* (consumer) instance
+            // the route delivers into. Every routed `MobMachineEffect` is a
+            // request INTO the `meerkat` runtime machine, so the route resolved
+            // from the cached producer effect-variant id targets the generated
+            // `meerkat` instance — read from generated truth, not a
+            // hand-authored slug.
+            assert_eq!(
+                route.instance_id,
+                meerkat_runtime::generated::meerkat_mob_seam::producers::meerkat_instance_id()
+            );
             // Every producer field the generated route declares must be
             // projectable from the effect body through the generated field
             // helpers (no missing producer field).

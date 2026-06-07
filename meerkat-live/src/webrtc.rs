@@ -1387,6 +1387,15 @@ mod tests {
 
         let state = LiveWebrtcState::new_for_test_with_generated_close_feedback(Arc::clone(&host));
         let browser_peer = new_browser_peer().await;
+        // A WebRTC offer needs at least one m-line to carry ICE credentials;
+        // an offer with no data channel / track yields an SDP with no
+        // ice-ufrag, which the answer side's set_remote_description rejects.
+        // Open the canonical "meerkat.live" data channel before offering,
+        // mirroring the other webrtc tests in this module.
+        let _dc = browser_peer
+            .create_data_channel("meerkat.live", None)
+            .await
+            .unwrap();
         let offer = browser_peer.create_offer(None).await.unwrap();
         let mut gathering_complete = browser_peer.gathering_complete_promise().await;
         browser_peer.set_local_description(offer).await.unwrap();

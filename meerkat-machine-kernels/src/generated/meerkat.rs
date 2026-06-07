@@ -4746,6 +4746,68 @@ impl std::fmt::Display for PeerIngressReceiveOutcomeClass {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum PeerIngressRequestClass {
+    #[default]
+    #[serde(rename = "Other")]
+    Other,
+    #[serde(rename = "MobPeerAdded")]
+    MobPeerAdded,
+    #[serde(rename = "MobPeerRetired")]
+    MobPeerRetired,
+    #[serde(rename = "MobPeerUnwired")]
+    MobPeerUnwired,
+    #[serde(rename = "SupervisorBridge")]
+    SupervisorBridge,
+}
+impl PeerIngressRequestClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Other => "Other",
+            Self::MobPeerAdded => "MobPeerAdded",
+            Self::MobPeerRetired => "MobPeerRetired",
+            Self::MobPeerUnwired => "MobPeerUnwired",
+            Self::SupervisorBridge => "SupervisorBridge",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PeerIngressRequestClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Other" => Ok(Self::Other),
+            "MobPeerAdded" => Ok(Self::MobPeerAdded),
+            "MobPeerRetired" => Ok(Self::MobPeerRetired),
+            "MobPeerUnwired" => Ok(Self::MobPeerUnwired),
+            "SupervisorBridge" => Ok(Self::SupervisorBridge),
+            other => Err(format!("invalid PeerIngressRequestClass value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PeerIngressRequestClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PeerIngressRequestClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum PeerIngressResponseStatus {
     #[default]
     #[serde(rename = "Accepted")]
@@ -12546,6 +12608,7 @@ pub mod signals {
         pub from_peer: String,
         pub envelope_kind: PeerIngressEnvelopeClass,
         pub request_intent: String,
+        pub request_intent_class: PeerIngressRequestClass,
         pub lifecycle_kind: PeerIngressLifecycleClass,
         pub lifecycle_peer_param: Option<String>,
         pub response_status: PeerIngressResponseStatus,

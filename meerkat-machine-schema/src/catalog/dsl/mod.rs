@@ -989,6 +989,16 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Accepted", "Completed", "Failed"],
             ),
             NamedTypeBinding::string_enum(
+                "PeerIngressRequestClass",
+                &[
+                    "Other",
+                    "MobPeerAdded",
+                    "MobPeerRetired",
+                    "MobPeerUnwired",
+                    "SupervisorBridge",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "PeerIngressResponseTerminality",
                 &["Progress", "TerminalCompleted", "TerminalFailed"],
             ),

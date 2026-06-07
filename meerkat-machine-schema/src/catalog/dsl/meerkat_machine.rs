@@ -478,6 +478,23 @@ pub enum PeerIngressResponseStatus {
     Failed,
 }
 
+/// Closed classifier for the peer-ingress request intents that drive fixed
+/// lifecycle routing (mob peer add/retire/unwire) plus the supervisor-bridge
+/// channel. The machine guards on this typed class instead of comparing the
+/// raw `request_intent` string. Arbitrary, user-configured silent intents are
+/// an OPEN set and are matched separately against the raw `request_intent`
+/// string via `silent_intent_overrides` — `Other` covers every intent outside
+/// the closed routing set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressRequestClass {
+    #[default]
+    Other,
+    MobPeerAdded,
+    MobPeerRetired,
+    MobPeerUnwired,
+    SupervisorBridge,
+}
+
 /// DSL-owned response progress/terminal classifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum PeerIngressResponseTerminality {
@@ -4031,6 +4048,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 from_peer: String,
                 envelope_kind: Enum<PeerIngressEnvelopeClass>,
                 request_intent: String,
+                request_intent_class: Enum<PeerIngressRequestClass>,
                 lifecycle_kind: Enum<PeerIngressLifecycleClass>,
                 lifecycle_peer_param: Option<String>,
                 response_status: Enum<PeerIngressResponseStatus>,
@@ -10775,7 +10793,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // only peer-retired and peer-unwired cleanup notices during teardown.
         transition ClassifyExternalEnvelopeMessageAttached {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -10797,7 +10815,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeMessageRunning {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Running }
@@ -10819,14 +10837,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestPeerAddedAttached {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_request_peer_added" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent == "mob.peer_added"
+                && request_intent_class == PeerIngressRequestClass::MobPeerAdded
             }
             update {}
             to Attached
@@ -10850,14 +10868,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestPeerAddedIdle {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Idle }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_request_peer_added" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent == "mob.peer_added"
+                && request_intent_class == PeerIngressRequestClass::MobPeerAdded
             }
             update {}
             to Idle
@@ -10881,14 +10899,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestPeerAddedRunning {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_request_peer_added" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent == "mob.peer_added"
+                && request_intent_class == PeerIngressRequestClass::MobPeerAdded
             }
             update {}
             to Running
@@ -10912,14 +10930,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestPeerRetiredAttached {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_request_peer_retired" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent == "mob.peer_retired"
+                && request_intent_class == PeerIngressRequestClass::MobPeerRetired
             }
             update {}
             to Attached
@@ -10943,14 +10961,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestPeerRetiredIdle {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Idle }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_request_peer_retired" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent == "mob.peer_retired"
+                && request_intent_class == PeerIngressRequestClass::MobPeerRetired
             }
             update {}
             to Idle
@@ -10974,14 +10992,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestPeerRetiredRetired {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Retired }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_request_peer_retired" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent == "mob.peer_retired"
+                && request_intent_class == PeerIngressRequestClass::MobPeerRetired
             }
             update {}
             to Retired
@@ -11005,14 +11023,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestPeerRetiredStopped {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_request_peer_retired" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent == "mob.peer_retired"
+                && request_intent_class == PeerIngressRequestClass::MobPeerRetired
             }
             update {}
             to Stopped
@@ -11036,14 +11054,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestPeerRetiredRunning {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_request_peer_retired" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent == "mob.peer_retired"
+                && request_intent_class == PeerIngressRequestClass::MobPeerRetired
             }
             update {}
             to Running
@@ -11067,14 +11085,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestPeerUnwiredAttached {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_request_peer_unwired" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent == "mob.peer_unwired"
+                && request_intent_class == PeerIngressRequestClass::MobPeerUnwired
             }
             update {}
             to Attached
@@ -11098,14 +11116,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestPeerUnwiredIdle {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Idle }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_request_peer_unwired" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent == "mob.peer_unwired"
+                && request_intent_class == PeerIngressRequestClass::MobPeerUnwired
             }
             update {}
             to Idle
@@ -11129,14 +11147,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestPeerUnwiredRetired {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Retired }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_request_peer_unwired" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent == "mob.peer_unwired"
+                && request_intent_class == PeerIngressRequestClass::MobPeerUnwired
             }
             update {}
             to Retired
@@ -11160,14 +11178,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestPeerUnwiredStopped {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_request_peer_unwired" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent == "mob.peer_unwired"
+                && request_intent_class == PeerIngressRequestClass::MobPeerUnwired
             }
             update {}
             to Stopped
@@ -11191,14 +11209,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestPeerUnwiredRunning {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_request_peer_unwired" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent == "mob.peer_unwired"
+                && request_intent_class == PeerIngressRequestClass::MobPeerUnwired
             }
             update {}
             to Running
@@ -11222,14 +11240,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestSupervisorSilentAttached {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_supervisor_silent_request" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent == "supervisor.bridge"
+                && request_intent_class == PeerIngressRequestClass::SupervisorBridge
                 && self.silent_intent_overrides.contains(request_intent)
             }
             update {}
@@ -11248,14 +11266,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestSupervisorSilentIdle {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Idle }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_supervisor_silent_request" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent == "supervisor.bridge"
+                && request_intent_class == PeerIngressRequestClass::SupervisorBridge
                 && self.silent_intent_overrides.contains(request_intent)
             }
             update {}
@@ -11274,14 +11292,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestSupervisorSilentRunning {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_supervisor_silent_request" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent == "supervisor.bridge"
+                && request_intent_class == PeerIngressRequestClass::SupervisorBridge
                 && self.silent_intent_overrides.contains(request_intent)
             }
             update {}
@@ -11300,17 +11318,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestSilentAttached {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_silent_request" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent != "supervisor.bridge"
-                && request_intent != "mob.peer_added"
-                && request_intent != "mob.peer_retired"
-                && request_intent != "mob.peer_unwired"
+                && request_intent_class == PeerIngressRequestClass::Other
                 && self.silent_intent_overrides.contains(request_intent)
             }
             update {}
@@ -11329,17 +11344,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestSilentRunning {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_silent_request" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent != "supervisor.bridge"
-                && request_intent != "mob.peer_added"
-                && request_intent != "mob.peer_retired"
-                && request_intent != "mob.peer_unwired"
+                && request_intent_class == PeerIngressRequestClass::Other
                 && self.silent_intent_overrides.contains(request_intent)
             }
             update {}
@@ -11358,14 +11370,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestSupervisorAttached {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_supervisor_request" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent == "supervisor.bridge"
+                && request_intent_class == PeerIngressRequestClass::SupervisorBridge
                 && !self.silent_intent_overrides.contains(request_intent)
             }
             update {}
@@ -11384,14 +11396,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestSupervisorIdle {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Idle }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_supervisor_request" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent == "supervisor.bridge"
+                && request_intent_class == PeerIngressRequestClass::SupervisorBridge
                 && !self.silent_intent_overrides.contains(request_intent)
             }
             update {}
@@ -11410,14 +11422,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestSupervisorRunning {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_supervisor_request" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent == "supervisor.bridge"
+                && request_intent_class == PeerIngressRequestClass::SupervisorBridge
                 && !self.silent_intent_overrides.contains(request_intent)
             }
             update {}
@@ -11436,17 +11448,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestActionableAttached {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_actionable_request" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent != "supervisor.bridge"
-                && request_intent != "mob.peer_added"
-                && request_intent != "mob.peer_retired"
-                && request_intent != "mob.peer_unwired"
+                && request_intent_class == PeerIngressRequestClass::Other
                 && !self.silent_intent_overrides.contains(request_intent)
             }
             update {}
@@ -11465,17 +11474,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeRequestActionableRunning {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             guard "peer_ingress_actionable_request" {
                 envelope_kind == PeerIngressEnvelopeClass::Request
-                && request_intent != "supervisor.bridge"
-                && request_intent != "mob.peer_added"
-                && request_intent != "mob.peer_retired"
-                && request_intent != "mob.peer_unwired"
+                && request_intent_class == PeerIngressRequestClass::Other
                 && !self.silent_intent_overrides.contains(request_intent)
             }
             update {}
@@ -11494,7 +11500,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeLifecycleAddedIdle {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Idle }
@@ -11525,7 +11531,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeLifecycleAddedAttached {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -11556,7 +11562,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeLifecycleAddedRunning {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Running }
@@ -11587,7 +11593,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeLifecycleRetiredIdle {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Idle }
@@ -11618,7 +11624,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeLifecycleRetiredRetired {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Retired }
@@ -11649,7 +11655,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeLifecycleRetiredStopped {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Stopped }
@@ -11680,7 +11686,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeLifecycleRetiredAttached {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -11711,7 +11717,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeLifecycleRetiredRunning {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Running }
@@ -11742,7 +11748,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeLifecycleUnwiredIdle {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Idle }
@@ -11773,7 +11779,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeLifecycleUnwiredRetired {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Retired }
@@ -11804,7 +11810,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeLifecycleUnwiredStopped {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Stopped }
@@ -11835,7 +11841,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeLifecycleUnwiredAttached {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -11866,7 +11872,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeLifecycleUnwiredRunning {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Running }
@@ -11897,7 +11903,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeResponseAcceptedAttached {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -11922,7 +11928,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeResponseAcceptedRunning {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Running }
@@ -11947,7 +11953,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeResponseCompletedAttached {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -11972,7 +11978,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeResponseCompletedRunning {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Running }
@@ -11997,7 +12003,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeResponseFailedAttached {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -12022,7 +12028,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeResponseFailedRunning {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Running }
@@ -12047,7 +12053,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeAckAttached {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -12069,7 +12075,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
         transition ClassifyExternalEnvelopeAckRunning {
             on signal ClassifyExternalEnvelope {
-                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                item_id, from_peer, envelope_kind, request_intent, request_intent_class, lifecycle_kind,
                 lifecycle_peer_param, response_status, in_reply_to
             }
             guard { self.lifecycle_phase == Phase::Running }

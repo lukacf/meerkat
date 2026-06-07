@@ -1025,6 +1025,22 @@ pub enum PeerIngressResponseStatus {
     Failed,
 }
 
+/// Closed classifier for peer-ingress request intents that drive fixed
+/// lifecycle routing (mob peer add/retire/unwire) plus the supervisor-bridge
+/// channel. The machine guards on this typed class; arbitrary user-configured
+/// silent intents remain an open set matched against the raw `request_intent`
+/// string via `silent_intent_overrides`, so `Other` covers everything outside
+/// the closed routing set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressRequestClass {
+    #[default]
+    Other,
+    MobPeerAdded,
+    MobPeerRetired,
+    MobPeerUnwired,
+    SupervisorBridge,
+}
+
 /// DSL-owned response progress/terminal classifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum PeerIngressResponseTerminality {

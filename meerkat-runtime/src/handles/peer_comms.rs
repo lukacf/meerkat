@@ -155,6 +155,21 @@ fn auth_to_dsl(auth: meerkat_core::PeerIngressAuthDecision) -> mm_dsl::PeerIngre
     }
 }
 
+/// Classify a peer-ingress request intent into the closed routing class the
+/// machine guards on. Intents outside the closed set (including the empty
+/// intent carried by non-request envelopes) map to `Other`; the raw intent
+/// string is still threaded through the signal for the open-set
+/// `silent_intent_overrides` membership check inside the machine.
+fn request_intent_class_for(intent: &str) -> mm_dsl::PeerIngressRequestClass {
+    match intent {
+        "mob.peer_added" => mm_dsl::PeerIngressRequestClass::MobPeerAdded,
+        "mob.peer_retired" => mm_dsl::PeerIngressRequestClass::MobPeerRetired,
+        "mob.peer_unwired" => mm_dsl::PeerIngressRequestClass::MobPeerUnwired,
+        "supervisor.bridge" => mm_dsl::PeerIngressRequestClass::SupervisorBridge,
+        _ => mm_dsl::PeerIngressRequestClass::Other,
+    }
+}
+
 fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::MeerkatMachineSignal {
     let (
         envelope_kind,
@@ -212,11 +227,14 @@ fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::Meerkat
         ),
     };
 
+    let request_intent_class = request_intent_class_for(&request_intent);
+
     mm_dsl::MeerkatMachineSignal::ClassifyExternalEnvelope {
         item_id: facts.item_id.clone(),
         from_peer: facts.from_peer.clone(),
         envelope_kind,
         request_intent,
+        request_intent_class,
         lifecycle_kind,
         lifecycle_peer_param,
         response_status,

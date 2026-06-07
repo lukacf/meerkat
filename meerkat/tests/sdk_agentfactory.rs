@@ -387,7 +387,7 @@ async fn public_agentbuilder_matches_factory_session_runtime_invariants() {
         .build_agent(
             AgentBuildConfig {
                 max_tokens: Some(64),
-                system_prompt: Some(prompt.to_string()),
+                system_prompt: meerkat::SystemPromptOverride::Set(prompt.to_string()),
                 llm_client_override: Some(factory_client),
                 tool_dispatcher_override: Some(factory_tools),
                 session_store_override: Some(factory_store),

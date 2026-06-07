@@ -127,6 +127,17 @@ impl TextArtifactRef {
 #[serde(transparent)]
 pub struct MediaType(pub String);
 
+/// Fail-closed media-type parse error.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MediaTypeError {
+    /// The media-type string was empty after canonicalization.
+    #[error("media type must not be empty")]
+    Empty,
+    /// The media-type string was not a `type/subtype` shape.
+    #[error("media type '{0}' is not a valid type/subtype")]
+    Malformed(String),
+}
+
 impl MediaType {
     pub fn new(media_type: impl Into<String>) -> Self {
         Self(media_type.into())
@@ -134,6 +145,45 @@ impl MediaType {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Canonical form of a media-type string used for identity.
+    ///
+    /// Lowercases, trims surrounding whitespace, and drops any RFC parameters
+    /// (everything after the first `;`, e.g. `; charset=utf-8`). This is the
+    /// single canonicalization used by [`crate::blob::content_blob_id`] so that
+    /// cosmetic differences like `image/PNG` vs `image/png` never mint divergent
+    /// blob identities for identical bytes.
+    #[must_use]
+    pub fn canonical_str(raw: &str) -> String {
+        let without_params = raw.split_once(';').map_or(raw, |(head, _)| head);
+        without_params.trim().to_ascii_lowercase()
+    }
+
+    /// Canonicalize this media type in place into its identity form.
+    #[must_use]
+    pub fn normalize(&self) -> MediaType {
+        MediaType(Self::canonical_str(&self.0))
+    }
+
+    /// Fail-closed parse into a canonical, validated `type/subtype` media type.
+    ///
+    /// Rejects empty strings and values that are not a single `type/subtype`
+    /// pair (after dropping parameters), so unknown/garbage media-type strings
+    /// cannot silently become identity input.
+    pub fn parse(raw: &str) -> Result<MediaType, MediaTypeError> {
+        let canonical = Self::canonical_str(raw);
+        if canonical.is_empty() {
+            return Err(MediaTypeError::Empty);
+        }
+        let mut parts = canonical.split('/');
+        let (Some(kind), Some(subtype), None) = (parts.next(), parts.next(), parts.next()) else {
+            return Err(MediaTypeError::Malformed(canonical));
+        };
+        if kind.is_empty() || subtype.is_empty() {
+            return Err(MediaTypeError::Malformed(canonical));
+        }
+        Ok(MediaType(canonical))
     }
 }
 
@@ -1070,6 +1120,42 @@ mod tests {
         PromptSource::ModelDistilled {
             tool_call_id: ToolCallId::new("tool-call-1"),
         }
+    }
+
+    #[test]
+    fn media_type_canonicalizes_case_params_and_whitespace() {
+        assert_eq!(MediaType::canonical_str("image/PNG"), "image/png");
+        assert_eq!(
+            MediaType::canonical_str("image/png; charset=binary"),
+            "image/png"
+        );
+        assert_eq!(MediaType::canonical_str("  Image/JPEG  "), "image/jpeg");
+        assert_eq!(
+            MediaType::new("image/PNG").normalize(),
+            MediaType::new("image/png")
+        );
+    }
+
+    #[test]
+    fn media_type_parse_is_fail_closed() {
+        assert_eq!(
+            MediaType::parse("image/PNG"),
+            Ok(MediaType::new("image/png"))
+        );
+        assert_eq!(MediaType::parse(""), Err(MediaTypeError::Empty));
+        assert_eq!(MediaType::parse("   "), Err(MediaTypeError::Empty));
+        assert!(matches!(
+            MediaType::parse("not-a-media-type"),
+            Err(MediaTypeError::Malformed(_))
+        ));
+        assert!(matches!(
+            MediaType::parse("image/png/extra"),
+            Err(MediaTypeError::Malformed(_))
+        ));
+        assert!(matches!(
+            MediaType::parse("/png"),
+            Err(MediaTypeError::Malformed(_))
+        ));
     }
 
     #[test]

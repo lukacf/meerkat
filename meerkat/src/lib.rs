@@ -403,6 +403,11 @@ pub use meerkat_contracts::{
 // Surface infrastructure
 pub mod surface;
 
+// Typed per-request system-prompt policy (always compiled; consumed by
+// AgentBuildConfig on every target and by prompt assembly on non-wasm).
+mod system_prompt_override;
+pub use system_prompt_override::SystemPromptOverride;
+
 // Prompt assembly (filesystem-dependent: reads AGENTS.md, system_prompt_file)
 #[cfg(not(target_arch = "wasm32"))]
 mod prompt_assembly;

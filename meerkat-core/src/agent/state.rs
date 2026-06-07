@@ -1010,14 +1010,15 @@ where
                     .session_boundary_index
                     .saturating_add(1);
                 let cadence = self.compaction_cadence.clone();
-                if let Err(error) =
-                    crate::agent::compact::persist_compaction_cadence(self.session_mut(), &cadence)
-                {
-                    tracing::warn!(
-                        error = %error,
-                        "failed to persist session compaction cadence metadata"
-                    );
-                }
+                // A cadence-persist failure is a typed serialization fault, not
+                // a best-effort no-op: surfacing it keeps the persisted cadence
+                // and the in-memory `compaction_cadence` from silently diverging.
+                crate::agent::compact::persist_compaction_cadence(self.session_mut(), &cadence)
+                    .map_err(|error| {
+                        AgentError::InternalError(format!(
+                            "failed to persist session compaction cadence metadata: {error}"
+                        ))
+                    })?;
             }
         }
         Ok(())
@@ -2252,6 +2253,22 @@ where
                                 tool_result.tool_use_id = tc.id.clone();
                             }
 
+                            // Reject unsupported video tool results BEFORE any
+                            // success-shaped progress events are emitted and
+                            // route the rejection through the turn machine, so
+                            // public event truth never reports completion while
+                            // the terminal truth is an error.
+                            if tool_result.has_video() {
+                                let error = AgentError::ConfigError(
+                                    "video blocks are not supported in tool results".to_string(),
+                                );
+                                self.terminalize_fatal_error(
+                                    &run_id, turn_count, &event_tx, &error,
+                                )
+                                .await?;
+                                return Err(error);
+                            }
+
                             let post_tool_report = self
                                 .execute_turn_hooks(
                                     HookInvocation {
@@ -2307,12 +2324,6 @@ where
                                 content: tool_result.content.clone(),
                                 is_error: tool_result.is_error,
                             });
-
-                            if tool_result.has_video() {
-                                return Err(AgentError::ConfigError(
-                                    "video blocks are not supported in tool results".to_string(),
-                                ));
-                            }
 
                             tool_results.push(tool_result);
                             accumulated_session_effects.extend(tool_session_effects);
@@ -2730,37 +2741,68 @@ where
                     // Await completion of all pending barrier operations via
                     // the machine-owned turn-local wait-set. Only barrier ops
                     // block the turn; detached ops run independently.
+                    // Authority/wait faults in this arm must apply
+                    // `TurnExecutionInput::FatalFailure` to the turn machine
+                    // before returning, mirroring the drain_turn_boundary path
+                    // below; a raw `Err` would leave the turn non-terminal.
                     if !self.turn_pending_ops_registered()? {
-                        return Err(AgentError::InternalError(
+                        let error = AgentError::InternalError(
                             "WaitingForOps entered without registered pending_op_refs".to_string(),
-                        ));
+                        );
+                        self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
+                            .await?;
+                        return Err(error);
                     }
                     let barrier_ids = self.turn_barrier_operation_ids()?;
                     if !barrier_ids.is_empty() {
-                        let wait_result = if let Some(ref registry) = self.ops_lifecycle {
-                            registry
-                                .wait_all(&run_id, &barrier_ids)
-                                .await
-                                .map_err(|e| {
-                                    AgentError::InternalError(format!(
-                                        "ops lifecycle wait_all failed: {e}"
-                                    ))
-                                })?
-                        } else {
-                            return Err(AgentError::InternalError(
-                                "barrier ops registered without ops_lifecycle registry".to_string(),
-                            ));
+                        // Clone the Arc so the immutable borrow of
+                        // `self.ops_lifecycle` is released before the
+                        // `&mut self` terminalization calls below.
+                        let registry = match self.ops_lifecycle.clone() {
+                            Some(registry) => registry,
+                            None => {
+                                let error = AgentError::InternalError(
+                                    "barrier ops registered without ops_lifecycle registry"
+                                        .to_string(),
+                                );
+                                self.terminalize_fatal_error(
+                                    &run_id, turn_count, &event_tx, &error,
+                                )
+                                .await?;
+                                return Err(error);
+                            }
+                        };
+                        let wait_result = match registry.wait_all(&run_id, &barrier_ids).await {
+                            Ok(wait_result) => wait_result,
+                            Err(e) => {
+                                let error = AgentError::InternalError(format!(
+                                    "ops lifecycle wait_all failed: {e}"
+                                ));
+                                self.terminalize_fatal_error(
+                                    &run_id, turn_count, &event_tx, &error,
+                                )
+                                .await?;
+                                return Err(error);
+                            }
                         };
                         // Feed the authority-owned wait-all obligation back through the
                         // generated handoff helper without relabeling its run identity.
-                        let turn_handle = self.turn_state_handle.as_deref().ok_or_else(|| {
-                            AgentError::InternalError(
-                                "runtime turn-state handle missing while submitting \
-                                 ops barrier satisfaction feedback"
-                                    .to_string(),
-                            )
-                        })?;
-                        submit_ops_barrier_satisfied(
+                        let turn_handle = match self.turn_state_handle.as_deref() {
+                            Some(turn_handle) => turn_handle,
+                            None => {
+                                let error = AgentError::InternalError(
+                                    "runtime turn-state handle missing while submitting \
+                                     ops barrier satisfaction feedback"
+                                        .to_string(),
+                                );
+                                self.terminalize_fatal_error(
+                                    &run_id, turn_count, &event_tx, &error,
+                                )
+                                .await?;
+                                return Err(error);
+                            }
+                        };
+                        if let Err(err) = submit_ops_barrier_satisfied(
                             turn_handle,
                             OpsBarrierSatisfactionObligation {
                                 run_id: wait_result.satisfied.run_id,
@@ -2770,12 +2812,14 @@ where
                                     .into_iter()
                                     .collect(),
                             },
-                        )
-                        .map_err(|err| {
-                            AgentError::InternalError(format!(
+                        ) {
+                            let error = AgentError::InternalError(format!(
                                 "generated ops_barrier_satisfaction feedback rejected: {err}"
-                            ))
-                        })?;
+                            ));
+                            self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
+                                .await?;
+                            return Err(error);
+                        }
                     }
                     self.observe_cancel_after_boundary_request(&run_id)?;
                     self.apply_turn_input(TurnExecutionInput::ToolCallsResolved {
@@ -5807,6 +5851,255 @@ mod tests {
             "runtime must not trust terminal cause supplied by tool-authored Ok outcomes"
         );
         assert_eq!(outcome.terminal_cause(), None);
+    }
+
+    /// Row 273: a `WaitingForOps` authority fault (here: barrier ops
+    /// registered without an `ops_lifecycle` registry) must terminalize the
+    /// turn through `TurnExecutionInput::FatalFailure` BEFORE returning the
+    /// raw `AgentError`, so the turn is never left non-terminal.
+    #[tokio::test]
+    async fn waiting_for_ops_registry_missing_terminalizes_turn() {
+        struct BarrierOpDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for BarrierOpDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                // Register a barrier async op with no backing ops_lifecycle
+                // registry on the agent, forcing the WaitingForOps arm into
+                // the "registry missing" fault path.
+                let mut outcome = crate::ops::ToolDispatchOutcome::sync_result(ToolResult::new(
+                    call.id.to_string(),
+                    "queued".to_string(),
+                    false,
+                ));
+                outcome.async_ops.push(crate::ops::AsyncOpRef::barrier(
+                    crate::ops::OperationId::new(),
+                ));
+                Ok(outcome)
+            }
+        }
+
+        struct SingleToolCallClient;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentLlmClient for SingleToolCallClient {
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                Ok(super::LlmStreamResult::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: "call-barrier".to_string(),
+                        name: "queue_op".into(),
+                        args: serde_json::value::RawValue::from_string("{}".to_string())
+                            .expect("static raw value should parse"),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                    Usage::default(),
+                ))
+            }
+
+            fn provider(&self) -> &'static str {
+                "mock"
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        let client = Arc::new(SingleToolCallClient);
+        let tools = Arc::new(BarrierOpDispatcher {
+            tools: Arc::from([Arc::new(ToolDef {
+                name: "queue_op".into(),
+                description: "registers a barrier async op".to_string(),
+                input_schema: serde_json::json!({ "type": "object" }),
+                provenance: None,
+            })]),
+        });
+        let turn_handle =
+            Arc::new(crate::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(turn_handle.clone())
+            .with_runtime_execution_kind_for_test(
+                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+            )
+            .build_standalone(client, tools, Arc::new(NoopStore))
+            .await;
+
+        let err = agent
+            .run("prompt".to_string().into())
+            .await
+            .expect_err("barrier ops without a registry must fail the run");
+        assert!(
+            matches!(err, AgentError::InternalError(_)),
+            "registry-missing fault should surface as an internal error"
+        );
+
+        let snapshot = agent
+            .execution_snapshot()
+            .expect("test turn-state handle should expose a snapshot");
+        assert_eq!(
+            snapshot.terminal_outcome,
+            TurnTerminalOutcome::Failed,
+            "WaitingForOps registry-missing fault must terminalize the turn authority"
+        );
+        assert_eq!(
+            turn_handle.run_failed_effect_count(),
+            1,
+            "the fault must terminalize through the failed authority exactly once"
+        );
+        assert_eq!(
+            turn_handle.run_completed_effect_count(),
+            0,
+            "a WaitingForOps fault must not publish completed authority effects"
+        );
+    }
+
+    /// Row 274: an unsupported video tool result must terminalize the turn
+    /// via the machine and must NOT emit success-shaped progress events
+    /// (`ToolExecutionCompleted`/`ToolResultReceived`) for the rejected call.
+    #[tokio::test]
+    async fn unsupported_video_tool_result_terminalizes_without_success_events() {
+        struct VideoResultDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for VideoResultDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                Ok(ToolResult::with_blocks(
+                    call.id.to_string(),
+                    vec![ContentBlock::Video {
+                        media_type: "video/mp4".to_string(),
+                        duration_ms: 1_000,
+                        data: crate::types::VideoData::from("AAAA"),
+                    }],
+                    false,
+                )
+                .into())
+            }
+        }
+
+        struct SingleToolCallClient;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentLlmClient for SingleToolCallClient {
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                Ok(super::LlmStreamResult::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: "call-video".to_string(),
+                        name: "make_video".into(),
+                        args: serde_json::value::RawValue::from_string("{}".to_string())
+                            .expect("static raw value should parse"),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                    Usage::default(),
+                ))
+            }
+
+            fn provider(&self) -> &'static str {
+                "mock"
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        let client = Arc::new(SingleToolCallClient);
+        let tools = Arc::new(VideoResultDispatcher {
+            tools: Arc::from([Arc::new(ToolDef {
+                name: "make_video".into(),
+                description: "returns an unsupported video block".to_string(),
+                input_schema: serde_json::json!({ "type": "object" }),
+                provenance: None,
+            })]),
+        });
+        let turn_handle =
+            Arc::new(crate::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(turn_handle.clone())
+            .with_runtime_execution_kind_for_test(
+                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+            )
+            .build_standalone(client, tools, Arc::new(NoopStore))
+            .await;
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        let err = agent
+            .run_with_events("prompt".to_string().into(), tx)
+            .await
+            .expect_err("unsupported video tool result must fail the run");
+        assert!(
+            matches!(err, AgentError::ConfigError(_)),
+            "video rejection should surface as a config error"
+        );
+
+        let mut saw_tool_progress_event = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(
+                event,
+                crate::event::AgentEvent::ToolExecutionCompleted { .. }
+                    | crate::event::AgentEvent::ToolResultReceived { .. }
+            ) {
+                saw_tool_progress_event = true;
+            }
+        }
+        assert!(
+            !saw_tool_progress_event,
+            "rejected video tool result must not emit success-shaped progress events"
+        );
+
+        let snapshot = agent
+            .execution_snapshot()
+            .expect("test turn-state handle should expose a snapshot");
+        assert_eq!(
+            snapshot.terminal_outcome,
+            TurnTerminalOutcome::Failed,
+            "unsupported video tool result must terminalize the turn authority"
+        );
+        assert_eq!(
+            turn_handle.run_failed_effect_count(),
+            1,
+            "video rejection must terminalize through the failed authority exactly once"
+        );
+        assert_eq!(
+            turn_handle.run_completed_effect_count(),
+            0,
+            "video rejection must not publish completed authority effects"
+        );
     }
 
     #[tokio::test]

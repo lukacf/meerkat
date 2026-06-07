@@ -9,6 +9,7 @@ use crate::error::MobError;
 use crate::ids::{MeerkatId, MobId, ProfileName};
 use crate::profile::Profile;
 use meerkat::AgentBuildConfig;
+use meerkat::SystemPromptOverride;
 use meerkat_core::InheritedToolVisibilityAuthority;
 use meerkat_core::PeerMeta;
 use meerkat_core::RealmId;
@@ -190,10 +191,10 @@ pub async fn build_agent_config(
     config.mob_member_binding = Some(member_binding);
     match system_prompt_override {
         Some(crate::runtime::SpawnSystemPromptOverride::Replace(prompt)) => {
-            config.system_prompt = Some(prompt);
+            config.system_prompt = SystemPromptOverride::Set(prompt);
         }
         None if !system_prompt.is_empty() => {
-            config.system_prompt = Some(system_prompt);
+            config.system_prompt = SystemPromptOverride::Set(system_prompt);
         }
         None => {}
     }
@@ -323,7 +324,7 @@ pub async fn build_resumed_agent_config(
     apply_resumed_session_metadata(&mut config, &metadata)?;
     config.resume_session = Some(resumed_session);
     // Preserve the durable session prompt/history exactly as stored.
-    config.system_prompt = None;
+    config.system_prompt = SystemPromptOverride::Inherit;
     // Do not silently reapply prompt-affecting surface-local context on resume.
     config.additional_instructions = None;
     config.app_context = None;
@@ -387,7 +388,7 @@ pub fn to_create_session_request(
         model: config.model.clone(),
         prompt,
         render_metadata: None,
-        system_prompt: config.system_prompt.clone(),
+        system_prompt: config.system_prompt.to_persisted_option(),
         max_tokens: config.max_tokens,
         event_tx: None,
 
@@ -1562,7 +1563,10 @@ mod tests {
         .await
         .expect("build_agent_config");
 
-        let prompt = config.system_prompt.as_deref().expect("system_prompt set");
+        let prompt = config
+            .system_prompt
+            .as_set_prompt()
+            .expect("system_prompt set");
         assert!(
             prompt.contains("You are the team lead."),
             "prompt should contain resolved inline skill"
@@ -1599,7 +1603,7 @@ mod tests {
         .expect("build_agent_config");
 
         assert_eq!(
-            config.system_prompt.as_deref(),
+            config.system_prompt.as_set_prompt(),
             Some("OB3 replacement prompt"),
             "typed Replace must bypass profile prompt assembly"
         );
@@ -1924,7 +1928,7 @@ mod tests {
         .await
         .expect("build_agent_config should resolve path skill");
 
-        let prompt = config.system_prompt.expect("system prompt");
+        let prompt = config.system_prompt.as_set_prompt().expect("system prompt");
         assert!(prompt.contains("Path skill content for leader."));
         assert!(!prompt.contains("[skill from:"));
     }

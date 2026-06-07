@@ -267,7 +267,7 @@ impl HookEngine for TestHookEngine {
                     self.post_tool_seen_content
                         .lock()
                         .await
-                        .push(tool_result.content.clone());
+                        .push(tool_result.text_projection());
                 }
             }
             HookPoint::TurnBoundary if self.turn_boundary_deny => {

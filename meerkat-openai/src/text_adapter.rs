@@ -47,12 +47,28 @@ use std::collections::HashSet;
 /// regardless of caller intent.
 const REALTIME_MAX_OUTPUT_TOKENS: u32 = 4096;
 
-/// Translate an agent-level `max_tokens` budget into the optional
+/// Translate an agent-level `max_tokens` budget into the
 /// `response.max_output_tokens` the Realtime API accepts, clamping to the
-/// protocol ceiling. Returns `None` when the caller did not request a
-/// finite budget so the provider default (`inf`) applies.
-fn realtime_max_output_tokens(max_tokens: u32) -> Option<MaxTokens> {
-    (max_tokens > 0).then(|| MaxTokens::Count(max_tokens.min(REALTIME_MAX_OUTPUT_TOKENS)))
+/// protocol ceiling.
+///
+/// #230: an explicit `max_tokens == 0` is a typed [`LlmError::InvalidRequest`]
+/// reject rather than a silent downgrade to the provider default. A zero cap
+/// is already invalid caller policy upstream — `agent.max_tokens_per_turn == 0`
+/// fails config validation — so the realtime boundary fails closed on an
+/// explicit zero instead of fail-open reverting to the provider default. A
+/// finite positive budget clamps to the protocol ceiling.
+///
+/// (The remaining caller-Unset distinction — a request that genuinely did not
+/// set a finite budget — would need `LlmRequest.max_tokens: Option<u32>` in
+/// `meerkat-llm-core`; until that lands every request carries a positive
+/// budget from the validated config path.)
+fn realtime_max_output_tokens(max_tokens: u32) -> Result<MaxTokens, LlmError> {
+    if max_tokens == 0 {
+        return Err(LlmError::InvalidRequest {
+            message: "realtime max_output_tokens must be greater than 0".to_string(),
+        });
+    }
+    Ok(MaxTokens::Count(max_tokens.min(REALTIME_MAX_OUTPUT_TOKENS)))
 }
 
 /// Resolve the optional caller temperature into a realtime `Temperature`,
@@ -322,15 +338,17 @@ impl LlmClient for OpenAiRealtimeTextAdapter {
             // as the Responses-API path. `temperature == None` is the
             // caller-Unset distinction (provider default applies); an
             // explicit-but-invalid temperature is a typed reject rather than
-            // a silent downgrade to the provider default.
-            let max_output_tokens = realtime_max_output_tokens(request.max_tokens);
+            // a silent downgrade to the provider default. #230: likewise an
+            // explicit zero output-token cap is a typed reject, not a silent
+            // fall-through to the provider default.
+            let max_output_tokens = realtime_max_output_tokens(request.max_tokens)?;
             let temperature = resolve_realtime_temperature(request.temperature)?;
             let response_config = ResponseConfig {
                 conversation: Some(ConversationMode::None),
                 output_modalities: Some(OutputModalities::Text),
                 instructions: instructions.clone(),
                 tools: Some(tools.clone()),
-                max_output_tokens,
+                max_output_tokens: Some(max_output_tokens),
                 temperature,
                 ..ResponseConfig::default()
             };
@@ -945,18 +963,28 @@ mod tests {
     }
 
     #[test]
-    fn realtime_max_output_tokens_drops_zero_budget() {
-        assert!(realtime_max_output_tokens(0).is_none());
+    fn realtime_max_output_tokens_rejects_explicit_zero_budget() {
+        // #230: an explicit zero cap is a typed InvalidRequest reject, never a
+        // silent downgrade to the provider default.
+        match realtime_max_output_tokens(0) {
+            Err(LlmError::InvalidRequest { message }) => {
+                assert!(
+                    message.contains("greater than 0"),
+                    "unexpected reject message: {message}"
+                );
+            }
+            other => panic!("expected InvalidRequest for zero cap, got {other:?}"),
+        }
     }
 
     #[test]
     fn realtime_max_output_tokens_passes_values_at_or_below_ceiling() {
         match realtime_max_output_tokens(1) {
-            Some(MaxTokens::Count(n)) => assert_eq!(n, 1),
+            Ok(MaxTokens::Count(n)) => assert_eq!(n, 1),
             other => panic!("expected Count(1), got {other:?}"),
         }
         match realtime_max_output_tokens(REALTIME_MAX_OUTPUT_TOKENS) {
-            Some(MaxTokens::Count(n)) => assert_eq!(n, REALTIME_MAX_OUTPUT_TOKENS),
+            Ok(MaxTokens::Count(n)) => assert_eq!(n, REALTIME_MAX_OUTPUT_TOKENS),
             other => panic!("expected Count(4096), got {other:?}"),
         }
     }
@@ -968,7 +996,7 @@ mod tests {
         // the s71/s72 smoke failures.
         for requested in [4097_u32, 8_192, 16_384, u32::MAX] {
             match realtime_max_output_tokens(requested) {
-                Some(MaxTokens::Count(n)) => assert_eq!(
+                Ok(MaxTokens::Count(n)) => assert_eq!(
                     n, REALTIME_MAX_OUTPUT_TOKENS,
                     "requested={requested} should clamp to {REALTIME_MAX_OUTPUT_TOKENS}"
                 ),

@@ -438,7 +438,7 @@ mod scenario_02_tool_driven_shell {
 
         let config = Config::default();
         let mut build_config = AgentBuildConfig::new(smoke_model());
-        build_config.system_prompt = Some(
+        build_config.system_prompt = meerkat::SystemPromptOverride::Set(
             "You are a helpful assistant with shell access. Execute commands as asked.".to_string(),
         );
 
@@ -529,7 +529,7 @@ mod scenario_03_structured_output {
 
         let mut build_config = AgentBuildConfig::new(smoke_model());
         build_config.output_schema = Some(output_schema);
-        build_config.system_prompt = Some(
+        build_config.system_prompt = meerkat::SystemPromptOverride::Set(
             "You are a helpful assistant with shell access. \
              List files as instructed."
                 .to_string(),
@@ -614,8 +614,9 @@ mod scenario_05_multi_turn {
         let config = Config::default();
 
         let mut build_config = AgentBuildConfig::new(smoke_model());
-        build_config.system_prompt =
-            Some("You are a helpful assistant. Keep your responses brief and precise.".to_string());
+        build_config.system_prompt = meerkat::SystemPromptOverride::Set(
+            "You are a helpful assistant. Keep your responses brief and precise.".to_string(),
+        );
 
         let mut agent = factory
             .build_agent(build_config, &config)
@@ -879,7 +880,7 @@ mod scenario_07_session_resume {
             let factory = AgentFactory::new(store_path.clone());
             let config = Config::default();
             let mut build_config = AgentBuildConfig::new(smoke_model());
-            build_config.system_prompt = Some(
+            build_config.system_prompt = meerkat::SystemPromptOverride::Set(
                 "You are a helpful assistant. Remember everything the user tells you.".to_string(),
             );
 
@@ -1443,7 +1444,7 @@ mod scenario_19_multi_turn_context {
         let config = Config::default();
 
         let mut build_config = AgentBuildConfig::new(smoke_model());
-        build_config.system_prompt = Some(
+        build_config.system_prompt = meerkat::SystemPromptOverride::Set(
             "You are a helpful assistant. Remember all facts the user tells you. Be brief."
                 .to_string(),
         );

@@ -3238,7 +3238,11 @@ fn runtime_binding_from_wire(
 
 /// Project the canonical mob lifecycle state into its wire mirror. Keeps the
 /// surface emitting a closed typed status rather than the bare `MobState` text.
-fn wire_mob_lifecycle_status(state: MobState) -> WireMobLifecycleStatus {
+///
+/// Exported so sibling surfaces (e.g. the JSON-RPC `mob/list` / `mob/status`
+/// handlers) consume this single `MobState -> WireMobLifecycleStatus` owner
+/// rather than re-deriving the projection from `MobState::to_string()`.
+pub fn wire_mob_lifecycle_status(state: MobState) -> WireMobLifecycleStatus {
     match state {
         MobState::Creating => WireMobLifecycleStatus::Creating,
         MobState::Running => WireMobLifecycleStatus::Running,

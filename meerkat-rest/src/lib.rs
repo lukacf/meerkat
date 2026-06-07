@@ -4378,6 +4378,7 @@ async fn create_session_inner(
     let mut build = SessionBuildOptions {
         provider: (provider_was_explicit || model_was_explicit)
             .then_some(initial_identity.provider),
+        override_comms: Default::default(),
         self_hosted_server_id: initial_identity.self_hosted_server_id.clone(),
         output_schema: req.output_schema,
         structured_output_retries: req.structured_output_retries,
@@ -5414,6 +5415,7 @@ async fn continue_session_inner(
         };
         let mut build = SessionBuildOptions {
             provider: llm_binding.provider,
+            override_comms: Default::default(),
             self_hosted_server_id: llm_binding.self_hosted_server_id,
             output_schema: req.output_schema,
             structured_output_retries: req.structured_output_retries,

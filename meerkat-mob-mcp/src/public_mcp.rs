@@ -279,11 +279,13 @@ const fn default_limit() -> usize {
 /// Single source of truth for every public MCP tool exposed by this surface.
 ///
 /// Each entry carries the advertised name, its description, and a function that
-/// produces the `inputSchema` JSON. Schemas mix two shapes: typed entries derive
-/// from `schema_for!` (via [`typed_schema`]); the four profile tools carry a
-/// hand-written inline JSON object. Both surfaces — [`public_tool_names`] (the
-/// routing roster gated on by the unified MCP server) and [`public_tools_list`]
-/// (the advertised catalog) — are derived from this table so they cannot drift.
+/// produces the `inputSchema` JSON. Every entry's schema derives from
+/// `schema_for!` (via [`typed_schema`]) over a typed input struct; no entry
+/// carries a hand-authored `json!` literal (pinned by the
+/// `public_tool_schemas_are_typed_not_handwritten` gate). Both surfaces —
+/// [`public_tool_names`] (the routing roster gated on by the unified MCP server)
+/// and [`public_tools_list`] (the advertised catalog) — are derived from this
+/// table so they cannot drift.
 /// The dispatch match in [`handle_public_tools_call`] is pinned to this table by
 /// the `public_tool_surfaces_have_no_drift` parity test via `DISPATCH_TOOL_NAMES`.
 struct PublicTool {

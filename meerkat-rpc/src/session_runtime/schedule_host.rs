@@ -233,9 +233,11 @@ impl SessionRuntime {
         let mut build_config = AgentBuildConfig::new(create.model.clone());
         build_config.provider = create.provider;
         build_config.max_tokens = create.max_tokens;
-        build_config.system_prompt = prompt_system_prompt
-            .map(str::to_owned)
-            .or_else(|| create.system_prompt.clone());
+        build_config.system_prompt = meerkat::SystemPromptOverride::from_wire_option(
+            prompt_system_prompt
+                .map(str::to_owned)
+                .or_else(|| create.system_prompt.clone()),
+        );
         build_config.output_schema = create.output_schema.clone();
         build_config.structured_output_retries = create.structured_output_retries;
         build_config.provider_params = create.provider_params.clone();

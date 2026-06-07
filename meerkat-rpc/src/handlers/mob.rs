@@ -1246,11 +1246,17 @@ pub async fn handle_spawn_helper(
         Ok(m) => m,
         Err(resp) => return resp,
     };
-    let agent_identity = AgentIdentity::from(
-        params
-            .agent_identity
-            .unwrap_or_else(|| format!("helper-{}", uuid::Uuid::new_v4())),
-    );
+    // #115: the surface must not mint mob-member identity. A missing
+    // `agent_identity` fails closed with a typed INVALID_PARAMS rather than
+    // fabricating a synthetic `helper-{uuid}` on the runtime identity path —
+    // identity allocation is the mob substrate's responsibility.
+    let Some(agent_identity_str) = params.agent_identity else {
+        return invalid_params(
+            id,
+            "mob/spawn_helper requires agent_identity; the surface does not allocate member identity",
+        );
+    };
+    let agent_identity = AgentIdentity::from(agent_identity_str);
     let mut options = meerkat_mob::HelperOptions::default();
     if let Some(role) = params.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role));
@@ -1315,11 +1321,16 @@ pub async fn handle_fork_helper(
         Err(resp) => return resp,
     };
     let source_identity = AgentIdentity::from(params.source_member_id.as_str());
-    let agent_identity = AgentIdentity::from(
-        params
-            .agent_identity
-            .unwrap_or_else(|| format!("fork-{}", uuid::Uuid::new_v4())),
-    );
+    // #115: the surface must not mint mob-member identity. A missing
+    // `agent_identity` fails closed with a typed INVALID_PARAMS rather than
+    // fabricating a synthetic `fork-{uuid}` on the runtime identity path.
+    let Some(agent_identity_str) = params.agent_identity else {
+        return invalid_params(
+            id,
+            "mob/fork_helper requires agent_identity; the surface does not allocate member identity",
+        );
+    };
+    let agent_identity = AgentIdentity::from(agent_identity_str);
     let fork_context = params
         .fork_context
         .unwrap_or(meerkat_mob::ForkContext::FullHistory);
@@ -2393,6 +2404,58 @@ mod tests {
 
         assert_destroy_incomplete_rpc_error_with_message(response, "worker-1: archive failed");
         Ok(())
+    }
+
+    /// #115: the surface never mints mob-member identity. A `mob/spawn_helper`
+    /// request without `agent_identity` fails closed with INVALID_PARAMS
+    /// instead of fabricating a synthetic `helper-{uuid}`.
+    #[tokio::test]
+    async fn spawn_helper_without_agent_identity_fails_closed() {
+        let state = MobMcpState::new_in_memory();
+        let mob_id = MobId::from("rpc-helper-identity-test");
+        let params = serde_json::json!({
+            "mob_id": mob_id.as_str(),
+            "prompt": "do the thing",
+        });
+        let raw = serde_json::value::RawValue::from_string(params.to_string())
+            .expect("serialize spawn_helper params");
+
+        let response = handle_spawn_helper(Some(RpcId::Num(11)), Some(&raw), &state).await;
+
+        assert!(response.result.is_none());
+        let error = response.error.expect("missing identity must be an error");
+        assert_eq!(error.code, crate::error::INVALID_PARAMS);
+        assert!(
+            error.message.contains("requires agent_identity"),
+            "message should name the missing identity: {}",
+            error.message
+        );
+    }
+
+    /// #115: the fork path likewise fails closed rather than minting
+    /// `fork-{uuid}`.
+    #[tokio::test]
+    async fn fork_helper_without_agent_identity_fails_closed() {
+        let state = MobMcpState::new_in_memory();
+        let mob_id = MobId::from("rpc-helper-identity-test");
+        let params = serde_json::json!({
+            "mob_id": mob_id.as_str(),
+            "source_member_id": "worker",
+            "prompt": "do the thing",
+        });
+        let raw = serde_json::value::RawValue::from_string(params.to_string())
+            .expect("serialize fork_helper params");
+
+        let response = handle_fork_helper(Some(RpcId::Num(12)), Some(&raw), &state).await;
+
+        assert!(response.result.is_none());
+        let error = response.error.expect("missing identity must be an error");
+        assert_eq!(error.code, crate::error::INVALID_PARAMS);
+        assert!(
+            error.message.contains("requires agent_identity"),
+            "message should name the missing identity: {}",
+            error.message
+        );
     }
 
     fn assert_destroy_incomplete_rpc_error_with_message(

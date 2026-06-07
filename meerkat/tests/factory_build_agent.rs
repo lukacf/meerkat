@@ -1614,7 +1614,7 @@ async fn build_agent_applies_system_prompt_override() {
     let custom_prompt = "You are a helpful test assistant.".to_string();
     let build_config = AgentBuildConfig {
         llm_client_override: Some(Arc::new(MockLlmClient)),
-        system_prompt: Some(custom_prompt.clone()),
+        system_prompt: meerkat::SystemPromptOverride::Set(custom_prompt.clone()),
         ..AgentBuildConfig::new("claude-sonnet-4-5")
     };
 

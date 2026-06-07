@@ -1401,6 +1401,12 @@ pub async fn handle_live_webrtc_answer(
             {
                 Ok(authority) => authority,
                 Err(error) => {
+                    // #346: answer_offer already installed the transport peer in
+                    // the WebRTC registry. The generated answer-result authority
+                    // rejected the result, so fail closed: tear the just-inserted
+                    // peer back out rather than leaving an orphaned peer with no
+                    // accepted answer behind it.
+                    live_webrtc.close_peer(&channel_id).await;
                     return RpcResponse::error(
                         id,
                         error::INTERNAL_ERROR,
@@ -1414,7 +1420,12 @@ pub async fn handle_live_webrtc_answer(
                         .map_err(|err| format!("failed to serialize LiveWebrtcAnswerResult: {err}"))
                 }) {
                 Ok(value) => RpcResponse::success(id, value),
-                Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err),
+                Err(err) => {
+                    // #346: the peer is installed but we cannot hand back a valid
+                    // answer result — fail closed by removing the orphaned peer.
+                    live_webrtc.close_peer(&channel_id).await;
+                    RpcResponse::error(id, error::INTERNAL_ERROR, err)
+                }
             }
         }
         Err(err) => {

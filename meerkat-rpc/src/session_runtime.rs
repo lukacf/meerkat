@@ -5274,7 +5274,8 @@ impl SessionRuntime {
                     build_config.max_tokens = Some(max_tokens);
                 }
                 if let Some(ref system_prompt) = ov.system_prompt {
-                    build_config.system_prompt = Some(system_prompt.clone());
+                    build_config.system_prompt =
+                        meerkat::SystemPromptOverride::Set(system_prompt.clone());
                 }
                 if let Some(ref output_schema) = ov.output_schema {
                     match meerkat_core::OutputSchema::from_json_value(output_schema.clone()) {
@@ -5339,7 +5340,7 @@ impl SessionRuntime {
                 model: build_config.model.clone(),
                 prompt: runtime_prompt.clone(),
                 render_metadata: None,
-                system_prompt: build_config.system_prompt.clone(),
+                system_prompt: build_config.system_prompt.to_persisted_option(),
                 max_tokens: build_config.max_tokens,
                 event_tx: None,
 
@@ -5692,7 +5693,8 @@ impl SessionRuntime {
                     build_config.max_tokens = Some(max_tokens);
                 }
                 if let Some(ref system_prompt) = ov.system_prompt {
-                    build_config.system_prompt = Some(system_prompt.clone());
+                    build_config.system_prompt =
+                        meerkat::SystemPromptOverride::Set(system_prompt.clone());
                 }
                 if let Some(ref output_schema) = ov.output_schema {
                     match meerkat_core::OutputSchema::from_json_value(output_schema.clone()) {
@@ -5783,7 +5785,7 @@ impl SessionRuntime {
                 model: build_config.model.clone(),
                 prompt: ContentInput::Text(String::new()),
                 render_metadata: None,
-                system_prompt: build_config.system_prompt.clone(),
+                system_prompt: build_config.system_prompt.to_persisted_option(),
                 max_tokens: build_config.max_tokens,
                 event_tx: None,
 
@@ -6015,7 +6017,8 @@ impl SessionRuntime {
         let model = create_request.model.clone();
         let mut build_config = AgentBuildConfig::new(model);
         build_config.apply_session_build_options(&build);
-        build_config.system_prompt = create_request.system_prompt.clone();
+        build_config.system_prompt =
+            meerkat::SystemPromptOverride::from_wire_option(create_request.system_prompt.clone());
         build_config.max_tokens = create_request.max_tokens;
 
         // Stage as pending and re-enter the materialization path.
@@ -9453,7 +9456,7 @@ mod tests {
             model: build_config.model.clone(),
             prompt: ContentInput::Text("service-created session".to_string()),
             render_metadata: None,
-            system_prompt: build_config.system_prompt.clone(),
+            system_prompt: build_config.system_prompt.to_persisted_option(),
             max_tokens: build_config.max_tokens,
             event_tx: None,
             skill_references: None,
@@ -10407,7 +10410,8 @@ mod tests {
         let mut build = mock_build_config();
         build.keep_alive = true;
         build.comms_name = Some("realtime-open-config-build-state".to_string());
-        build.system_prompt = Some("You are the realtime operator.".to_string());
+        build.system_prompt =
+            meerkat::SystemPromptOverride::Set("You are the realtime operator.".to_string());
         build.additional_instructions = Some(vec![
             "Remember user-provided codewords verbatim.".to_string(),
             "Use the most recent authoritative terminal peer response.".to_string(),
@@ -10471,7 +10475,9 @@ mod tests {
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let mut build = mock_build_config();
-        build.system_prompt = Some("You are the recovered realtime operator.".to_string());
+        build.system_prompt = meerkat::SystemPromptOverride::Set(
+            "You are the recovered realtime operator.".to_string(),
+        );
         build.additional_instructions = Some(vec![
             "Remember user-provided codewords verbatim.".to_string(),
             "Prefer the latest authoritative peer response over stale memory.".to_string(),
@@ -13625,7 +13631,7 @@ mod tests {
                 model: build_config.model.clone(),
                 prompt: "Hello".to_string().into(),
                 render_metadata: None,
-                system_prompt: build_config.system_prompt.clone(),
+                system_prompt: build_config.system_prompt.to_persisted_option(),
                 max_tokens: build_config.max_tokens,
                 event_tx: None,
                 skill_references: None,
@@ -13675,7 +13681,7 @@ mod tests {
                 model: build_config.model.clone(),
                 prompt: "Hello".to_string().into(),
                 render_metadata: None,
-                system_prompt: build_config.system_prompt.clone(),
+                system_prompt: build_config.system_prompt.to_persisted_option(),
                 max_tokens: build_config.max_tokens,
                 event_tx: None,
                 skill_references: None,
@@ -17202,7 +17208,7 @@ mod tests {
             model: build_config.model.clone(),
             prompt: ContentInput::Text(String::new()),
             render_metadata: None,
-            system_prompt: build_config.system_prompt.clone(),
+            system_prompt: build_config.system_prompt.to_persisted_option(),
             max_tokens: build_config.max_tokens,
             event_tx: None,
             skill_references: None,
@@ -17285,7 +17291,7 @@ mod tests {
             model: build_config.model.clone(),
             prompt: ContentInput::Text(String::new()),
             render_metadata: None,
-            system_prompt: build_config.system_prompt.clone(),
+            system_prompt: build_config.system_prompt.to_persisted_option(),
             max_tokens: build_config.max_tokens,
             event_tx: None,
             skill_references: None,

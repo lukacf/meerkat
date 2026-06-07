@@ -203,15 +203,15 @@ pub struct HookToolCall {
 
 /// Tool result view exposed to hooks.
 ///
-/// `content_blocks` is the canonical typed tool-result content. `content` is
-/// retained as a legacy display projection for existing hook consumers.
+/// `content_blocks` is the canonical typed tool-result content that post-tool
+/// hooks deny/terminalize on. The text projection is presentation-only and is
+/// derived from the blocks via [`HookToolResult::text_projection`]; it is never
+/// a separately-stored field that policy code can read.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct HookToolResult {
     pub tool_use_id: String,
     pub name: String,
-    /// Legacy text projection retained for existing hooks.
-    pub content: String,
     /// Canonical typed tool-result content exposed to hooks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content_blocks: Vec<ContentBlock>,
@@ -235,11 +235,20 @@ impl HookToolResult {
         Self {
             tool_use_id: tool_use_id.into(),
             name: name.into(),
-            content: result.text_content(),
             content_blocks: result.content.clone(),
             is_error: result.is_error,
             has_images: result.has_images(),
         }
+    }
+
+    /// Presentation-only text projection derived from the canonical typed
+    /// `content_blocks`.
+    ///
+    /// This is for rendering/diagnostics only and MUST NOT feed hook policy
+    /// (allow/deny/terminalize) decisions — those steer on `content_blocks`.
+    #[must_use]
+    pub fn text_projection(&self) -> String {
+        crate::types::text_content(&self.content_blocks)
     }
 }
 
@@ -496,13 +505,12 @@ mod tests {
         let hook_result = HookToolResult {
             tool_use_id: tr.tool_use_id.clone(),
             name: "test_tool".into(),
-            content: tr.text_content(),
             content_blocks: tr.content.clone(),
             is_error: tr.is_error,
             has_images: tr.has_images(),
         };
-        // text_content concatenates text projections; image blocks produce "[image: image/png]"
-        assert_eq!(hook_result.content, "hello\n[image: image/png]");
+        // text projection concatenates text from blocks; image blocks produce "[image: image/png]"
+        assert_eq!(hook_result.text_projection(), "hello\n[image: image/png]");
         assert!(hook_result.has_images);
     }
 
@@ -512,12 +520,11 @@ mod tests {
         let hook_result = HookToolResult {
             tool_use_id: tr.tool_use_id.clone(),
             name: "test_tool".into(),
-            content: tr.text_content(),
             content_blocks: tr.content.clone(),
             is_error: tr.is_error,
             has_images: tr.has_images(),
         };
-        assert_eq!(hook_result.content, "just text");
+        assert_eq!(hook_result.text_projection(), "just text");
         assert_eq!(hook_result.content_blocks, vec![text_block("just text")]);
         assert!(!hook_result.has_images);
     }
@@ -527,13 +534,17 @@ mod tests {
         let tr = ToolResult::new("tc_1".into(), "just text".into(), false);
         let hook_result = HookToolResult::from_tool_result("test_tool", &tr);
 
-        assert_eq!(hook_result.content, "just text");
+        assert_eq!(hook_result.text_projection(), "just text");
         assert_eq!(hook_result.content_blocks, vec![text_block("just text")]);
 
         let json = serde_json::to_value(&hook_result).expect("serialize hook tool result");
         assert_eq!(
             json["content_blocks"],
             serde_json::json!([{"type": "text", "text": "just text"}])
+        );
+        assert!(
+            json.get("content").is_none(),
+            "the legacy text mirror must not be serialized on the hook surface"
         );
         assert!(
             json.get("has_images").is_none(),
@@ -547,7 +558,7 @@ mod tests {
             ToolResult::with_blocks("tc_1".into(), vec![image_block("image/png", "AAAA")], false);
         let hook_result = HookToolResult::from_tool_result("view_image", &tr);
 
-        assert_eq!(hook_result.content, "[image: image/png]");
+        assert_eq!(hook_result.text_projection(), "[image: image/png]");
         assert_eq!(
             hook_result.content_blocks,
             vec![image_block("image/png", "AAAA")]
@@ -582,7 +593,10 @@ mod tests {
         );
         let hook_result = HookToolResult::from_tool_result("mixed_tool", &tr);
 
-        assert_eq!(hook_result.content, "before\n[image: image/png]\nafter");
+        assert_eq!(
+            hook_result.text_projection(),
+            "before\n[image: image/png]\nafter"
+        );
         assert_eq!(hook_result.content_blocks, tr.content);
     }
 
@@ -594,6 +608,31 @@ mod tests {
 
         assert_eq!(hook_result.tool_use_id, "active_tool_id");
         assert_eq!(hook_result.content_blocks, vec![text_block("ok")]);
+    }
+
+    #[test]
+    fn hook_tool_result_text_projection_is_derived_only_from_typed_blocks() {
+        // The text projection must be derived purely from the canonical typed
+        // content_blocks — there is no separately-stored `content` mirror that
+        // could diverge from the blocks or feed policy.
+        let result = HookToolResult {
+            tool_use_id: "tc_1".into(),
+            name: "tool".into(),
+            content_blocks: vec![text_block("alpha"), image_block("image/png", "AAAA")],
+            is_error: false,
+            has_images: true,
+        };
+        assert_eq!(
+            result.text_projection(),
+            crate::types::text_content(&result.content_blocks),
+            "text projection must equal the rendering of the typed blocks"
+        );
+
+        // Mutating the typed blocks immediately changes the projection (no stale
+        // stored mirror).
+        let mut mutated = result;
+        mutated.content_blocks = vec![text_block("beta")];
+        assert_eq!(mutated.text_projection(), "beta");
     }
 
     #[test]
@@ -616,7 +655,6 @@ mod tests {
         let result = HookToolResult {
             tool_use_id: "tc_1".into(),
             name: "tool".into(),
-            content: "text".into(),
             content_blocks: vec![text_block("text")],
             is_error: false,
             has_images: true,
@@ -625,6 +663,10 @@ mod tests {
         assert!(
             json.get("has_images").is_none(),
             "new hook payloads carry content_blocks instead of has_images"
+        );
+        assert!(
+            json.get("content").is_none(),
+            "the legacy text mirror is no longer a stored field on the hook surface"
         );
 
         let decoded: HookToolResult = serde_json::from_value(serde_json::json!({

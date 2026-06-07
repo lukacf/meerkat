@@ -310,8 +310,12 @@ pub struct AgentBuildConfig {
     pub self_hosted_server_id: Option<String>,
     /// Max tokens per turn. If `None`, uses `Config::max_tokens`.
     pub max_tokens: Option<u32>,
-    /// Override the system prompt. If `None`, uses the default composed prompt.
-    pub system_prompt: Option<String>,
+    /// Typed per-request system-prompt policy.
+    ///
+    /// `Inherit` uses the config/AGENTS/default precedence chain; `Set` wins
+    /// outright (skipping config + AGENTS.md); `Disable` suppresses every
+    /// prompt source.
+    pub system_prompt: crate::SystemPromptOverride,
     /// Optional output schema for structured extraction.
     pub output_schema: Option<OutputSchema>,
     /// Structured-output retry budget *intent*. `None` inherits the canonical
@@ -517,13 +521,16 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("provider", &self.provider)
             .field("self_hosted_server_id", &self.self_hosted_server_id)
             .field("max_tokens", &self.max_tokens)
-            .field(
-                "system_prompt",
-                &self
-                    .system_prompt
-                    .as_deref()
-                    .map(|s| if s.len() > 64 { &s[..64] } else { s }),
-            )
+            .field("system_prompt", &{
+                match &self.system_prompt {
+                    crate::SystemPromptOverride::Inherit => "Inherit".to_string(),
+                    crate::SystemPromptOverride::Disable => "Disable".to_string(),
+                    crate::SystemPromptOverride::Set(s) => {
+                        let head: String = s.chars().take(64).collect();
+                        format!("Set({head:?})")
+                    }
+                }
+            })
             .field("output_schema", &self.output_schema.is_some())
             .field("structured_output_retries", &self.structured_output_retries)
             .field("keep_alive", &self.keep_alive)
@@ -616,7 +623,7 @@ impl AgentBuildConfig {
             provider: None,
             self_hosted_server_id: None,
             max_tokens: None,
-            system_prompt: None,
+            system_prompt: crate::SystemPromptOverride::Inherit,
             output_schema: None,
             structured_output_retries: None,
             hooks_override: HookRunOverrides::default(),
@@ -688,7 +695,11 @@ impl AgentBuildConfig {
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Self {
         let mut build = Self::new(req.model.clone());
-        build.system_prompt = req.system_prompt.clone();
+        // Parse-at-boundary: the wire `Option<String>` becomes the typed
+        // per-request policy. `Some` → `Set`, `None` → `Inherit`. `Disable`
+        // is not yet expressible at this wire boundary (see row #337 note).
+        build.system_prompt =
+            crate::SystemPromptOverride::from_wire_option(req.system_prompt.clone());
         build.max_tokens = req.max_tokens;
         if let Some(options) = &req.build {
             build.apply_session_build_options(options);
@@ -814,6 +825,10 @@ impl AgentBuildConfig {
             override_mob: self.override_mob,
             override_image_generation: self.override_image_generation,
             override_web_search: self.override_web_search,
+            // The facade build pipeline exposes no comms-override API surface;
+            // the per-build comms override (#76) is owned by the recovery path
+            // (`build_recovered_session`), so the non-recovery build inherits.
+            override_comms: ToolCategoryOverride::Inherit,
             schedule_tools: self.schedule_tools.clone(),
             workgraph_tools: self.workgraph_tools.clone(),
             mob_tool_authority_context: self.mob_tool_authority_context.clone(),
@@ -4028,8 +4043,14 @@ impl AgentFactory {
         let skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>> = None;
 
         // 6b. Build tool dispatcher (with optional external tools, per-build overrides, skill tools)
-        let persisted_system_prompt = build_config.system_prompt.clone();
-        let per_request_prompt = build_config.system_prompt.take();
+        //
+        // The typed per-request policy is projected to the persisted
+        // `Option<String>` build-state field (Set→Some, Inherit/Disable→None;
+        // Disable's suppression fact cannot round-trip through the
+        // `Option<String>` persisted shape yet — see row #337). The override
+        // itself is taken (leaving `Inherit`) for prompt assembly below.
+        let persisted_system_prompt = build_config.system_prompt.to_persisted_option();
+        let prompt_override = std::mem::take(&mut build_config.system_prompt);
         let effective_builtins = build_config.override_builtins.resolve(self.enable_builtins);
         #[allow(unused_variables)] // only consumed by non-wasm32 tool dispatcher
         let effective_shell = build_config.override_shell.resolve(self.enable_shell);
@@ -4757,15 +4778,18 @@ impl AgentFactory {
             .resume_session
             .as_ref()
             .is_some_and(|session| session.messages().is_empty());
+        // An explicit per-request policy (`Set` or `Disable`) forces prompt
+        // (re)assembly even on resume; `Inherit` only assembles for fresh or
+        // pre-created-empty sessions.
         let should_apply_system_prompt = build_config.resume_session.is_none()
             || resume_session_is_precreated_empty
-            || per_request_prompt.is_some();
+            || prompt_override.is_explicit();
         #[cfg(not(target_arch = "wasm32"))]
         let system_prompt = if should_apply_system_prompt {
             Some(
                 crate::assemble_system_prompt(
                     config,
-                    per_request_prompt.as_deref(),
+                    &prompt_override,
                     _conventions_context_root,
                     &extra_sections,
                     &tool_usage_instructions,
@@ -4779,26 +4803,46 @@ impl AgentFactory {
         #[cfg(target_arch = "wasm32")]
         let system_prompt = if should_apply_system_prompt {
             Some({
-                // Precedence: per-request > config inline > default.
-                // No AGENTS.md or system_prompt_file on wasm32 (no filesystem).
-                let base = per_request_prompt
-                    .or_else(|| config.agent.system_prompt.clone())
-                    .unwrap_or_else(|| DEFAULT_WASM_SYSTEM_PROMPT.to_string());
+                // Precedence: Set wins outright; Disable suppresses every
+                // source (empty base); Inherit falls through to config inline
+                // then the default. No AGENTS.md or system_prompt_file on
+                // wasm32 (no filesystem).
+                let base = match &prompt_override {
+                    crate::SystemPromptOverride::Set(prompt) => prompt.clone(),
+                    crate::SystemPromptOverride::Disable => String::new(),
+                    crate::SystemPromptOverride::Inherit => config
+                        .agent
+                        .system_prompt
+                        .clone()
+                        .unwrap_or_else(|| DEFAULT_WASM_SYSTEM_PROMPT.to_string()),
+                };
                 let mut prompt = base;
+                // Config-level tool instructions are skipped for an explicit
+                // per-request Set (mirroring the non-wasm path); Disable and
+                // Inherit still append them.
+                let skip_config_tools =
+                    matches!(prompt_override, crate::SystemPromptOverride::Set(_));
                 for section in &extra_sections {
                     if !section.is_empty() {
-                        prompt.push_str("\n\n");
+                        if !prompt.is_empty() {
+                            prompt.push_str("\n\n");
+                        }
                         prompt.push_str(section);
                     }
                 }
-                if let Some(ref config_tools) = config.agent.tool_instructions
+                if !skip_config_tools
+                    && let Some(ref config_tools) = config.agent.tool_instructions
                     && !config_tools.is_empty()
                 {
-                    prompt.push_str("\n\n");
+                    if !prompt.is_empty() {
+                        prompt.push_str("\n\n");
+                    }
                     prompt.push_str(config_tools);
                 }
                 if !tool_usage_instructions.is_empty() {
-                    prompt.push_str("\n\n");
+                    if !prompt.is_empty() {
+                        prompt.push_str("\n\n");
+                    }
                     prompt.push_str(&tool_usage_instructions);
                 }
                 prompt

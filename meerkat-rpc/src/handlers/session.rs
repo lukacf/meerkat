@@ -264,7 +264,8 @@ pub async fn handle_create(
     build_config.resume_override_mask.model = model_was_explicit;
     build_config.resume_override_mask.provider = provider_was_explicit;
     build_config.max_tokens = params.max_tokens;
-    build_config.system_prompt = params.system_prompt;
+    build_config.system_prompt =
+        meerkat::SystemPromptOverride::from_wire_option(params.system_prompt);
     build_config.output_schema = output_schema;
     build_config.structured_output_retries = params.structured_output_retries;
     build_config.hooks_override = params.hooks_override.unwrap_or_default();

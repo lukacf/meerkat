@@ -25,6 +25,7 @@ use crate::tokio;
 use crate::tool_catalog::{ToolCatalogCapabilities, ToolCatalogEntry, ToolUnavailableReason};
 use crate::types::{ToolCallView, ToolDef, ToolName};
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Entry for a dispatcher in the gateway.
@@ -32,12 +33,29 @@ struct DispatcherEntry {
     dispatcher: Arc<dyn AgentToolDispatcher>,
 }
 
+/// How a single dispatcher entry routes a given tool name. A flat, typed
+/// three-way verdict (rather than `Option<Option<…>>`): the name is either not
+/// surfaced by this entry, surfaced and callable, or surfaced but currently
+/// unavailable for a typed reason.
+enum EntryRouting {
+    /// The entry does not surface this tool name live.
+    NotSurfaced,
+    /// The entry surfaces the tool and it is callable.
+    Callable,
+    /// The entry surfaces the tool but it is currently unavailable.
+    Unavailable(ToolUnavailableReason),
+}
+
 /// A tool dispatcher that composes multiple dispatchers into one.
 ///
-/// The gateway validates the initial child catalogs for collisions, then uses
-/// live child catalogs/lists for routing and identity admission. This lets
-/// dynamic dispatchers surface newly connected tools without rebuilding the
-/// gateway while preserving first-dispatcher-wins behavior for live duplicates.
+/// The gateway validates the initial child catalogs for collisions and records
+/// a typed routing table keyed by [`ToolName`] that owns the
+/// `tool name -> owning dispatcher` decision. The build-time collision check
+/// already proves uniqueness, so the routing table is the canonical authority
+/// for build-known tools (deterministic owner per `ToolName`, stable regardless
+/// of insertion order). Dynamic dispatchers that surface newly connected tools
+/// after build time fall back to live catalog/list iteration, preserving
+/// first-dispatcher-wins for live duplicates without rebuilding the gateway.
 ///
 /// ## Dynamic Visibility
 ///
@@ -48,6 +66,12 @@ struct DispatcherEntry {
 pub struct ToolGateway {
     /// Dispatcher entries in stable precedence order.
     entries: Vec<DispatcherEntry>,
+    /// Typed routing authority: build-known tool name -> owning entry index.
+    ///
+    /// Populated from the frozen build-time catalogs (uniqueness already
+    /// guaranteed by the collision check), so routing for build-known tools is
+    /// a typed lookup, not first-wins iteration re-derived on every call.
+    routing: HashMap<ToolName, usize>,
 }
 
 impl std::fmt::Debug for ToolGateway {
@@ -101,6 +125,46 @@ impl ToolGateway {
             other => other,
         }
     }
+
+    /// Resolve the owning dispatcher entry for `name`.
+    ///
+    /// The typed routing table is the canonical authority for build-known tools;
+    /// it yields a deterministic owner per [`ToolName`] regardless of insertion
+    /// order. Tools surfaced dynamically after build time are not in the table,
+    /// so the caller must fall back to live iteration for them.
+    fn routed_entry(&self, name: &str) -> Option<&DispatcherEntry> {
+        self.routing
+            .get(name)
+            .and_then(|idx| self.entries.get(*idx))
+    }
+
+    /// Classify how the owning entry routes `name`: not surfaced, callable, or
+    /// unavailable for a typed reason.
+    fn entry_routing(entry: &DispatcherEntry, name: &str) -> EntryRouting {
+        if entry.dispatcher.tool_catalog_capabilities().exact_catalog {
+            match entry
+                .dispatcher
+                .tool_catalog()
+                .iter()
+                .find(|catalog_entry| catalog_entry.tool.name == name)
+            {
+                Some(catalog_entry) => match catalog_entry.callability.unavailable_reason() {
+                    Some(reason) => EntryRouting::Unavailable(reason),
+                    None => EntryRouting::Callable,
+                },
+                None => EntryRouting::NotSurfaced,
+            }
+        } else if entry
+            .dispatcher
+            .tools()
+            .iter()
+            .any(|tool| tool.name == name)
+        {
+            EntryRouting::Callable
+        } else {
+            EntryRouting::NotSurfaced
+        }
+    }
 }
 
 /// Builder for constructing a [`ToolGateway`].
@@ -144,13 +208,14 @@ impl ToolGatewayBuilder {
     /// All tools are checked for collisions regardless of their availability.
     pub fn build(self) -> Result<ToolGateway, ToolError> {
         let mut entries: Vec<DispatcherEntry> = Vec::new();
-        let mut seen: std::collections::HashSet<ToolName> = std::collections::HashSet::new();
+        let mut routing: HashMap<ToolName, usize> = HashMap::new();
 
         for dispatcher in self.dispatchers {
+            let entry_index = entries.len();
             let frozen_catalog = ToolGateway::live_catalog_for_dispatcher(dispatcher.as_ref());
             for entry in frozen_catalog.iter() {
                 let name = entry.tool.tool_name();
-                if !seen.insert(name.clone()) {
+                if routing.insert(name, entry_index).is_some() {
                     return Err(ToolError::Other(format!(
                         "tool name collision in gateway: '{}'",
                         entry.tool.name.as_str()
@@ -160,7 +225,7 @@ impl ToolGatewayBuilder {
             entries.push(DispatcherEntry { dispatcher });
         }
 
-        Ok(ToolGateway { entries })
+        Ok(ToolGateway { entries, routing })
     }
 }
 
@@ -188,34 +253,38 @@ impl AgentToolDispatcher for ToolGateway {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
-        for entry in &self.entries {
-            if entry.dispatcher.tool_catalog_capabilities().exact_catalog {
-                if let Some(catalog_entry) = entry
-                    .dispatcher
-                    .tool_catalog()
-                    .iter()
-                    .find(|entry| entry.tool.name == call.name)
-                {
-                    if let Some(reason) = catalog_entry.callability.unavailable_reason() {
-                        return Err(ToolError::unavailable(call.name, reason));
-                    }
+        // Typed routing authority first: build-known tools resolve to a single
+        // deterministic owning entry regardless of insertion order.
+        if let Some(entry) = self.routed_entry(call.name) {
+            match Self::entry_routing(entry, call.name) {
+                EntryRouting::Unavailable(reason) => {
+                    return Err(ToolError::unavailable(call.name, reason));
+                }
+                EntryRouting::Callable => {
                     return entry
                         .dispatcher
                         .dispatch(call)
                         .await
                         .map_err(|err| Self::route_not_found_as_unavailable(call.name, err));
                 }
-            } else if entry
-                .dispatcher
-                .tools()
-                .iter()
-                .any(|tool| tool.name == call.name)
-            {
-                return entry
-                    .dispatcher
-                    .dispatch(call)
-                    .await
-                    .map_err(|err| Self::route_not_found_as_unavailable(call.name, err));
+                EntryRouting::NotSurfaced => {}
+            }
+        }
+        // Fall back to live iteration only for tools surfaced dynamically after
+        // build time (not present in the typed routing table).
+        for entry in &self.entries {
+            match Self::entry_routing(entry, call.name) {
+                EntryRouting::Unavailable(reason) => {
+                    return Err(ToolError::unavailable(call.name, reason));
+                }
+                EntryRouting::Callable => {
+                    return entry
+                        .dispatcher
+                        .dispatch(call)
+                        .await
+                        .map_err(|err| Self::route_not_found_as_unavailable(call.name, err));
+                }
+                EntryRouting::NotSurfaced => {}
             }
         }
         Err(ToolError::not_found(call.name))
@@ -226,34 +295,35 @@ impl AgentToolDispatcher for ToolGateway {
         call: ToolCallView<'_>,
         context: &crate::ToolDispatchContext,
     ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
-        for entry in &self.entries {
-            if entry.dispatcher.tool_catalog_capabilities().exact_catalog {
-                if let Some(catalog_entry) = entry
-                    .dispatcher
-                    .tool_catalog()
-                    .iter()
-                    .find(|entry| entry.tool.name == call.name)
-                {
-                    if let Some(reason) = catalog_entry.callability.unavailable_reason() {
-                        return Err(ToolError::unavailable(call.name, reason));
-                    }
+        // Typed routing authority first (see `dispatch`).
+        if let Some(entry) = self.routed_entry(call.name) {
+            match Self::entry_routing(entry, call.name) {
+                EntryRouting::Unavailable(reason) => {
+                    return Err(ToolError::unavailable(call.name, reason));
+                }
+                EntryRouting::Callable => {
                     return entry
                         .dispatcher
                         .dispatch_with_context(call, context)
                         .await
                         .map_err(|err| Self::route_not_found_as_unavailable(call.name, err));
                 }
-            } else if entry
-                .dispatcher
-                .tools()
-                .iter()
-                .any(|tool| tool.name == call.name)
-            {
-                return entry
-                    .dispatcher
-                    .dispatch_with_context(call, context)
-                    .await
-                    .map_err(|err| Self::route_not_found_as_unavailable(call.name, err));
+                EntryRouting::NotSurfaced => {}
+            }
+        }
+        for entry in &self.entries {
+            match Self::entry_routing(entry, call.name) {
+                EntryRouting::Unavailable(reason) => {
+                    return Err(ToolError::unavailable(call.name, reason));
+                }
+                EntryRouting::Callable => {
+                    return entry
+                        .dispatcher
+                        .dispatch_with_context(call, context)
+                        .await
+                        .map_err(|err| Self::route_not_found_as_unavailable(call.name, err));
+                }
+                EntryRouting::NotSurfaced => {}
             }
         }
         Err(ToolError::not_found(call.name))
@@ -1519,6 +1589,82 @@ mod tests {
                 .expect("shared entry")
                 .currently_callable()
         );
+    }
+
+    #[tokio::test]
+    async fn gateway_typed_routing_owner_is_stable_regardless_of_insertion_order() {
+        // The typed routing table must resolve each ToolName to a single
+        // deterministic owning dispatcher, regardless of the order dispatchers
+        // were added. `alpha` is owned by "base" and `beta` by "comms" in both
+        // orderings; routing identity (the source that answers a dispatch) must
+        // not change with insertion order.
+        let base_first = {
+            let base = Arc::new(MockDispatcher::new("base", &["alpha"]));
+            let comms = Arc::new(MockDispatcher::new("comms", &["beta"]));
+            ToolGatewayBuilder::new()
+                .add_dispatcher(base)
+                .add_dispatcher(comms)
+                .build()
+                .expect("gateway builds")
+        };
+        let comms_first = {
+            let base = Arc::new(MockDispatcher::new("base", &["alpha"]));
+            let comms = Arc::new(MockDispatcher::new("comms", &["beta"]));
+            ToolGatewayBuilder::new()
+                .add_dispatcher(comms)
+                .add_dispatcher(base)
+                .build()
+                .expect("gateway builds")
+        };
+
+        // The typed routing table owns the decision: same owner index meaning in
+        // both orderings (the routed entry's dispatcher answers the call).
+        for name in ["alpha", "beta"] {
+            let owner_a = base_first
+                .routed_entry(name)
+                .expect("alpha/beta routed")
+                .dispatcher
+                .tools()
+                .iter()
+                .map(|t| t.name.to_string())
+                .collect::<Vec<_>>();
+            let owner_b = comms_first
+                .routed_entry(name)
+                .expect("alpha/beta routed")
+                .dispatcher
+                .tools()
+                .iter()
+                .map(|t| t.name.to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                owner_a, owner_b,
+                "routing owner for `{name}` must be stable across insertion order"
+            );
+        }
+
+        // And dispatch routes through the typed map to the correct source.
+        let alpha = dispatch_json(&comms_first, "alpha", json!({}))
+            .await
+            .expect("alpha dispatches");
+        assert_eq!(alpha["source"], "base");
+        let beta = dispatch_json(&base_first, "beta", json!({}))
+            .await
+            .expect("beta dispatches");
+        assert_eq!(beta["source"], "comms");
+    }
+
+    #[test]
+    fn gateway_typed_routing_table_rejects_duplicate_owner() {
+        // Two dispatchers claiming the same name still fail at build: the typed
+        // routing table cannot admit two owners for one ToolName.
+        let base = Arc::new(MockDispatcher::new("base", &["dup"]));
+        let comms = Arc::new(MockDispatcher::new("comms", &["dup"]));
+        let result = ToolGatewayBuilder::new()
+            .add_dispatcher(base)
+            .add_dispatcher(comms)
+            .build();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("collision"));
     }
 
     #[tokio::test]

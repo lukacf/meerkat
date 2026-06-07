@@ -241,6 +241,8 @@ pub struct SessionBuildOptions {
     // Use runtime_build_mode instead.
     pub override_builtins: ToolCategoryOverride,
     pub override_shell: ToolCategoryOverride,
+    /// Per-build override for the factory-level comms tooling capability.
+    pub override_comms: ToolCategoryOverride,
     pub override_memory: ToolCategoryOverride,
     /// Per-build override for the factory-level scheduler capability.
     pub override_schedule: ToolCategoryOverride,
@@ -922,6 +924,7 @@ pub struct ResumeOverrideMask {
     pub auth_binding: bool,
     pub override_builtins: bool,
     pub override_shell: bool,
+    pub override_comms: bool,
     pub override_memory: bool,
     pub override_schedule: bool,
     pub override_workgraph: bool,
@@ -1000,6 +1003,7 @@ impl Default for SessionBuildOptions {
             agent_llm_client_decorator: None,
             override_builtins: ToolCategoryOverride::Inherit,
             override_shell: ToolCategoryOverride::Inherit,
+            override_comms: ToolCategoryOverride::Inherit,
             override_memory: ToolCategoryOverride::Inherit,
             override_schedule: ToolCategoryOverride::Inherit,
             override_workgraph: ToolCategoryOverride::Inherit,
@@ -1056,6 +1060,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             )
             .field("override_builtins", &self.override_builtins)
             .field("override_shell", &self.override_shell)
+            .field("override_comms", &self.override_comms)
             .field("override_memory", &self.override_memory)
             .field("override_schedule", &self.override_schedule)
             .field("override_workgraph", &self.override_workgraph)

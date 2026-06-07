@@ -90,9 +90,21 @@ impl AgentBuilder {
         self
     }
 
-    /// Set the system prompt.
+    /// Set an explicit per-request system prompt.
+    ///
+    /// This wins outright over config and AGENTS.md
+    /// ([`SystemPromptOverride::Set`](crate::SystemPromptOverride::Set)).
     pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.build_config.system_prompt = Some(prompt.into());
+        self.build_config.system_prompt = crate::SystemPromptOverride::Set(prompt.into());
+        self
+    }
+
+    /// Suppress every system-prompt source for this build.
+    ///
+    /// No config override, no AGENTS.md, and no default prompt are applied
+    /// ([`SystemPromptOverride::Disable`](crate::SystemPromptOverride::Disable)).
+    pub fn disable_system_prompt(mut self) -> Self {
+        self.build_config.system_prompt = crate::SystemPromptOverride::Disable;
         self
     }
 

@@ -128,12 +128,6 @@ pub struct Router {
     /// registrations where the runtime owns a stable routing id in addition
     /// to the peer's signing key.
     trusted_peer_ids: Arc<RwLock<PubKeyPeerIdMap>>,
-    /// Directory-filter side-channel for private (control-plane) trust
-    /// edges. Membership here is additive to `trusted_peers`: the peer
-    /// is still admitted AND send-resolvable, but `resolve_peer_directory()`
-    /// filters it out of the `comms.peers` REST/RPC/MCP surface. Used e.g.
-    /// for the supervisor bridge in session-backed mob members.
-    private_peer_ids: Arc<RwLock<PeerIdSet>>,
     /// Mechanical projection of which generated source currently owns each
     /// trust row. Admission uses the union; generated removals are scoped to
     /// the source that authorized them.
@@ -143,6 +137,16 @@ pub struct Router {
     /// snapshots read this map so one generated owner cannot rewrite another
     /// owner's descriptor projection.
     trusted_peer_descriptors_by_source: Arc<RwLock<TrustDescriptorMap>>,
+    /// Source-attributed directory visibility for private (control-plane)
+    /// trust edges. A peer is private iff some generated source authorized it
+    /// privately. This is the single visibility authority: `is_private`,
+    /// `is_private_peer_id`, and directory resolution derive from it, so
+    /// rebuilding the Router from the generated trust-authority snapshot
+    /// reproduces identical `comms.peers` visibility with no separate flat
+    /// side-map to repopulate. Private peers are still admitted AND
+    /// send-resolvable, but `resolve_peer_directory()` filters them out of the
+    /// `comms.peers` REST/RPC/MCP surface (e.g. the supervisor bridge in
+    /// session-backed mob members).
     private_peer_sources: Arc<RwLock<TrustSourceMap>>,
     config: CommsConfig,
     require_peer_auth: bool,
@@ -173,7 +177,6 @@ impl Router {
             keypair: Arc::new(keypair),
             trusted_peers: Arc::new(RwLock::new(TrustedPeers::new())),
             trusted_peer_ids: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
-            private_peer_ids: Arc::new(RwLock::new(std::collections::BTreeSet::new())),
             trusted_peer_sources: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
             trusted_peer_descriptors_by_source: Arc::new(RwLock::new(
                 std::collections::BTreeMap::new(),
@@ -198,7 +201,6 @@ impl Router {
             keypair: Arc::new(keypair),
             trusted_peers,
             trusted_peer_ids: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
-            private_peer_ids: Arc::new(RwLock::new(std::collections::BTreeSet::new())),
             trusted_peer_sources: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
             trusted_peer_descriptors_by_source: Arc::new(RwLock::new(
                 std::collections::BTreeMap::new(),
@@ -213,13 +215,19 @@ impl Router {
 
     /// Returns `true` if the peer is currently marked private.
     pub fn is_private(&self, pubkey: &crate::identity::PubKey) -> bool {
-        self.private_peer_ids
-            .read()
-            .contains(&peer_id_from_pubkey(pubkey))
+        self.is_private_peer_id(&peer_id_from_pubkey(pubkey))
     }
 
+    /// Snapshot of the peer IDs that are currently directory-private, derived
+    /// from the source-attributed `private_peer_sources` authority (a peer is
+    /// private iff some generated source authorized it privately).
     pub(crate) fn private_peer_ids(&self) -> PeerIdSet {
-        self.private_peer_ids.read().clone()
+        self.private_peer_sources
+            .read()
+            .iter()
+            .filter(|(_, sources)| !sources.is_empty())
+            .map(|(peer_id, _)| *peer_id)
+            .collect()
     }
 
     pub(crate) fn has_trust_source(
@@ -346,7 +354,6 @@ impl Router {
                 .entry(peer_id)
                 .or_default()
                 .insert(source_kind);
-            self.private_peer_ids.write().insert(peer_id);
         }
         Ok(created)
     }
@@ -393,7 +400,6 @@ impl Router {
                 peer_sources.remove(&source_kind);
                 if peer_sources.is_empty() {
                     private_sources.remove(peer_id);
-                    self.private_peer_ids.write().remove(peer_id);
                 }
             }
         }
@@ -428,13 +434,18 @@ impl Router {
             trusted_peer_ids.remove(&pubkey);
         }
         drop(trusted_peer_ids);
-        self.private_peer_ids.write().remove(peer_id);
         self.private_peer_sources.write().remove(peer_id);
         true
     }
 
+    /// Directory-private iff some generated source authorized the peer
+    /// privately. Derived from the source-attributed `private_peer_sources`
+    /// authority — there is no separate flat side-map to consult.
     pub(crate) fn is_private_peer_id(&self, peer_id: &PeerId) -> bool {
-        self.private_peer_ids.read().contains(peer_id)
+        self.private_peer_sources
+            .read()
+            .get(peer_id)
+            .is_some_and(|sources| !sources.is_empty())
     }
 
     fn trusted_peer_by_peer_id(&self, peer_id: &PeerId) -> TrustedPeerLookup {
@@ -925,5 +936,110 @@ mod tests {
             ),
             "a divergent routing address must conflict, got {conflict:?}"
         );
+    }
+
+    /// ROW #82 gate: directory visibility is a property of the
+    /// source-attributed trust authority, not a separate flat side-map.
+    /// Rebuilding a fresh Router by replaying the same generated trust-authority
+    /// adds reproduces identical `comms.peers` visibility (private peers stay
+    /// filtered) with no separate `private_peer_ids` population step.
+    #[test]
+    fn private_visibility_derives_from_source_authority_and_survives_rebuild() {
+        let public_pubkey = [11u8; 32];
+        let private_pubkey = [22u8; 32];
+        let public_id = PeerId::from_ed25519_pubkey(&public_pubkey);
+        let private_id = PeerId::from_ed25519_pubkey(&private_pubkey);
+        let source = GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish;
+
+        // Replay the generated trust authority into a fresh router: one public
+        // edge, one private (control-plane) edge.
+        let install = |router: &Router| {
+            router
+                .add_trusted_peer_with_peer_id(
+                    public_id,
+                    peer("public-peer", public_pubkey, "tcp://10.0.0.1:7001"),
+                    source,
+                    false,
+                )
+                .expect("public add");
+            router
+                .add_trusted_peer_with_peer_id(
+                    private_id,
+                    peer("private-bridge", private_pubkey, "tcp://10.0.0.2:7001"),
+                    source,
+                    true,
+                )
+                .expect("private add");
+        };
+
+        let original = test_router();
+        install(&original);
+        assert!(
+            !original.is_private_peer_id(&public_id),
+            "a public trust edge is not directory-private"
+        );
+        assert!(
+            original.is_private_peer_id(&private_id),
+            "a privately-authorized trust edge is directory-private"
+        );
+        assert!(original.is_private(&PubKey::new(private_pubkey)));
+        assert_eq!(
+            original.private_peer_ids(),
+            std::collections::BTreeSet::from([private_id]),
+            "the private snapshot is derived from the source-attributed authority"
+        );
+
+        // A fresh router replaying the SAME authority reproduces identical
+        // visibility — there is no separate side-map that has to be repopulated.
+        let rebuilt = test_router();
+        install(&rebuilt);
+        assert_eq!(rebuilt.private_peer_ids(), original.private_peer_ids());
+        assert!(rebuilt.is_private_peer_id(&private_id));
+        assert!(!rebuilt.is_private_peer_id(&public_id));
+    }
+
+    /// ROW #82 gate: privacy is multi-source. A peer authorized privately by
+    /// two sources stays directory-private until the LAST private source is
+    /// removed; removing one private source does not prematurely expose it.
+    #[test]
+    fn private_visibility_clears_only_when_last_private_source_removed() {
+        let pubkey = [33u8; 32];
+        let peer_id = PeerId::from_ed25519_pubkey(&pubkey);
+        let source_a = GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish;
+        let source_b = GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring;
+
+        let router = test_router();
+        router
+            .add_trusted_peer_with_peer_id(
+                peer_id,
+                peer("dual-private", pubkey, "tcp://10.0.0.3:7001"),
+                source_a,
+                true,
+            )
+            .expect("private add A");
+        router
+            .add_trusted_peer_with_peer_id(
+                peer_id,
+                peer("dual-private", pubkey, "tcp://10.0.0.3:7001"),
+                source_b,
+                true,
+            )
+            .expect("private add B");
+        assert!(router.is_private_peer_id(&peer_id));
+
+        // Removing one private source must NOT expose the peer.
+        assert!(router.remove_trusted_peer_for_source(&peer_id, source_a));
+        assert!(
+            router.is_private_peer_id(&peer_id),
+            "peer stays private while another private source owns it"
+        );
+
+        // Removing the last private source clears visibility.
+        assert!(router.remove_trusted_peer_for_source(&peer_id, source_b));
+        assert!(
+            !router.is_private_peer_id(&peer_id),
+            "the last private source removal clears directory privacy"
+        );
+        assert!(router.private_peer_ids().is_empty());
     }
 }

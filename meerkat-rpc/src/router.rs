@@ -1446,6 +1446,31 @@ impl MethodRouter {
         request: RpcRequest,
         request_context: Option<RequestContext>,
     ) -> Option<RpcResponse> {
+        // Validate the JSON-RPC envelope version at the boundary. The transport
+        // carries `jsonrpc` as a free String; an envelope that does not declare
+        // the supported "2.0" version is rejected here (typed via
+        // `has_supported_version`) rather than dispatched. A notification (no
+        // id) with a bad version gets no response per the JSON-RPC spec.
+        if !request.has_supported_version() {
+            if request.is_notification() {
+                tracing::debug!(
+                    jsonrpc = %request.jsonrpc,
+                    method = %request.method,
+                    "Dropping notification with unsupported JSON-RPC version"
+                );
+                return None;
+            }
+            return Some(RpcResponse::error(
+                request.id.clone(),
+                error::INVALID_REQUEST,
+                format!(
+                    "Unsupported JSON-RPC version: expected \"{}\", got \"{}\"",
+                    crate::protocol::JSONRPC_VERSION,
+                    request.jsonrpc
+                ),
+            ));
+        }
+
         // Notifications (no id) are fire-and-forget
         if request.is_notification() {
             // Handle known notification methods silently
@@ -4754,6 +4779,66 @@ mod tests {
     // -----------------------------------------------------------------------
     // Tests
     // -----------------------------------------------------------------------
+
+    /// #326: a request envelope declaring an unsupported JSON-RPC version is
+    /// rejected with the standard INVALID_REQUEST error at the dispatch
+    /// boundary rather than dispatched to the named method handler.
+    #[tokio::test]
+    async fn unsupported_jsonrpc_version_request_rejected_before_dispatch() {
+        let (router, _notif_rx) = test_router().await;
+        let req = RpcRequest {
+            jsonrpc: "1.0".to_string(),
+            id: Some(RpcId::Num(7)),
+            method: "initialize".to_string(),
+            params: None,
+        };
+
+        let resp = router
+            .dispatch(req)
+            .await
+            .expect("request frame must yield a response");
+        assert_eq!(error_code(&resp), crate::error::INVALID_REQUEST);
+        assert_eq!(resp.id, Some(RpcId::Num(7)));
+        // The handler never ran: the success-shaped capability payload is absent.
+        assert!(resp.result.is_none());
+    }
+
+    /// #326: a missing JSON-RPC version (deserialized to empty string) is also
+    /// rejected, not silently treated as 2.0.
+    #[tokio::test]
+    async fn missing_jsonrpc_version_request_rejected_before_dispatch() {
+        let (router, _notif_rx) = test_router().await;
+        let req = RpcRequest {
+            jsonrpc: String::new(),
+            id: Some(RpcId::Num(8)),
+            method: "initialize".to_string(),
+            params: None,
+        };
+
+        let resp = router
+            .dispatch(req)
+            .await
+            .expect("request frame must yield a response");
+        assert_eq!(error_code(&resp), crate::error::INVALID_REQUEST);
+    }
+
+    /// #326: a notification (no id) with an unsupported version gets no
+    /// response and is not dispatched.
+    #[tokio::test]
+    async fn unsupported_jsonrpc_version_notification_dropped() {
+        let (router, _notif_rx) = test_router().await;
+        let notif = RpcRequest {
+            jsonrpc: "1.0".to_string(),
+            id: None,
+            method: "initialized".to_string(),
+            params: None,
+        };
+
+        assert!(
+            router.dispatch(notif).await.is_none(),
+            "bad-version notification must be dropped with no response"
+        );
+    }
 
     /// 1. `initialize` returns server capabilities with server info and methods.
     #[tokio::test]

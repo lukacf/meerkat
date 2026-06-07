@@ -3178,6 +3178,7 @@ async fn handle_meerkat_run(
     let create_provider = input.provider.map(ProviderInput::to_provider);
     let mut build = SessionBuildOptions {
         provider: create_provider,
+        override_comms: Default::default(),
         self_hosted_server_id: None,
         output_schema,
         structured_output_retries: input.structured_output_retries,
@@ -3582,6 +3583,7 @@ async fn handle_meerkat_resume(
     let build_session_options = |runtime_bindings, external_tools| {
         let mut build = SessionBuildOptions {
             provider: llm_binding.provider,
+            override_comms: Default::default(),
             self_hosted_server_id: llm_binding.self_hosted_server_id.clone(),
             output_schema: output_schema.clone(),
             structured_output_retries: input.structured_output_retries,

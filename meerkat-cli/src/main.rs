@@ -8752,6 +8752,7 @@ async fn run_agent(
 
         let mut build = SessionBuildOptions {
             provider: build_provider_override.map(Provider::as_core),
+            override_comms: Default::default(),
             self_hosted_server_id: None,
             output_schema,
             structured_output_retries,

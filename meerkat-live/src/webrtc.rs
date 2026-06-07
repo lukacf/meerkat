@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use axum::Router;
 use bytes::Bytes;
-use meerkat_contracts::WireLiveAdapterObservation;
+use meerkat_contracts::{LiveInputChunkWire, WireLiveAdapterObservation};
 use meerkat_core::live_adapter::{LiveAdapterObservation, LiveInputChunk};
 use opus::{Application, Channels, Decoder, Encoder};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
@@ -39,6 +39,7 @@ use crate::transport::{
     LiveChannelCloseFeedback, LiveChannelStatusFeedback, LiveTokenString, LiveWsState,
     live_ws_router,
 };
+use crate::wire_input::live_input_chunk_from_wire;
 
 /// Canonical JSON-RPC signaling method for browser-offer WebRTC.
 pub const LIVE_WEBRTC_ANSWER_METHOD: &str = "live/webrtc/answer";
@@ -482,18 +483,44 @@ fn install_data_channel_handler(context: DataChannelPumpContext) {
                 let data_channel = Arc::clone(&channel_for_messages_handle);
                 Box::pin(async move {
                     if message.is_string {
-                        // NOTE (D243, cross-lane): the parse boundary should be
-                        // the generated `LiveInputChunkWire` + the shared
-                        // `live_input_chunk_from_wire` conversion that RPC
-                        // `live/send_input` uses, so the WebRTC data channel runs
-                        // identical wire validation. That conversion helper lives
-                        // in `meerkat-rpc` (`handlers/live.rs`) and base64-decodes;
-                        // adopting it here requires lifting it to a shared owner
-                        // (meerkat-contracts/meerkat-core) — see report. The
-                        // D329 terminality fix below is independent of the parse
-                        // representation.
-                        match serde_json::from_slice::<LiveInputChunk>(&message.data) {
-                            Ok(chunk) => {
+                        // D243: the parse boundary is the generated
+                        // `LiveInputChunkWire` + the shared
+                        // `live_input_chunk_from_wire` conversion owner
+                        // (`crate::wire_input`) that the RPC `live/send_input`
+                        // path also routes through, so the WebRTC data channel
+                        // runs identical wire validation. A payload that fails
+                        // wire validation (malformed envelope OR malformed
+                        // base64) is rejected here exactly as on the RPC path.
+                        //
+                        // D329: any invalid frame — failed wire parse or failed
+                        // wire->core conversion — terminalizes the channel
+                        // (uniform with the WS path) rather than only logging
+                        // and keeping the peer alive.
+                        let chunk = match serde_json::from_slice::<LiveInputChunkWire>(
+                            &message.data,
+                        ) {
+                            Ok(wire) => match live_input_chunk_from_wire(wire) {
+                                Ok(chunk) => Some(chunk),
+                                Err(err) => {
+                                    tracing::warn!(
+                                        channel = %channel_id,
+                                        error = %err,
+                                        "WebRTC data-channel input chunk failed wire validation; closing"
+                                    );
+                                    None
+                                }
+                            },
+                            Err(err) => {
+                                tracing::warn!(
+                                    channel = %channel_id,
+                                    error = %err,
+                                    "invalid WebRTC data-channel input frame; closing"
+                                );
+                                None
+                            }
+                        };
+                        match chunk {
+                            Some(chunk) => {
                                 if let Err(err) = host.send_input(&channel_id, chunk).await {
                                     tracing::warn!(
                                         channel = %channel_id,
@@ -502,15 +529,7 @@ fn install_data_channel_handler(context: DataChannelPumpContext) {
                                     );
                                 }
                             }
-                            Err(err) => {
-                                // D329: malformed frame terminalizes the channel
-                                // (uniform with the WS path) rather than only
-                                // logging and keeping the peer alive.
-                                tracing::warn!(
-                                    channel = %channel_id,
-                                    error = %err,
-                                    "invalid WebRTC data-channel input frame; closing"
-                                );
+                            None => {
                                 reject_invalid_live_frame(
                                     host.as_ref(),
                                     close_feedback.as_ref(),

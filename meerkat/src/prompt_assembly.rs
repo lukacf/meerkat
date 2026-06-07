@@ -1,15 +1,18 @@
 //! Unified system prompt assembly.
 //!
 //! Single canonical path for building the final system prompt with clear
-//! precedence rules:
+//! precedence rules, driven by a typed [`SystemPromptOverride`]:
 //!
-//! 1. Per-request override (via `per_request_prompt`) — wins outright.
+//! 1. Per-request override ([`SystemPromptOverride::Set`]) — wins outright,
+//!    skipping config and AGENTS.md. [`SystemPromptOverride::Disable`]
+//!    suppresses *all* prompt sources (no config, no AGENTS.md, no default).
 //! 2. Config-level file override (`config.agent.system_prompt_file`).
 //! 3. Config-level inline override (`config.agent.system_prompt`).
 //! 4. Default system prompt + AGENTS.md files.
 //! 5. Config-level tool instructions (`config.agent.tool_instructions`).
 //! 6. Dispatcher-provided tool usage instructions (appended last).
 
+use crate::SystemPromptOverride;
 use meerkat_core::{Config, SystemPromptConfig, prompt::normalize_agents_md_content};
 use std::path::Path;
 
@@ -35,28 +38,51 @@ pub enum PromptAssemblyError {
 
 /// Assemble the final system prompt. Single canonical path.
 ///
-/// `per_request_prompt` is the per-request override from `AgentBuildConfig.system_prompt`.
-/// `extra_sections` is a forward-compatible slot for additional content
-/// (e.g., skill inventory in Phase 3). For now callers pass `&[]`.
+/// `prompt_override` is the typed per-request policy from
+/// `AgentBuildConfig.system_prompt`. `extra_sections` is a forward-compatible
+/// slot for additional content (e.g., skill inventory in Phase 3). For now
+/// callers pass `&[]`.
 ///
 /// Returns [`PromptAssemblyError`] when an explicitly-configured prompt source
 /// is present but unusable (e.g. an unreadable `system_prompt_file`). Optional
 /// sources that are simply absent never fail.
 pub async fn assemble_system_prompt(
     config: &Config,
-    per_request_prompt: Option<&str>,
+    prompt_override: &SystemPromptOverride,
     context_root: Option<&Path>,
     extra_sections: &[&str],
     tool_usage_instructions: &str,
 ) -> Result<String, PromptAssemblyError> {
-    // 1. Per-request override wins outright (skips AGENTS.md and config).
-    if let Some(prompt) = per_request_prompt {
-        return Ok(append_sections(
-            prompt,
-            extra_sections,
-            &[],
-            tool_usage_instructions,
-        ));
+    match prompt_override {
+        // 1a. Explicit per-request prompt wins outright (skips AGENTS.md and
+        //     config), but appended sections still apply.
+        SystemPromptOverride::Set(prompt) => {
+            return Ok(append_sections(
+                prompt,
+                extra_sections,
+                &[],
+                tool_usage_instructions,
+            ));
+        }
+        // 1b. Explicit disable suppresses every prompt source (config file,
+        //     config inline, AGENTS.md, default). Only the appended
+        //     extra/config-tool/dispatcher sections remain.
+        SystemPromptOverride::Disable => {
+            let config_tool_sections: Vec<&str> = config
+                .agent
+                .tool_instructions
+                .as_deref()
+                .into_iter()
+                .collect();
+            return Ok(append_sections(
+                "",
+                extra_sections,
+                &config_tool_sections,
+                tool_usage_instructions,
+            ));
+        }
+        // Fall through to the config/AGENTS/default precedence chain below.
+        SystemPromptOverride::Inherit => {}
     }
 
     // 2-4. This crate owns filesystem reads and prompt precedence, then passes
@@ -139,22 +165,24 @@ fn append_sections(
     tool_instructions: &str,
 ) -> String {
     let mut prompt = base.to_string();
-    for section in extra_sections {
-        if !section.is_empty() {
-            prompt.push_str("\n\n");
-            prompt.push_str(section);
+    let push_section = |prompt: &mut String, section: &str| {
+        if section.is_empty() {
+            return;
         }
+        // Avoid a leading "\n\n" when the base is empty (e.g. an explicitly
+        // disabled prompt with only appended sections).
+        if !prompt.is_empty() {
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(section);
+    };
+    for section in extra_sections {
+        push_section(&mut prompt, section);
     }
     for section in config_tool_sections {
-        if !section.is_empty() {
-            prompt.push_str("\n\n");
-            prompt.push_str(section);
-        }
+        push_section(&mut prompt, section);
     }
-    if !tool_instructions.is_empty() {
-        prompt.push_str("\n\n");
-        prompt.push_str(tool_instructions);
-    }
+    push_section(&mut prompt, tool_instructions);
     prompt
 }
 
@@ -172,10 +200,14 @@ mod tests {
 
     // --- Precedence level 1: per-request override ---
 
+    fn set(prompt: &str) -> SystemPromptOverride {
+        SystemPromptOverride::Set(prompt.to_string())
+    }
+
     #[tokio::test]
     async fn test_per_request_override_wins() {
         let config = default_config();
-        let result = assemble_system_prompt(&config, Some("Per-request prompt"), None, &[], "")
+        let result = assemble_system_prompt(&config, &set("Per-request prompt"), None, &[], "")
             .await
             .unwrap();
         assert_eq!(result, "Per-request prompt");
@@ -187,7 +219,7 @@ mod tests {
         config.agent.system_prompt = Some("Config inline prompt".to_string());
         config.agent.tool_instructions = Some("Config tool instructions".to_string());
 
-        let result = assemble_system_prompt(&config, Some("Per-request prompt"), None, &[], "")
+        let result = assemble_system_prompt(&config, &set("Per-request prompt"), None, &[], "")
             .await
             .unwrap();
         // Per-request override skips config.agent.system_prompt and tool_instructions
@@ -201,7 +233,7 @@ mod tests {
         let config = default_config();
         let result = assemble_system_prompt(
             &config,
-            Some("Per-request prompt"),
+            &set("Per-request prompt"),
             None,
             &[],
             "Dispatcher tool instructions",
@@ -210,6 +242,112 @@ mod tests {
         .unwrap();
         assert!(result.starts_with("Per-request prompt"));
         assert!(result.contains("Dispatcher tool instructions"));
+    }
+
+    // --- Typed override: the three policies are type-distinguishable ---
+
+    #[tokio::test]
+    async fn test_prompt_override_disable_suppresses_all_sources() {
+        let temp = TempDir::new().unwrap();
+        // Provide every prompt source: a configured file, an inline config
+        // prompt, and an AGENTS.md context root.
+        let file_path = temp.path().join("prompt.txt");
+        tokio::fs::write(&file_path, "File-based prompt")
+            .await
+            .unwrap();
+        let agents_path = temp.path().join("AGENTS.md");
+        tokio::fs::write(&agents_path, "Context root instructions")
+            .await
+            .unwrap();
+
+        let mut config = default_config();
+        config.agent.system_prompt_file = Some(file_path);
+        config.agent.system_prompt = Some("Inline prompt".to_string());
+
+        let result = assemble_system_prompt(
+            &config,
+            &SystemPromptOverride::Disable,
+            Some(temp.path()),
+            &[],
+            "Dispatcher tool instructions",
+        )
+        .await
+        .unwrap();
+
+        // Disable suppresses EVERY prompt source — config file, config inline,
+        // AGENTS.md, and the default prompt — leaving only appended sections.
+        assert!(!result.contains("File-based prompt"));
+        assert!(!result.contains("Inline prompt"));
+        assert!(!result.contains("Context root instructions"));
+        assert!(!result.contains(DEFAULT_SYSTEM_PROMPT));
+        // Appended dispatcher instructions still apply, with no leading blank.
+        assert_eq!(result, "Dispatcher tool instructions");
+    }
+
+    #[tokio::test]
+    async fn test_prompt_override_set_skips_config_only() {
+        let temp = TempDir::new().unwrap();
+        let agents_path = temp.path().join("AGENTS.md");
+        tokio::fs::write(&agents_path, "Context root instructions")
+            .await
+            .unwrap();
+
+        let mut config = default_config();
+        config.agent.system_prompt = Some("Inline prompt".to_string());
+        config.agent.tool_instructions = Some("Config tool instructions".to_string());
+
+        let result = assemble_system_prompt(
+            &config,
+            &set("Per-request prompt"),
+            Some(temp.path()),
+            &[],
+            "Dispatcher tools",
+        )
+        .await
+        .unwrap();
+
+        // Set wins outright over config inline and AGENTS.md...
+        assert!(result.starts_with("Per-request prompt"));
+        assert!(!result.contains("Inline prompt"));
+        assert!(!result.contains("Context root instructions"));
+        assert!(!result.contains(DEFAULT_SYSTEM_PROMPT));
+        // ...and also skips config-level tool instructions (only the
+        // dispatcher instructions are appended).
+        assert!(!result.contains("Config tool instructions"));
+        assert!(result.contains("Dispatcher tools"));
+    }
+
+    #[tokio::test]
+    async fn test_prompt_override_inherit_uses_config_and_default() {
+        let mut config = default_config();
+        config.agent.system_prompt = Some("Inline prompt".to_string());
+
+        let result = assemble_system_prompt(&config, &SystemPromptOverride::Inherit, None, &[], "")
+            .await
+            .unwrap();
+        // Inherit falls through to the config inline override.
+        assert!(result.contains("Inline prompt"));
+    }
+
+    #[test]
+    fn test_prompt_override_wire_round_trip_and_persistence() {
+        // Parse-at-boundary: the wire Option<String> maps to typed Set/Inherit.
+        assert_eq!(
+            SystemPromptOverride::from_wire_option(Some("p".to_string())),
+            SystemPromptOverride::Set("p".to_string())
+        );
+        assert_eq!(
+            SystemPromptOverride::from_wire_option(None),
+            SystemPromptOverride::Inherit
+        );
+        // Persistence projection back to the Option<String> build-state field.
+        assert_eq!(set("p").to_persisted_option(), Some("p".to_string()));
+        assert_eq!(SystemPromptOverride::Inherit.to_persisted_option(), None);
+        assert_eq!(SystemPromptOverride::Disable.to_persisted_option(), None);
+        // Explicitness drives whether the prompt must be (re)assembled.
+        assert!(!SystemPromptOverride::Inherit.is_explicit());
+        assert!(set("p").is_explicit());
+        assert!(SystemPromptOverride::Disable.is_explicit());
     }
 
     // --- Precedence level 2: config file override ---
@@ -225,7 +363,7 @@ mod tests {
         let mut config = default_config();
         config.agent.system_prompt_file = Some(file_path);
 
-        let result = assemble_system_prompt(&config, None, None, &[], "")
+        let result = assemble_system_prompt(&config, &SystemPromptOverride::Inherit, None, &[], "")
             .await
             .unwrap();
         assert!(result.contains("File-based prompt"));
@@ -244,7 +382,7 @@ mod tests {
         config.agent.system_prompt_file = Some(file_path);
         config.agent.system_prompt = Some("Inline prompt".to_string());
 
-        let result = assemble_system_prompt(&config, None, None, &[], "")
+        let result = assemble_system_prompt(&config, &SystemPromptOverride::Inherit, None, &[], "")
             .await
             .unwrap();
         assert!(result.contains("File-based prompt"));
@@ -260,7 +398,8 @@ mod tests {
         config.agent.system_prompt_file = Some(PathBuf::from("/nonexistent/path/prompt.txt"));
         config.agent.system_prompt = Some("Inline fallback".to_string());
 
-        let result = assemble_system_prompt(&config, None, None, &[], "").await;
+        let result =
+            assemble_system_prompt(&config, &SystemPromptOverride::Inherit, None, &[], "").await;
         let err = result.expect_err("unreadable configured system_prompt_file must error");
         assert!(matches!(
             err,
@@ -275,7 +414,7 @@ mod tests {
         let mut config = default_config();
         config.agent.system_prompt = Some("Inline prompt".to_string());
 
-        let result = assemble_system_prompt(&config, None, None, &[], "")
+        let result = assemble_system_prompt(&config, &SystemPromptOverride::Inherit, None, &[], "")
             .await
             .unwrap();
         assert!(result.contains("Inline prompt"));
@@ -293,9 +432,15 @@ mod tests {
         let mut config = default_config();
         config.agent.system_prompt = Some("Inline prompt".to_string());
 
-        let result = assemble_system_prompt(&config, None, Some(temp.path()), &[], "")
-            .await
-            .unwrap();
+        let result = assemble_system_prompt(
+            &config,
+            &SystemPromptOverride::Inherit,
+            Some(temp.path()),
+            &[],
+            "",
+        )
+        .await
+        .unwrap();
         assert!(result.contains("Inline prompt"));
         assert!(result.contains("Context root instructions"));
         assert!(!result.contains(DEFAULT_SYSTEM_PROMPT));
@@ -313,9 +458,15 @@ mod tests {
             .unwrap();
 
         let config = default_config();
-        let result = assemble_system_prompt(&config, None, Some(temp.path()), &[], "")
-            .await
-            .unwrap();
+        let result = assemble_system_prompt(
+            &config,
+            &SystemPromptOverride::Inherit,
+            Some(temp.path()),
+            &[],
+            "",
+        )
+        .await
+        .unwrap();
         let agents_section_start = result.find("# Project Instructions").unwrap();
         let agents_content = &result[agents_section_start..];
         assert!(agents_content.len() <= AGENTS_MD_MAX_BYTES + 100);
@@ -333,9 +484,15 @@ mod tests {
             .unwrap();
 
         let config = default_config();
-        let result = assemble_system_prompt(&config, None, Some(temp.path()), &[], "")
-            .await
-            .unwrap();
+        let result = assemble_system_prompt(
+            &config,
+            &SystemPromptOverride::Inherit,
+            Some(temp.path()),
+            &[],
+            "",
+        )
+        .await
+        .unwrap();
         assert!(result.contains("Fallback instructions"));
     }
 
@@ -344,7 +501,7 @@ mod tests {
     #[tokio::test]
     async fn test_default_prompt_when_no_overrides() {
         let config = default_config();
-        let result = assemble_system_prompt(&config, None, None, &[], "")
+        let result = assemble_system_prompt(&config, &SystemPromptOverride::Inherit, None, &[], "")
             .await
             .unwrap();
         assert!(result.contains(DEFAULT_SYSTEM_PROMPT));
@@ -357,7 +514,7 @@ mod tests {
         let mut config = default_config();
         config.agent.tool_instructions = Some("Use tools carefully".to_string());
 
-        let result = assemble_system_prompt(&config, None, None, &[], "")
+        let result = assemble_system_prompt(&config, &SystemPromptOverride::Inherit, None, &[], "")
             .await
             .unwrap();
         assert!(result.contains("Use tools carefully"));
@@ -368,9 +525,15 @@ mod tests {
         let mut config = default_config();
         config.agent.tool_instructions = Some("Config tools".to_string());
 
-        let result = assemble_system_prompt(&config, None, None, &[], "Dispatcher tools")
-            .await
-            .unwrap();
+        let result = assemble_system_prompt(
+            &config,
+            &SystemPromptOverride::Inherit,
+            None,
+            &[],
+            "Dispatcher tools",
+        )
+        .await
+        .unwrap();
         let config_pos = result.find("Config tools").unwrap();
         let dispatcher_pos = result.find("Dispatcher tools").unwrap();
         assert!(
@@ -384,10 +547,15 @@ mod tests {
     #[tokio::test]
     async fn test_dispatcher_tool_instructions_appended() {
         let config = default_config();
-        let result =
-            assemble_system_prompt(&config, None, None, &[], "Dispatcher tool instructions")
-                .await
-                .unwrap();
+        let result = assemble_system_prompt(
+            &config,
+            &SystemPromptOverride::Inherit,
+            None,
+            &[],
+            "Dispatcher tool instructions",
+        )
+        .await
+        .unwrap();
         assert!(result.contains("Dispatcher tool instructions"));
     }
 
@@ -398,7 +566,7 @@ mod tests {
         let config = default_config();
         let result = assemble_system_prompt(
             &config,
-            None,
+            &SystemPromptOverride::Inherit,
             None,
             &["## Available Skills\n- /task-workflow"],
             "",
@@ -414,10 +582,15 @@ mod tests {
         let mut config = default_config();
         config.agent.tool_instructions = Some("Config tools".to_string());
 
-        let result =
-            assemble_system_prompt(&config, None, None, &["Skills section"], "Dispatcher tools")
-                .await
-                .unwrap();
+        let result = assemble_system_prompt(
+            &config,
+            &SystemPromptOverride::Inherit,
+            None,
+            &["Skills section"],
+            "Dispatcher tools",
+        )
+        .await
+        .unwrap();
         let skills_pos = result.find("Skills section").unwrap();
         let config_tools_pos = result.find("Config tools").unwrap();
         let dispatcher_pos = result.find("Dispatcher tools").unwrap();
@@ -428,9 +601,10 @@ mod tests {
     #[tokio::test]
     async fn test_empty_extra_sections_no_double_newlines() {
         let config = default_config();
-        let result = assemble_system_prompt(&config, None, None, &["", ""], "")
-            .await
-            .unwrap();
+        let result =
+            assemble_system_prompt(&config, &SystemPromptOverride::Inherit, None, &["", ""], "")
+                .await
+                .unwrap();
         // Should not have extra blank sections
         assert!(!result.contains("\n\n\n\n"));
     }
@@ -445,7 +619,7 @@ mod tests {
 
         let result = assemble_system_prompt(
             &config,
-            None,
+            &SystemPromptOverride::Inherit,
             None,
             &["Skills inventory"],
             "Dispatcher tools",
@@ -478,7 +652,7 @@ mod tests {
 
         let result = assemble_system_prompt(
             &config,
-            None,
+            &SystemPromptOverride::Inherit,
             None,
             &[
                 "Skills section",
@@ -510,7 +684,7 @@ mod tests {
         let config = default_config();
         let result = assemble_system_prompt(
             &config,
-            None,
+            &SystemPromptOverride::Inherit,
             None,
             &["My additional instruction"],
             "Dispatcher tools block",

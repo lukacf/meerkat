@@ -1619,6 +1619,17 @@ pub(crate) struct MachineRecoveryDelta {
         Option<crate::meerkat_machine::dsl::RecoveredInputNormalizationReasonKind>,
 }
 
+/// Mechanical, total, identity-preserving projection of the durable runtime
+/// `InputLifecycleState` seed phase onto the generated DSL's
+/// `RecoveredInputObservedPhase` input type. This is a boundary type-translation
+/// only — NOT an authority step: every runtime variant maps 1:1 onto its
+/// same-named DSL variant and no phase is collapsed, inferred, or normalized
+/// here. All recovery normalization authority lives in the generated
+/// `NormalizeRecoveredInputLifecycle` transition, which receives this raw
+/// observed phase and decides the normalized lifecycle. The `match` is
+/// exhaustive over `InputLifecycleState`, so a new runtime phase fails closed at
+/// compile time rather than silently defaulting. Mirrors the reverse
+/// DSL→runtime translation in `lifecycle_from_normalized_phase`.
 fn recovered_observed_phase(
     phase: InputLifecycleState,
 ) -> crate::meerkat_machine::dsl::RecoveredInputObservedPhase {
@@ -3194,6 +3205,38 @@ mod run_failed_cause_tests {
             class.cleanup_observation(),
             crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::FinalizationFailed
         );
+    }
+
+    #[test]
+    fn recovered_observed_phase_is_a_total_identity_projection_not_an_authority_step() {
+        // `recovered_observed_phase` must remain a mechanical 1:1 boundary
+        // type-translation from the durable runtime seed phase onto the DSL's
+        // `RecoveredInputObservedPhase` — it must not collapse, infer, or
+        // normalize any phase (that authority lives in
+        // `NormalizeRecoveredInputLifecycle`). Every runtime phase variant maps
+        // to its same-named observed-phase variant.
+        use crate::meerkat_machine::dsl::RecoveredInputObservedPhase as Observed;
+        let cases = [
+            (InputLifecycleState::Accepted, Observed::Accepted),
+            (InputLifecycleState::Queued, Observed::Queued),
+            (InputLifecycleState::Staged, Observed::Staged),
+            (InputLifecycleState::Applied, Observed::Applied),
+            (
+                InputLifecycleState::AppliedPendingConsumption,
+                Observed::AppliedPendingConsumption,
+            ),
+            (InputLifecycleState::Consumed, Observed::Consumed),
+            (InputLifecycleState::Superseded, Observed::Superseded),
+            (InputLifecycleState::Coalesced, Observed::Coalesced),
+            (InputLifecycleState::Abandoned, Observed::Abandoned),
+        ];
+        for (phase, expected) in cases {
+            assert_eq!(
+                recovered_observed_phase(phase),
+                expected,
+                "recovered_observed_phase must project {phase:?} onto its same-named observed phase without reclassification",
+            );
+        }
     }
 
     #[test]

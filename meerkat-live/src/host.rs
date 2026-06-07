@@ -1409,15 +1409,80 @@ pub trait LiveToolDispatcher: Send + Sync {
 }
 
 /// Error returned by a [`LiveToolDispatcher`].
+///
+/// D113: failure semantics are typed, not prose-parsed. A
+/// [`LiveToolDispatcher`] backed by the canonical session runtime resolves a
+/// live tool call through the session service and therefore fails with a typed
+/// [`meerkat_core::SessionError`]. The seam classifies that error into a
+/// *distinct* variant via [`LiveToolDispatchError::from_session_error`],
+/// carrying the session error's stable `error_code` so the terminal class
+/// survives back through the live adapter rather than being flattened into a
+/// generic `Internal(other.to_string())` string. This mirrors the
+/// [`LiveProjectionError::from_session_error`] classification owner.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum LiveToolDispatchError {
     #[error(transparent)]
     Tool(#[from] ToolError),
+    /// The target session does not exist (`SessionError::NotFound`).
+    #[error("live tool dispatch target session {0} not found")]
+    SessionNotFound(SessionId),
+    /// A turn is already in progress on the target session
+    /// (`SessionError::Busy`).
+    #[error("live tool dispatch target session {0} is busy")]
+    SessionBusy(SessionId),
+    /// No turn is currently running on the target session
+    /// (`SessionError::NotRunning`).
+    #[error("live tool dispatch target session {0} is not running")]
+    SessionNotRunning(SessionId),
+    /// A required session capability (persistence / compaction) is disabled.
+    /// Carries the disabled capability's stable session error code.
+    #[error("live tool dispatch capability disabled ({code}): {message}")]
+    CapabilityDisabled { code: &'static str, message: String },
+    /// The session service refused the dispatch (typed
+    /// `SessionError::Unsupported`).
     #[error("live tool dispatch rejected: {0}")]
     Rejected(String),
+    /// A session-level failure whose typed cause is identified by the stable
+    /// `SessionError::code` (store error, agent error, structured failure).
+    /// Carries the code so callers route on the typed class, not the message.
+    #[error("live tool dispatch session error [{code}]: {message}")]
+    Session { code: &'static str, message: String },
     #[error("live tool dispatch internal error: {0}")]
     Internal(String),
+}
+
+impl LiveToolDispatchError {
+    /// Classify a [`meerkat_core::SessionError`] into a typed
+    /// [`LiveToolDispatchError`] variant (D113).
+    ///
+    /// `session_id` is the dispatch target, used to populate identity-bearing
+    /// variants. Every `SessionError` lands in a distinct typed variant
+    /// carrying the session error's stable `code()` — no variant is collapsed
+    /// into a prose-only `Internal(to_string())`. This is the single
+    /// classification owner; the RPC dispatch seam routes through it instead of
+    /// re-deriving the mapping inline, so the terminal class (not found / busy /
+    /// not running / capability disabled / rejected / internal) survives back
+    /// through the live adapter.
+    #[must_use]
+    pub fn from_session_error(session_id: &SessionId, err: meerkat_core::SessionError) -> Self {
+        use meerkat_core::SessionError;
+        // Compute the stable code + human-readable message before the match
+        // consumes `err`. `code()` returns a `&'static str` and `to_string()`
+        // borrows `err` via `Display`, so both are available before the move.
+        let code = err.code();
+        let message = err.to_string();
+        match err {
+            SessionError::NotFound { .. } => Self::SessionNotFound(session_id.clone()),
+            SessionError::Unsupported(reason) => Self::Rejected(reason),
+            SessionError::Busy { id } => Self::SessionBusy(id),
+            SessionError::NotRunning { id } => Self::SessionNotRunning(id),
+            SessionError::PersistenceDisabled | SessionError::CompactionDisabled => {
+                Self::CapabilityDisabled { code, message }
+            }
+            _ => Self::Session { code, message },
+        }
+    }
 }
 
 struct AgentLiveToolDispatcher {
@@ -5547,6 +5612,76 @@ mod tests {
             LiveProjectionError::Session { code, message } => {
                 assert_eq!(code, "SESSION_ERROR");
                 assert_eq!(message, "boom");
+            }
+            other => panic!("expected typed Session, got {other:?}"),
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // D113: typed SessionError -> LiveToolDispatchError classification.
+    // A NotFound / busy / not-running / capability-disabled / unsupported /
+    // store SessionError maps to the matching typed LiveToolDispatchError
+    // variant, never a generic Internal(to_string()) string, so the terminal
+    // class survives back through the live adapter.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn live_tool_dispatch_session_error_classification_lands_in_distinct_typed_variants() {
+        use meerkat_core::SessionError;
+
+        let sid = test_session_id();
+
+        // NotFound -> SessionNotFound (identity-bearing), NOT a string.
+        assert!(matches!(
+            LiveToolDispatchError::from_session_error(
+                &sid,
+                SessionError::NotFound { id: sid.clone() }
+            ),
+            LiveToolDispatchError::SessionNotFound(_)
+        ));
+
+        // Unsupported (no-dispatcher / refusal) -> Rejected, preserving the
+        // typed reason payload.
+        match LiveToolDispatchError::from_session_error(
+            &sid,
+            SessionError::Unsupported("no live tool dispatcher".into()),
+        ) {
+            LiveToolDispatchError::Rejected(reason) => {
+                assert_eq!(reason, "no live tool dispatcher");
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+
+        // Busy -> SessionBusy (distinct from Internal/Session).
+        assert!(matches!(
+            LiveToolDispatchError::from_session_error(&sid, SessionError::Busy { id: sid.clone() }),
+            LiveToolDispatchError::SessionBusy(_)
+        ));
+
+        // NotRunning -> SessionNotRunning.
+        assert!(matches!(
+            LiveToolDispatchError::from_session_error(
+                &sid,
+                SessionError::NotRunning { id: sid.clone() }
+            ),
+            LiveToolDispatchError::SessionNotRunning(_)
+        ));
+
+        // PersistenceDisabled / CompactionDisabled -> CapabilityDisabled,
+        // carrying the stable code (no prose-only Internal collapse).
+        match LiveToolDispatchError::from_session_error(&sid, SessionError::PersistenceDisabled) {
+            LiveToolDispatchError::CapabilityDisabled { code, .. } => {
+                assert_eq!(code, "SESSION_PERSISTENCE_DISABLED");
+            }
+            other => panic!("expected CapabilityDisabled, got {other:?}"),
+        }
+
+        // Store error -> typed Session { code } carrying the stable code,
+        // NOT a prose-only Internal(to_string()).
+        let store_err: Box<dyn std::error::Error + Send + Sync> = "disk gone".into();
+        match LiveToolDispatchError::from_session_error(&sid, SessionError::Store(store_err)) {
+            LiveToolDispatchError::Session { code, .. } => {
+                assert_eq!(code, "SESSION_STORE_ERROR");
             }
             other => panic!("expected typed Session, got {other:?}"),
         }

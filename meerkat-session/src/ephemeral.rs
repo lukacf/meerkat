@@ -792,6 +792,15 @@ pub struct EphemeralSessionService<B: SessionAgentBuilder> {
     archived_views: RwLock<IndexMap<SessionId, SessionView>>,
     builder: B,
     max_sessions: Option<usize>,
+    /// Global concurrency limit on simultaneously-active sessions.
+    ///
+    /// This is a RESOURCE GATE, not lifecycle authority: it bounds how many
+    /// sessions may hold live work at once, it does NOT own any session's
+    /// semantic materialization status. Acquiring or failing to acquire a
+    /// permit conveys "is there spare capacity right now", never "is this
+    /// session a valid/admitted authority". The canonical materialization
+    /// status decision belongs to runtime/machine admission, not to this
+    /// semaphore. Treat permit accounting purely as a concurrency limiter.
     active_session_capacity: Option<Arc<Semaphore>>,
     /// Notified when a new session handle is stored. Used by CLI --stdin
     /// to avoid polling for the session to appear.
@@ -981,6 +990,13 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         }
     }
 
+    /// Acquire a global active-capacity permit.
+    ///
+    /// This is a resource gate (concurrency limit), not lifecycle authority:
+    /// success means there is spare capacity, failure means the global active
+    /// ceiling is reached. It never decides whether a session is a valid
+    /// admitted authority — that decision is owned by runtime/machine
+    /// admission, not by this semaphore.
     fn try_acquire_active_permit(&self) -> Result<Option<OwnedSemaphorePermit>, SessionError> {
         let Some(capacity) = self.active_session_capacity.as_ref() else {
             return Ok(None);

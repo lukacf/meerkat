@@ -75,6 +75,15 @@ fn is_runtime_placeholder_session(session: &meerkat_core::Session) -> bool {
         )
 }
 
+/// Deserialize a persisted session-snapshot blob through the session migration
+/// path so v0/v1-shaped rows transparently upgrade, matching the SQLite runtime
+/// store read path. Previously these reads used raw `from_slice`, bypassing the
+/// migrators.
+fn deserialize_persisted_session(bytes: &[u8]) -> Result<meerkat_core::Session, RuntimeStoreError> {
+    meerkat_core::session_migrations::deserialize_session_migrating(bytes)
+        .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl RuntimeStore for InMemoryRuntimeStore {
@@ -122,10 +131,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         let previous = inner
             .sessions
             .get(&runtime_id.0)
-            .map(|snapshot| {
-                serde_json::from_slice::<meerkat_core::Session>(snapshot)
-                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
-            })
+            .map(|snapshot| deserialize_persisted_session(snapshot))
             .transpose()?;
         meerkat_core::session_store::run_boundary_snapshot_save_guard(&incoming, previous.as_ref())
             .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
@@ -148,10 +154,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         let previous = inner
             .sessions
             .get(&runtime_id.0)
-            .map(|snapshot| {
-                serde_json::from_slice::<meerkat_core::Session>(snapshot)
-                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
-            })
+            .map(|snapshot| deserialize_persisted_session(snapshot))
             .transpose()?;
         meerkat_core::session_store::transcript_rewrite_save_guard(
             &incoming,
@@ -206,9 +209,10 @@ impl RuntimeStore for InMemoryRuntimeStore {
                             actual: incoming_session.id().clone(),
                         });
                     }
-                    let previous_session = inner.sessions.get(&rid).and_then(|snapshot| {
-                        serde_json::from_slice::<meerkat_core::Session>(snapshot).ok()
-                    });
+                    let previous_session = inner
+                        .sessions
+                        .get(&rid)
+                        .and_then(|snapshot| deserialize_persisted_session(snapshot).ok());
                     if let Err(err) = meerkat_core::session_store::run_boundary_snapshot_save_guard(
                         &incoming_session,
                         previous_session.as_ref(),

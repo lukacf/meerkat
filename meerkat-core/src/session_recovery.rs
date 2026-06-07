@@ -39,6 +39,7 @@ pub struct SurfaceSessionRecoveryOverrides {
     pub budget_limits: Option<BudgetLimits>,
     pub override_builtins: Option<bool>,
     pub override_shell: Option<bool>,
+    pub override_comms: Option<bool>,
     pub override_memory: Option<bool>,
     pub override_schedule: Option<bool>,
     pub override_workgraph: Option<bool>,
@@ -229,6 +230,7 @@ pub fn has_materialization_overrides(overrides: &SurfaceSessionRecoveryOverrides
         || overrides.budget_limits.is_some()
         || overrides.override_builtins.is_some()
         || overrides.override_shell.is_some()
+        || overrides.override_comms.is_some()
         || overrides.override_memory.is_some()
         || overrides.override_schedule.is_some()
         || overrides.override_workgraph.is_some()
@@ -426,6 +428,7 @@ pub fn resolve_effective_turn_config(
         auth_binding: overrides.auth_binding.is_some(),
         override_builtins: overrides.override_builtins.is_some(),
         override_shell: overrides.override_shell.is_some(),
+        override_comms: overrides.override_comms.is_some(),
         override_memory: overrides.override_memory.is_some(),
         override_schedule: overrides.override_schedule.is_some(),
         override_workgraph: overrides.override_workgraph.is_some(),
@@ -507,6 +510,10 @@ pub fn resolve_effective_turn_config(
             .override_shell
             .map(ToolCategoryOverride::from_effective)
             .unwrap_or(metadata.tooling.shell),
+        override_comms: overrides
+            .override_comms
+            .map(ToolCategoryOverride::from_effective)
+            .unwrap_or(metadata.tooling.comms),
         override_memory: overrides
             .override_memory
             .map(ToolCategoryOverride::from_effective)
@@ -754,6 +761,7 @@ mod tests {
         assert_eq!(effective.build.auth_binding, Some(persisted_ref));
         assert_eq!(effective.build.override_builtins, metadata.tooling.builtins);
         assert_eq!(effective.build.override_shell, metadata.tooling.shell);
+        assert_eq!(effective.build.override_comms, metadata.tooling.comms);
         assert_eq!(effective.build.override_memory, metadata.tooling.memory);
         assert_eq!(effective.build.override_schedule, metadata.tooling.schedule);
         assert_eq!(
@@ -985,6 +993,7 @@ mod tests {
                 }),
                 override_builtins: Some(true),
                 override_shell: Some(false),
+                override_comms: Some(false),
                 override_memory: Some(false),
                 override_schedule: Some(false),
                 override_workgraph: Some(false),
@@ -1021,6 +1030,7 @@ mod tests {
         );
         assert_eq!(build.override_builtins, ToolCategoryOverride::Enable);
         assert_eq!(build.override_shell, ToolCategoryOverride::Disable);
+        assert_eq!(build.override_comms, ToolCategoryOverride::Disable);
         assert_eq!(build.override_memory, ToolCategoryOverride::Disable);
         assert_eq!(build.override_schedule, ToolCategoryOverride::Disable);
         assert_eq!(build.override_workgraph, ToolCategoryOverride::Disable);
@@ -1044,6 +1054,51 @@ mod tests {
         assert_eq!(recovered_tool_defs[0].name, "fresh_tool");
         assert_eq!(recovered.recoverable_tool_defs.len(), 1);
         assert_eq!(recovered.recoverable_tool_defs[0].name, "fresh_tool");
+    }
+
+    #[test]
+    fn build_recovered_session_comms_override_resolves_to_session_build_option() {
+        // Parity with the override_shell path: a recovery request that sets
+        // override_comms must surface as a typed comms tooling override on the
+        // resumed turn's build options (and flag the resume mask), rather than
+        // having no build/recovery authority seam at all.
+        let recovered = build_recovered_session(
+            sample_session(),
+            &SurfaceSessionRecoveryOverrides {
+                override_comms: Some(false),
+                ..Default::default()
+            },
+            SurfaceSessionRecoveryContext::default(),
+        )
+        .expect("recovered session with comms override");
+
+        assert_eq!(
+            recovered.build.override_comms,
+            ToolCategoryOverride::Disable,
+            "override_comms=Some(false) must disable comms tooling on the resumed turn"
+        );
+        assert!(
+            recovered.build.resume_override_mask.override_comms,
+            "explicit comms override must set the resume mask bit so persisted comms tooling is not rehydrated over it"
+        );
+
+        // Absent override inherits the persisted comms tooling (Inherit in the
+        // sample session).
+        let inherited = build_recovered_session(
+            sample_session(),
+            &SurfaceSessionRecoveryOverrides::default(),
+            SurfaceSessionRecoveryContext::default(),
+        )
+        .expect("recovered session without comms override");
+        assert_eq!(
+            inherited.build.override_comms,
+            ToolCategoryOverride::Inherit,
+            "absent comms override inherits persisted SessionTooling.comms"
+        );
+        assert!(
+            !inherited.build.resume_override_mask.override_comms,
+            "no explicit comms override must leave the resume mask bit clear"
+        );
     }
 
     #[test]

@@ -93,20 +93,40 @@ async fn create_runtime_backed_session_and_run_initial_turn(
     }
 }
 
+/// Wrap the REAL source-identity record (projected from the skill runtime's
+/// `SourceIdentityRegistry`) as wire provenance. The MCP surface must never
+/// synthesize identity from display data; the registry record is the single
+/// source of truth (mirrors `meerkat-rpc`'s `skills` handler).
 fn skill_source_provenance(
-    source_uuid: meerkat_core::skills::SourceUuid,
-    display_name: impl Into<String>,
+    identity: meerkat_core::skills::SourceIdentityRecord,
 ) -> meerkat_contracts::SkillSourceProvenance {
-    let display_name = display_name.into();
-    meerkat_contracts::SkillSourceProvenance {
-        identity: meerkat_core::skills::SourceIdentityRecord {
-            source_uuid,
-            display_name: display_name.clone(),
-            transport_kind: meerkat_core::skills::SourceTransportKind::Embedded,
-            fingerprint: format!("mcp:{display_name}"),
-            status: meerkat_core::skills::SourceIdentityStatus::Active,
-        },
-    }
+    meerkat_contracts::SkillSourceProvenance { identity }
+}
+
+/// Project a registry-backed introspection entry into the wire `SkillEntry`,
+/// failing closed when the typed source identity is absent rather than
+/// fabricating a synthetic provenance record.
+fn skill_entry_from_introspection(
+    entry: &meerkat_core::skills::SkillIntrospectionEntry,
+) -> Result<meerkat_contracts::SkillEntry, String> {
+    let source_identity = entry.source_identity.clone().ok_or_else(|| {
+        format!(
+            "skill {} missing typed source identity",
+            entry.descriptor.key
+        )
+    })?;
+    Ok(meerkat_contracts::SkillEntry {
+        key: entry.descriptor.key.clone(),
+        name: entry.descriptor.name.clone(),
+        description: entry.descriptor.description.clone(),
+        scope: entry.descriptor.scope.to_string(),
+        source: skill_source_provenance(source_identity),
+        is_active: entry.is_active,
+        shadowed_by: entry
+            .shadowed_by_identity
+            .clone()
+            .map(skill_source_provenance),
+    })
 }
 use meerkat_client::TestClient;
 use tokio::sync::Mutex;
@@ -1933,24 +1953,8 @@ async fn handle_meerkat_skills(
                 .map_err(|e| format!("skill list failed: {e}"))?;
             let wire: Vec<meerkat_contracts::SkillEntry> = entries
                 .iter()
-                .map(|e| meerkat_contracts::SkillEntry {
-                    key: e.descriptor.key.clone(),
-                    name: e.descriptor.name.clone(),
-                    description: e.descriptor.description.clone(),
-                    scope: e.descriptor.scope.to_string(),
-                    source: skill_source_provenance(
-                        e.descriptor.key.source_uuid.clone(),
-                        e.descriptor.source_name.clone(),
-                    ),
-                    is_active: e.is_active,
-                    shadowed_by: e.shadowed_by_source_uuid.clone().map(|source_uuid| {
-                        skill_source_provenance(
-                            source_uuid,
-                            e.shadowed_by.clone().unwrap_or_default(),
-                        )
-                    }),
-                })
-                .collect();
+                .map(skill_entry_from_introspection)
+                .collect::<Result<_, _>>()?;
             serde_json::to_value(meerkat_contracts::SkillListResponse { skills: wire })
                 .map_err(|e| format!("serialization failed: {e}"))
         }
@@ -1971,15 +1975,27 @@ async fn handle_meerkat_skills(
                 .load_from_source(&canonical, input.source.as_deref())
                 .await
                 .map_err(|e| format!("skill inspect failed: {e}"))?;
+            // Project the REAL provenance from the registry-backed introspection
+            // listing (matching the canonical key) rather than fabricating one
+            // from display data. Fail closed if the registry does not surface a
+            // typed identity for this key.
+            let provenance_entries = runtime
+                .list_all_with_provenance(&meerkat_core::skills::SkillFilter::default())
+                .await
+                .map_err(|e| format!("skill provenance lookup failed: {e}"))?;
+            let source_identity = provenance_entries
+                .into_iter()
+                .find(|entry| entry.descriptor.key == doc.descriptor.key)
+                .and_then(|entry| entry.source_identity)
+                .ok_or_else(|| {
+                    format!("skill {} missing typed source identity", doc.descriptor.key)
+                })?;
             serde_json::to_value(meerkat_contracts::SkillInspectResponse {
                 key: doc.descriptor.key.clone(),
                 name: doc.descriptor.name.clone(),
                 description: doc.descriptor.description.clone(),
                 scope: doc.descriptor.scope.to_string(),
-                source: skill_source_provenance(
-                    doc.descriptor.key.source_uuid.clone(),
-                    doc.descriptor.source_name.clone(),
-                ),
+                source: skill_source_provenance(source_identity),
                 body: doc.body,
             })
             .map_err(|e| format!("serialization failed: {e}"))
@@ -5165,6 +5181,79 @@ mod tests {
         let input: MeerkatSkillsInput =
             serde_json::from_value(serde_json::json!({ "action": "list" })).unwrap();
         assert!(matches!(input.action, MeerkatSkillsAction::List));
+    }
+
+    /// Gate for dogma row #133: MCP skills provenance must PROJECT the real
+    /// `SourceIdentityRecord` from the runtime's identity registry, never
+    /// fabricate a synthetic `mcp:{display}` / Embedded record from display
+    /// data. The wire entry's transport and fingerprint must equal the registry
+    /// record exactly.
+    #[test]
+    fn test_skill_entry_projects_real_registry_provenance_not_synthetic() {
+        use meerkat_core::skills::{
+            SkillDescriptor, SkillKey, SkillName, SkillScope, SourceIdentityRecord,
+            SourceIdentityStatus, SourceTransportKind, SourceUuid,
+        };
+
+        let source_uuid = SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f").expect("uuid");
+        // The authoritative record the registry would surface: a Filesystem
+        // source with a real content fingerprint — NOT the synthetic
+        // `mcp:{display_name}` / Embedded shape.
+        let registry_identity = SourceIdentityRecord {
+            source_uuid: source_uuid.clone(),
+            display_name: "company-skills".to_string(),
+            transport_kind: SourceTransportKind::Filesystem,
+            fingerprint: "sha256:abc123".to_string(),
+            status: SourceIdentityStatus::Active,
+        };
+
+        let key = SkillKey::new(
+            source_uuid,
+            SkillName::parse("email-extractor").expect("name"),
+        );
+        let mut descriptor = SkillDescriptor::new(key, "Email Extractor", "Extracts email");
+        descriptor.scope = SkillScope::Project;
+        descriptor.source_name = "company-skills".to_string();
+
+        let entry = meerkat_core::skills::SkillIntrospectionEntry {
+            descriptor,
+            source_identity: Some(registry_identity.clone()),
+            shadowed_by: None,
+            shadowed_by_identity: None,
+            shadowed_by_source_uuid: None,
+            is_active: true,
+        };
+
+        let wire = skill_entry_from_introspection(&entry).expect("real provenance projects");
+
+        // Provenance must equal the registry record verbatim.
+        assert_eq!(wire.source.identity, registry_identity);
+        assert_eq!(
+            wire.source.identity.transport_kind,
+            SourceTransportKind::Filesystem
+        );
+        assert_eq!(wire.source.identity.fingerprint, "sha256:abc123");
+        // The synthetic forms must be gone.
+        assert_ne!(
+            wire.source.identity.transport_kind,
+            SourceTransportKind::Embedded
+        );
+        assert!(
+            !wire.source.identity.fingerprint.starts_with("mcp:"),
+            "fingerprint must not be the synthetic mcp: form, got {}",
+            wire.source.identity.fingerprint
+        );
+
+        // Fail closed: an entry without a typed identity must error rather than
+        // fabricate one.
+        let mut orphan = entry;
+        orphan.source_identity = None;
+        let err = skill_entry_from_introspection(&orphan)
+            .expect_err("missing typed identity must fail closed");
+        assert!(
+            err.contains("missing typed source identity"),
+            "unexpected error: {err}"
+        );
     }
 
     #[cfg(not(feature = "comms"))]

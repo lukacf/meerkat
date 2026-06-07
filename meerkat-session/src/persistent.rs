@@ -3817,6 +3817,26 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(session)
     }
 
+    /// Write the durable session projection as a *compatibility surface only* —
+    /// never as a second authority.
+    ///
+    /// Source of truth: the `MeerkatMachine` lifecycle (`RuntimeState::Retired`
+    /// for archival) owned by `runtime_store`. This projection mirrors that
+    /// machine fact for non-runtime readers and discovery; it is intentionally
+    /// NOT consulted as authority. `session_archived_by_authority` reads
+    /// `RuntimeState::Retired` as primary and fails closed when a projection
+    /// claims archived but the machine lifecycle state is absent, so a stale or
+    /// partially-written projection can never silently flip archival truth.
+    ///
+    /// Ordering invariant: callers (`archive_with_store_only_mode`) invoke this
+    /// only AFTER `protocol.retire_session` has committed the canonical
+    /// `Retire` transition — the projection write trails the machine, never
+    /// leads it.
+    ///
+    /// Rebuild trigger: this projection is derived and reconstructable. Deleting
+    /// it and replaying machine/event-store state (via `SessionProjector`)
+    /// reproduces identical content; the machine authority is the rebuild
+    /// source, not this file.
     async fn save_compatibility_projection_only(
         &self,
         session: Session,

@@ -3848,6 +3848,50 @@ capabilities = [{capability_values}]
         );
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn only_openai_seeds_single_openai_binding_via_catalog_priority() {
+        // With only openai configured, the per-realm default binding is the
+        // openai binding (its catalog-priority position is irrelevant when it
+        // is the sole provider — it is the only entry, so it seeds the default).
+        // No binding for any other provider is invented.
+        let mut config = Config::default();
+        let api_keys = HashMap::from([("openai".to_string(), "sk-oai".to_string())]);
+        populate_realm_from_api_keys(&mut config, &api_keys, None);
+        let section = config.realm.get("default").expect("default realm");
+
+        // Exactly one backend, whose provider is the typed `openai` identity
+        // (round-trips through Provider::parse_strict — no stringly invention).
+        assert_eq!(section.backend.len(), 1);
+        let backend = section.backend.values().next().expect("openai backend");
+        assert_eq!(backend.provider, "openai");
+        assert_eq!(
+            meerkat_core::Provider::parse_strict(&backend.provider),
+            Some(meerkat_core::Provider::OpenAI),
+        );
+
+        // The single configured provider seeds the per-realm default binding,
+        // and no anthropic/gemini binding is conjured into existence.
+        assert_eq!(section.default_binding.as_deref(), Some("default_openai"));
+        assert!(!section.backend.contains_key("default_anthropic"));
+        assert!(!section.backend.contains_key("default_gemini"));
+
+        // The default binding string is owned by the catalog provider list:
+        // its `default_<provider>` form names a provider that is itself a typed
+        // catalog identity, never an arbitrary key.
+        let default_provider = section
+            .default_binding
+            .as_deref()
+            .and_then(|id| id.strip_prefix("default_"))
+            .expect("default binding uses default_<provider> form");
+        assert!(
+            meerkat_models::catalog::provider_priority()
+                .iter()
+                .any(|p| p.as_str() == default_provider),
+            "default binding provider '{default_provider}' must be catalog-owned"
+        );
+    }
+
     // ── Row #186: Credentials carries max_sessions ─────────────────────────
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -3897,6 +3941,109 @@ capabilities = [{capability_values}]
         .expect("permissive policy accepts unsigned pack");
         // The verified definition is consumed, not discarded.
         assert_eq!(parsed.definition.id, "browser-test");
+    }
+
+    /// Build a trusted, signer-registered mobpack via the canonical
+    /// `meerkat_mob_pack::pack` signing authority and return both the signed
+    /// archive bytes and a `TrustedSigners` that recognizes the embedded key.
+    ///
+    /// The pack is signed through `pack_directory`'s real signing path (key file
+    /// → Ed25519 signature over the canonical digest), so the produced archive
+    /// is verifiable under `TrustPolicy::Strict`. The embedded public key is read
+    /// back out of the produced `signature.toml` to seed the trust store, which
+    /// keeps the test free of a direct `ed25519_dalek` dependency.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn trusted_signed_mobpack() -> (Vec<u8>, meerkat_mob_pack::trust::TrustedSigners) {
+        use std::str::FromStr;
+
+        // Unique on-disk pack directory (no `tempfile` dep needed in this crate).
+        let dir = std::env::temp_dir().join(format!(
+            "rkat-web-runtime-signed-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("create pack dir");
+
+        // Minimal valid pack: manifest (name + version, no [trust]) and a
+        // definition whose `id` the browser header reads back.
+        std::fs::write(
+            dir.join("manifest.toml"),
+            b"[mobpack]\nname = \"browser-test\"\nversion = \"1.0.0\"\n",
+        )
+        .expect("write manifest");
+        std::fs::write(dir.join("definition.json"), br#"{"id":"browser-test"}"#)
+            .expect("write definition");
+
+        // 32-byte Ed25519 secret as 64 hex chars (the signing key file format).
+        let key_path = dir.join("signing.key");
+        std::fs::write(
+            &key_path,
+            "0909090909090909090909090909090909090909090909090909090909090909",
+        )
+        .expect("write signing key");
+
+        let packed = meerkat_mob_pack::pack::pack_directory(
+            &dir,
+            Some(meerkat_mob_pack::pack::SigningRequest {
+                signer_id: "ci",
+                key_path: &key_path,
+            }),
+        )
+        .expect("sign pack");
+
+        // Read the embedded public key back out of the produced signature so the
+        // trust store recognizes the very signer that signed this pack.
+        let files = super::extract_targz_safe(&packed.archive_bytes).expect("extract signed pack");
+        let signature_bytes = files.get("signature.toml").expect("signature.toml present");
+        let signature: meerkat_mob_pack::signing::PackSignature =
+            toml::from_str(std::str::from_utf8(signature_bytes).expect("signature utf8"))
+                .expect("parse signature");
+
+        let trusted_key = meerkat_mob_pack::vocabulary::Ed25519PublicKeyHex::from_str(
+            signature.public_key.as_hex(),
+        )
+        .expect("public key hex");
+        let signer_id = meerkat_mob_pack::vocabulary::SignerId::from_str("ci").expect("signer id");
+
+        let mut trusted = meerkat_mob_pack::trust::TrustedSigners::default();
+        trusted.signers.insert(signer_id, trusted_key);
+
+        std::fs::remove_dir_all(&dir).ok();
+        (packed.archive_bytes, trusted)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn trusted_signed_mobpack_succeeds_under_strict_and_is_consumed() {
+        let (archive, trusted) = trusted_signed_mobpack();
+        let parsed = extract_verify_and_parse_mobpack(
+            &archive,
+            meerkat_mob_pack::trust::TrustPolicy::Strict,
+            &trusted,
+        )
+        .expect("trusted-signed pack must pass Strict verification");
+        // The verified pack is threaded forward (consumed), not dropped: the
+        // definition id and manifest name survive into the runtime bootstrap
+        // material via `BootstrapMobpack::from_parsed`.
+        assert_eq!(parsed.definition.id, "browser-test");
+        let bootstrap = super::BootstrapMobpack::from_parsed(parsed);
+        assert_eq!(bootstrap.name, "browser-test");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn signed_mobpack_with_untrusted_signer_fails_closed_under_strict() {
+        // The pack is validly signed but the signer is NOT in the trust store;
+        // Strict policy must reject it (fail closed), proving signing alone is
+        // insufficient — trust is required.
+        let (archive, _trusted) = trusted_signed_mobpack();
+        let err = extract_verify_and_parse_mobpack(
+            &archive,
+            meerkat_mob_pack::trust::TrustPolicy::Strict,
+            &meerkat_mob_pack::trust::TrustedSigners::default(),
+        )
+        .expect_err("unknown signer must fail closed under Strict");
+        assert_eq!(err["code"], "untrusted_mobpack");
     }
 
     // ── Row #204: lagged sentinel serializes to the typed schema ───────────

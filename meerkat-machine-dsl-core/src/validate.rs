@@ -135,14 +135,29 @@ pub fn validate(def: &MachineDef) -> Result<(), Error> {
                     ));
                 }
             }
-            // Last rule should be a fallback (no condition)
-            if let Some(last) = proj.rules.last()
-                && last.condition.is_some()
-                && proj.rules.len() == def.phase_enum.variants.len()
-            {
-                // All rules have conditions — no fallback. This may be intentional
-                // but is a common mistake, so warn via the error.
-                // Actually, don't error here — the unreachable! in codegen catches it.
+            // Totality + no-dead-arms (fail closed at the DSL boundary). The
+            // generated `phase()` evaluates the projection rules top-to-bottom,
+            // returning on the first match. The FINAL rule must be an
+            // unconditional fallback so the projection is exhaustive by
+            // construction (the generated method then needs no panicking
+            // `unreachable!`), and NO earlier rule may be unconditional — an
+            // unconditional non-final rule makes every following rule dead.
+            for (idx, rule) in proj.rules.iter().enumerate() {
+                let is_last = idx + 1 == proj.rules.len();
+                match (is_last, rule.condition.is_some()) {
+                    (true, true) => errors.push(Error::new(
+                        rule.phase.span(),
+                        "the final `phase_projection` rule must be unconditional (a total \
+                         fallback with no `if` condition) so the projection is exhaustive by \
+                         construction",
+                    )),
+                    (false, false) => errors.push(Error::new(
+                        rule.phase.span(),
+                        "only the final `phase_projection` rule may be unconditional; an earlier \
+                         unconditional rule makes every following projection rule unreachable",
+                    )),
+                    _ => {}
+                }
             }
         }
     }

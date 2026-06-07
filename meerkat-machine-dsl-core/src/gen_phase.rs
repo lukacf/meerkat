@@ -39,8 +39,11 @@ pub fn generate(def: &MachineDef) -> TokenStream {
             .collect();
         quote! {
             pub fn phase(&self) -> #phase_name {
+                // Validation guarantees the final projection rule is an
+                // unconditional fallback, so the last arm is an unconditional
+                // `return` and this method is total by construction (no
+                // panicking `unreachable!` fallback needed).
                 #(#arms)*
-                unreachable!("phase projection must be exhaustive")
             }
         }
     } else {

@@ -2500,7 +2500,12 @@ impl MobActor {
             .send_bridge_command_typed(
                 &authorized_peer,
                 &command,
-                std::time::Duration::from_secs(30),
+                // 60s (not 30s): tolerate async trust/peer-registration
+                // propagation lag before the bind reply lands (matches the
+                // responder's 60s wait). Bounds failure-lag only — under
+                // high-parallelism RBE loopback registration can lag tens of
+                // seconds; in real deployments it propagates in ms.
+                std::time::Duration::from_secs(60),
             )
             .await?;
         let returned_address = super::bridge_protocol::canonicalize_bridge_address(&bind.address);
@@ -2668,9 +2673,15 @@ impl MobActor {
         // `AuthorizeSupervisor` rejection or send failure must leave NO
         // installed recipient trust (fail closed).
         self.supervisor_bridge.trust_recipient(peer).await?;
+        // 60s (not 30s): the requester must tolerate the same async
+        // trust/peer-registration propagation lag the live peer waits out
+        // before replying (see `spawn_live_external_peer`, 60s). Bounds genuine
+        // failure-lag only — the happy path returns as soon as the reply lands.
+        // Under high-parallelism RBE loopback registration can lag tens of
+        // seconds; in real deployments it propagates in milliseconds.
         let value = match self
             .supervisor_bridge
-            .send_bridge_command(peer, &command, std::time::Duration::from_secs(30))
+            .send_bridge_command(peer, &command, std::time::Duration::from_secs(60))
             .await
         {
             Ok(value) => value,

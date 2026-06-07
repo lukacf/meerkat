@@ -821,6 +821,91 @@ test('Mob result decoders preserve generated result truth after validation', asy
   assert.deepEqual(flowStatus.step_ledger, []);
 });
 
+test('memberStatus rejects malformed resolved_capabilities booleans instead of coercing', async () => {
+  // A non-boolean capability flag must fail closed; the SDK must NOT coerce it
+  // (e.g. Boolean("false") === true would silently flip the meaning).
+  const malformedMob = new Mob('mob-web-unit', {
+    async mob_member_status() {
+      return JSON.stringify({
+        status: 'active',
+        member_ref: 'runtime-owned-ref-worker-1',
+        tokens_used: 1,
+        is_final: false,
+        resolved_capabilities: {
+          vision: false,
+          image_input: false,
+          image_tool_results: false,
+          inline_video: false,
+          realtime: 'false', // string, not boolean
+          web_search: false,
+          image_generation: false,
+        },
+      });
+    },
+  });
+  await assert.rejects(
+    () => malformedMob.memberStatus('worker-1'),
+    /resolved_capabilities\.realtime must be boolean/,
+  );
+
+  // An absent capability flag is equally malformed against the domain shape
+  // (all 7 flags are required) and must throw rather than default to false.
+  const missingFlagMob = new Mob('mob-web-unit', {
+    async mob_member_status() {
+      return JSON.stringify({
+        status: 'active',
+        member_ref: 'runtime-owned-ref-worker-1',
+        tokens_used: 1,
+        is_final: false,
+        resolved_capabilities: {
+          vision: true,
+          image_input: true,
+          image_tool_results: true,
+          inline_video: true,
+          realtime: true,
+          web_search: true,
+          // image_generation omitted
+        },
+      });
+    },
+  });
+  await assert.rejects(
+    () => missingFlagMob.memberStatus('worker-1'),
+    /resolved_capabilities\.image_generation must be boolean/,
+  );
+
+  // Sanity: a fully-typed capabilities block still parses and preserves truth.
+  const validMob = new Mob('mob-web-unit', {
+    async mob_member_status() {
+      return JSON.stringify({
+        status: 'active',
+        member_ref: 'runtime-owned-ref-worker-1',
+        tokens_used: 1,
+        is_final: false,
+        resolved_capabilities: {
+          vision: true,
+          image_input: false,
+          image_tool_results: true,
+          inline_video: false,
+          realtime: true,
+          web_search: false,
+          image_generation: true,
+        },
+      });
+    },
+  });
+  const snapshot = await validMob.memberStatus('worker-1');
+  assert.deepEqual(snapshot.resolved_capabilities, {
+    vision: true,
+    image_input: false,
+    image_tool_results: true,
+    inline_video: false,
+    realtime: true,
+    web_search: false,
+    image_generation: true,
+  });
+});
+
 test('Mob.respawn rejects legacy receipt carriers instead of projecting success', async () => {
   const mob = new Mob('mob-web-unit', {
     async mob_respawn() {

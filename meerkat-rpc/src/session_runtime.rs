@@ -19766,6 +19766,90 @@ mod tests {
         );
     }
 
+    /// #302: `live/open` must fail closed when no realtime session factory is
+    /// wired into the build. Before the fix, `open_channel_with_authority`
+    /// minted a channel regardless of factory presence, then returned a
+    /// `channel_id` + bootstrap with all-false capabilities that rejected
+    /// every real command later. The handler now refuses the open *before*
+    /// any admission/channel is resolved — it returns a typed
+    /// `INTERNAL_ERROR` and the response carries no `result` (no `channel_id`,
+    /// no transport bootstrap), proving no channel was registered or opened.
+    #[tokio::test]
+    async fn live_open_without_session_factory_fails_closed_and_opens_no_channel() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+
+        // Materialize a realtime-capable session so the B17 existence check
+        // passes and the flow reaches the #302 no-factory guard.
+        let mut build = AgentBuildConfig::new("gpt-realtime-2");
+        build.provider = Some(meerkat_core::Provider::OpenAI);
+        build.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create_session for realtime build");
+
+        // A fresh host starts with no channels; the assertion below proves it
+        // stays that way because the handler returns before opening one. The
+        // #302 guard fires before any transport branch runs, so `live_ws` is
+        // never read on this path — pass `None` and skip the heavyweight
+        // `LiveWsState` fixture.
+        let host = meerkat_live::LiveAdapterHost::new(Arc::new(meerkat_live::NoOpProjectionSink));
+
+        let params = serde_json::value::to_raw_value(&serde_json::json!({
+            "session_id": session_id.to_string(),
+        }))
+        .expect("serialize live/open params");
+
+        let ctx = crate::handlers::live::LiveOpenHandlerContext {
+            host: &host,
+            live_ws: None,
+            live_ws_base_url: None,
+            #[cfg(feature = "live-webrtc")]
+            live_webrtc: None,
+            runtime: &runtime,
+            // The whole point of #302: no factory wired.
+            session_factory: None,
+        };
+
+        let response =
+            crate::handlers::live::handle_live_open(None, Some(params.as_ref()), ctx).await;
+
+        // Typed error, not a success carrying a channel id.
+        let err = response
+            .error
+            .expect("no-factory live/open must return a typed error");
+        assert_eq!(
+            err.code,
+            error::INTERNAL_ERROR,
+            "no-factory live/open must fail with INTERNAL_ERROR, got {err:?}"
+        );
+        assert!(
+            err.message.contains("realtime session factory"),
+            "error must name the missing realtime session factory, got: {}",
+            err.message
+        );
+        // No result payload means no channel_id / transport bootstrap was ever
+        // handed back — the admission/open path never ran.
+        assert!(
+            response.result.is_none(),
+            "no-factory live/open must not return a result payload (no channel opened)"
+        );
+
+        // Direct host evidence: a `random_uuid` close-reserve would only ever
+        // succeed against a registered channel. The handler opened none, so
+        // any probe resolves to `ChannelNotFound` — there is no orphaned
+        // channel left behind.
+        let probe = meerkat_live::LiveChannelId::random_uuid();
+        assert!(
+            matches!(
+                host.reserve_channel_close_observation(&probe).await,
+                Err(meerkat_live::LiveAdapterHostError::ChannelNotFound(_))
+            ),
+            "host must hold no live channels after a fail-closed no-factory open"
+        );
+    }
+
     #[tokio::test]
     async fn turn_start_on_pending_session_rejects_provider_only_override() {
         use crate::handlers::turn::TurnOverrides;

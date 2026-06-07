@@ -873,6 +873,21 @@ pub async fn handle_live_open(
         );
     }
 
+    // #302: refuse the open up front when no realtime session factory is
+    // wired into this build. Without a factory there is no provider adapter
+    // to attach, so an opened channel could only report all-false
+    // capabilities and would reject every real command later. Fail closed
+    // *before* `resolve_live_open_admission` / `open_channel_with_authority`
+    // run so we never register or open a channel that cannot serve traffic.
+    let Some(session_factory) = session_factory else {
+        return RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            "live open requires a realtime session factory; none is wired in this build"
+                .to_string(),
+        );
+    };
+
     // R3-1 (P1): honor the caller's optional `turning_mode` override.
     // Default = `ProviderManaged` (back-compat with pre-R3-1 callers).
     // Callers that need the G9 typed text-only `live/commit_input`
@@ -884,36 +899,20 @@ pub async fn handle_live_open(
     let turning_mode = parsed
         .turning_mode
         .unwrap_or(RealtimeTurningMode::ProviderManaged);
-    let prepared_open_config = if session_factory.is_some() {
-        match runtime
-            .live_open_config_for_session(&session_id, turning_mode)
-            .await
-        {
-            Ok(config) => Some(config),
-            Err(err) => {
-                return RpcResponse::error(
-                    id,
-                    error::INTERNAL_ERROR,
-                    format!("failed to build session config: {err}"),
-                );
-            }
+    let prepared_open_config = match runtime
+        .live_open_config_for_session(&session_id, turning_mode)
+        .await
+    {
+        Ok(config) => config,
+        Err(err) => {
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("failed to build session config: {err}"),
+            );
         }
-    } else {
-        None
     };
-    let live_open_identity = match prepared_open_config.as_ref() {
-        Some(config) => config.llm_identity.clone(),
-        None => match runtime.live_llm_identity_for_session(&session_id).await {
-            Ok(identity) => identity,
-            Err(err) => {
-                return RpcResponse::error(
-                    id,
-                    error::INTERNAL_ERROR,
-                    format!("failed to resolve live channel identity: {err}"),
-                );
-            }
-        },
-    };
+    let live_open_identity = prepared_open_config.llm_identity.clone();
 
     let candidate_channel_id = LiveChannelId::random_uuid();
     let open_authority = match runtime
@@ -985,31 +984,25 @@ pub async fn handle_live_open(
         }
     };
 
-    // A8: continuity is computed from the projection snapshot built when a
-    // factory is wired; without a factory (e.g. degraded test config) the
-    // channel still opens but reports `Fresh` — there is no seeded state.
-    let mut continuity = LiveContinuityMode::Fresh;
-    // #176: the resolved typed audio policy for this channel. Populated from
-    // the realtime factory's `RealtimeCapabilities` (provider/model audio
-    // owner) when a factory wired the channel; the WS `&format=` token and
-    // the snapshot `audio_config` both derive from this single typed value.
-    let mut resolved_audio_config: Option<LiveAudioConfig> = None;
-    // P2#3: capture the adapter's real capability set for the response.
-    // Only meaningful when a factory wired the channel; otherwise the
-    // conservative all-false placeholder remains (no adapter, no claims).
-    let mut capabilities = LiveChannelCapabilities {
-        audio_in: false,
-        audio_out: false,
-        text_in: false,
-        text_out: false,
-        image_in: false,
-        video_in: false,
-        transcript_supported: false,
-        barge_in_supported: false,
-        provider_native_resume: false,
-    };
+    // A8: continuity is computed from the projection snapshot built for this
+    // channel. #302 makes a wired realtime factory a precondition, so the
+    // factory block below always runs and assigns these on the success path
+    // (every error path early-returns) — they are assigned exactly once, with
+    // no dead placeholder fallback.
+    //
+    // - `continuity` honestly reports `Fresh` for empty seed history and
+    //   `TranscriptOnly` once seeded (from `continuity_from_snapshot`).
+    // - `resolved_audio_config` (#176) is the typed audio policy resolved from
+    //   the factory's `RealtimeCapabilities` (provider/model audio owner); the
+    //   WS `&format=` token and the snapshot `audio_config` both read it.
+    // - `capabilities` (P2#3) is the adapter's real capability set.
+    let continuity: LiveContinuityMode;
+    let resolved_audio_config: Option<LiveAudioConfig>;
+    let capabilities: LiveChannelCapabilities;
 
-    if let Some(factory) = session_factory {
+    {
+        let factory = session_factory;
+        let open_config = &prepared_open_config;
         // B18: refuse providers without a wired live adapter and models that
         // lack realtime capability before reaching the factory. Without this,
         // a Gemini Live session would route through the OpenAI realtime
@@ -1036,14 +1029,6 @@ pub async fn handle_live_open(
             return RpcResponse::error(id, code, message);
         }
 
-        let Some(open_config) = prepared_open_config.as_ref() else {
-            close_live_channel_after_open_failure(host, runtime, &session_id, &channel_id).await;
-            return RpcResponse::error(
-                id,
-                error::INTERNAL_ERROR,
-                "session factory was wired without a prepared live open config".to_string(),
-            );
-        };
         // E25: open a provider-native `LiveAdapter` directly. The OpenAI
         // factory implements `open_live_adapter` to bypass the
         // `Box<dyn RealtimeSession>` boxing layer that the legacy
@@ -1296,8 +1281,9 @@ pub async fn handle_live_open(
     let transport: meerkat_contracts::WireLiveTransportBootstrap = transport.into();
 
     // P2#3: capabilities now reflect the adapter's real `capabilities()`
-    // (queried in the factory branch above). Without a factory the
-    // conservative all-false defaults are kept — no adapter, no claims.
+    // (queried in the factory branch above). #302 makes a wired factory a
+    // precondition for reaching this point, so the all-false defaults are
+    // always overwritten with the adapter's real capability set.
     //
     // A8: continuity is computed from the projection snapshot above; it
     // honestly reports `Fresh` for empty seed history, `TranscriptOnly` for

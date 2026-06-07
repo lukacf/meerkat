@@ -126,6 +126,64 @@ fn new_hnsw_index(max_elements_hint: usize, params: HnswParams) -> MemoryHnswInd
     )
 }
 
+/// Rebuild a single scoped HNSW index from the rows that currently survive in
+/// SQLite for `session_id`.
+///
+/// This is the per-scope analogue of the full re-index performed by
+/// [`HnswMemoryStore::open`]: it derives the live index purely from committed
+/// DB state, so callers can repair a scope after a partial in-memory insert
+/// (where the DB rows were rolled back) without leaving phantom neighbor slots
+/// that point at DB-deleted records.
+fn rebuild_scoped_index_from_db(
+    conn: &Connection,
+    session_id: &SessionId,
+    embedding_model: &dyn EmbeddingModel,
+    params: HnswParams,
+) -> Result<ScopedHnswIndex, MemoryStoreError> {
+    let mut rows = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT t.point_id, t.content, m.metadata_json \
+                 FROM memory_text t \
+                 JOIN memory_metadata m ON m.point_id = t.point_id \
+                 ORDER BY t.point_id ASC",
+            )
+            .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
+        let mapped = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
+        for row in mapped {
+            rows.push(row.map_err(|e| MemoryStoreError::Storage(e.to_string()))?);
+        }
+    }
+
+    let mut scoped: Vec<(usize, String)> = Vec::new();
+    for (point_id, text, metadata_json) in rows {
+        let metadata: MemoryMetadata = serde_json::from_slice(&metadata_json)
+            .map_err(|e| MemoryStoreError::Embedding(e.to_string()))?;
+        if &metadata.session_id != session_id {
+            continue;
+        }
+        let point_id =
+            usize::try_from(point_id).map_err(|_| MemoryStoreError::PointIdOutOfRange)?;
+        scoped.push((point_id, String::from_utf8_lossy(&text).into_owned()));
+    }
+
+    let index = ScopedHnswIndex::new(scoped.len(), params);
+    for (point_id, text) in &scoped {
+        let embedding = embedding_model.embed(text);
+        index.insert(&embedding, *point_id);
+    }
+    Ok(index)
+}
+
 struct ScopedHnswIndex {
     index: MemoryHnswIndex,
     #[cfg(test)]
@@ -160,6 +218,12 @@ pub struct HnswMemoryStore {
     /// Injected typed ranking policy: the authority for embedding generation
     /// and HNSW index parameters (not store-local constants).
     policy: MemoryRankingPolicy,
+    /// Test-only fault injector: when set, the in-memory HNSW insert loop fails
+    /// after the configured number of successful inserts within a batch,
+    /// simulating a partial mid-batch failure so the rollback/repair path can be
+    /// exercised deterministically. Production builds never carry this field.
+    #[cfg(test)]
+    fail_hnsw_insert_after: Arc<std::sync::atomic::AtomicI64>,
 }
 
 impl HnswMemoryStore {
@@ -259,6 +323,8 @@ impl HnswMemoryStore {
             insert_lock: Mutex::new(()),
             path: dir.to_path_buf(),
             policy,
+            #[cfg(test)]
+            fail_hnsw_insert_after: Arc::new(std::sync::atomic::AtomicI64::new(-1)),
         })
     }
 
@@ -294,6 +360,14 @@ impl HnswMemoryStore {
             .map(|index| index.max_elements_hint)
             .collect()
     }
+
+    /// Test-only: arm the in-memory HNSW insert loop to fail after `after`
+    /// successful inserts within the next batch (`-1` disables injection).
+    #[cfg(test)]
+    fn arm_hnsw_insert_failure_after(&self, after: i64) {
+        self.fail_hnsw_insert_after
+            .store(after, std::sync::atomic::Ordering::Release);
+    }
 }
 
 #[async_trait]
@@ -324,6 +398,9 @@ impl MemoryStore for HnswMemoryStore {
         let indices = Arc::clone(&self.indices);
         let session_id = receipt_scope.session_id().clone();
         let hnsw_params = self.policy.hnsw_params();
+        let embedding_model = Arc::clone(self.policy.embedding_model());
+        #[cfg(test)]
+        let fail_hnsw_insert_after = Arc::clone(&self.fail_hnsw_insert_after);
 
         // Keep point ID allocation coupled to a successful write.
         let _guard = self.insert_lock.lock().await;
@@ -360,10 +437,25 @@ impl MemoryStore for HnswMemoryStore {
                     .write()
                     .map_err(|_| MemoryStoreError::LockPoisoned)?;
                 let index = indices
-                    .entry(session_id)
+                    .entry(session_id.clone())
                     .or_insert_with(|| ScopedHnswIndex::new(indexed_entries, hnsw_params));
-                for (point_id, (_content, _meta_json, embedding)) in point_ids.iter().zip(&entries)
+                // The enumerate index is consumed only by the `cfg(test)`
+                // fault-injection seam below; in non-test builds it is unused.
+                #[allow(clippy::unused_enumerate_index)]
+                for (_ordinal, (point_id, (_content, _meta_json, embedding))) in
+                    point_ids.iter().zip(&entries).enumerate()
                 {
+                    // Test-only fault injection: simulate a partial mid-batch
+                    // HNSW failure after `fail_hnsw_insert_after` successful
+                    // inserts so the rollback/repair path can be exercised.
+                    #[cfg(test)]
+                    {
+                        let fail_after =
+                            fail_hnsw_insert_after.load(std::sync::atomic::Ordering::Acquire);
+                        if fail_after >= 0 && _ordinal as i64 >= fail_after {
+                            return Err(MemoryStoreError::LockPoisoned);
+                        }
+                    }
                     let point_id = usize::try_from(*point_id)
                         .map_err(|_| MemoryStoreError::PointIdOutOfRange)?;
                     index.insert(embedding, point_id);
@@ -390,6 +482,26 @@ impl MemoryStore for HnswMemoryStore {
                 }
                 tx.commit()
                     .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
+
+                // `hnsw_rs` cannot remove already-inserted points, so a partial
+                // insert above may have left live neighbor slots for point_ids
+                // we just deleted from the DB. Rebuild the scope's live index
+                // purely from the surviving committed rows so a subsequent
+                // search in this same process never selects phantom (DB-deleted)
+                // neighbor slots. This mirrors the full re-index that crash
+                // recovery performs on `open`. Fail closed: if the rebuild
+                // cannot be derived from the DB, surface the typed fault rather
+                // than leaving a stale live index.
+                let repaired = rebuild_scoped_index_from_db(
+                    &cleanup,
+                    &session_id,
+                    embedding_model.as_ref(),
+                    hnsw_params,
+                )?;
+                let mut indices = indices
+                    .write()
+                    .map_err(|_| MemoryStoreError::LockPoisoned)?;
+                indices.insert(session_id, repaired);
                 return Err(error);
             }
 
@@ -495,7 +607,8 @@ impl MemoryStore for HnswMemoryStore {
 mod tests {
     use super::*;
     use meerkat_core::memory::{
-        MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemorySource, MessageRange,
+        MemoryIndexBatch, MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemorySource,
+        MessageRange,
     };
     use meerkat_core::types::SessionId;
     use std::time::SystemTime;
@@ -631,6 +744,79 @@ mod tests {
             results[0].content.contains("scoped survivor"),
             "scoped candidates must be ranked before the limit is applied"
         );
+    }
+
+    /// Gate (#240): a partial in-memory HNSW failure mid-batch must not leave
+    /// phantom neighbor slots. The DB rows for the failed batch are rolled back,
+    /// so the live scoped index is repaired (rebuilt from surviving DB rows) and
+    /// a subsequent search in the same live process selects no DB-deleted point.
+    #[tokio::test]
+    async fn test_partial_hnsw_failure_repairs_live_index_no_phantom_neighbors() {
+        let dir = TempDir::new().unwrap();
+        let store = HnswMemoryStore::open(dir.path().join("memory")).unwrap();
+        let session_id = SessionId::new();
+        let scope = MemorySearchScope::for_session(session_id.clone());
+
+        // A clean committed entry that must remain the only live candidate.
+        store
+            .index_scoped(request("alpha survivor entry one", &session_id))
+            .await
+            .unwrap();
+        assert_eq!(store.hnsw_point_count(), 1);
+
+        // Arm a partial mid-batch failure: the first insert of the next batch
+        // lands in the live HNSW, the rest fail, and the whole batch's DB rows
+        // are rolled back. Without repair, the live index would retain a slot
+        // for the now-DB-deleted first point.
+        store.arm_hnsw_insert_failure_after(1);
+        let batch = MemoryIndexBatch::new(
+            MemoryIndexScope::for_session(session_id.clone()),
+            vec![
+                request("beta doomed entry two", &session_id),
+                request("gamma doomed entry three", &session_id),
+                request("delta doomed entry four", &session_id),
+            ],
+        )
+        .unwrap();
+        let err = store.index_scoped_batch(batch).await.unwrap_err();
+        assert_eq!(err.error_code(), "memory_lock_poisoned");
+
+        // Disarm injection for subsequent searches.
+        store.arm_hnsw_insert_failure_after(-1);
+
+        // The live index now matches the DB exactly: only the one survivor.
+        assert_eq!(
+            store.hnsw_point_count(),
+            1,
+            "repaired live index must contain exactly the surviving DB rows"
+        );
+
+        // Search against the text of a DB-deleted (doomed) entry. The repaired
+        // index must not surface a phantom neighbor slot for the rolled-back
+        // point; only DB-present content can be returned.
+        let results = store
+            .search(&scope, "beta doomed entry two", 10)
+            .await
+            .unwrap();
+        for result in &results {
+            assert!(
+                result.content.contains("survivor"),
+                "search must only return DB-present content, got: {}",
+                result.content
+            );
+        }
+        assert!(
+            results.iter().all(|r| scope.includes(&r.metadata)),
+            "all results stay within the requested scope"
+        );
+
+        // The survivor is still discoverable by its own text.
+        let survivor = store
+            .search(&scope, "alpha survivor entry one", 1)
+            .await
+            .unwrap();
+        assert_eq!(survivor.len(), 1);
+        assert!(survivor[0].content.contains("survivor"));
     }
 
     #[tokio::test]

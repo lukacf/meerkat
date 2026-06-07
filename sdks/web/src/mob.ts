@@ -36,6 +36,7 @@ import type {
   MobRespawnResult as WireMobRespawnResult,
   MobStatusResult as WireMobStatusResult,
   WireMobMemberStatus,
+  WireResolvedModelCapabilities,
 } from './generated/mob.js';
 
 // WASM function signatures (bound at construction)
@@ -230,15 +231,47 @@ function parseResolvedModelCapabilities(
   const record = requireRecord(
     raw,
     'Invalid mob member_status response: resolved_capabilities must be object',
-  );
+  ) as Partial<WireResolvedModelCapabilities> & Record<string, unknown>;
+  // Strict consumption of the generated WireResolvedModelCapabilities: every
+  // capability flag must arrive as a real boolean. We fail closed on
+  // absent/malformed booleans rather than coercing with Boolean(...), which
+  // would silently project `undefined`/`null`/non-booleans into `false`.
   return {
-    vision: Boolean(record.vision),
-    image_input: Boolean(record.image_input),
-    image_tool_results: Boolean(record.image_tool_results),
-    inline_video: Boolean(record.inline_video),
-    realtime: Boolean(record.realtime),
-    web_search: Boolean(record.web_search),
-    image_generation: Boolean(record.image_generation),
+    vision: requireBooleanField(
+      record,
+      'vision',
+      'Invalid mob member_status response: resolved_capabilities.vision must be boolean',
+    ),
+    image_input: requireBooleanField(
+      record,
+      'image_input',
+      'Invalid mob member_status response: resolved_capabilities.image_input must be boolean',
+    ),
+    image_tool_results: requireBooleanField(
+      record,
+      'image_tool_results',
+      'Invalid mob member_status response: resolved_capabilities.image_tool_results must be boolean',
+    ),
+    inline_video: requireBooleanField(
+      record,
+      'inline_video',
+      'Invalid mob member_status response: resolved_capabilities.inline_video must be boolean',
+    ),
+    realtime: requireBooleanField(
+      record,
+      'realtime',
+      'Invalid mob member_status response: resolved_capabilities.realtime must be boolean',
+    ),
+    web_search: requireBooleanField(
+      record,
+      'web_search',
+      'Invalid mob member_status response: resolved_capabilities.web_search must be boolean',
+    ),
+    image_generation: requireBooleanField(
+      record,
+      'image_generation',
+      'Invalid mob member_status response: resolved_capabilities.image_generation must be boolean',
+    ),
   };
 }
 

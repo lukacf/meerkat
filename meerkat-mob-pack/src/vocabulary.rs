@@ -99,6 +99,56 @@ impl ExecPolicy {
     }
 }
 
+/// A canonicalized archive path: identity under which an entry is digested,
+/// classified, and deduplicated. Normalization (backslash to forward slash,
+/// stripping a leading `./` or `/`) happens once when the value is constructed,
+/// so digest identity is a typed decision in one place rather than raw-string
+/// normalization re-implemented at every call site.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CanonicalPath(String);
+
+impl CanonicalPath {
+    /// The reserved entry name carrying the pack signature. It is excluded from
+    /// the canonical digest (the signature signs the digest, so it cannot be
+    /// part of it).
+    pub const SIGNATURE: &'static str = "signature.toml";
+
+    /// Canonicalize a raw archive path into its digest identity.
+    pub fn new(path: &str) -> Self {
+        let replaced = path.replace('\\', "/");
+        let normalized = replaced
+            .trim_start_matches("./")
+            .trim_start_matches('/')
+            .to_string();
+        CanonicalPath(normalized)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+
+    /// Whether this is the reserved signature entry, which is excluded from the
+    /// canonical digest.
+    pub fn is_signature(&self) -> bool {
+        self.0 == Self::SIGNATURE
+    }
+
+    /// The archive section this path belongs to, if any.
+    pub fn section(&self) -> Option<ArchiveSection> {
+        ArchiveSection::classify(&self.0)
+    }
+}
+
+impl fmt::Display for CanonicalPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Error raised when a typed mobpack vocabulary value fails to parse.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseVocabularyError(&'static str);
@@ -528,6 +578,41 @@ mod tests {
         assert_eq!(ArchiveSection::classify("manifest.toml"), None);
         assert_eq!(ArchiveSection::classify("definition.json"), None);
         assert_eq!(ArchiveSection::classify("signature.toml"), None);
+    }
+
+    #[test]
+    fn test_canonical_path_owns_digest_identity() {
+        // Canonical-path identity is normalized once: backslashes, leading `./`
+        // and leading `/` all collapse to the same digest identity.
+        assert_eq!(
+            CanonicalPath::new("skills/review.md").as_str(),
+            "skills/review.md"
+        );
+        assert_eq!(
+            CanonicalPath::new(".\\skills\\review.md").as_str(),
+            "skills/review.md"
+        );
+        assert_eq!(
+            CanonicalPath::new("/skills/review.md").as_str(),
+            "skills/review.md"
+        );
+        assert_eq!(
+            CanonicalPath::new("./hooks/run.sh").as_str(),
+            "hooks/run.sh"
+        );
+
+        // The signature entry is recognized as such regardless of leading prefix,
+        // so it is consistently excluded from the canonical digest.
+        assert!(CanonicalPath::new("signature.toml").is_signature());
+        assert!(CanonicalPath::new("./signature.toml").is_signature());
+        assert!(!CanonicalPath::new("skills/review.md").is_signature());
+
+        // Section classification routes through the same typed identity.
+        assert_eq!(
+            CanonicalPath::new(".\\hooks\\run.sh").section(),
+            Some(ArchiveSection::Hooks)
+        );
+        assert_eq!(CanonicalPath::new("manifest.toml").section(), None);
     }
 
     #[test]

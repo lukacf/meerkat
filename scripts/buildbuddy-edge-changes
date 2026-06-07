@@ -42,6 +42,10 @@ mark_path() {
       mark_all
       return
       ;;
+    xtask/rmat-baseline.toml|xtask/ownership-baseline.toml|xtask/src/rmat_policy.rs|xtask/src/seam_inventory.rs|xtask/src/ownership_ledger.rs|xtask/src/rmat_audit.rs|docs/architecture/meerkat-dogma.md|docs/architecture/meerkat-dogma-commentary.md|docs/architecture/dogma-audits/*)
+      mark_all
+      return
+      ;;
     deny.toml)
       audit_changed=true
       ;;

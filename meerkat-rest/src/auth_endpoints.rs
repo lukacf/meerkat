@@ -355,30 +355,6 @@ async fn mark_token_commit_lifecycle_published_unlocked(
     Ok(())
 }
 
-fn publish_resolved_auth_lease(
-    auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
-    auth_binding: &AuthBindingRef,
-    connection: &meerkat_providers::ResolvedConnection,
-) -> Result<(), meerkat_core::handles::DslTransitionError> {
-    if matches!(
-        connection.auth_lease.kind(),
-        meerkat_core::ResolvedAuthKind::None
-    ) {
-        return Ok(());
-    }
-    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(auth_binding);
-    if auth_lease.snapshot(&lease_key).credential_present {
-        return Ok(());
-    }
-    let expires_at = connection
-        .auth_lease
-        .expires_at()
-        .map(|ts| ts.timestamp().max(0) as u64)
-        .unwrap_or(u64::MAX);
-    auth_lease.acquire_lease(&lease_key, expires_at)?;
-    Ok(())
-}
-
 async fn save_tokens_and_publish_lifecycle(
     token_store: &dyn TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
@@ -959,6 +935,12 @@ pub async fn test_auth_binding(
                 .await
             {
                 Ok(conn) => {
+                    // Validation surface: a successful resolution is sufficient
+                    // proof the binding is usable. Do NOT publish/acquire the
+                    // lease here — `test` is read-only and must not advance
+                    // AuthMachine lease freshness. Lease acquisition is owned by
+                    // the real credential write paths (login/save), not by a
+                    // dry-run validation probe.
                     let (auth_binding, binding, auth_profile) = match resolve_binding_identity(
                         &state,
                         &body.realm_id,
@@ -973,18 +955,6 @@ pub async fn test_auth_binding(
                                 .into_response();
                         }
                     };
-                    if let Err(e) =
-                        publish_resolved_auth_lease(&state.auth_lease, &auth_binding, &conn)
-                    {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({
-                                "state": "error",
-                                "error": format!("AuthMachine lifecycle acquire failed: {e}"),
-                            })),
-                        )
-                            .into_response();
-                    }
                     (
                         StatusCode::OK,
                         Json(serde_json::json!({
@@ -2293,7 +2263,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rest_test_auth_binding_publishes_resolved_lease_to_auth_machine() {
+    async fn rest_test_auth_binding_is_read_only_and_does_not_advance_lease() {
         use meerkat_providers::{
             ProviderAuthError, ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry,
             ResolvedConnection, ResolverEnvironment, StaticLease, ValidatedBinding,
@@ -2381,12 +2351,25 @@ mod tests {
             profile: None,
             origin: meerkat_core::connection::BindingOrigin::Configured,
         };
+        // `test` is a validation probe, not a credential write: a successful
+        // resolution must NOT advance AuthMachine lease freshness. The lease
+        // must remain untouched (no phase, no credential, no expiry) so the
+        // validation surface cannot launder lease truth.
         let snapshot = state
             .auth_lease
             .snapshot(&LeaseKey::from_auth_binding(&auth_binding));
-        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
-        assert!(snapshot.credential_present);
-        assert_eq!(snapshot.expires_at, Some(expires_at.timestamp() as u64));
+        assert_eq!(
+            snapshot.phase, None,
+            "test surface must not transition the AuthMachine lease into any phase"
+        );
+        assert!(
+            !snapshot.credential_present,
+            "test surface must not mark the lease credential as present"
+        );
+        assert_eq!(
+            snapshot.expires_at, None,
+            "test surface must not stamp lease freshness/expiry"
+        );
     }
 
     #[tokio::test]

@@ -14,47 +14,51 @@ red()   { printf '\033[0;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[0;32m%s\033[0m\n' "$*"; }
 
 COMMITTED="$ROOT/artifacts/schemas"
-FRESH_DIR=$(mktemp -d)
-trap 'rm -rf "$FRESH_DIR"' EXIT
+
+# emit-schemas writes in-place to artifacts/schemas/ relative to its cwd. To
+# avoid mutating the committed workspace tree while we validate, we run the
+# emitter inside an isolated TEMP_ROOT (a copy of the workspace's
+# artifacts/schemas/ seeded with the committed files) and diff committed vs
+# freshly emitted entirely inside that temp dir. The real workspace tree is
+# never written to, so `git status` stays clean after this gate runs.
+TEMP_ROOT=$(mktemp -d)
+trap 'rm -rf "$TEMP_ROOT"' EXIT
+FRESH_DIR="$TEMP_ROOT/artifacts/schemas"
+mkdir -p "$FRESH_DIR"
 
 echo "Re-emitting schemas to temp directory..."
 
-# Run emit-schemas, redirecting output to the temp dir.
-# The emit-schemas binary writes to artifacts/schemas/ relative to cwd,
-# so we need to set up the right structure.
-TEMP_ROOT=$(mktemp -d)
-trap 'rm -rf "$FRESH_DIR" "$TEMP_ROOT"' EXIT
-mkdir -p "$TEMP_ROOT/artifacts/schemas"
+# Seed the temp artifacts dir with the committed files so the emitter overwrites
+# them in place (matching its real-run behavior) without touching the workspace.
+cp "$COMMITTED"/*.json "$FRESH_DIR"/ 2>/dev/null || true
 
-# Build and run emit-schemas, capturing output
-"$CARGO" run -p meerkat-contracts --features schema --bin emit-schemas \
-    --manifest-path "$ROOT/Cargo.toml" 2>&1 | tail -1
+# Build and run emit-schemas with cwd=TEMP_ROOT so it writes to
+# "$TEMP_ROOT/artifacts/schemas" instead of the committed workspace tree.
+# `--manifest-path` keeps the build pointed at the real workspace while the
+# emitter's relative artifacts/schemas/ output lands in the temp dir.
+(cd "$TEMP_ROOT" && "$CARGO" run -p meerkat-contracts --features schema --bin emit-schemas \
+    --manifest-path "$ROOT/Cargo.toml" 2>&1 | tail -1)
 
-# The binary writes to artifacts/schemas/ relative to the workspace root.
-# After running, compare committed vs fresh.
+# Compare committed (workspace) vs freshly emitted (temp dir). The workspace
+# tree is untouched, so any difference means the committed schemas are stale.
 FAIL=0
 echo ""
 echo "Comparing committed schemas against freshly emitted:"
 
 for f in "$COMMITTED"/*.json; do
     fname=$(basename "$f")
-    if [ ! -f "$COMMITTED/$fname" ]; then
+    fresh="$FRESH_DIR/$fname"
+    if [ ! -f "$fresh" ]; then
+        red "  MISSING: $fname (committed but not emitted)"
+        FAIL=1
         continue
     fi
-    # Compare the committed file content (use jq to normalize JSON formatting)
+    # Normalize JSON formatting before comparing so cosmetic whitespace/key
+    # ordering differences don't trip the gate.
     committed_norm=$(jq -S . "$f" 2>/dev/null || cat "$f")
-    # Since emit-schemas writes in-place to artifacts/schemas/, the files
-    # are already updated. We compare git's version vs working tree.
-    git_version=$(git show HEAD:"artifacts/schemas/$fname" 2>/dev/null || echo "")
-    current=$(jq -S . "$f" 2>/dev/null || cat "$f")
+    fresh_norm=$(jq -S . "$fresh" 2>/dev/null || cat "$fresh")
 
-    if [ -z "$git_version" ]; then
-        continue  # New file, not in git yet
-    fi
-
-    git_norm=$(echo "$git_version" | jq -S . 2>/dev/null || echo "$git_version")
-
-    if [ "$git_norm" != "$current" ]; then
+    if [ "$committed_norm" != "$fresh_norm" ]; then
         red "  STALE: $fname (committed version differs from freshly emitted)"
         FAIL=1
     else

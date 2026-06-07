@@ -93,6 +93,9 @@ machine_authority_path() {
     xtask/Cargo.toml|xtask/BUILD.bazel|xtask/src/lib.rs|xtask/src/main.rs|xtask/src/machines*.rs|xtask/src/protocol_codegen.rs|xtask/src/audit_generated_headers.rs|xtask/src/public_contracts.rs)
       return 0
       ;;
+    xtask/src/rmat_policy.rs|xtask/src/seam_inventory.rs|xtask/src/ownership_ledger.rs|xtask/src/rmat_audit.rs)
+      return 0
+      ;;
     xtask/tests/machine_verify_all_tlc_test.sh|xtask/tests/machines_contracts.rs|xtask/tests/protocol_codegen_drift.rs)
       return 0
       ;;

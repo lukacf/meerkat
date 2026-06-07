@@ -3258,6 +3258,51 @@ async fn get_capabilities(
     Ok(Json(meerkat::surface::build_capabilities_response(&config)))
 }
 
+/// Which optional feature gates a catalogued REST path.
+///
+/// The axum `router()` registers `/mob/*` behind `#[cfg(feature = "mob")]`,
+/// `/sessions/{id}/mcp/*` behind `#[cfg(feature = "mcp")]`, and the schedule
+/// families track the `schedule` feature. Host-info advertisement must mirror
+/// the same gate set so a feature-disabled build does not advertise routes the
+/// router never registered. Classification is fail-closed: a path that does not
+/// match a known feature family is `Always` (unconditionally advertised), and
+/// any future feature-owned family must be added here explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestPathFeature {
+    Always,
+    Mob,
+    Mcp,
+    Schedule,
+}
+
+impl RestPathFeature {
+    fn classify(path: &str) -> Self {
+        if path == "/mob" || path.starts_with("/mob/") {
+            RestPathFeature::Mob
+        } else if path.contains("/mcp/") {
+            RestPathFeature::Mcp
+        } else if path == "/schedule"
+            || path.starts_with("/schedule/")
+            || path == "/schedules"
+            || path.starts_with("/schedules/")
+        {
+            RestPathFeature::Schedule
+        } else {
+            RestPathFeature::Always
+        }
+    }
+
+    /// Whether this path family is enabled given the cfg-gated option set.
+    fn is_enabled(self, options: &meerkat::surface::RuntimeHostSurfaceOptions) -> bool {
+        match self {
+            RestPathFeature::Always => true,
+            RestPathFeature::Mob => options.mobs,
+            RestPathFeature::Mcp => options.mcp_live,
+            RestPathFeature::Schedule => options.schedules,
+        }
+    }
+}
+
 fn rest_runtime_host_surface_options(
     state: &AppState,
 ) -> meerkat::surface::RuntimeHostSurfaceOptions {
@@ -3279,8 +3324,12 @@ fn rest_runtime_host_surface_options(
     options.skills = true;
     options.approvals = false;
     options.rest_base_url = Some(format!("http://{}:{}", state.rest_host, state.rest_port));
+    // Derive advertised paths from the SAME cfg-gated option set the axum
+    // router uses: filter the static catalog so feature-disabled builds omit
+    // the mob/mcp/schedule routes they never register.
     options.rest_paths = meerkat_contracts::rest_path_catalog()
         .into_iter()
+        .filter(|path| RestPathFeature::classify(path.path).is_enabled(&options))
         .map(|path| path.path.to_string())
         .collect();
     options
@@ -10206,6 +10255,97 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let health: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(health["status"], "ok");
+    }
+
+    #[test]
+    fn test_rest_path_feature_classifier_maps_feature_families() {
+        // Every mob/mcp/schedule path in the catalog must classify to its
+        // owning feature so host-info gating mirrors the cfg-gated router.
+        for descriptor in meerkat_contracts::rest_path_catalog() {
+            let path = descriptor.path;
+            let expected = if path == "/mob" || path.starts_with("/mob/") {
+                RestPathFeature::Mob
+            } else if path.contains("/mcp/") {
+                RestPathFeature::Mcp
+            } else if path.starts_with("/schedule/")
+                || path == "/schedules"
+                || path.starts_with("/schedules/")
+                || path == "/schedule"
+            {
+                RestPathFeature::Schedule
+            } else {
+                RestPathFeature::Always
+            };
+            assert_eq!(
+                RestPathFeature::classify(path),
+                expected,
+                "path `{path}` classified to the wrong feature family",
+            );
+        }
+        // Always-on families stay always-on.
+        assert_eq!(
+            RestPathFeature::classify("/sessions"),
+            RestPathFeature::Always
+        );
+        assert_eq!(RestPathFeature::classify("/help"), RestPathFeature::Always);
+    }
+
+    #[test]
+    fn test_host_info_rest_paths_omit_disabled_feature_routes() {
+        // Construct options with mob/mcp/schedule force-disabled to model a
+        // build compiled without those features, then apply the SAME filter
+        // `rest_runtime_host_surface_options` uses.
+        let mut options = meerkat::surface::RuntimeHostSurfaceOptions::process(
+            "meerkat-rest",
+            env!("CARGO_PKG_VERSION"),
+        );
+        options.mobs = false;
+        options.mcp_live = false;
+        options.schedules = false;
+
+        let advertised: Vec<String> = meerkat_contracts::rest_path_catalog()
+            .into_iter()
+            .filter(|path| RestPathFeature::classify(path.path).is_enabled(&options))
+            .map(|path| path.path.to_string())
+            .collect();
+
+        assert!(
+            !advertised.is_empty(),
+            "always-on routes must still be advertised"
+        );
+        for path in &advertised {
+            assert!(
+                !(path == "/mob" || path.starts_with("/mob/")),
+                "no-mob build must not advertise mob route `{path}`",
+            );
+            assert!(
+                !path.contains("/mcp/"),
+                "no-mcp build must not advertise mcp route `{path}`",
+            );
+            assert!(
+                !(path.starts_with("/schedule/")
+                    || path == "/schedule"
+                    || path == "/schedules"
+                    || path.starts_with("/schedules/")),
+                "no-schedule build must not advertise schedule route `{path}`",
+            );
+        }
+        // Always-on routes survive the filter.
+        assert!(advertised.iter().any(|p| p == "/sessions"));
+        assert!(advertised.iter().any(|p| p == "/health"));
+
+        // Conversely, enabling all three re-admits at least one path per family.
+        options.mobs = true;
+        options.mcp_live = true;
+        options.schedules = true;
+        let full: Vec<String> = meerkat_contracts::rest_path_catalog()
+            .into_iter()
+            .filter(|path| RestPathFeature::classify(path.path).is_enabled(&options))
+            .map(|path| path.path.to_string())
+            .collect();
+        assert!(full.iter().any(|p| p.starts_with("/mob/")));
+        assert!(full.iter().any(|p| p.contains("/mcp/")));
+        assert!(full.iter().any(|p| p.starts_with("/schedules")));
     }
 
     #[tokio::test]

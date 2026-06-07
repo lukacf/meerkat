@@ -1,4 +1,5 @@
 use crate::exec_bits::normalize_executable_bit;
+use crate::vocabulary::CanonicalPath;
 use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest as ShaDigestTrait, Sha256};
@@ -107,50 +108,46 @@ pub fn sha256_bytes(input: &[u8]) -> [u8; 32] {
 }
 
 pub fn canonical_digest(entries: &[CanonicalEntry]) -> MobpackDigest {
-    let mut index: Vec<(String, [u8; 32], bool)> = entries
+    let index: Vec<(CanonicalPath, [u8; 32], bool)> = entries
         .iter()
         .map(|entry| {
             (
-                normalize_path(&entry.path),
+                CanonicalPath::new(&entry.path),
                 sha256_bytes(&entry.bytes),
                 normalize_executable_bit(&entry.path, &entry.bytes),
             )
         })
-        .filter(|(path, _, _)| path != "signature.toml")
+        .filter(|(path, _, _)| !path.is_signature())
         .collect();
 
-    index.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut hasher = Sha256::new();
-    for (path, file_digest, executable_bit) in index {
-        hasher.update(path.as_bytes());
-        hasher.update([0]);
-        hasher.update(hex::encode(file_digest).as_bytes());
-        hasher.update([0]);
-        hasher.update([if executable_bit { b'1' } else { b'0' }]);
-        hasher.update([b'\n']);
-    }
-
-    MobpackDigest(hasher.finalize().into())
+    hash_canonical_index(index)
 }
 
 pub fn canonical_digest_from_map(files: &BTreeMap<String, Vec<u8>>) -> MobpackDigest {
-    let mut index: Vec<(String, [u8; 32], bool)> = files
+    let index: Vec<(CanonicalPath, [u8; 32], bool)> = files
         .iter()
         .map(|(path, bytes)| {
             (
-                normalize_path(path),
+                CanonicalPath::new(path),
                 sha256_bytes(bytes),
                 normalize_executable_bit(path, bytes),
             )
         })
-        .filter(|(path, _, _)| path != "signature.toml")
+        .filter(|(path, _, _)| !path.is_signature())
         .collect();
+
+    hash_canonical_index(index)
+}
+
+/// Hash the canonicalized `(path, content digest, exec bit)` index into the
+/// final mobpack digest. Entries are sorted by their typed canonical path so
+/// the digest is independent of input order.
+fn hash_canonical_index(mut index: Vec<(CanonicalPath, [u8; 32], bool)>) -> MobpackDigest {
     index.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut hasher = Sha256::new();
     for (path, file_digest, executable_bit) in index {
-        hasher.update(path.as_bytes());
+        hasher.update(path.as_str().as_bytes());
         hasher.update([0]);
         hasher.update(hex::encode(file_digest).as_bytes());
         hasher.update([0]);
@@ -158,14 +155,6 @@ pub fn canonical_digest_from_map(files: &BTreeMap<String, Vec<u8>>) -> MobpackDi
         hasher.update([b'\n']);
     }
     MobpackDigest(hasher.finalize().into())
-}
-
-fn normalize_path(path: &str) -> String {
-    let replaced = path.replace('\\', "/");
-    replaced
-        .trim_start_matches("./")
-        .trim_start_matches('/')
-        .to_string()
 }
 
 #[cfg(test)]

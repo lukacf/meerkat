@@ -336,11 +336,13 @@ fn live_webrtc_answer_rejection_reason(
             LiveChannelRequestRejectionReason::ChannelNotFound
         }
         meerkat_live::LiveWebrtcError::Json(_) => LiveChannelRequestRejectionReason::InvalidPayload,
-        meerkat_live::LiveWebrtcError::Webrtc(_)
-        | meerkat_live::LiveWebrtcError::Audio(_)
-        | meerkat_live::LiveWebrtcError::MissingLocalDescription => {
-            LiveChannelRequestRejectionReason::WebrtcAnswerError
-        }
+        // All WebRTC answer-phase faults (codec registration / peer creation /
+        // set-remote-description / create-answer / data-channel send / audio)
+        // and a missing local description map to the generated WebrtcAnswerError
+        // rejection reason. The enum is #[non_exhaustive]; future phase variants
+        // fall here too. (Per-phase generated rejection reasons are a tracked
+        // machine-schema follow-up for #124.)
+        _ => LiveChannelRequestRejectionReason::WebrtcAnswerError,
     }
 }
 

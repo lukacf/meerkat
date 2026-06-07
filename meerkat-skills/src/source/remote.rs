@@ -277,3 +277,43 @@ pub fn cache_from_catalog(parsed: ParsedRemoteCatalog) -> RemoteCache {
         refreshed_at: Some(SystemTime::now()),
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn source_uuid() -> SourceUuid {
+        SourceUuid::parse("fe52aa61-1111-4a22-9999-bbbbbbbbbbbb").unwrap()
+    }
+
+    #[test]
+    fn quarantine_placeholder_key_is_never_loadable() {
+        // Row #36: an invalid remote entry (bad skill name) is quarantined for
+        // diagnostics, but the placeholder key it carries must NOT resolve to a
+        // loadable document — load_cached must return NotFound for it.
+        let configured = source_uuid();
+        let raw = serde_json::json!({
+            "skills": [{ "name": "Not A Valid Slug", "description": "broken" }]
+        })
+        .to_string();
+
+        let parsed = parse_remote_catalog(&raw, &configured, SkillScope::Project, "test").unwrap();
+        let cache = cache_from_catalog(parsed);
+
+        // The invalid entry is quarantined...
+        assert_eq!(cache.quarantined.len(), 1, "invalid entry must quarantine");
+        let placeholder_key = cache.quarantined[0].key.clone();
+
+        // ...but its placeholder key is not present in loadable documents.
+        assert!(
+            !cache.documents.contains_key(&placeholder_key),
+            "quarantine placeholder must not be a loadable document key"
+        );
+        let err = load_cached(&cache, &placeholder_key).unwrap_err();
+        assert!(
+            matches!(err, SkillError::NotFound { .. }),
+            "loading a quarantine placeholder must return NotFound; got {err:?}"
+        );
+    }
+}

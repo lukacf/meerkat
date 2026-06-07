@@ -365,6 +365,17 @@ impl JsonlStore {
         Ok(Some(session))
     }
 
+    /// List sessions via the SQLite session index.
+    ///
+    /// The index is a **derived projection**, not canonical state. The source
+    /// of truth is the per-session `.meta` sidecar written atomically (temp +
+    /// rename + `sync_all`) in [`save_impl`](Self::save_impl) *before* the index
+    /// insert. `open_index` (and therefore the first `index()` call backing this
+    /// method) always reconciles the index by rebuilding it from the `.meta`
+    /// sidecars, so a crash that lands the sidecars but not the index insert
+    /// self-heals on next open: the canonical truth is intact and the projection
+    /// is rematerialized from it. A stale or missing index can never make this
+    /// listing diverge from the sidecars beyond the next reconcile.
     async fn list_impl(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, StoreError> {
         let index = self.index().await?;
         let result = spawn_blocking(move || index.list_meta(filter)).await;
@@ -712,6 +723,55 @@ mod tests {
             matches!(result, Err(SessionStoreError::Serialization(_))),
             "corrupt .meta must surface as SessionStoreError::Serialization, got {result:?}"
         );
+        Ok(())
+    }
+
+    /// Row #104 gate: the SQLite index is a reconciled projection of the `.meta`
+    /// sidecars, which are the canonical source of truth. `save_impl` writes the
+    /// session file and the `.meta` sidecar atomically (temp + rename + sync)
+    /// *before* inserting into the index, so a crash in the index-insert window
+    /// leaves the canonical sidecar durable. A fresh `open_index` must reconcile
+    /// the projection back from the sidecars, yielding a complete listing with
+    /// no divergence. This asserts both the durable sidecar invariant and the
+    /// reconcile-on-open behavior the doc-comment on `list_impl` declares.
+    #[tokio::test]
+    async fn test_jsonl_store_meta_sidecar_is_source_of_truth_for_index()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let store_path = temp_dir.path().to_path_buf();
+
+        let id = {
+            let store = JsonlStore::new(store_path.clone());
+            let mut session = Session::new();
+            session.push(Message::User(UserMessage::text("Hello".to_string())));
+            let id = session.id().clone();
+            store.save(&session).await?;
+            id
+        };
+
+        // The canonical `.meta` sidecar must exist independently of the index:
+        // `save_impl` writes it (atomically) before the index insert, so it is
+        // durable even if the subsequent index write never lands.
+        let meta_path = store_path.join(format!("{}.meta", id.0));
+        assert!(
+            fs::try_exists(&meta_path).await?,
+            "canonical .meta sidecar must be written before index insert"
+        );
+
+        // Simulate the crash window: the durable sidecar exists, but the index
+        // projection is gone. A fresh store must reconcile the full listing
+        // back from the sidecars rather than diverging from canonical truth.
+        let index_path = store_path.join("session_index.sqlite3");
+        fs::remove_file(&index_path).await?;
+
+        let store = JsonlStore::new(store_path);
+        let sessions = store.list(SessionFilter::default()).await?;
+        assert_eq!(
+            sessions.len(),
+            1,
+            "list() must reconcile from .meta sidecars, not the dropped index"
+        );
+        assert_eq!(sessions[0].id, id);
         Ok(())
     }
 

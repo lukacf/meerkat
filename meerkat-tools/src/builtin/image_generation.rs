@@ -743,6 +743,13 @@ fn parse_simple_target(
                 provider: ProviderId::new(value),
             });
         }
+        // A target value is present but is neither the canonical target shape nor a
+        // string alias. Fail closed with a typed error rather than silently laundering
+        // the malformed target into a fabricated `Auto` default.
+        return Err(BuiltinToolError::invalid_args(
+            "request.target must be \"auto\", a provider string, or a canonical target object \
+             ({\"target\":\"auto\"|\"provider_default\"|\"model\", ...})",
+        ));
     }
 
     match (provider, model) {
@@ -1482,6 +1489,47 @@ mod tests {
             parsed.intent,
             ImageGenerationIntent::Generate { .. }
         ));
+    }
+
+    #[test]
+    fn generate_image_rejects_malformed_target_instead_of_laundering_to_auto() {
+        // A present-but-uninterpretable target must fail closed with a typed arg error,
+        // not silently fall through to a fabricated `Auto` default (dogma row #64).
+        let err = parse_generate_image_request(
+            json!({
+                "intent": "generate",
+                "prompt": "draw a cozy tabby cat",
+                "target": { "not_a_target": "garbage" }
+            }),
+            ImageOperationId::new(uuid::Uuid::new_v4()),
+            &FakePlanner,
+        )
+        .expect_err("malformed target must be rejected, not laundered into Auto");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("request.target"),
+            "error should name the malformed target field: {message}"
+        );
+    }
+
+    #[test]
+    fn generate_image_rejects_unknown_intent_alias() {
+        // A malformed intent name must be rejected at parse time with a typed error.
+        let err = parse_generate_image_request(
+            json!({
+                "intent": "teleport",
+                "prompt": "draw a cozy tabby cat"
+            }),
+            ImageOperationId::new(uuid::Uuid::new_v4()),
+            &FakePlanner,
+        )
+        .expect_err("unknown intent alias must be rejected");
+
+        assert!(
+            err.to_string().contains("image intent"),
+            "error should describe the unsupported intent: {err}"
+        );
     }
 
     #[tokio::test]

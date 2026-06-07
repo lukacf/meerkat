@@ -458,6 +458,45 @@ pub enum ToolDispatchSkipReason {
     InvalidArguments,
 }
 
+/// Typed terminal fact for a live tool dispatch that exceeded the configured
+/// per-call timeout (D281).
+///
+/// The host already returns the typed [`ObservationOutcome::ToolCallTimedOut`]
+/// to its own callers; this newtype is the *adapter-facing* counterpart. The
+/// previous code fabricated an ad-hoc parseable string
+/// (`format!("tool dispatch timeout after {timeout:?}")`) and submitted it as
+/// the [`LiveAdapterCommand::SubmitToolError`] payload, asking the adapter /
+/// downstream to recover the fact by parsing prose. Instead the host now mints
+/// this typed fact; the only point a string is produced is its [`Display`]
+/// projection at the meerkat-core `SubmitToolError { error: String }` seam
+/// edge (that wire field is owned by `meerkat-core::live_adapter`, so the
+/// adapter command itself cannot be made fully typed from this crate). The
+/// `Display` rendering is a deterministic projection of the typed fields, not
+/// a source of truth: callers in this crate route on the typed value, never on
+/// the rendered string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveToolDispatchTimeout {
+    timeout: Duration,
+}
+
+impl LiveToolDispatchTimeout {
+    #[must_use]
+    pub fn new(timeout: Duration) -> Self {
+        Self { timeout }
+    }
+
+    #[must_use]
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
+impl std::fmt::Display for LiveToolDispatchTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "tool dispatch timeout after {:?}", self.timeout)
+    }
+}
+
 /// Runtime-side projection sink consumed by [`LiveAdapterHost`].
 ///
 /// This is the seam through which adapter observations become canonical
@@ -542,6 +581,65 @@ impl<'a> LiveTranscriptIdentity<'a> {
             delta_id: None,
         }
     }
+
+    /// Resolve the required identity triple for an assistant **delta** event
+    /// (D199): `response_id`, `delta_id`, and `item_id` (provider item id).
+    ///
+    /// The sink previously coalesced each missing id to an empty string via
+    /// `unwrap_or_default()`, emitting an [`RealtimeTranscriptEvent`] whose
+    /// identity was empty-string truth — a delta that cannot be bound back to
+    /// any response/item. This accessor fails closed: a missing required id
+    /// yields a typed [`LiveTranscriptIdentityError`] naming the absent field,
+    /// so the projection rejects the malformed delta rather than fabricating
+    /// empty identity.
+    pub fn require_delta_identity(&self) -> Result<DeltaIdentity<'a>, LiveTranscriptIdentityError> {
+        let response_id = self
+            .response_id
+            .ok_or(LiveTranscriptIdentityError::MissingResponseId)?;
+        let delta_id = self
+            .delta_id
+            .ok_or(LiveTranscriptIdentityError::MissingDeltaId)?;
+        let item_id = self
+            .provider_item_id
+            .ok_or(LiveTranscriptIdentityError::MissingItemId)?;
+        Ok(DeltaIdentity {
+            response_id,
+            delta_id,
+            item_id,
+            previous_item_id: self.previous_item_id,
+            content_index: self.content_index,
+        })
+    }
+}
+
+/// The required identity triple resolved for an assistant **delta** event
+/// (D199). Produced by [`LiveTranscriptIdentity::require_delta_identity`];
+/// guarantees `response_id` / `delta_id` / `item_id` are present (non-empty
+/// fail-closed), so the realtime-transcript layer can key per-response staging
+/// without empty-string identity truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeltaIdentity<'a> {
+    pub response_id: &'a str,
+    pub delta_id: &'a str,
+    pub item_id: &'a str,
+    pub previous_item_id: Option<&'a str>,
+    pub content_index: Option<u32>,
+}
+
+/// Typed failure when a transcript identity is missing a required id (D199).
+///
+/// Replaces the prior `unwrap_or_default()` empty-string coalescing in the
+/// projection sink: a delta lacking `response_id` / `delta_id` / `item_id`
+/// fails closed with a named field rather than emitting empty-string identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum LiveTranscriptIdentityError {
+    #[error("transcript delta is missing a required response_id")]
+    MissingResponseId,
+    #[error("transcript delta is missing a required delta_id")]
+    MissingDeltaId,
+    #[error("transcript delta is missing a required item_id")]
+    MissingItemId,
 }
 
 #[async_trait::async_trait]
@@ -697,15 +795,73 @@ pub trait LiveProjectionSink: Send + Sync {
 }
 
 /// Errors returned by [`LiveProjectionSink`] implementations.
+///
+/// D301: failure semantics are typed, not prose-parsed. Each underlying
+/// [`meerkat_core::SessionError`] that a sink encounters lands in a *distinct*
+/// variant via [`LiveProjectionError::from_session_error`], carrying the
+/// session error's stable `error_code` so downstream callers route on a typed
+/// class rather than reparsing `SessionError::to_string()`. The previous sink
+/// mapper collapsed every non-`NotFound`/`Unsupported` variant into
+/// `Internal(other.to_string())`, erasing the typed cause.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum LiveProjectionError {
     #[error("session {0} not found")]
     SessionNotFound(SessionId),
+    /// The session service refused the projection (typed
+    /// `SessionError::Unsupported`).
     #[error("projection rejected: {0}")]
     Rejected(String),
+    /// A turn is already in progress on the target session
+    /// (`SessionError::Busy`).
+    #[error("session busy: {0}")]
+    SessionBusy(SessionId),
+    /// No turn is currently running on the target session
+    /// (`SessionError::NotRunning`).
+    #[error("session not running: {0}")]
+    SessionNotRunning(SessionId),
+    /// A required session capability (persistence / compaction) is disabled.
+    /// Carries the disabled capability's stable session error code.
+    #[error("session capability disabled ({code}): {message}")]
+    CapabilityDisabled { code: &'static str, message: String },
+    /// A session-level failure whose typed cause is identified by the stable
+    /// `SessionError::code` (store error, agent error, structured failure).
+    /// Carries the code so callers route on the typed class, not the message.
+    #[error("session error [{code}]: {message}")]
+    Session { code: &'static str, message: String },
     #[error("projection sink internal error: {0}")]
     Internal(String),
+}
+
+impl LiveProjectionError {
+    /// Classify a [`meerkat_core::SessionError`] into a typed
+    /// [`LiveProjectionError`] variant (D301).
+    ///
+    /// `session_id` is the projection target, used to populate identity-bearing
+    /// variants. Every `SessionError` lands in a distinct typed variant
+    /// carrying the session error's stable `code()` — no variant is collapsed
+    /// into a prose-only `Internal(to_string())`. This is the single
+    /// classification owner; surfaces route through it instead of re-deriving
+    /// the mapping per call site.
+    #[must_use]
+    pub fn from_session_error(session_id: &SessionId, err: meerkat_core::SessionError) -> Self {
+        use meerkat_core::SessionError;
+        // Compute the stable code + human-readable message before the match
+        // consumes `err`. `code()` returns a `&'static str` and `to_string()`
+        // borrows `err` via `Display`, so both are available before the move.
+        let code = err.code();
+        let message = err.to_string();
+        match err {
+            SessionError::NotFound { .. } => Self::SessionNotFound(session_id.clone()),
+            SessionError::Unsupported(reason) => Self::Rejected(reason),
+            SessionError::Busy { id } => Self::SessionBusy(id),
+            SessionError::NotRunning { id } => Self::SessionNotRunning(id),
+            SessionError::PersistenceDisabled | SessionError::CompactionDisabled => {
+                Self::CapabilityDisabled { code, message }
+            }
+            _ => Self::Session { code, message },
+        }
+    }
 }
 
 /// No-op projection sink for tests and degraded configurations that
@@ -1174,6 +1330,35 @@ pub enum LiveAdapterHostError {
     AdapterError(#[from] LiveAdapterError),
     #[error("projection sink error: {0}")]
     ProjectionError(#[from] LiveProjectionError),
+}
+
+impl LiveAdapterHostError {
+    /// Stable typed reason code for this host error (D153).
+    ///
+    /// Transports surface this as the `WsErrorFrame.reason` so clients route
+    /// on a typed class rather than reparsing the human-readable `error`
+    /// message. The codes are stable wire strings; adding a variant must add
+    /// its code here (the match is exhaustive over the `#[non_exhaustive]`
+    /// enum from inside the crate).
+    #[must_use]
+    pub fn reason_code(&self) -> &'static str {
+        match self {
+            Self::ChannelNotFound(_) => "channel_not_found",
+            Self::SessionNotFound(_) => "session_not_found",
+            Self::ChannelNotReady(..) => "channel_not_ready",
+            Self::SessionAlreadyBound(_) => "session_already_bound",
+            Self::OpenNotAuthorized => "open_not_authorized",
+            Self::OpenAuthorityAlreadyConsumed => "open_authority_already_consumed",
+            Self::CloseNotAuthorized => "close_not_authorized",
+            Self::CloseAuthorityAlreadyConsumed => "close_authority_already_consumed",
+            Self::StatusNotAuthorized => "status_not_authorized",
+            Self::StatusAuthorityAlreadyConsumed => "status_authority_already_consumed",
+            Self::NoAdapter(_) => "no_adapter",
+            Self::UnsupportedCommand(_) => "unsupported_command",
+            Self::AdapterError(_) => "adapter_error",
+            Self::ProjectionError(_) => "projection_error",
+        }
+    }
 }
 
 /// Observation routing decision — what the host does with an adapter
@@ -1707,6 +1892,23 @@ impl LiveAdapterHost {
         .await
     }
 
+    /// Submit a typed tool-dispatch-timeout fact back to the adapter (D281).
+    ///
+    /// The caller passes the typed [`LiveToolDispatchTimeout`] fact; the only
+    /// stringification happens here, at the meerkat-core
+    /// [`LiveAdapterCommand::SubmitToolError`] seam edge, via the fact's
+    /// [`Display`] projection. No call site fabricates a parseable prose
+    /// string; the typed value is the truth.
+    pub async fn submit_tool_dispatch_timeout(
+        &self,
+        channel_id: &LiveChannelId,
+        call_id: String,
+        timeout: LiveToolDispatchTimeout,
+    ) -> Result<(), LiveAdapterHostError> {
+        self.submit_tool_error(channel_id, call_id, timeout.to_string())
+            .await
+    }
+
     /// Poll the next observation from the adapter on a channel and project it.
     ///
     /// Convenience wrapper around `next_observation_raw` + `apply_observation`.
@@ -2107,13 +2309,21 @@ impl LiveAdapterHost {
             Some(timeout) => match tokio::time::timeout(timeout, dispatch_call).await {
                 Ok(result) => result,
                 Err(_elapsed) => {
-                    // Notify the adapter so the provider can unblock its turn.
-                    // The error string is a stable, parseable shape: "tool
-                    // dispatch timeout after Ns" so downstream surfaces can
-                    // route on it without parsing the dispatcher's error.
-                    let error_text = format!("tool dispatch timeout after {timeout:?}");
-                    self.submit_tool_error(channel_id, provider_call_id.to_string(), error_text)
-                        .await?;
+                    // D281: notify the adapter so the provider can unblock its
+                    // turn — but carry the typed `LiveToolDispatchTimeout` fact
+                    // rather than fabricating a parseable prose string. The
+                    // typed `ObservationOutcome::ToolCallTimedOut` is returned
+                    // to the host's own callers; the adapter-facing submission
+                    // renders the typed fact only at the meerkat-core
+                    // `SubmitToolError { error: String }` seam edge (that wire
+                    // field is owned by meerkat-core and cannot be made fully
+                    // typed from this crate).
+                    self.submit_tool_dispatch_timeout(
+                        channel_id,
+                        provider_call_id.to_string(),
+                        LiveToolDispatchTimeout::new(timeout),
+                    )
+                    .await?;
                     return Ok(ObservationOutcome::ToolCallTimedOut {
                         provider_call_id: provider_call_id.to_string(),
                         tool_name: tool_name.to_string(),
@@ -2546,6 +2756,28 @@ impl LiveAdapterHost {
             .get(channel_id)
             .map(|ch| ch.session_id.clone())
             .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
+    }
+
+    /// Lower a transport-local barge-in (e.g. local VAD detecting user speech
+    /// while output audio is still queued) into the canonical interrupt seam
+    /// (D223).
+    ///
+    /// This routes through the *same* [`LiveProjectionSink::signal_turn_interrupt`]
+    /// path that adapter-observed [`LiveAdapterObservation::TurnInterrupted`]
+    /// barge-ins use, so a transport-discarded output-audio queue is a typed
+    /// interrupt fact the session observes — not a silent
+    /// `tracing`-and-discard. The transport has no provider response id for a
+    /// locally-detected barge-in, so `response_id` is `None` (the same shape
+    /// the user-facing `live/interrupt` RPC uses).
+    pub async fn signal_transport_barge_in(
+        &self,
+        channel_id: &LiveChannelId,
+    ) -> Result<(), LiveAdapterHostError> {
+        let session_id = self.channel_session(channel_id).await?;
+        self.projection_sink
+            .signal_turn_interrupt(&session_id, None)
+            .await?;
+        Ok(())
     }
 
     pub fn classify_observation(observation: &LiveAdapterObservation) -> ObservationRouting {
@@ -4547,9 +4779,16 @@ mod tests {
         let errors = adapter.submitted_errors.lock().unwrap();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].0, "call_slow");
-        assert!(
-            errors[0].1.contains("timeout"),
-            "tool error message should mention timeout: {}",
+        // D281 gate: the adapter-facing payload is exactly the typed
+        // `LiveToolDispatchTimeout` fact's `Display` projection — not an
+        // ad-hoc fabricated string. This pins that the typed fact owns the
+        // truth and the only stringification is the deterministic seam-edge
+        // render.
+        assert_eq!(
+            errors[0].1,
+            LiveToolDispatchTimeout::new(timeout).to_string(),
+            "tool dispatch timeout must submit the typed fact's Display projection, \
+             not a fabricated string: {}",
             errors[0].1
         );
         let results = adapter.submitted_results.lock().unwrap();
@@ -4675,6 +4914,37 @@ mod tests {
         // so the truncation can be scoped to the specific response even when
         // the barge-in lands before any transcript delta has been staged.
         assert_eq!(interrupts[0].1.as_deref(), Some("resp_42"));
+    }
+
+    // -- D223: transport-local barge-in lowers into the interrupt seam --
+
+    #[tokio::test]
+    async fn transport_barge_in_emits_typed_interrupt_via_sink() {
+        // A transport-discarded output-audio queue (local VAD barge-in) must
+        // become a typed interrupt fact the session observes — routed through
+        // the same `signal_turn_interrupt` seam adapter-observed barge-ins use,
+        // not a silent discard. (Fails-old: there was no host seam for a
+        // transport-local barge-in, so the discard was log-only.)
+        let sink = Arc::new(RecordingProjectionSink::default());
+        let host = LiveAdapterHost::new(Arc::clone(&sink) as _);
+        let session_id = test_session_id();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
+
+        host.signal_transport_barge_in(&ch).await.unwrap();
+
+        let interrupts = sink.interrupts.lock().unwrap();
+        assert_eq!(
+            interrupts.len(),
+            1,
+            "barge-in must signal exactly one interrupt"
+        );
+        assert_eq!(interrupts[0].0, session_id);
+        // Transport-local barge-in carries no provider response id (same shape
+        // as the user-facing `live/interrupt` RPC).
+        assert_eq!(interrupts[0].1, None);
     }
 
     // -- A10: terminal error projection --
@@ -5195,5 +5465,154 @@ mod tests {
                 .push((session_id.clone(), event.clone()));
             Ok(())
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // D301: typed SessionError -> LiveProjectionError classification
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn session_error_classification_lands_in_distinct_typed_variants() {
+        use meerkat_core::SessionError;
+
+        let sid = test_session_id();
+
+        // NotFound -> SessionNotFound (identity-bearing).
+        assert!(matches!(
+            LiveProjectionError::from_session_error(
+                &sid,
+                SessionError::NotFound { id: sid.clone() }
+            ),
+            LiveProjectionError::SessionNotFound(_)
+        ));
+
+        // Unsupported -> Rejected, preserving the typed reason payload.
+        match LiveProjectionError::from_session_error(
+            &sid,
+            SessionError::Unsupported("nope".into()),
+        ) {
+            LiveProjectionError::Rejected(reason) => assert_eq!(reason, "nope"),
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+
+        // Busy -> SessionBusy (distinct from Internal/Session).
+        assert!(matches!(
+            LiveProjectionError::from_session_error(&sid, SessionError::Busy { id: sid.clone() }),
+            LiveProjectionError::SessionBusy(_)
+        ));
+
+        // NotRunning -> SessionNotRunning.
+        assert!(matches!(
+            LiveProjectionError::from_session_error(
+                &sid,
+                SessionError::NotRunning { id: sid.clone() }
+            ),
+            LiveProjectionError::SessionNotRunning(_)
+        ));
+
+        // PersistenceDisabled / CompactionDisabled -> CapabilityDisabled,
+        // carrying the stable code (no prose-only Internal collapse).
+        match LiveProjectionError::from_session_error(&sid, SessionError::PersistenceDisabled) {
+            LiveProjectionError::CapabilityDisabled { code, .. } => {
+                assert_eq!(code, "SESSION_PERSISTENCE_DISABLED");
+            }
+            other => panic!("expected CapabilityDisabled, got {other:?}"),
+        }
+        match LiveProjectionError::from_session_error(&sid, SessionError::CompactionDisabled) {
+            LiveProjectionError::CapabilityDisabled { code, .. } => {
+                assert_eq!(code, "SESSION_COMPACTION_DISABLED");
+            }
+            other => panic!("expected CapabilityDisabled, got {other:?}"),
+        }
+
+        // Store error -> typed Session { code } carrying the stable code,
+        // NOT a prose-only Internal(to_string()).
+        let store_err: Box<dyn std::error::Error + Send + Sync> = "disk gone".into();
+        match LiveProjectionError::from_session_error(&sid, SessionError::Store(store_err)) {
+            LiveProjectionError::Session { code, .. } => {
+                assert_eq!(code, "SESSION_STORE_ERROR");
+            }
+            other => panic!("expected typed Session, got {other:?}"),
+        }
+
+        // FailedWithData -> typed Session { code } (still carries the stable
+        // code; the prose lives only in `message`).
+        match LiveProjectionError::from_session_error(
+            &sid,
+            SessionError::FailedWithData {
+                message: "boom".into(),
+                data: serde_json::json!({"k": "v"}),
+            },
+        ) {
+            LiveProjectionError::Session { code, message } => {
+                assert_eq!(code, "SESSION_ERROR");
+                assert_eq!(message, "boom");
+            }
+            other => panic!("expected typed Session, got {other:?}"),
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // D199: transcript delta identity fails closed on missing required ids
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn delta_identity_requires_response_delta_and_item_ids() {
+        // Full identity resolves to a typed triple.
+        let full = LiveTranscriptIdentity::assistant_delta(
+            Some("item-1"),
+            Some("prev-0"),
+            Some(2),
+            Some("resp-9"),
+            Some("delta-3"),
+        );
+        let resolved = full
+            .require_delta_identity()
+            .expect("full identity resolves");
+        assert_eq!(resolved.response_id, "resp-9");
+        assert_eq!(resolved.delta_id, "delta-3");
+        assert_eq!(resolved.item_id, "item-1");
+        assert_eq!(resolved.previous_item_id, Some("prev-0"));
+        assert_eq!(resolved.content_index, Some(2));
+
+        // Missing response_id fails closed with a typed error (NOT an
+        // empty-string-coalesced identity).
+        let no_resp = LiveTranscriptIdentity::assistant_delta(
+            Some("item-1"),
+            None,
+            Some(0),
+            None,
+            Some("delta-3"),
+        );
+        assert_eq!(
+            no_resp.require_delta_identity(),
+            Err(LiveTranscriptIdentityError::MissingResponseId)
+        );
+
+        // Missing delta_id fails closed.
+        let no_delta = LiveTranscriptIdentity::assistant_delta(
+            Some("item-1"),
+            None,
+            Some(0),
+            Some("resp-9"),
+            None,
+        );
+        assert_eq!(
+            no_delta.require_delta_identity(),
+            Err(LiveTranscriptIdentityError::MissingDeltaId)
+        );
+
+        // Missing item_id fails closed.
+        let no_item = LiveTranscriptIdentity::assistant_delta(
+            None,
+            None,
+            Some(0),
+            Some("resp-9"),
+            Some("delta-3"),
+        );
+        assert_eq!(
+            no_item.require_delta_identity(),
+            Err(LiveTranscriptIdentityError::MissingItemId)
+        );
     }
 }

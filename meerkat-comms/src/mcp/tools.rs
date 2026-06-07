@@ -275,9 +275,17 @@ pub async fn handle_tools_call_with_context(
                 .map_err(|e| format!("Invalid arguments: {e}"))?;
             let to = peer_route(ctx, input.peer_id, input.display_name.as_deref())?;
             let blocks = resolve_message_blocks(&input.body, input.blocks, dispatch_context)?;
+            // Single content authority: when blocks are present they own the
+            // content, and `body` is derived as a projection of their text
+            // blocks so the two cannot diverge. With no blocks, `body` is the
+            // sole content owner and stands alone.
+            let body = match &blocks {
+                Some(blocks) => project_body_from_blocks(blocks),
+                None => input.body,
+            };
             let command = CommsCommand::PeerMessage {
                 to,
-                body: input.body,
+                body,
                 blocks,
                 handling_mode: input.handling_mode,
             };
@@ -358,6 +366,23 @@ fn resolve_message_blocks(
         );
     }
     Ok(Some(blocks))
+}
+
+/// Project a message body from the text content of resolved blocks.
+///
+/// When blocks are the single content authority, the body is a deterministic
+/// function of their text blocks: the text-block contents joined with newlines.
+/// Non-text blocks (images) contribute no body text. This guarantees that the
+/// carried `body` cannot diverge from the block content it is meant to mirror.
+fn project_body_from_blocks(blocks: &[ContentBlock]) -> String {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn blocks_text_contains(blocks: &[ContentBlock], expected: &str) -> bool {
@@ -1502,6 +1527,53 @@ mod tests {
             &blocks[1],
             meerkat_core::ContentBlock::Text { text } if text == "the attached image."
         ));
+    }
+
+    /// ROW #94 gate: when a comms message carries blocks, blocks are the single
+    /// content authority and the carried `body` is provably a projection of the
+    /// text blocks — it cannot diverge from a contradicting `body` input.
+    #[tokio::test]
+    async fn send_message_body_is_projection_of_text_blocks_when_blocks_present() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+
+        handle_tools_call_with_context(
+            &ctx,
+            "send_message",
+            &json!({
+                "peer_id": peer_id,
+                // A body that contradicts the block content.
+                "body": "TOTALLY DIFFERENT BODY",
+                "blocks": [
+                    {"type": "text", "text": "authoritative line one"},
+                    {"type": "text", "text": "authoritative line two"}
+                ],
+                "handling_mode": "queue"
+            }),
+            &ToolDispatchContext::default(),
+        )
+        .await
+        .expect("send_message should accept text blocks");
+
+        let sent = runtime.sent.lock();
+        let [
+            CommsCommand::PeerMessage {
+                body,
+                blocks: Some(blocks),
+                ..
+            },
+        ] = sent.as_slice()
+        else {
+            panic!("expected one peer message with blocks, got {sent:?}");
+        };
+        // Body is a function of the text blocks, NOT the contradicting input
+        // body. Helper synthesis and ingress classification read one owner.
+        let expected = super::project_body_from_blocks(blocks);
+        assert_eq!(body, &expected);
+        assert_eq!(body, "authoritative line one\nauthoritative line two");
+        assert_ne!(body, "TOTALLY DIFFERENT BODY");
     }
 
     #[test]

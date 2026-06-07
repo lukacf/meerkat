@@ -13,12 +13,13 @@ pub mod transport;
 pub mod webrtc;
 
 pub use host::{
-    DEFAULT_LIVE_TOOL_TIMEOUT, LiveAdapterHost, LiveAdapterHostError,
+    DEFAULT_LIVE_TOOL_TIMEOUT, DeltaIdentity, LiveAdapterHost, LiveAdapterHostError,
     LiveChannelCloseCommitAuthority, LiveChannelCloseObservation, LiveChannelId,
     LiveChannelOpenAuthority, LiveChannelStatusCommitAuthority, LiveChannelStatusObservation,
     LiveCommandAcceptanceKind, LiveCommandQueueAcceptance, LiveProjectionError, LiveProjectionSink,
-    LiveRefreshQueueAcceptance, LiveToolDispatchError, LiveToolDispatcher, LiveTranscriptIdentity,
-    NoOpProjectionSink, ObservationOutcome, ObservationRouting, ToolDispatchSkipReason,
+    LiveRefreshQueueAcceptance, LiveToolDispatchError, LiveToolDispatchTimeout, LiveToolDispatcher,
+    LiveTranscriptIdentity, LiveTranscriptIdentityError, NoOpProjectionSink, ObservationOutcome,
+    ObservationRouting, ToolDispatchSkipReason,
 };
 pub use transport::{
     LIVE_WS_PATH, LiveChannelCloseFeedback, LiveChannelStatusFeedback, LiveTokenString,

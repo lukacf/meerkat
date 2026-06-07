@@ -34,10 +34,14 @@ pub use agent::types::{DrainedMessage, PlainMessage, drain_inbox_item};
 pub use event_injector::CommsEventInjector;
 pub use identity::{IdentityError, Keypair, PubKey, Signature};
 pub use inbox::{AdmissionOutcome, DropReason, Inbox, InboxError, InboxSender};
-pub use inproc::{InprocPeerInfo, InprocRegistry, InprocSendError};
+pub use inproc::{
+    InprocPeerInfo, InprocRegistry, InprocSendError, RegistrationOutcome, RegistrationRejection,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use io_task::{IoTaskError, handle_connection};
 pub use peer_meta::PeerMeta;
+#[cfg(not(target_arch = "wasm32"))]
+pub use plain_listener::{PlainIngressFault, PlainIngressFaults, handle_plain_connection};
 pub use router::{CommsConfig, DEFAULT_MAX_MESSAGE_BYTES, Router, SendError};
 #[cfg(not(target_arch = "wasm32"))]
 pub use transport::codec::{EnvelopeFrame, TransportCodec};

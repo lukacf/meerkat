@@ -8,6 +8,7 @@ use crate::runtime::CommsRuntime;
 use crate::{Router, TrustedPeersView};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
+use meerkat_core::ToolCallArguments;
 use meerkat_core::ToolCallability;
 use meerkat_core::ToolCatalogCapabilities;
 use meerkat_core::ToolCatalogEntry;
@@ -16,7 +17,6 @@ use meerkat_core::ToolDispatchOutcome;
 use meerkat_core::agent::ExternalToolUpdate;
 use meerkat_core::error::ToolError;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind};
-use serde_json::Value;
 use std::sync::Arc;
 
 /// Tool dispatcher that provides comms tools.
@@ -158,18 +158,26 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatch
         call: ToolCallView<'_>,
         context: &ToolDispatchContext,
     ) -> Result<ToolDispatchOutcome, ToolError> {
-        let args: Value = serde_json::from_str(call.args.get())
-            .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
         if is_comms_tool(call.name) {
             if let Some(reason) =
                 callability_for_context(&self.tool_context, call.name).unavailable_reason()
             {
                 return Err(ToolError::unavailable(call.name, reason));
             }
-            let result =
-                handle_tools_call_with_context(&self.tool_context, call.name, &args, context)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed { message: e })?;
+            // Parse tool arguments through the object-guarded typed boundary.
+            // Non-object / non-JSON args fail closed with a typed
+            // `InvalidArguments` error rather than falling back to a
+            // `Value::String` that would silently reach the comms handler.
+            let args = ToolCallArguments::from_raw_json(call.args)
+                .map_err(|err| ToolError::invalid_arguments(call.name, err.to_string()))?;
+            let result = handle_tools_call_with_context(
+                &self.tool_context,
+                call.name,
+                args.as_value(),
+                context,
+            )
+            .await
+            .map_err(|e| ToolError::ExecutionFailed { message: e })?;
             Ok(ToolResult::new(call.id.to_string(), result.to_string(), false).into())
         } else if let Some(inner) = &self.inner {
             inner.dispatch_with_context(call, context).await
@@ -303,18 +311,26 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
         call: ToolCallView<'_>,
         context: &ToolDispatchContext,
     ) -> Result<ToolDispatchOutcome, ToolError> {
-        let args: Value = serde_json::from_str(call.args.get())
-            .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
         if is_comms_tool(call.name) {
             if let Some(reason) =
                 callability_for_context(&self.tool_context, call.name).unavailable_reason()
             {
                 return Err(ToolError::unavailable(call.name, reason));
             }
-            let result =
-                handle_tools_call_with_context(&self.tool_context, call.name, &args, context)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed { message: e })?;
+            // Parse tool arguments through the object-guarded typed boundary.
+            // Non-object / non-JSON args fail closed with a typed
+            // `InvalidArguments` error rather than falling back to a
+            // `Value::String` that would silently reach the comms handler.
+            let args = ToolCallArguments::from_raw_json(call.args)
+                .map_err(|err| ToolError::invalid_arguments(call.name, err.to_string()))?;
+            let result = handle_tools_call_with_context(
+                &self.tool_context,
+                call.name,
+                args.as_value(),
+                context,
+            )
+            .await
+            .map_err(|e| ToolError::ExecutionFailed { message: e })?;
             Ok(ToolResult::new(call.id.to_string(), result.to_string(), false).into())
         } else {
             self.inner.dispatch_with_context(call, context).await
@@ -633,6 +649,54 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// ROW #63 gate: a comms tool call whose arguments are not a JSON object
+    /// (string literal / array / number) must fail closed with a typed
+    /// `InvalidArguments` error at the dispatcher boundary, never reaching
+    /// `handle_tools_call_with_context` with a `Value::String` fallback.
+    #[tokio::test]
+    async fn non_object_comms_args_return_invalid_arguments() {
+        for raw in [r#""just a string""#, "[1, 2, 3]", "42"] {
+            let (router, trusted_peers) = test_router();
+            let dispatcher = CommsToolDispatcher::new(router, trusted_peers);
+            let args_raw = serde_json::value::RawValue::from_string(raw.to_string())
+                .expect("raw JSON literal");
+            let call = ToolCallView {
+                id: "row63-1",
+                name: "send_message",
+                args: &args_raw,
+            };
+            let result = dispatcher.dispatch(call).await;
+            assert!(
+                matches!(result, Err(ToolError::InvalidArguments { .. })),
+                "non-object comms args ({raw}) must return InvalidArguments, got {result:?}"
+            );
+        }
+    }
+
+    /// ROW #63 gate (Dyn wrapper): same object-guarded boundary applies to the
+    /// `DynCommsToolDispatcher` dispatch path.
+    #[tokio::test]
+    async fn dyn_non_object_comms_args_return_invalid_arguments() {
+        let (router, trusted_peers) = test_router();
+        let dispatcher = DynCommsToolDispatcher::new(
+            router,
+            trusted_peers,
+            Arc::new(ContextAwareDispatcher::new()),
+        );
+        let args_raw = serde_json::value::RawValue::from_string(r#""not an object""#.to_string())
+            .expect("raw JSON literal");
+        let call = ToolCallView {
+            id: "row63-dyn-1",
+            name: "send_message",
+            args: &args_raw,
+        };
+        let result = dispatcher.dispatch(call).await;
+        assert!(
+            matches!(result, Err(ToolError::InvalidArguments { .. })),
+            "non-object comms args must return InvalidArguments, got {result:?}"
+        );
     }
 
     #[test]

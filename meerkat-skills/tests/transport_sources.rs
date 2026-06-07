@@ -106,6 +106,64 @@ async fn http_source_serves_stale_cache_after_refresh_error() {
 }
 
 #[tokio::test]
+#[cfg(feature = "skills-http")]
+async fn unhealthy_http_source_refuses_stale_cache() {
+    // Row #165: once a remote source is Unhealthy (refresh failing past the
+    // unhealthy threshold), it must refuse to serve stale-but-interval-fresh
+    // cache with a typed stale error instead of laundering cached content.
+    use meerkat_core::skills::SourceHealthThresholds;
+
+    let source_uuid = source_uuid("fe52aa61-1111-4a22-9999-bbbbbbbbbbbb");
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/skills"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "skills": [{
+                "name": "cached",
+                "body": skill_body("cached", "cached", "cached body")
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // unhealthy_failure_streak == 1 → a single refresh failure flips the
+    // source to Unhealthy.
+    let thresholds = SourceHealthThresholds {
+        unhealthy_failure_streak: 1,
+        ..SourceHealthThresholds::default()
+    };
+    let source = HttpSkillSource::new_with_thresholds(
+        source_uuid,
+        format!("{}/skills", server.uri()),
+        None,
+        Duration::from_secs(0),
+        Duration::from_secs(5),
+        thresholds,
+    );
+
+    // First call populates the cache from the live server.
+    assert_eq!(source.list(&SkillFilter::default()).await.unwrap().len(), 1);
+
+    // Server goes away: the next refresh fails and pushes the source Unhealthy.
+    server.reset().await;
+    let err = source.list(&SkillFilter::default()).await.unwrap_err();
+    let message = err.to_string();
+    assert!(
+        message.contains("stale source") && message.contains("unhealthy"),
+        "unhealthy source must surface a typed stale refusal; got {message}"
+    );
+
+    // Even a subsequent call (cache still interval-fresh under refresh_interval
+    // semantics) must keep refusing while the source stays Unhealthy.
+    let err = source.list(&SkillFilter::default()).await.unwrap_err();
+    assert!(
+        err.to_string().contains("stale source"),
+        "Unhealthy source must keep refusing stale cache; got {err}"
+    );
+}
+
+#[tokio::test]
 async fn stdio_source_lists_and_loads_with_configured_uuid() {
     let tmp = tempfile::tempdir().unwrap();
     let script = tmp.path().join("skills-server.sh");

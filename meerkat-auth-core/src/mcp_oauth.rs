@@ -38,6 +38,80 @@ pub enum McpAuthMode {
     Interactive,
 }
 
+/// Typed canonical identity for an MCP server credential binding.
+///
+/// Row #349 closure: the `mcp-oauth` realm binding slug is derived from the
+/// canonical server config (name + URL) exactly once, here, by the typed
+/// identity — not re-hashed independently at every key-derivation site. The
+/// `<slug>-<digest>` binding slug is the single owned projection of the
+/// `(server_name, server_url)` pair; `token_key` and `lease_key` both delegate
+/// to [`binding_slug`](Self::binding_slug) so the token realm key and the
+/// `AuthMachine` lease key are guaranteed structurally identical for the same
+/// server.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct McpServerIdentity {
+    server_name: String,
+    server_url: String,
+}
+
+impl McpServerIdentity {
+    /// Build the typed identity from the canonical server config fields.
+    pub fn from_server_config(
+        server_name: impl Into<String>,
+        server_url: impl Into<String>,
+    ) -> Self {
+        Self {
+            server_name: server_name.into(),
+            server_url: server_url.into(),
+        }
+    }
+
+    pub fn server_name(&self) -> &str {
+        &self.server_name
+    }
+
+    pub fn server_url(&self) -> &str {
+        &self.server_url
+    }
+
+    /// The single owned `<slug>-<digest>` binding slug for this server. The
+    /// digest binds name + URL so two servers that differ only in URL get
+    /// distinct bindings; the slug prefix keeps the binding human-recognizable.
+    fn binding_slug(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(self.server_name.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(self.server_url.as_bytes());
+        let digest = URL_SAFE_NO_PAD.encode(hasher.finalize());
+        let name_slug = slug_component(&self.server_name);
+        format!("{name_slug}-{}", &digest[..16])
+    }
+
+    fn key_error(&self, reason: impl std::fmt::Display) -> McpOAuthError {
+        McpOAuthError::TokenKey {
+            server_name: self.server_name.clone(),
+            reason: reason.to_string(),
+        }
+    }
+
+    /// The durable token-store key for this server's credentials.
+    pub fn token_key(&self) -> Result<TokenKey, McpOAuthError> {
+        TokenKey::parse(MCP_TOKEN_REALM, self.binding_slug()).map_err(|error| self.key_error(error))
+    }
+
+    /// The per-binding `AuthMachine` lease key for this MCP server, structurally
+    /// identical to [`token_key`](Self::token_key) (realm `mcp-oauth` + the
+    /// `<slug>-<digest>` binding slug). The credential-freshness / reauth
+    /// decision for MCP-OAuth bearer tokens is owned by the `AuthMachine` keyed
+    /// on this lease — the authority never re-derives expiry policy.
+    pub fn lease_key(&self) -> Result<LeaseKey, McpOAuthError> {
+        let realm = RealmId::parse(MCP_TOKEN_REALM).map_err(|error| self.key_error(error))?;
+        let binding =
+            BindingId::parse(self.binding_slug()).map_err(|error| self.key_error(error))?;
+        Ok(LeaseKey::new(realm, binding, None))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct McpAuthTarget {
     pub server_name: String,
@@ -52,40 +126,21 @@ impl McpAuthTarget {
         }
     }
 
-    pub fn token_key(&self) -> Result<TokenKey, McpOAuthError> {
-        let mut hasher = Sha256::new();
-        hasher.update(self.server_name.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(self.server_url.as_bytes());
-        let digest = URL_SAFE_NO_PAD.encode(hasher.finalize());
-        let name_slug = slug_component(&self.server_name);
-        TokenKey::parse(MCP_TOKEN_REALM, format!("{name_slug}-{}", &digest[..16])).map_err(
-            |error| McpOAuthError::TokenKey {
-                server_name: self.server_name.clone(),
-                reason: error.to_string(),
-            },
-        )
+    /// The typed canonical identity for this target's server config. All
+    /// realm-key derivation flows through this typed identity.
+    pub fn identity(&self) -> McpServerIdentity {
+        McpServerIdentity::from_server_config(self.server_name.clone(), self.server_url.clone())
     }
 
-    /// The per-binding `AuthMachine` lease key for this MCP server, structurally
-    /// identical to [`token_key`](Self::token_key) (realm `mcp-oauth` + the
-    /// `<slug>-<digest>` binding slug). The credential-freshness / reauth
-    /// decision for MCP-OAuth bearer tokens is owned by the `AuthMachine` keyed
-    /// on this lease — the authority never re-derives expiry policy.
+    pub fn token_key(&self) -> Result<TokenKey, McpOAuthError> {
+        self.identity().token_key()
+    }
+
+    /// The per-binding `AuthMachine` lease key for this MCP server. Delegates to
+    /// the typed [`McpServerIdentity`] so the lease key and the token key share
+    /// one identity derivation.
     pub fn lease_key(&self) -> Result<LeaseKey, McpOAuthError> {
-        let mut hasher = Sha256::new();
-        hasher.update(self.server_name.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(self.server_url.as_bytes());
-        let digest = URL_SAFE_NO_PAD.encode(hasher.finalize());
-        let name_slug = slug_component(&self.server_name);
-        let to_err = |error: meerkat_core::connection::IdentityError| McpOAuthError::TokenKey {
-            server_name: self.server_name.clone(),
-            reason: error.to_string(),
-        };
-        let realm = RealmId::parse(MCP_TOKEN_REALM).map_err(to_err)?;
-        let binding = BindingId::parse(format!("{name_slug}-{}", &digest[..16])).map_err(to_err)?;
-        Ok(LeaseKey::new(realm, binding, None))
+        self.identity().lease_key()
     }
 }
 
@@ -306,11 +361,51 @@ impl McpOAuthAuthority {
         let persisted =
             persisted_tokens_from_result(&token, &discovery, &client, target, Utc::now())?;
         let key = target.token_key()?;
+        // Fold the post-exchange durable token write into an AuthMachine
+        // lease-publish transition so the credential write is owned by the
+        // machine, not a bare `store.save`. Fail closed if the transition is
+        // rejected — no token is persisted without a committed lease.
+        let published = self.publish_login_tokens_via_lease(target, &key, &persisted)?;
         self.token_store
-            .save(&key, &persisted)
+            .save(&key, &published)
             .await
             .map_err(|error| McpOAuthError::TokenStore(error.to_string()))?;
         Ok(token.access_token)
+    }
+
+    /// Wrap the post-login durable token write in an `AuthMachine` lease-publish
+    /// transition (mirrors the provider path's
+    /// `publish_managed_store_tokens_refresh_lifecycle` +
+    /// `mark_tokens_lifecycle_published`). The shared lease handle is reset for
+    /// this key, the lease is acquired at the credential's own expiry, and the
+    /// resulting transition stamps the durable lifecycle marker onto the tokens
+    /// before they are saved. Fail closed on any transition / marker error.
+    fn publish_login_tokens_via_lease(
+        &self,
+        target: &McpAuthTarget,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<PersistedTokens, McpOAuthError> {
+        let lease_key = target.lease_key()?;
+        let lifecycle_err =
+            |error: meerkat_core::handles::DslTransitionError| McpOAuthError::AuthLifecycle {
+                server_name: target.server_name.clone(),
+                reason: error.to_string(),
+            };
+        // The handle is shared across servers; clear any prior lease state for
+        // this key before publishing the freshly minted credential. An
+        // untracked key has nothing to release.
+        let _ = self.auth_lease.release_lease(&lease_key);
+        let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(tokens);
+        let transition = self
+            .auth_lease
+            .acquire_lease(&lease_key, expires_at)
+            .map_err(lifecycle_err)?;
+        meerkat_core::mark_tokens_lifecycle_published_for_transition(key, tokens, &transition)
+            .map_err(|error| McpOAuthError::AuthLifecycle {
+                server_name: target.server_name.clone(),
+                reason: error.to_string(),
+            })
     }
 
     async fn refresh_if_needed(
@@ -1129,6 +1224,64 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(a.realm.as_str(), MCP_TOKEN_REALM);
+    }
+
+    #[test]
+    fn server_identity_is_typed_and_owns_key_derivation() {
+        // Row #349 gate (1): realm-key derivation flows through the typed
+        // `McpServerIdentity`, and the token key and the AuthMachine lease key
+        // share one identity derivation (structurally identical binding).
+        let identity =
+            McpServerIdentity::from_server_config("glean", "https://king-be.glean.com/mcp/default");
+        let token_key = identity.token_key().unwrap();
+        let lease_key = identity.lease_key().unwrap();
+        assert_eq!(token_key.realm.as_str(), MCP_TOKEN_REALM);
+        assert_eq!(lease_key.realm.as_str(), MCP_TOKEN_REALM);
+        assert_eq!(
+            token_key.binding.as_str(),
+            lease_key.binding.as_str(),
+            "token key and lease key must share one typed identity binding"
+        );
+        // The target delegates to the same typed identity.
+        let target = McpAuthTarget::new("glean", "https://king-be.glean.com/mcp/default");
+        assert_eq!(target.token_key().unwrap(), token_key);
+        // Distinct server URL yields a distinct identity binding.
+        let other =
+            McpServerIdentity::from_server_config("glean", "https://other.example/mcp/default");
+        assert_ne!(
+            other.token_key().unwrap().binding.as_str(),
+            token_key.binding.as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn interactive_login_token_write_is_lease_published() {
+        // Row #349 gate (2): the post-login durable token write carries the
+        // AuthMachine lease lifecycle marker — the credential write is owned by
+        // a committed lease transition, not a bare store.save.
+        let (base, state) = spawn_oauth_fixture().await;
+        let store = Arc::new(EphemeralTokenStore::new());
+        let browser = recording_browser(Arc::clone(&state));
+        let authority =
+            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
+        let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
+
+        authority
+            .interactive_login(&target, None)
+            .await
+            .expect("login succeeds");
+
+        let stored = store
+            .load(&target.token_key().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            meerkat_core::tokens_lifecycle_published(&stored),
+            "post-login token write must be wrapped in an AuthMachine lease transition"
+        );
+        // The pre-existing MCP metadata survives alongside the marker.
+        assert_eq!(stored.metadata["client"]["client_id"], "client-123");
     }
 
     #[test]

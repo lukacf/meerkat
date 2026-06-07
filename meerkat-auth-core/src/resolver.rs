@@ -92,10 +92,7 @@ pub async fn resolve_simple_secret(
                 refresh_interval_ms: *refresh_interval_ms,
             };
             let runner = CommandCredentialRunner::new(spec);
-            let tokens = runner
-                .resolve()
-                .await
-                .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
+            let tokens = resolve_command_credential_via_lease(env, binding, &runner).await?;
             tokens.primary_secret.ok_or_else(|| {
                 ProviderAuthError::SourceResolutionFailed(
                     "command returned no primary_secret in its persisted tokens payload".into(),
@@ -118,6 +115,106 @@ pub async fn resolve_simple_secret(
         CredentialSourceSpec::PlatformDefault => {
             Err(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))
         }
+    }
+}
+
+/// Resolve a command-source credential, routing the cached-vs-rerun freshness
+/// verdict through the per-binding AuthMachine lease (row #47).
+///
+/// The subprocess execution stays in the [`CommandCredentialRunner`]; only the
+/// freshness verdict moves to the lease. The runner's prior-run `last_refresh`
+/// plus its configured `refresh_interval_ms` become the lease's expiry input,
+/// and the AuthMachine `CredentialUseDisposition` — not a runner-local
+/// `Instant` comparison — decides whether the cached token is reused or the
+/// command is re-run. When no lease handle is present (standalone/ephemeral
+/// surfaces) the credential is produced fresh on every resolve rather than
+/// trusting a runner-local freshness clock.
+#[cfg(not(target_arch = "wasm32"))]
+async fn resolve_command_credential_via_lease(
+    env: &ResolverEnvironment,
+    binding: &ValidatedBinding,
+    runner: &crate::auth_store::CommandCredentialRunner,
+) -> Result<PersistedTokens, ProviderAuthError> {
+    let Some(interval_ms) = runner.spec().refresh_interval_ms else {
+        // No freshness window configured: there is nothing to cache, so the
+        // command always runs. No lease decision is involved.
+        return runner
+            .run_and_cache()
+            .await
+            .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()));
+    };
+    let Some(auth_lease) = env.auth_lease_handle.as_ref() else {
+        // Caching was requested but no AuthMachine lease owns the freshness
+        // verdict here; fall through to a fresh run instead of trusting a
+        // runner-local clock as the authority.
+        return runner
+            .run_and_cache()
+            .await
+            .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()));
+    };
+
+    let Some((cached, last_run)) = runner.cached() else {
+        // No cached credential yet: run and cache the first credential.
+        return runner
+            .run_and_cache()
+            .await
+            .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()));
+    };
+
+    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(binding.auth_binding_ref());
+    let now = (env.now)();
+    // Project the runner's cache age onto the lease as a synthetic expiry:
+    // `last_run + refresh_interval`. Express it in epoch seconds relative to
+    // `now` so the AuthMachine freshness observation can classify the cached
+    // credential as fresh or due-for-rerun.
+    let elapsed_ms = u64::try_from(last_run.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let remaining_secs = interval_ms.saturating_sub(elapsed_ms) / 1000;
+    let synthetic_expiry = epoch_secs(now).saturating_add(remaining_secs);
+
+    fn lifecycle_err(
+        context: &str,
+        error: meerkat_core::handles::DslTransitionError,
+    ) -> ProviderAuthError {
+        ProviderAuthError::SourceResolutionFailed(format!(
+            "AuthMachine command-credential {context} failed: {error}"
+        ))
+    }
+    // The handle is shared across bindings; reset this key's prior state, then
+    // record the cached credential's synthetic expiry so the freshness verdict
+    // reflects THIS cache entry.
+    let _ = auth_lease.release_lease(&lease_key);
+    auth_lease
+        .acquire_lease(&lease_key, synthetic_expiry)
+        .map_err(|e| lifecycle_err("acquire", e))?;
+    auth_lease
+        .observe_credential_freshness(
+            &lease_key,
+            epoch_secs(now),
+            meerkat_core::handles::AUTH_LEASE_TTL_REFRESH_WINDOW_SECS,
+        )
+        .map_err(|e| lifecycle_err("freshness observation", e))?;
+    match resolve_credential_use_admission(
+        auth_lease,
+        &lease_key,
+        meerkat_core::handles::CredentialUseIntent::UseCredential,
+    )? {
+        // The machine authorizes the cached credential as fresh: reuse it.
+        CredentialUseDisposition::Authorized => Ok(cached),
+        // The machine asks for a refresh: re-run the command.
+        CredentialUseDisposition::RefreshRequired => runner
+            .run_and_cache()
+            .await
+            .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string())),
+        // A command credential has no interactive reauth or silent-refresh
+        // distinction; any other disposition fails closed by re-running the
+        // command to obtain a fresh credential.
+        CredentialUseDisposition::ReauthRequired
+        | CredentialUseDisposition::RefreshDisallowed
+        | CredentialUseDisposition::LeaseAbsent
+        | CredentialUseDisposition::AlreadyRefreshing => runner
+            .run_and_cache()
+            .await
+            .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string())),
     }
 }
 
@@ -1687,6 +1784,83 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, ProviderAuthError::SourceResolutionFailed(_)));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn command_credential_freshness_verdict_comes_from_auth_machine_lease() {
+        // Row #47 gate: the cached-vs-rerun verdict for a command credential is
+        // owned by the AuthMachine lease (`CredentialUseDisposition`), keyed by
+        // the command binding's lease, not by a runner-local `Instant`
+        // comparison. With a primed cache and a fresh valid lease, the lease
+        // authorizes the cached credential and the subprocess is NOT re-run.
+        use crate::auth_store::{CommandCredentialRunner, CommandCredentialSpec};
+
+        let run_log = std::env::temp_dir().join(format!("rkat-cmd-{}", uuid::Uuid::new_v4()));
+        // Each subprocess run appends a line and prints the running count as the
+        // token, so a re-run is observable both by line count and by token text.
+        let script = format!(
+            "echo run >> '{path}'; wc -l < '{path}' | tr -d ' '",
+            path = run_log.display()
+        );
+        let spec = CommandCredentialSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), script],
+            cwd: None,
+            env: std::collections::HashMap::new(),
+            timeout_ms: 5_000,
+            // Large window so a runner-local clock would always reuse; the
+            // lease, not the clock, must be the verdict owner.
+            refresh_interval_ms: Some(3_600_000),
+        };
+        let runner = CommandCredentialRunner::new(spec);
+
+        // Prime the cache (first real run).
+        let first = runner.run_and_cache().await.unwrap();
+        assert_eq!(first.primary_secret.as_deref(), Some("1"));
+
+        let binding = simple_secret_binding(
+            CredentialSourceSpec::Command {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), "true".into()],
+                cwd: None,
+                env: std::collections::BTreeMap::new(),
+                timeout_ms: 5_000,
+                refresh_interval_ms: Some(3_600_000),
+            },
+            "api_key",
+        );
+        let env = ResolverEnvironment::testing()
+            .with_auth_lease_handle(StaticAuthLeaseHandle::valid().generated());
+
+        // Fresh valid lease authorizes the cached credential: reuse, no re-run.
+        let reused = resolve_command_credential_via_lease(&env, &binding, &runner)
+            .await
+            .unwrap();
+        assert_eq!(
+            reused.primary_secret.as_deref(),
+            Some("1"),
+            "AuthMachine lease must authorize reuse of the cached command credential"
+        );
+        let line_count = std::fs::read_to_string(&run_log).unwrap().lines().count();
+        assert_eq!(
+            line_count, 1,
+            "command must not be re-run when the lease authorizes the cached credential"
+        );
+
+        // With NO lease handle, caching has no owning authority, so the command
+        // re-runs every resolve rather than trusting a runner-local clock.
+        let env_no_lease = ResolverEnvironment::testing();
+        let reran = resolve_command_credential_via_lease(&env_no_lease, &binding, &runner)
+            .await
+            .unwrap();
+        assert_eq!(
+            reran.primary_secret.as_deref(),
+            Some("2"),
+            "absent a lease authority, the command must re-run rather than honor a runner clock"
+        );
+
+        let _ = std::fs::remove_file(&run_log);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

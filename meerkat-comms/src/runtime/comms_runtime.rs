@@ -157,18 +157,62 @@ const PAIRING_COMPLETE_KIND: &str = "meerkat_pairing_complete";
 #[cfg(not(target_arch = "wasm32"))]
 const PAIRING_CLASSIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Typed identity-kind for a pairing caller.
+///
+/// Deserialization fails closed on any kind other than the single supported
+/// `ed25519_public_key`, replacing the previous free-string `kind` field +
+/// `== "ed25519_public_key"` equality check.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+enum PairingIdentityKind {
+    #[serde(rename = "ed25519_public_key")]
+    Ed25519PublicKey,
+}
+
+/// Typed pairing public key.
+///
+/// Deserializes once from the wire `"ed25519:<base64>"` string and validates
+/// it into a [`PubKey`], failing closed on a malformed key. The original
+/// canonical string is retained because the password proof is computed over
+/// the exact wire form supplied by the caller.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+struct PairingPublicKey {
+    raw: String,
+    key: PubKey,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<'de> serde::Deserialize<'de> for PairingPublicKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let key = PubKey::from_pubkey_string(&raw).map_err(serde::de::Error::custom)?;
+        Ok(Self { raw, key })
+    }
+}
+
+/// Typed pairing peer address newtype (transparent over the wire string).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(transparent)]
+struct PairingAddress(String);
+
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, serde::Deserialize)]
 struct PairingPeerIdentity {
-    kind: String,
-    public_key: String,
+    #[allow(dead_code)]
+    kind: PairingIdentityKind,
+    public_key: PairingPublicKey,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, serde::Deserialize)]
 struct PairingPeer {
     name: String,
-    address: String,
+    address: PairingAddress,
     identity: PairingPeerIdentity,
 }
 
@@ -1339,6 +1383,62 @@ pub enum CommsRuntimeError {
     AlreadyStarted,
     #[error("Unsafe binding: {0}")]
     UnsafeBinding(String),
+    #[error("Inproc registration rejected: {0:?}")]
+    InprocRegistrationRejected(crate::RegistrationRejection),
+}
+
+/// Observe a constructor-time inproc registration outcome and fail closed on
+/// rejection.
+///
+/// A freshly constructed runtime binds its own (non-zero) keypair under its
+/// participant name. A clean [`RegistrationOutcome::Registered`] is the
+/// expected result. A name/pubkey displacement is surfaced as a typed warning
+/// (legitimate during a same-name restart), and a hard rejection fails the
+/// constructor closed rather than returning a runtime whose route was never
+/// installed.
+fn observe_inproc_registration(
+    namespace: &str,
+    name: &str,
+    outcome: crate::RegistrationOutcome,
+) -> Result<(), CommsRuntimeError> {
+    use crate::RegistrationOutcome;
+    match outcome {
+        RegistrationOutcome::Registered => Ok(()),
+        RegistrationOutcome::ReplacedPubkey { evicted_name } => {
+            tracing::warn!(
+                inproc_namespace = %namespace,
+                peer_name = %name,
+                %evicted_name,
+                "inproc registration replaced an existing route under this pubkey"
+            );
+            Ok(())
+        }
+        RegistrationOutcome::EvictedName { evicted_pubkey } => {
+            tracing::warn!(
+                inproc_namespace = %namespace,
+                peer_name = %name,
+                evicted_pubkey = %evicted_pubkey.to_pubkey_string(),
+                "inproc registration evicted a stale pubkey bound to this name"
+            );
+            Ok(())
+        }
+        RegistrationOutcome::ReplacedPubkeyAndEvictedName {
+            evicted_name,
+            evicted_pubkey,
+        } => {
+            tracing::warn!(
+                inproc_namespace = %namespace,
+                peer_name = %name,
+                %evicted_name,
+                evicted_pubkey = %evicted_pubkey.to_pubkey_string(),
+                "inproc registration displaced both a name and a pubkey route"
+            );
+            Ok(())
+        }
+        RegistrationOutcome::Rejected { reason } => {
+            Err(CommsRuntimeError::InprocRegistrationRejected(reason))
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1567,13 +1667,16 @@ impl CommsRuntime {
             peer_interaction_handle: parking_lot::RwLock::new(None),
             interaction_stream_handle: parking_lot::RwLock::new(None),
         };
-        InprocRegistry::global().register_with_meta_in_namespace(
-            config.inproc_namespace.as_deref().unwrap_or(""),
-            config.name,
+        let namespace = config.inproc_namespace.clone().unwrap_or_default();
+        let name = config.name.clone();
+        let outcome = InprocRegistry::global().register_with_meta_in_namespace(
+            &namespace,
+            &name,
             runtime.public_key,
             inbox_sender,
             crate::PeerMeta::default(),
         );
+        observe_inproc_registration(&namespace, &name, outcome)?;
         Ok(runtime)
     }
 
@@ -1679,13 +1782,15 @@ impl CommsRuntime {
             peer_interaction_handle: parking_lot::RwLock::new(None),
             interaction_stream_handle: parking_lot::RwLock::new(None),
         };
-        InprocRegistry::global().register_with_meta_in_namespace(
-            namespace.as_deref().unwrap_or(""),
+        let namespace_ref = namespace.as_deref().unwrap_or("");
+        let outcome = InprocRegistry::global().register_with_meta_in_namespace(
+            namespace_ref,
             name,
             runtime.public_key,
             inbox_sender,
             crate::PeerMeta::default(),
         );
+        observe_inproc_registration(namespace_ref, name, outcome)?;
         Ok(runtime)
     }
 
@@ -1795,13 +1900,15 @@ impl CommsRuntime {
             peer_interaction_handle: parking_lot::RwLock::new(None),
             interaction_stream_handle: parking_lot::RwLock::new(None),
         };
-        InprocRegistry::global().register_with_meta_in_namespace(
-            namespace.as_deref().unwrap_or(""),
+        let namespace_ref = namespace.as_deref().unwrap_or("");
+        let outcome = InprocRegistry::global().register_with_meta_in_namespace(
+            namespace_ref,
             name,
             runtime.public_key,
             inbox_sender,
             crate::PeerMeta::default(),
         );
+        observe_inproc_registration(namespace_ref, name, outcome)?;
         Ok(runtime)
     }
 
@@ -2371,13 +2478,34 @@ impl CommsRuntime {
     /// because the sender is cloned from the same router and pending
     /// deliveries are unaffected.
     pub fn set_peer_meta(&self, meta: crate::PeerMeta) {
-        InprocRegistry::global().register_with_meta_in_namespace(
-            self.inproc_namespace().unwrap_or(""),
-            self.participant_name(),
+        let namespace = self.inproc_namespace().unwrap_or("");
+        let name = self.participant_name();
+        let outcome = InprocRegistry::global().register_with_meta_in_namespace(
+            namespace,
+            name,
             self.public_key,
             self.router.inbox_sender().clone(),
             meta,
         );
+        // A metadata refresh re-registers the same name+pubkey and expects a
+        // clean `Registered`. Surface anything else explicitly rather than
+        // assuming success — a rejection means the meta update never landed,
+        // and a displacement means we clobbered an unexpected route.
+        if outcome.is_rejected() {
+            tracing::warn!(
+                inproc_namespace = %namespace,
+                peer_name = %name,
+                ?outcome,
+                "inproc metadata refresh rejected; peer meta was not updated"
+            );
+        } else if outcome.displaced_existing() {
+            tracing::warn!(
+                inproc_namespace = %namespace,
+                peer_name = %name,
+                ?outcome,
+                "inproc metadata refresh displaced an unexpected route"
+            );
+        }
     }
 
     /// Canonical peer resolver.
@@ -3257,24 +3385,22 @@ async fn handle_pairing_connection(
             "pairing proof missing caller",
         )
     })?;
+    // Typed pairing-caller deserialization fails closed: a malformed public
+    // key or an identity kind other than `ed25519_public_key` is rejected here,
+    // before any trust row is derived. No String `identity.kind` equality check
+    // and no late, second public-key parse downstream.
     let caller: PairingPeer = serde_json::from_value(caller_value).map_err(|err| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("invalid pairing caller: {err}"),
         )
     })?;
-    if caller.identity.kind != "ed25519_public_key" {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "pairing caller identity must be ed25519_public_key",
-        ));
-    }
     let supplied = pairing_field(&proof, "password_proof")?;
     let expected = comms_pairing_password_proof(
         pairing_password,
         &challenge,
-        &caller.identity.public_key,
-        &caller.address,
+        &caller.identity.public_key.raw,
+        &caller.address.0,
     );
     if !constant_time_str_eq(supplied, &expected) {
         return Err(std::io::Error::new(
@@ -3283,12 +3409,9 @@ async fn handle_pairing_connection(
         ));
     }
 
-    let pubkey = PubKey::from_pubkey_string(&caller.identity.public_key).map_err(|err| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("invalid pairing caller public key: {err}"),
-        )
-    })?;
+    // The trusted peer is built from the typed identity validated at
+    // deserialization — not from re-parsed free strings.
+    let pubkey = caller.identity.public_key.key;
     // Paired external-peer trust is a MobMachine-owned external-peer edge: the
     // remote target paired into this mob's control plane. Attribute the trust
     // row to the generated MobMachineExternalPeerTrustWiring authority source
@@ -3300,7 +3423,7 @@ async fn handle_pairing_connection(
             TrustedPeer {
                 name: caller.name.clone(),
                 pubkey,
-                addr: caller.address.clone(),
+                addr: caller.address.0.clone(),
                 meta: crate::PeerMeta::default(),
             },
             meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring,
@@ -3345,10 +3468,14 @@ async fn spawn_plain_tcp_listener(
 ) -> Result<ListenerHandle, std::io::Error> {
     let listener = TcpListener::bind(addr).await?;
     let semaphore = Arc::new(tokio::sync::Semaphore::new(PLAIN_LISTENER_MAX_CONCURRENT));
+    // Shared typed ingress-fault counters across all connection tasks for this
+    // listener (codec overflow / inbox-full backpressure).
+    let faults = Arc::new(crate::plain_listener::PlainIngressFaults::default());
     let handle = tokio::spawn(async move {
         while let Ok((stream, _peer)) = listener.accept().await {
             let sender = inbox_sender.clone();
             let sem = semaphore.clone();
+            let faults = faults.clone();
             tokio::spawn(async move {
                 let _permit = match sem.acquire().await {
                     Ok(p) => p,
@@ -3359,6 +3486,7 @@ async fn spawn_plain_tcp_listener(
                     sender,
                     max_line_length,
                     meerkat_core::PlainEventSource::Tcp,
+                    &faults,
                 )
                 .await;
             });
@@ -3388,10 +3516,14 @@ async fn spawn_plain_uds_listener(
     }
     let listener = UnixListener::bind(&path)?;
     let semaphore = Arc::new(tokio::sync::Semaphore::new(PLAIN_LISTENER_MAX_CONCURRENT));
+    // Shared typed ingress-fault counters across all connection tasks for this
+    // listener (codec overflow / inbox-full backpressure).
+    let faults = Arc::new(crate::plain_listener::PlainIngressFaults::default());
     let handle = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let sender = inbox_sender.clone();
             let sem = semaphore.clone();
+            let faults = faults.clone();
             tokio::spawn(async move {
                 let _permit = match sem.acquire().await {
                     Ok(p) => p,
@@ -3402,6 +3534,7 @@ async fn spawn_plain_uds_listener(
                     sender,
                     max_line_length,
                     meerkat_core::PlainEventSource::Uds,
+                    &faults,
                 )
                 .await;
             });
@@ -3434,6 +3567,67 @@ mod tests {
         interaction::InteractionId,
         types::{ContentBlock, ImageData, SessionId},
     };
+
+    /// ROW #344 gate: the pairing caller is built from a typed identity that
+    /// deserializes once and fails closed.
+    ///
+    /// - A malformed public key (not `ed25519:<base64>`) is rejected at typed
+    ///   deserialization, before any trust row could be derived.
+    /// - An identity `kind` other than `ed25519_public_key` is rejected by the
+    ///   typed enum — no String equality check downstream.
+    /// - A well-formed caller yields a typed [`PubKey`] (the trust row is built
+    ///   from `identity.public_key.key`, not a re-parsed free string).
+    #[test]
+    fn pairing_caller_identity_is_typed_and_fails_closed() {
+        // Malformed public key → typed deserialization rejects it.
+        let bad_key = serde_json::json!({
+            "name": "peer",
+            "address": "tcp://127.0.0.1:4200",
+            "identity": {
+                "kind": "ed25519_public_key",
+                "public_key": "not-a-valid-pubkey",
+            }
+        });
+        assert!(
+            serde_json::from_value::<PairingPeer>(bad_key).is_err(),
+            "a malformed pairing public key must be rejected at deserialization"
+        );
+
+        // Wrong identity kind → typed enum rejects it (no String == check).
+        let valid_pubkey = Keypair::generate().public_key();
+        let wrong_kind = serde_json::json!({
+            "name": "peer",
+            "address": "tcp://127.0.0.1:4200",
+            "identity": {
+                "kind": "rsa_public_key",
+                "public_key": valid_pubkey.to_pubkey_string(),
+            }
+        });
+        assert!(
+            serde_json::from_value::<PairingPeer>(wrong_kind).is_err(),
+            "a non-ed25519 identity kind must be rejected at deserialization"
+        );
+
+        // Well-formed caller → typed PubKey is recovered, raw string retained
+        // for the proof hash.
+        let good = serde_json::json!({
+            "name": "peer",
+            "address": "tcp://127.0.0.1:4200",
+            "identity": {
+                "kind": "ed25519_public_key",
+                "public_key": valid_pubkey.to_pubkey_string(),
+            }
+        });
+        let caller: PairingPeer =
+            serde_json::from_value(good).expect("well-formed pairing caller deserializes");
+        assert_eq!(caller.identity.public_key.key, valid_pubkey);
+        assert_eq!(
+            caller.identity.public_key.raw,
+            valid_pubkey.to_pubkey_string()
+        );
+        assert_eq!(caller.address.0, "tcp://127.0.0.1:4200");
+        assert_eq!(caller.identity.kind, PairingIdentityKind::Ed25519PublicKey);
+    }
 
     /// Test helper: build a [`TrustedPeerDescriptor`] from raw pubkey +
     /// display name + address string. Panics on invalid input — tests are

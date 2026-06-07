@@ -84,11 +84,23 @@ impl HttpSkillSource {
     }
 
     async fn refresh_if_needed(&self) -> Result<(), SkillError> {
-        if self
-            .cache
-            .read()
-            .map(|cache| cache.is_fresh(self.refresh_interval))
-            .unwrap_or(false)
+        // Authority gate: an Unhealthy source (refresh failing past the
+        // unhealthy threshold) is no longer authoritative. It must NOT serve
+        // interval-fresh-but-stale cache — health is the authority, not the
+        // freshness timer. We still attempt a refresh so the source can
+        // recover, but skip the is_fresh fast-path that would otherwise serve
+        // stale cache without re-validating.
+        let unhealthy = {
+            let streak = self.failure_streak.read().map(|f| *f).unwrap_or_default();
+            streak >= self.thresholds.unhealthy_failure_streak
+        };
+
+        if !unhealthy
+            && self
+                .cache
+                .read()
+                .map(|cache| cache.is_fresh(self.refresh_interval))
+                .unwrap_or(false)
         {
             return Ok(());
         }
@@ -111,8 +123,18 @@ impl HttpSkillSource {
                 Ok(())
             }
             Err(err) => {
-                if let Ok(mut failures) = self.failure_streak.write() {
+                let streak = if let Ok(mut failures) = self.failure_streak.write() {
                     *failures = failures.saturating_add(1);
+                    *failures
+                } else {
+                    self.failure_streak.read().map(|f| *f).unwrap_or_default()
+                };
+                // Authority gate: once refresh has failed past the unhealthy
+                // threshold the source is no longer authoritative, so we refuse
+                // to serve interval-fresh-but-stale cache with a typed stale
+                // error rather than laundering it as a successful load.
+                if streak >= self.thresholds.unhealthy_failure_streak {
+                    return Err(stale_source_error(&redacted_url(&self.url), streak, &err));
                 }
                 if self
                     .cache
@@ -229,6 +251,18 @@ impl SkillSource for HttpSkillSource {
             failures >= self.thresholds.unhealthy_failure_streak,
         ))
     }
+}
+
+/// Typed refusal for an Unhealthy remote source: rather than serving stale
+/// (but interval-fresh) cache, the source declares itself non-authoritative.
+fn stale_source_error(location: &str, failure_streak: u32, cause: &SkillError) -> SkillError {
+    SkillError::Load(
+        format!(
+            "stale source: HTTP skill source {location} is unhealthy \
+             (failure_streak={failure_streak}); refusing to serve stale cache: {cause}"
+        )
+        .into(),
+    )
 }
 
 fn redacted_url(url: &str) -> String {

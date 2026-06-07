@@ -694,9 +694,12 @@ async fn handle_live_socket(
                             Ok(chunk) => {
                                 if let Err(err) = state.host.send_input(&channel_id, chunk).await {
                                     tracing::warn!(channel = %channel_id, error = %err, "send_input failed");
+                                    // D153: populate the typed `reason` with the
+                                    // host error's stable class so clients route
+                                    // on the code, not the prose `error`.
                                     let err_json = serde_json::to_string(&WsErrorFrame {
                                         error: err.to_string(),
-                                        reason: None,
+                                        reason: Some(err.reason_code().to_string()),
                                     }).unwrap_or_default();
                                     let _ = socket.send(WsMessage::Text(err_json.into())).await;
                                 }
@@ -734,9 +737,11 @@ async fn handle_live_socket(
                         };
                         if let Err(err) = state.host.send_input(&channel_id, chunk).await {
                             tracing::warn!(channel = %channel_id, error = %err, "binary send_input failed");
+                            // D153: populate the typed `reason` with the host
+                            // error's stable class (see text-frame path above).
                             let err_json = serde_json::to_string(&WsErrorFrame {
                                 error: err.to_string(),
-                                reason: None,
+                                reason: Some(err.reason_code().to_string()),
                             }).unwrap_or_default();
                             let _ = socket.send(WsMessage::Text(err_json.into())).await;
                         }
@@ -2244,6 +2249,63 @@ mod tests {
         match typed_observation {
             Some(WireLiveAdapterObservation::Ready) => {}
             other => panic!("expected wire-mirror Ready, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // D153: send_input failure WsErrorFrame carries a typed reason code
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn send_input_failure_frame_populates_typed_reason() {
+        // A representative send_input failure: the channel is gone. The host
+        // error is typed; the WS frame must carry its stable reason class in
+        // the `reason` field (previously left `None`, forcing clients to
+        // reparse the prose `error`).
+        let host_err = LiveAdapterHostError::ChannelNotFound(LiveChannelId::new("ch-1"));
+        let frame = WsErrorFrame {
+            error: host_err.to_string(),
+            reason: Some(host_err.reason_code().to_string()),
+        };
+        assert_eq!(frame.reason.as_deref(), Some("channel_not_found"));
+
+        // The serialized frame must include the populated `reason` (the
+        // `skip_serializing_if = Option::is_none` would have dropped it under
+        // the old `reason: None` shape).
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(
+            json.contains("\"reason\":\"channel_not_found\""),
+            "serialized WsErrorFrame must carry the typed reason: {json}"
+        );
+
+        // Each host error variant maps to a distinct, stable reason class so
+        // clients can route without parsing the message. Two structurally
+        // different not-ready errors share the not-ready class, which is
+        // correct; the point is the codes are stable and exhaustive.
+        let cases = [
+            (
+                LiveAdapterHostError::NoAdapter(LiveChannelId::new("c")),
+                "no_adapter",
+            ),
+            (
+                LiveAdapterHostError::OpenNotAuthorized,
+                "open_not_authorized",
+            ),
+            (
+                LiveAdapterHostError::CloseNotAuthorized,
+                "close_not_authorized",
+            ),
+            (
+                LiveAdapterHostError::StatusNotAuthorized,
+                "status_not_authorized",
+            ),
+            (
+                LiveAdapterHostError::UnsupportedCommand("x"),
+                "unsupported_command",
+            ),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(err.reason_code(), expected, "reason_code for {err:?}");
         }
     }
 }

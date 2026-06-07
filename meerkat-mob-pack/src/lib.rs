@@ -11,3 +11,4 @@ pub mod targz;
 mod test_utils;
 pub mod trust;
 pub mod validate;
+pub mod vocabulary;

@@ -283,8 +283,12 @@ impl CompositeDispatcher {
     /// Register skill discovery tools (browse_skills, load_skill).
     #[cfg(feature = "skills")]
     pub fn register_skill_tools(&mut self, tool_set: SkillToolSet) {
+        let resolved_policy = self.builtin_config.resolve();
         for tool in tool_set.tools() {
-            self.allowed_tools.insert(tool.name().to_string());
+            let name = tool.name();
+            if resolved_policy.is_enabled(name, tool.default_enabled()) {
+                self.allowed_tools.insert(name.to_string());
+            }
         }
         self.skill_tools = Some(tool_set);
     }
@@ -1606,5 +1610,166 @@ mod tests {
                 }
             }
         }
+    }
+
+    // Minimal SkillEngine test double. The skill tool registration path only
+    // reads each tool's `name()` / `default_enabled()`, so the engine methods
+    // below are never invoked; they exist only to satisfy the trait bound.
+    #[cfg(feature = "skills")]
+    fn stub_skill_key() -> meerkat_core::skills::SkillKey {
+        meerkat_core::skills::SkillKey::new(
+            meerkat_core::skills::SourceUuid::from_uuid(uuid::Uuid::nil()),
+            meerkat_core::skills::SkillName::parse("stub").unwrap(),
+        )
+    }
+
+    #[cfg(feature = "skills")]
+    struct StubSkillEngine;
+
+    #[cfg(feature = "skills")]
+    impl meerkat_core::skills::SkillEngine for StubSkillEngine {
+        async fn inventory_section(&self) -> Result<String, meerkat_core::skills::SkillError> {
+            Ok(String::new())
+        }
+
+        async fn resolve_and_render(
+            &self,
+            _keys: &[meerkat_core::skills::SkillKey],
+        ) -> Result<Vec<meerkat_core::skills::ResolvedSkill>, meerkat_core::skills::SkillError>
+        {
+            Ok(Vec::new())
+        }
+
+        async fn collections(
+            &self,
+        ) -> Result<Vec<meerkat_core::skills::SkillCollection>, meerkat_core::skills::SkillError>
+        {
+            Ok(Vec::new())
+        }
+
+        async fn list_skills(
+            &self,
+            _filter: &meerkat_core::skills::SkillFilter,
+        ) -> Result<Vec<meerkat_core::skills::SkillDescriptor>, meerkat_core::skills::SkillError>
+        {
+            Ok(Vec::new())
+        }
+
+        async fn quarantined_diagnostics(
+            &self,
+        ) -> Result<
+            Vec<meerkat_core::skills::SkillQuarantineDiagnostic>,
+            meerkat_core::skills::SkillError,
+        > {
+            Ok(Vec::new())
+        }
+
+        async fn health_snapshot(
+            &self,
+        ) -> Result<meerkat_core::skills::SourceHealthSnapshot, meerkat_core::skills::SkillError>
+        {
+            Err(meerkat_core::skills::SkillError::NotFound {
+                key: stub_skill_key(),
+            })
+        }
+
+        async fn list_artifacts(
+            &self,
+            _key: &meerkat_core::skills::SkillKey,
+        ) -> Result<Vec<meerkat_core::skills::SkillArtifact>, meerkat_core::skills::SkillError>
+        {
+            Ok(Vec::new())
+        }
+
+        async fn read_artifact(
+            &self,
+            key: &meerkat_core::skills::SkillKey,
+            _artifact_path: &str,
+        ) -> Result<meerkat_core::skills::SkillArtifactContent, meerkat_core::skills::SkillError>
+        {
+            Err(meerkat_core::skills::SkillError::NotFound { key: key.clone() })
+        }
+
+        async fn invoke_function(
+            &self,
+            key: &meerkat_core::skills::SkillKey,
+            _function_name: &str,
+            _arguments: serde_json::Value,
+        ) -> Result<serde_json::Value, meerkat_core::skills::SkillError> {
+            Err(meerkat_core::skills::SkillError::NotFound { key: key.clone() })
+        }
+    }
+
+    #[cfg(feature = "skills")]
+    fn stub_skill_tool_set() -> SkillToolSet {
+        let runtime = Arc::new(meerkat_core::skills::SkillRuntime::new(Arc::new(
+            StubSkillEngine,
+        )));
+        SkillToolSet::new(runtime)
+    }
+
+    #[cfg(feature = "skills")]
+    #[test]
+    fn register_skill_tools_respects_default_disabled_policy() {
+        // Dogma row #318: skill builtins are default_enabled() == false and must NOT
+        // appear in the catalog under the default (AllowAll) policy.
+        let store: Arc<dyn crate::builtin::TaskStore> = Arc::new(MemoryTaskStore::new());
+        let mut dispatcher = CompositeDispatcher::new(
+            store,
+            &BuiltinToolConfig::default(),
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        dispatcher.register_skill_tools(stub_skill_tool_set());
+
+        let names: Vec<String> = dispatcher
+            .tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        assert!(
+            !names.contains(&"browse_skills".to_string()),
+            "browse_skills must stay disabled by default: {names:?}"
+        );
+        assert!(
+            !names.contains(&"load_skill".to_string()),
+            "load_skill must stay disabled by default: {names:?}"
+        );
+    }
+
+    #[cfg(feature = "skills")]
+    #[test]
+    fn register_skill_tools_honors_explicit_enable() {
+        // With explicit policy enable, the skill tools must appear in the catalog.
+        let store: Arc<dyn crate::builtin::TaskStore> = Arc::new(MemoryTaskStore::new());
+        let config = BuiltinToolConfig {
+            policy: ToolPolicyLayer::new()
+                .enable_tool("browse_skills")
+                .enable_tool("load_skill"),
+            ..BuiltinToolConfig::default()
+        };
+        let mut dispatcher =
+            CompositeDispatcher::new(store, &config, None, None, None, None, false).unwrap();
+
+        dispatcher.register_skill_tools(stub_skill_tool_set());
+
+        let names: Vec<String> = dispatcher
+            .tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        assert!(
+            names.contains(&"browse_skills".to_string()),
+            "explicitly enabled browse_skills must appear: {names:?}"
+        );
+        assert!(
+            names.contains(&"load_skill".to_string()),
+            "explicitly enabled load_skill must appear: {names:?}"
+        );
     }
 }

@@ -1,14 +1,7 @@
+use crate::vocabulary::ExecPolicy;
+
 pub fn normalize_executable_bit(path: &str, bytes: &[u8]) -> bool {
-    let normalized_path = path.replace('\\', "/");
-    if !normalized_path.starts_with("hooks/") {
-        return false;
-    }
-
-    normalized_path.ends_with(".sh") || normalized_path.ends_with(".bash") || has_shebang(bytes)
-}
-
-fn has_shebang(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"#!")
+    ExecPolicy::classify(path, bytes).is_executable()
 }
 
 #[cfg(test)]

@@ -88,8 +88,19 @@ impl CompositeSkillSource {
     }
 
     fn resolve_key_for_load(&self, key: &SkillKey) -> Result<SkillKey, SkillError> {
+        // Fail closed: a composite load can only proceed once the canonical
+        // source-identity registry has resolved the key. Without an attached
+        // registry there is no authority to confirm `key` is canonical /
+        // lifecycle-active, so we refuse rather than passing the unresolved
+        // key straight through.
         let Some(registry) = &self.registry else {
-            return Ok(key.clone());
+            return Err(SkillError::Load(
+                format!(
+                    "composite skill source has no source-identity registry attached; \
+                     refusing to load {key} on unresolved identity"
+                )
+                .into(),
+            ));
         };
         registry
             .resolve(key)
@@ -379,5 +390,27 @@ mod tests {
         assert_eq!(doc.descriptor.name, "Canonical Alpha");
         assert_eq!(doc.descriptor.source_name, "canonical");
         assert_eq!(doc.body, "canonical body");
+    }
+
+    #[tokio::test]
+    async fn load_without_registry_fails_closed() {
+        // Row #11: a composite with no attached source-identity registry must
+        // refuse to load (no silent `Ok(key.clone())` pass-through).
+        let source = source_uuid("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa");
+        let key = skill_key(&source, "alpha");
+        let composite = CompositeSkillSource::from_named(vec![NamedSource::new(
+            source_record(source, "legacy"),
+            SourceNode::Memory(InMemorySkillSource::new(vec![skill_doc(
+                key.clone(),
+                "Alpha",
+                "body",
+            )])),
+        )]);
+
+        let err = composite.load(&key).await.unwrap_err();
+        assert!(
+            matches!(&err, SkillError::Load(message) if message.contains("no source-identity registry")),
+            "expected fail-closed registry-absence refusal; got {err:?}"
+        );
     }
 }

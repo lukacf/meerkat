@@ -3082,13 +3082,17 @@ capabilities = [{capability_values}]
 
         let parsed = parse_mobpack(&bytes).expect("browser-safe mobpack should parse");
 
+        let tokens: Vec<String> = parsed
+            .manifest
+            .requires
+            .as_ref()
+            .expect("requires section")
+            .capabilities
+            .iter()
+            .map(|c| c.token().to_string())
+            .collect();
         assert_eq!(
-            parsed
-                .manifest
-                .requires
-                .as_ref()
-                .expect("requires section")
-                .capabilities,
+            tokens,
             vec![
                 "sessions".to_string(),
                 "comms".to_string(),

@@ -229,33 +229,48 @@ struct MeerkatMobWaitReadyInput {
     timeout_ms: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct MeerkatMobProfileCreateInput {
+    /// Unique profile name.
     name: String,
+    /// Profile definition (model, skills, tools, etc.).
+    #[schemars(with = "serde_json::Value")]
     profile: meerkat_mob::Profile,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct MeerkatMobProfileNameInput {
+    /// Profile name to retrieve.
     name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct MeerkatMobProfileUpdateInput {
+    /// Profile name to update.
     name: String,
+    /// Updated profile definition.
+    #[schemars(with = "serde_json::Value")]
     profile: meerkat_mob::Profile,
+    /// Expected current revision for CAS.
     expected_revision: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct MeerkatMobProfileDeleteInput {
+    /// Profile name to delete.
     name: String,
+    /// Expected current revision for CAS.
     expected_revision: u64,
 }
+
+/// Schema source for tools that accept no parameters.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MeerkatMobNoParamsInput {}
 
 const fn default_limit() -> usize {
     100
@@ -290,7 +305,7 @@ static PUBLIC_TOOLS: &[PublicTool] = &[
     PublicTool {
         name: "meerkat_mob_list",
         description: "List active mobs.",
-        schema: || json!({ "type": "object", "properties": {}, "required": [] }),
+        schema: typed_schema::<MeerkatMobNoParamsInput>,
     },
     PublicTool {
         name: "meerkat_mob_status",
@@ -390,63 +405,27 @@ static PUBLIC_TOOLS: &[PublicTool] = &[
     PublicTool {
         name: "meerkat_mob_profile_create",
         description: "Create a new realm profile for spawning mob members.",
-        schema: || {
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Unique profile name"},
-                    "profile": {"type": "object", "description": "Profile definition (model, skills, tools, etc.)"}
-                },
-                "required": ["name", "profile"]
-            })
-        },
+        schema: typed_schema::<MeerkatMobProfileCreateInput>,
     },
     PublicTool {
         name: "meerkat_mob_profile_get",
         description: "Get a realm profile by name.",
-        schema: || {
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Profile name to retrieve"}
-                },
-                "required": ["name"]
-            })
-        },
+        schema: typed_schema::<MeerkatMobProfileNameInput>,
     },
     PublicTool {
         name: "meerkat_mob_profile_list",
         description: "List all realm profiles.",
-        schema: || json!({ "type": "object", "properties": {}, "required": [] }),
+        schema: typed_schema::<MeerkatMobNoParamsInput>,
     },
     PublicTool {
         name: "meerkat_mob_profile_update",
         description: "Update a realm profile with CAS revision check.",
-        schema: || {
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Profile name to update"},
-                    "profile": {"type": "object", "description": "Updated profile definition"},
-                    "expected_revision": {"type": "integer", "description": "Expected current revision for CAS"}
-                },
-                "required": ["name", "profile", "expected_revision"]
-            })
-        },
+        schema: typed_schema::<MeerkatMobProfileUpdateInput>,
     },
     PublicTool {
         name: "meerkat_mob_profile_delete",
         description: "Delete a realm profile.",
-        schema: || {
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Profile name to delete"},
-                    "expected_revision": {"type": "integer", "description": "Expected current revision for CAS"}
-                },
-                "required": ["name", "expected_revision"]
-            })
-        },
+        schema: typed_schema::<MeerkatMobProfileDeleteInput>,
     },
 ];
 
@@ -1108,6 +1087,26 @@ mod tests {
             26,
             "expected exactly 26 public tools across all surfaces"
         );
+    }
+
+    /// Gate for remediation rows #32/#157: every public mob MCP tool's
+    /// `inputSchema` must be produced by `schema_for!` via [`typed_schema`],
+    /// never a hand-authored `json!` literal. `schema_for!` always stamps the
+    /// root with a `$schema` meta-schema URL; hand-written `json!({...})` object
+    /// literals in this surface never carry one. Asserting `$schema` is present
+    /// on every advertised schema therefore fails on the old hand-literal form
+    /// and passes once each entry routes through `typed_schema::<T>()`.
+    #[test]
+    fn public_tool_schemas_are_typed_not_handwritten() {
+        for entry in PUBLIC_TOOLS {
+            let schema = (entry.schema)();
+            assert!(
+                schema.get("$schema").and_then(Value::as_str).is_some(),
+                "tool {} has a hand-authored json! schema (missing $schema marker); \
+                 it must derive from schema_for! via typed_schema::<T>()",
+                entry.name
+            );
+        }
     }
 
     const ED25519_PUBLIC_KEY_7: &str = "ed25519:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";

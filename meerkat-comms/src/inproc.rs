@@ -46,6 +46,58 @@ pub struct InprocPeerInfo {
     pub meta: PeerMeta,
 }
 
+/// Why a registration was rejected without mutating the registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistrationRejection {
+    /// The supplied pubkey was the all-zero key, which can never identify a
+    /// distinct peer and is refused fail-closed.
+    ZeroPubkey,
+}
+
+/// Typed result of registering an inproc peer.
+///
+/// Registration is not always a clean insert: re-registering an existing
+/// pubkey under a new name evicts the old name mapping, and re-registering an
+/// existing name with a new pubkey evicts the old pubkey entry. Both evictions
+/// can also happen at once. Callers (runtime constructors, metadata refresh)
+/// must observe these facts rather than assume a clean success.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistrationOutcome {
+    /// The peer was inserted without displacing any existing route.
+    Registered,
+    /// This pubkey was already registered under a different name; the old name
+    /// mapping was removed and replaced with the new name.
+    ReplacedPubkey { evicted_name: String },
+    /// This name was already bound to a different pubkey; the old pubkey entry
+    /// was evicted so the stale key is no longer reachable.
+    EvictedName { evicted_pubkey: PubKey },
+    /// Both evictions happened: this pubkey's old name was removed AND this
+    /// name's old pubkey was evicted in the same registration.
+    ReplacedPubkeyAndEvictedName {
+        evicted_name: String,
+        evicted_pubkey: PubKey,
+    },
+    /// The registration was refused without mutating the registry.
+    Rejected { reason: RegistrationRejection },
+}
+
+impl RegistrationOutcome {
+    /// Whether the registration displaced an existing route (either eviction).
+    pub fn displaced_existing(&self) -> bool {
+        matches!(
+            self,
+            Self::ReplacedPubkey { .. }
+                | Self::EvictedName { .. }
+                | Self::ReplacedPubkeyAndEvictedName { .. }
+        )
+    }
+
+    /// Whether the registration was rejected (no mutation occurred).
+    pub fn is_rejected(&self) -> bool {
+        matches!(self, Self::Rejected { .. })
+    }
+}
+
 /// Global inproc registry instance.
 static GLOBAL_REGISTRY: OnceLock<InprocRegistry> = OnceLock::new();
 
@@ -122,31 +174,48 @@ impl InprocRegistry {
 
     /// Register an agent's inbox for inproc communication.
     ///
-    /// If an agent with the same pubkey already exists, it will be replaced.
-    /// If an agent with the same name but different pubkey exists, the old
-    /// agent will be evicted (both from peers and names maps).
-    pub fn register(&self, name: impl Into<String>, pubkey: PubKey, sender: InboxSender) {
+    /// Returns a typed [`RegistrationOutcome`] describing whether the insert was
+    /// clean or displaced an existing route (see
+    /// [`register_with_meta_in_namespace`](Self::register_with_meta_in_namespace)).
+    pub fn register(
+        &self,
+        name: impl Into<String>,
+        pubkey: PubKey,
+        sender: InboxSender,
+    ) -> RegistrationOutcome {
         self.register_with_meta_in_namespace(
             DEFAULT_NAMESPACE,
             name,
             pubkey,
             sender,
             PeerMeta::default(),
-        );
+        )
     }
 
     /// Register an agent's inbox with associated [`PeerMeta`].
+    ///
+    /// Returns a typed [`RegistrationOutcome`]; see
+    /// [`register_with_meta_in_namespace`](Self::register_with_meta_in_namespace).
     pub fn register_with_meta(
         &self,
         name: impl Into<String>,
         pubkey: PubKey,
         sender: InboxSender,
         meta: PeerMeta,
-    ) {
-        self.register_with_meta_in_namespace(DEFAULT_NAMESPACE, name, pubkey, sender, meta);
+    ) -> RegistrationOutcome {
+        self.register_with_meta_in_namespace(DEFAULT_NAMESPACE, name, pubkey, sender, meta)
     }
 
     /// Register an agent's inbox within an explicit namespace.
+    ///
+    /// Returns a typed [`RegistrationOutcome`] that surfaces route displacement
+    /// explicitly: re-registering an existing pubkey under a new name evicts
+    /// the old name mapping ([`RegistrationOutcome::ReplacedPubkey`]); a name
+    /// rebound to a new pubkey evicts the old pubkey entry
+    /// ([`RegistrationOutcome::EvictedName`]); both can happen at once
+    /// ([`RegistrationOutcome::ReplacedPubkeyAndEvictedName`]). A zero pubkey is
+    /// refused without mutation ([`RegistrationOutcome::Rejected`]). Callers
+    /// must observe displacement/rejection rather than assume a clean success.
     pub fn register_with_meta_in_namespace(
         &self,
         namespace: &str,
@@ -154,7 +223,7 @@ impl InprocRegistry {
         pubkey: PubKey,
         sender: InboxSender,
         meta: PeerMeta,
-    ) {
+    ) -> RegistrationOutcome {
         let name = name.into();
         if pubkey.is_zero() {
             tracing::warn!(
@@ -162,7 +231,9 @@ impl InprocRegistry {
                 peer_name = %name,
                 "rejecting zero-pubkey inproc registration"
             );
-            return;
+            return RegistrationOutcome::Rejected {
+                reason: RegistrationRejection::ZeroPubkey,
+            };
         }
         let peer = InprocPeer {
             name: name.clone(),
@@ -175,28 +246,40 @@ impl InprocRegistry {
         let namespace_state = state.namespace_mut(namespace);
 
         // If this pubkey was registered under a different name, remove old name mapping
-        let old_name_to_remove = namespace_state
+        let evicted_name = namespace_state
             .peers
             .get(&pubkey)
             .filter(|old_peer| old_peer.name != name)
             .map(|old_peer| old_peer.name.clone());
-        if let Some(old_name) = old_name_to_remove {
-            namespace_state.names.remove(&old_name);
+        if let Some(old_name) = &evicted_name {
+            namespace_state.names.remove(old_name);
         }
 
         // If this name was registered to a different pubkey, remove the old pubkey entry
         // This prevents stale pubkeys from remaining reachable
-        let old_pubkey_to_remove = namespace_state
+        let evicted_pubkey = namespace_state
             .names
             .get(&name)
             .filter(|&&old_pk| old_pk != pubkey)
             .copied();
-        if let Some(old_pubkey) = old_pubkey_to_remove {
+        if let Some(old_pubkey) = evicted_pubkey {
             namespace_state.peers.remove(&old_pubkey);
         }
 
         namespace_state.peers.insert(pubkey, peer);
         namespace_state.names.insert(name, pubkey);
+
+        match (evicted_name, evicted_pubkey) {
+            (None, None) => RegistrationOutcome::Registered,
+            (Some(evicted_name), None) => RegistrationOutcome::ReplacedPubkey { evicted_name },
+            (None, Some(evicted_pubkey)) => RegistrationOutcome::EvictedName { evicted_pubkey },
+            (Some(evicted_name), Some(evicted_pubkey)) => {
+                RegistrationOutcome::ReplacedPubkeyAndEvictedName {
+                    evicted_name,
+                    evicted_pubkey,
+                }
+            }
+        }
     }
 
     /// Unregister an agent by pubkey.
@@ -864,6 +947,57 @@ mod tests {
         // Lookup should return the new pubkey
         let (found_pubkey, _) = registry.get_by_name("my-agent").unwrap();
         assert_eq!(found_pubkey, pubkey2);
+    }
+
+    /// ROW #292 gate: registration returns a typed [`RegistrationOutcome`] that
+    /// surfaces route displacement and zero-pubkey rejection, instead of
+    /// silently evicting and returning `()`.
+    #[test]
+    fn registration_outcome_is_typed_for_displacement_and_rejection() {
+        let registry = InprocRegistry::new();
+        let keypair = make_keypair();
+        let pubkey = keypair.public_key();
+        let (_, sender1) = classified_inbox();
+        let (_, sender2) = classified_inbox();
+        let (_, sender3) = classified_inbox();
+
+        // Clean first insert.
+        assert_eq!(
+            registry.register("agent-v1", pubkey, sender1),
+            RegistrationOutcome::Registered
+        );
+
+        // Re-registering the SAME pubkey under a NEW name evicts the old name
+        // and reports it typed.
+        assert_eq!(
+            registry.register("agent-v2", pubkey, sender2),
+            RegistrationOutcome::ReplacedPubkey {
+                evicted_name: "agent-v1".to_string()
+            }
+        );
+
+        // Re-registering an existing NAME with a NEW pubkey evicts the old
+        // pubkey and reports it typed.
+        let other = make_keypair();
+        let other_pubkey = other.public_key();
+        match registry.register("agent-v2", other_pubkey, sender3) {
+            RegistrationOutcome::EvictedName { evicted_pubkey } => {
+                assert_eq!(evicted_pubkey, pubkey);
+            }
+            other => panic!("expected EvictedName, got {other:?}"),
+        }
+
+        // A zero pubkey is refused fail-closed with a typed rejection, no
+        // mutation.
+        let (_, zero_sender) = classified_inbox();
+        let zero_pubkey = PubKey::new([0u8; 32]);
+        assert_eq!(
+            registry.register("zero", zero_pubkey, zero_sender),
+            RegistrationOutcome::Rejected {
+                reason: RegistrationRejection::ZeroPubkey
+            }
+        );
+        assert!(!registry.contains_name("zero"));
     }
 
     /// Test that the ABA scenario is handled correctly:

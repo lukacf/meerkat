@@ -55,25 +55,22 @@ where
     };
 
     // Verify signature (when peer auth is enabled).
+    //
+    // A rejected envelope is a *failed* admission, not successful handling.
+    // Return a typed auth/address fault (mirroring the `IngressDropped` arm
+    // below) so the listener's `Err -> warn` arm records the rejection fact
+    // rather than treating the silent `Ok(())` as a clean connection.
     if require_peer_auth && !envelope.verify() {
-        tracing::warn!(
-            "Dropped message {} from {:?}: invalid signature",
-            envelope.id,
-            envelope.from
-        );
-        return Ok(());
+        return Err(IoTaskError::InvalidSignature {
+            envelope_id: envelope.id,
+        });
     }
 
     // Verify envelope is addressed to us
     if envelope.to != keypair.public_key() {
-        tracing::warn!(
-            "Dropped message {} from {:?}: misaddressed (to {:?}, we are {:?})",
-            envelope.id,
-            envelope.from,
-            envelope.to,
-            keypair.public_key()
-        );
-        return Ok(());
+        return Err(IoTaskError::Misaddressed {
+            envelope_id: envelope.id,
+        });
     }
 
     // Admit through the inbox seam first. Typed admission outcome: explicit
@@ -145,6 +142,22 @@ pub enum IoTaskError {
     InboxFull,
     #[error("Ingress dropped: {0:?}")]
     IngressDropped(DropReason),
+    #[error("Rejected envelope {envelope_id}: invalid signature")]
+    InvalidSignature { envelope_id: uuid::Uuid },
+    #[error("Rejected envelope {envelope_id}: misaddressed (not addressed to us)")]
+    Misaddressed { envelope_id: uuid::Uuid },
+}
+
+impl IoTaskError {
+    /// Whether this error represents a *rejected admission* (auth/address/policy
+    /// fault) rather than a transport/IO failure. Lets the listener distinguish
+    /// "we refused this peer" from "the connection broke" for metrics.
+    pub fn is_admission_rejection(&self) -> bool {
+        matches!(
+            self,
+            Self::InvalidSignature { .. } | Self::Misaddressed { .. } | Self::IngressDropped(_)
+        )
+    }
 }
 
 #[cfg(test)]
@@ -303,9 +316,60 @@ mod tests {
         });
 
         let result = handle_connection(server, true, &receiver_keypair, &inbox_sender).await;
-        assert!(result.is_ok()); // Silent drop, not an error
+        // ROW #300: an invalid signature is a rejected admission, surfaced as a
+        // typed auth fault — not a silent `Ok(())` that the listener would treat
+        // as successful handling.
+        assert!(matches!(result, Err(IoTaskError::InvalidSignature { .. })));
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .is_some_and(IoTaskError::is_admission_rejection),
+            "invalid signature must classify as an admission rejection"
+        );
 
         // No item in inbox
+        let items = inbox.try_drain_classified();
+        assert!(items.is_empty());
+    }
+
+    /// ROW #300 gate: an envelope addressed to a different recipient is rejected
+    /// with a typed `Misaddressed` fault, not silently swallowed as `Ok(())`.
+    #[tokio::test]
+    async fn test_io_task_misaddressed_returns_typed_fault() {
+        let sender_keypair = make_keypair();
+        let receiver_keypair = make_keypair();
+        let other_keypair = make_keypair();
+        let trusted = make_trusted_peers(&sender_keypair.public_key());
+        let (mut inbox, inbox_sender) = classified_inbox_for_trust(&trusted, true);
+
+        // Signed correctly, but addressed to `other_keypair`, not the receiver.
+        let envelope = make_signed_envelope(
+            &sender_keypair,
+            other_keypair.public_key(),
+            MessageKind::Message {
+                blocks: None,
+                body: "hello".to_string(),
+                handling_mode: None,
+            },
+        );
+        let bytes = envelope_to_bytes(&envelope).await;
+
+        let (client, server) = tokio::io::duplex(4096);
+        let (_client_read, mut client_write) = tokio::io::split(client);
+        tokio::spawn(async move {
+            client_write.write_all(&bytes).await.unwrap();
+        });
+
+        let result = handle_connection(server, true, &receiver_keypair, &inbox_sender).await;
+        assert!(matches!(result, Err(IoTaskError::Misaddressed { .. })));
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .is_some_and(IoTaskError::is_admission_rejection)
+        );
+
         let items = inbox.try_drain_classified();
         assert!(items.is_empty());
     }

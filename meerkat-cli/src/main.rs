@@ -12728,7 +12728,7 @@ async fn execute_mob_web_build(
         load_verified_mobpack(scope, pack, cli_trust_policy, "mob web build failed").await?;
     if let Some(requires) = &verified.archive.manifest.requires {
         for cap in &requires.capabilities {
-            if matches!(cap.as_str(), "shell" | "mcp_stdio" | "process_spawn") {
+            if matches!(cap.token(), "shell" | "mcp_stdio" | "process_spawn") {
                 anyhow::bail!("forbidden capability '{cap}' is not allowed for web builds");
             }
         }
@@ -13069,10 +13069,10 @@ fn validate_required_capabilities(
 ) -> Result<(), meerkat_mob_pack::validate::PackValidationError> {
     if let Some(requires) = &manifest.requires {
         for required in &requires.capabilities {
-            if !runtime_caps.contains(required) {
+            if !runtime_caps.contains(required.token()) {
                 return Err(
                     meerkat_mob_pack::validate::PackValidationError::CapabilityMismatch(
-                        required.clone(),
+                        required.token().to_string(),
                     ),
                 );
             }

@@ -775,7 +775,8 @@ mod scenario_06_hooks {
                     })
                 }),
             )
-            .await;
+            .await
+            .expect("register observer hook handler");
 
         // Register guardrail handler (always allows)
         engine
@@ -791,7 +792,8 @@ mod scenario_06_hooks {
                     })
                 }),
             )
-            .await;
+            .await
+            .expect("register guardrail hook handler");
 
         // Register post-LLM observer handler
         engine
@@ -811,7 +813,8 @@ mod scenario_06_hooks {
                     })
                 }),
             )
-            .await;
+            .await
+            .expect("register post-LLM observer hook handler");
 
         let hook_engine: Arc<dyn HookEngine> = Arc::new(engine);
 

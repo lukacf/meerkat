@@ -62,14 +62,39 @@ impl CommandCredentialRunner {
     }
 
     /// Resolve a token. Uses cached value if within `refresh_interval_ms`.
+    ///
+    /// This is the runner-local freshness path (no AuthMachine lease). The
+    /// resolver seam prefers [`resolve_with_freshness`](Self::resolve_with_freshness)
+    /// so the cached-vs-rerun verdict is owned by the per-binding AuthMachine
+    /// lease (row #47); this method remains for callers that hold no lease.
     pub async fn resolve(&self) -> Result<PersistedTokens, CommandCredentialError> {
-        if let Some(interval_ms) = self.spec.refresh_interval_ms
-            && let Some((cached, at)) = self.cache.lock().as_ref()
-            && at.elapsed() < Duration::from_millis(interval_ms)
-        {
-            return Ok(cached.clone());
+        if let Some(cached) = self.cached_within_interval() {
+            return Ok(cached);
         }
+        self.run_and_cache().await
+    }
 
+    /// The currently cached token and the [`Instant`] it was produced, if any.
+    /// Exposed so the resolver can hand the cache age to the AuthMachine lease
+    /// as a freshness input instead of deciding reuse internally.
+    pub fn cached(&self) -> Option<(PersistedTokens, Instant)> {
+        self.cache.lock().clone()
+    }
+
+    /// Runner-local cached value when still within `refresh_interval_ms`.
+    /// Returns `None` when no interval is configured (no caching) or the cache
+    /// is stale/absent.
+    fn cached_within_interval(&self) -> Option<PersistedTokens> {
+        let interval_ms = self.spec.refresh_interval_ms?;
+        let guard = self.cache.lock();
+        let (cached, at) = guard.as_ref()?;
+        (at.elapsed() < Duration::from_millis(interval_ms)).then(|| cached.clone())
+    }
+
+    /// Run the subprocess and record the resulting token in the cache. The
+    /// subprocess execution always lives here; only the freshness verdict can
+    /// be delegated to the AuthMachine lease.
+    pub async fn run_and_cache(&self) -> Result<PersistedTokens, CommandCredentialError> {
         let tokens = self.run_once().await?;
         *self.cache.lock() = Some((tokens.clone(), Instant::now()));
         Ok(tokens)

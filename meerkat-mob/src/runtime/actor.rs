@@ -1068,6 +1068,21 @@ pub(super) struct MobActor {
     /// Whether this mob's definition declares an orchestrator.
     /// Gates orchestrator-specific transitions and notification fan-out.
     pub(super) has_orchestrator: bool,
+    /// Flow-run EXECUTION-HANDLE registries — NOT semantic authority (#210).
+    ///
+    /// `run_tasks` (JoinHandles), `run_cancel_tokens` (CancellationTokens +
+    /// owning FlowId), and `flow_streams` (per-run event senders) are the
+    /// actor's local execution resources for in-flight flow runs. They carry
+    /// NO semantic verdict: the active-run lifecycle (admission to run/cancel,
+    /// run-known/no-active-runs gating) is owned by the MobMachine
+    /// (`run_status`), driven through `apply_command_admission`. No production
+    /// branch may read these maps' presence to decide a semantic outcome
+    /// BEFORE machine admission — they are consulted only to perform the
+    /// EXECUTION (abort the task, fire the token, drop the stream) after the
+    /// machine has already ruled. They are reconciled against the machine and
+    /// against each other by `ensure_flow_tracker_alignment` /
+    /// `flow_tracker_alignment_violation`; the only read of their cardinality
+    /// is the `#[cfg(test)]`-gated `machine_active_run_count` snapshot.
     pub(super) run_tasks: BTreeMap<RunId, tokio::task::JoinHandle<()>>,
     pub(super) run_cancel_tokens: BTreeMap<RunId, (tokio_util::sync::CancellationToken, FlowId)>,
     pub(super) flow_streams:
@@ -4147,15 +4162,14 @@ impl MobActor {
         let dsl_session_id = mob_dsl::SessionId::from_domain(session_id);
         self.pending_routed_effects.retain(|effect| {
             !matches!(
-                effect,
-                super::composition::MobSeamEffect::Mob(
-                    mob_dsl::MobMachineEffect::RequestRuntimeBinding {
-                        session_id,
-                        ..
-                    }
-                    | mob_dsl::MobMachineEffect::RequestRuntimeRetire { session_id }
-                    | mob_dsl::MobMachineEffect::RequestRuntimeDestroy { session_id },
-                ) if session_id == &dsl_session_id
+                effect.body(),
+                mob_dsl::MobMachineEffect::RequestRuntimeBinding {
+                    session_id,
+                    ..
+                }
+                | mob_dsl::MobMachineEffect::RequestRuntimeRetire { session_id }
+                | mob_dsl::MobMachineEffect::RequestRuntimeDestroy { session_id }
+                if session_id == &dsl_session_id
             )
         });
     }
@@ -4542,17 +4556,24 @@ impl MobActor {
         }
     }
 
-    fn kickoff_notice_intent(
+    /// Map every DSL-emitted [`KickoffIntent`] to its stable lifecycle-notice
+    /// wire tag. This is a TOTAL projection: the MobMachine emits
+    /// `EmitKickoffLifecycleNotice` for every kickoff phase, so the shell
+    /// forwards every intent mechanically rather than narrowing the
+    /// machine-emitted set to `Failed`/`Cancelled`. There is no `None`-drop:
+    /// dropping a phase would silently discard a machine-owned lifecycle fact
+    /// that wired peers are entitled to observe.
+    pub(super) fn kickoff_notice_intent(
         intent: crate::machines::mob_machine::KickoffIntent,
-    ) -> Option<&'static str> {
+    ) -> &'static str {
         use crate::machines::mob_machine::KickoffIntent;
         match intent {
-            KickoffIntent::Failed => Some("mob.kickoff_failed"),
-            KickoffIntent::Cancelled => Some("mob.kickoff_cancelled"),
-            KickoffIntent::Pending
-            | KickoffIntent::Starting
-            | KickoffIntent::Started
-            | KickoffIntent::CallbackPending => None,
+            KickoffIntent::Pending => "mob.kickoff_pending",
+            KickoffIntent::Starting => "mob.kickoff_starting",
+            KickoffIntent::Started => "mob.kickoff_started",
+            KickoffIntent::CallbackPending => "mob.kickoff_callback_pending",
+            KickoffIntent::Failed => "mob.kickoff_failed",
+            KickoffIntent::Cancelled => "mob.kickoff_cancelled",
         }
     }
 
@@ -4649,10 +4670,13 @@ impl MobActor {
                     member_id: _,
                     intent,
                 } => {
-                    if let Some(notice_intent) = Self::kickoff_notice_intent(intent)
-                        && let Err(error) = self
-                            .notify_kickoff_event(agent_identity, notice_intent)
-                            .await
+                    // Forward every machine-emitted kickoff intent mechanically:
+                    // the DSL owns which phases produce a notice, so the shell
+                    // never narrows the set or drops a phase.
+                    let notice_intent = Self::kickoff_notice_intent(intent);
+                    if let Err(error) = self
+                        .notify_kickoff_event(agent_identity, notice_intent)
+                        .await
                     {
                         tracing::warn!(
                             agent_identity = %agent_identity,

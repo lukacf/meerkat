@@ -1127,6 +1127,103 @@ pub(crate) const OPENAI_REALTIME_AUDIO_CHANNELS: u8 = 1;
 const OPENAI_REALTIME_RESPONSE_NUDGE_TIMEOUT_MS: u64 = 750;
 const OPENAI_REALTIME_RESPONSE_NUDGE_MAX_ATTEMPTS: u8 = 3;
 
+/// R2/#52: typed lifecycle for the OpenAI realtime response-nudge machine.
+///
+/// Pre-#52 this was a tri-bit shadow of three independent booleans
+/// (`awaiting_provider_response_after_commit`,
+/// `provider_response_acknowledged_without_progress`,
+/// `provider_response_nudge_inflight`) plus a separate
+/// `provider_response_nudge_attempts: u8` counter. Those four fields could
+/// encode combinations that no transition ever intends — e.g. "awaiting the
+/// first `response.created` AND already acknowledged-without-progress", or
+/// "a recovery nudge is inflight but the provider has not acknowledged any
+/// response". The enum makes those combinations unrepresentable: the nudge
+/// attempt budget only exists on the states that actually own it, and the
+/// stalled terminality is an explicit `Stalled` transition rather than a
+/// `>= max_attempts` boolean read scattered across the wait loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RealtimeResponseState {
+    /// No turn is waiting on a provider-managed response: either no turn is
+    /// in flight, or the active response has already made real progress
+    /// (output / tool activity / a terminal response event).
+    Idle,
+    /// A provider-managed turn was committed and the adapter is waiting for
+    /// the provider to acknowledge a response (`response.created` or an
+    /// equivalent "active response in progress" error). No recovery nudge is
+    /// currently inflight; `nudge_attempts` carries the running budget
+    /// consumed by prior `response.create` recovery sends.
+    AwaitingProvider { nudge_attempts: u8 },
+    /// Like [`Self::AwaitingProvider`] (still waiting for the provider to
+    /// acknowledge a response) but a one-shot recovery `response.create` nudge
+    /// is inflight: the transport accepted it, yet the provider has not yet
+    /// surfaced an acknowledgement or progress. The wait loop keeps re-nudging
+    /// from this state (the same fact the pre-#52 booleans encoded as
+    /// `awaiting && nudge_inflight && !acknowledged`).
+    Nudged { nudge_attempts: u8 },
+    /// The provider acknowledged that a response exists (via `response.created`
+    /// or a tolerated "active response" error) but has not yet produced real
+    /// progress. From here the wait loop waits passively (no further nudges)
+    /// until progress arrives or the recovery budget is exhausted.
+    Acknowledged { nudge_attempts: u8 },
+    /// Terminal: the recovery budget is exhausted and the turn is treated as
+    /// stalled. The wait loop returns `LlmError::NetworkTimeout` on this
+    /// transition; the state is never persisted past the failing turn because
+    /// every commit / progress event resets the machine.
+    Stalled,
+}
+
+impl RealtimeResponseState {
+    /// True while the adapter is waiting on the provider to either acknowledge
+    /// or make progress on a response. The `next_event` loop arms the recovery
+    /// timeout while this holds.
+    fn is_waiting(self) -> bool {
+        matches!(
+            self,
+            Self::AwaitingProvider { .. } | Self::Acknowledged { .. } | Self::Nudged { .. }
+        )
+    }
+
+    /// True once the provider has acknowledged a response exists but it has
+    /// not yet progressed. Selects the passive recovery-wait branch in the
+    /// wait loop: in this state the adapter waits for real progress rather
+    /// than sending further `response.create` nudges.
+    fn acknowledged_without_progress(self) -> bool {
+        matches!(self, Self::Acknowledged { .. })
+    }
+
+    /// True only when a recovery `response.create` nudge is currently inflight.
+    fn nudge_inflight(self) -> bool {
+        matches!(self, Self::Nudged { .. })
+    }
+
+    /// True while the adapter is waiting on the provider to *acknowledge* the
+    /// first response after commit (pre-acknowledgement window), whether or
+    /// not a recovery nudge is currently inflight.
+    fn awaiting_after_commit(self) -> bool {
+        matches!(self, Self::AwaitingProvider { .. } | Self::Nudged { .. })
+    }
+
+    /// The recovery budget consumed so far for the active acknowledgement.
+    fn nudge_attempts(self) -> u8 {
+        match self {
+            Self::AwaitingProvider { nudge_attempts }
+            | Self::Acknowledged { nudge_attempts }
+            | Self::Nudged { nudge_attempts } => nudge_attempts,
+            Self::Idle | Self::Stalled => 0,
+        }
+    }
+
+    /// Transition taken when the provider acknowledges a response exists but
+    /// has not yet progressed (`response.created`, or a tolerated
+    /// "active response in progress" error). Preserves the recovery budget so
+    /// duplicate acknowledgements do not reset stalled-turn detection.
+    fn acknowledge(self) -> Self {
+        Self::Acknowledged {
+            nudge_attempts: self.nudge_attempts(),
+        }
+    }
+}
+
 fn openai_realtime_client_event_id(prefix: &str) -> String {
     let suffix: String = meerkat_core::time_compat::new_uuid_v7()
         .to_string()
@@ -1150,36 +1247,39 @@ fn openai_response_cancel_no_active_response_message(message: &str) -> bool {
 
 fn should_suppress_openai_active_response_error(
     message: &str,
-    provider_response_nudge_inflight: bool,
+    response_state: RealtimeResponseState,
     response_output_active: bool,
-    awaiting_provider_response_after_commit: bool,
-    provider_response_acknowledged_without_progress: bool,
 ) -> bool {
     // R3-5 (P2): `response_output_active` is the OR of the audio + text
     // bits — the OpenAI realtime "active response in progress" guard is
     // about a server-side response of *any* modality being active, so the
     // suppression decision composes both bits at the call site.
+    //
+    // #52: the lifecycle facts (nudge inflight / awaiting acknowledgement /
+    // acknowledged-without-progress) now come from the typed
+    // `RealtimeResponseState` rather than three independent booleans. Any
+    // non-idle waiting state means the provider may already be servicing a
+    // response, so a fresh "active response in progress" error is a tolerated
+    // acknowledgement rather than a product failure.
     openai_response_already_active_message(message)
-        && (provider_response_nudge_inflight
-            || response_output_active
-            || awaiting_provider_response_after_commit
-            || provider_response_acknowledged_without_progress)
+        && (response_output_active || response_state.is_waiting())
 }
 
 fn trace_openai_active_response_error(
     source: &str,
     message: &str,
-    provider_response_nudge_inflight: bool,
+    response_state: RealtimeResponseState,
     response_output_active: bool,
-    awaiting_provider_response_after_commit: bool,
-    provider_response_acknowledged_without_progress: bool,
     suppressed: bool,
 ) {
     if std::env::var_os("RKAT_OPENAI_REALTIME_TRACE_ACTIVE_RESPONSE").is_none() {
         return;
     }
     eprintln!(
-        "[openai-realtime-active-response] source={source} suppressed={suppressed} nudge_inflight={provider_response_nudge_inflight} output_active={response_output_active} awaiting_after_commit={awaiting_provider_response_after_commit} ack_without_progress={provider_response_acknowledged_without_progress} message={message}",
+        "[openai-realtime-active-response] source={source} suppressed={suppressed} nudge_inflight={} output_active={response_output_active} awaiting_after_commit={} ack_without_progress={} message={message}",
+        response_state.nudge_inflight(),
+        response_state.awaiting_after_commit(),
+        response_state.acknowledged_without_progress(),
     );
 }
 
@@ -1220,19 +1320,20 @@ pub struct OpenAiRealtimeSession {
     turning_mode: RealtimeTurningMode,
     has_staged_input: bool,
     has_staged_audio: bool,
-    /// R4-1 (P1): text items staged via `send_input` while
+    /// R4-1 (P1) / #51: text items staged via `send_input` while
     /// `turning_mode == ExplicitCommit`, awaiting `commit_turn_with_modality`.
-    /// Each entry is the `(synthetic_item_id, text)` pair sent to the
-    /// provider via `ConversationItemCreate`. On commit the canonical
-    /// user-turn synthesis path drains this and emits the same
-    /// `TurnStarted` / `InputTranscriptPartial` / `InputTranscriptFinalForItem`
-    /// / `TurnCommitted` sequence the `ProviderManaged` text-input path
-    /// emits inline — so explicit-commit text turns enter canonical
-    /// history, just like `ProviderManaged` text turns. The only
-    /// semantic difference between the two modes for text input is when
-    /// `response.create` fires (caller-driven vs server-driven), not
-    /// whether the user turn is recorded.
-    pending_explicit_commit_text_items: Vec<(String, String)>,
+    /// Each entry is a typed [`StagedTextTurn`] (`item_id` + `text`) — the
+    /// synthetic item id sent to the provider via `ConversationItemCreate`
+    /// plus the staged user text — rather than an untyped positional tuple.
+    /// On commit the canonical user-turn synthesis path drains this and emits
+    /// the same `TurnStarted` / `InputTranscriptPartial` /
+    /// `InputTranscriptFinalForItem` / `TurnCommitted` sequence the
+    /// `ProviderManaged` text-input path emits inline — so explicit-commit
+    /// text turns enter canonical history, just like `ProviderManaged` text
+    /// turns. The only semantic difference between the two modes for text
+    /// input is when `response.create` fires (caller-driven vs server-driven),
+    /// not whether the user turn is recorded.
+    pending_explicit_commit_text_items: Vec<StagedTextTurn>,
     pending_events: VecDeque<RealtimeSessionEvent>,
     pending_mcp_calls: BTreeMap<String, PendingMcpCall>,
     item_previous: BTreeMap<String, Option<String>>,
@@ -1263,10 +1364,14 @@ pub struct OpenAiRealtimeSession {
     text_output_active: bool,
     response_interrupt_emitted: bool,
     response_tool_call_observed: bool,
-    awaiting_provider_response_after_commit: bool,
-    provider_response_acknowledged_without_progress: bool,
-    provider_response_nudge_attempts: u8,
-    provider_response_nudge_inflight: bool,
+    /// #52: typed lifecycle for the provider-managed response-nudge machine.
+    /// Replaces the prior tri-bit shadow (`awaiting_provider_response_after_commit`,
+    /// `provider_response_acknowledged_without_progress`,
+    /// `provider_response_nudge_inflight`) plus the separate
+    /// `provider_response_nudge_attempts` counter — illegal combinations of
+    /// those four facts are now unrepresentable and stalled-turn terminality
+    /// is the explicit [`RealtimeResponseState::Stalled`] transition.
+    response_state: RealtimeResponseState,
     /// Per-session override for the provider-nudge timeout (milliseconds).
     /// None falls back to `OPENAI_REALTIME_RESPONSE_NUDGE_TIMEOUT_MS`.
     response_nudge_timeout_ms: Option<u64>,
@@ -1301,6 +1406,25 @@ struct PendingMcpCall {
     final_arguments: Option<String>,
 }
 
+/// R4-1/#51: a single text turn staged via `send_input` while
+/// `turning_mode == ExplicitCommit`, awaiting `commit_turn_with_modality`.
+///
+/// Pre-#51 this was an untyped positional `(String, String)` tuple whose
+/// fields carried no names and could be transposed at any push/drain site.
+/// The named struct makes the staged turn a typed fact: `item_id` is the
+/// synthetic id sent to the provider via `ConversationItemCreate` and reused
+/// on the typed transcript seam, and `text` is the staged user text. On
+/// commit the canonical user-turn synthesis path drains these and emits the
+/// same `TurnStarted` / `InputTranscriptPartial` /
+/// `InputTranscriptFinalForItem` / `TurnCommitted` sequence the
+/// `ProviderManaged` text-input path emits inline, so explicit-commit text
+/// turns enter canonical history identically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StagedTextTurn {
+    item_id: String,
+    text: String,
+}
+
 impl OpenAiRealtimeSession {
     /// Wrap an OpenAI raw live session in the provider-neutral realtime trait.
     pub fn new(raw: Box<dyn OpenAiLiveSession>, turning_mode: RealtimeTurningMode) -> Self {
@@ -1325,10 +1449,7 @@ impl OpenAiRealtimeSession {
             text_output_active: false,
             response_interrupt_emitted: false,
             response_tool_call_observed: false,
-            awaiting_provider_response_after_commit: false,
-            provider_response_acknowledged_without_progress: false,
-            provider_response_nudge_attempts: 0,
-            provider_response_nudge_inflight: false,
+            response_state: RealtimeResponseState::Idle,
             response_nudge_timeout_ms: None,
             response_nudge_max_attempts: None,
             pending_truncations: BTreeMap::new(),
@@ -1672,21 +1793,21 @@ impl OpenAiRealtimeSession {
     }
 
     fn waiting_for_provider_progress(&self) -> bool {
-        self.awaiting_provider_response_after_commit
-            || self.provider_response_acknowledged_without_progress
+        self.response_state.is_waiting()
     }
 
     fn note_provider_response_acknowledged(&mut self) {
-        self.awaiting_provider_response_after_commit = false;
-        self.provider_response_acknowledged_without_progress = true;
-        self.provider_response_nudge_inflight = false;
+        // The provider acknowledged a response exists but has not yet
+        // progressed. Preserve the consumed recovery budget so duplicate
+        // acknowledgements cannot reset stalled-turn detection, and clear any
+        // inflight nudge guard (the acknowledgement subsumes it).
+        self.response_state = self.response_state.acknowledge();
     }
 
     fn note_provider_response_progressed(&mut self) {
-        self.awaiting_provider_response_after_commit = false;
-        self.provider_response_acknowledged_without_progress = false;
-        self.provider_response_nudge_attempts = 0;
-        self.provider_response_nudge_inflight = false;
+        // Real progress (output / tool activity / a terminal response event)
+        // resets the whole nudge machine, including the recovery budget.
+        self.response_state = RealtimeResponseState::Idle;
     }
 
     fn note_output_audio_transcript_done(
@@ -1819,14 +1940,19 @@ impl OpenAiRealtimeSession {
                     return Ok(None);
                 }
                 self.note_previous_for_item(&item_id, previous_item_id);
-                self.awaiting_provider_response_after_commit =
-                    self.turning_mode == RealtimeTurningMode::ProviderManaged;
-                self.provider_response_acknowledged_without_progress = false;
-                self.provider_response_nudge_attempts = 0;
-                self.provider_response_nudge_inflight = false;
+                // A fresh commit resets the nudge machine: provider-managed
+                // turns wait for the next acknowledgement (with a fresh
+                // recovery budget); explicit-commit turns drive
+                // `response.create` themselves, so they are not in the
+                // server-managed wait state.
+                self.response_state = if self.turning_mode == RealtimeTurningMode::ProviderManaged {
+                    RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 }
+                } else {
+                    RealtimeResponseState::Idle
+                };
                 trace_openai_realtime_lifecycle(format!(
                     "input_audio_buffer.committed awaiting_after_commit={}",
-                    self.awaiting_provider_response_after_commit
+                    self.response_state.awaiting_after_commit()
                 ));
                 if self.audio_output_active && !self.response_interrupt_emitted {
                     let response_id = self.active_response_id.clone();
@@ -1866,7 +1992,7 @@ impl OpenAiRealtimeSession {
                 None
             }
             ServerEvent::ResponseDone { response, .. } => {
-                if self.awaiting_provider_response_after_commit {
+                if self.response_state.awaiting_after_commit() {
                     trace_openai_realtime_lifecycle(format!(
                         "response.done suppressed_while_awaiting status={:?}",
                         response.status
@@ -1925,7 +2051,7 @@ impl OpenAiRealtimeSession {
                 }
             }
             ServerEvent::ResponseCancelled { response, .. } => {
-                if self.awaiting_provider_response_after_commit {
+                if self.response_state.awaiting_after_commit() {
                     trace_openai_realtime_lifecycle("response.cancelled suppressed_while_awaiting");
                     self.clear_response_output_active();
                     self.response_tool_call_observed = false;
@@ -2189,18 +2315,14 @@ impl OpenAiRealtimeSession {
                 }
                 let suppress = should_suppress_openai_active_response_error(
                     &error.message,
-                    self.provider_response_nudge_inflight,
+                    self.response_state,
                     self.any_response_output_active(),
-                    self.awaiting_provider_response_after_commit,
-                    self.provider_response_acknowledged_without_progress,
                 );
                 trace_openai_active_response_error(
                     "server_event",
                     &error.message,
-                    self.provider_response_nudge_inflight,
+                    self.response_state,
                     self.any_response_output_active(),
-                    self.awaiting_provider_response_after_commit,
-                    self.provider_response_acknowledged_without_progress,
                     suppress,
                 );
                 if suppress {
@@ -2334,8 +2456,12 @@ impl OpenAiRealtimeSession {
         // drives the TurnCommitted observation through the normal mapping
         // path (see `map_server_event`).
         let pending_text_items = std::mem::take(&mut self.pending_explicit_commit_text_items);
-        for (item_id, text) in &pending_text_items {
-            Self::synthesize_text_turn_observations(&mut self.pending_events, item_id, text);
+        for staged in &pending_text_items {
+            Self::synthesize_text_turn_observations(
+                &mut self.pending_events,
+                &staged.item_id,
+                &staged.text,
+            );
         }
         // `LiveResponseModality` is `#[non_exhaustive]`; future variants
         // the OpenAI realtime adapter does not yet honor must surface a
@@ -2467,7 +2593,8 @@ impl RealtimeSession for OpenAiRealtimeSession {
                             })
                             .await?;
                         self.has_staged_input = false;
-                        self.awaiting_provider_response_after_commit = true;
+                        self.response_state =
+                            RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 };
                     }
                     RealtimeTurningMode::ExplicitCommit => {
                         // R4-1 (P1): defer canonical-history synthesis until
@@ -2479,7 +2606,10 @@ impl RealtimeSession for OpenAiRealtimeSession {
                         // ProviderManaged emits inline so explicit-commit
                         // text turns reach canonical history.
                         self.pending_explicit_commit_text_items
-                            .push((synthetic_item_id, text));
+                            .push(StagedTextTurn {
+                                item_id: synthetic_item_id,
+                                text,
+                            });
                     }
                 }
                 Ok(())
@@ -2596,18 +2726,14 @@ impl RealtimeSession for OpenAiRealtimeSession {
                             if {
                                 let suppress = should_suppress_openai_active_response_error(
                                     &message,
-                                    self.provider_response_nudge_inflight,
+                                    self.response_state,
                                     self.any_response_output_active(),
-                                    self.awaiting_provider_response_after_commit,
-                                    self.provider_response_acknowledged_without_progress,
                                 );
                                 trace_openai_active_response_error(
                                     "raw_timeout_branch",
                                     &message,
-                                    self.provider_response_nudge_inflight,
+                                    self.response_state,
                                     self.any_response_output_active(),
-                                    self.awaiting_provider_response_after_commit,
-                                    self.provider_response_acknowledged_without_progress,
                                     suppress,
                                 );
                                 suppress
@@ -2619,28 +2745,35 @@ impl RealtimeSession for OpenAiRealtimeSession {
                         Err(error) => return Err(error),
                     },
                     Err(_) => {
-                        if self.provider_response_acknowledged_without_progress {
-                            if self.provider_response_nudge_attempts >= nudge_max_attempts {
+                        let nudge_attempts = self.response_state.nudge_attempts();
+                        if self.response_state.acknowledged_without_progress() {
+                            if nudge_attempts >= nudge_max_attempts {
                                 trace_openai_realtime_lifecycle(format!(
-                                    "provider response acknowledged but stalled after {} wait windows",
-                                    self.provider_response_nudge_attempts
+                                    "provider response acknowledged but stalled after {nudge_attempts} wait windows"
                                 ));
+                                // #52: stalled-turn terminality is an explicit
+                                // state transition, not a bare boolean read.
+                                self.response_state = RealtimeResponseState::Stalled;
                                 return Err(LlmError::NetworkTimeout {
                                     duration_ms: nudge_timeout_ms * u64::from(nudge_max_attempts),
                                 });
                             }
-                            self.provider_response_nudge_attempts += 1;
+                            self.response_state = RealtimeResponseState::Acknowledged {
+                                nudge_attempts: nudge_attempts + 1,
+                            };
                             trace_openai_realtime_lifecycle(format!(
                                 "provider response acknowledged without progress; waiting again attempt={}",
-                                self.provider_response_nudge_attempts
+                                nudge_attempts + 1
                             ));
                             continue;
                         }
-                        if self.provider_response_nudge_attempts >= nudge_max_attempts {
+                        if nudge_attempts >= nudge_max_attempts {
                             trace_openai_realtime_lifecycle(format!(
-                                "provider response nudge budget exhausted after {} attempts",
-                                self.provider_response_nudge_attempts
+                                "provider response nudge budget exhausted after {nudge_attempts} attempts"
                             ));
+                            // #52: stalled-turn terminality is an explicit
+                            // state transition, not a bare boolean read.
+                            self.response_state = RealtimeResponseState::Stalled;
                             return Err(LlmError::NetworkTimeout {
                                 duration_ms: nudge_timeout_ms * u64::from(nudge_max_attempts),
                             });
@@ -2657,29 +2790,26 @@ impl RealtimeSession for OpenAiRealtimeSession {
                             .await
                         {
                             Ok(()) => {
-                                self.provider_response_nudge_attempts += 1;
-                                self.provider_response_nudge_inflight = true;
+                                self.response_state = RealtimeResponseState::Nudged {
+                                    nudge_attempts: nudge_attempts + 1,
+                                };
                                 trace_openai_realtime_lifecycle(format!(
                                     "response.create nudge accepted by transport attempt={}",
-                                    self.provider_response_nudge_attempts
+                                    nudge_attempts + 1
                                 ));
                             }
                             Err(LlmError::InvalidRequest { message })
                                 if {
                                     let suppress = should_suppress_openai_active_response_error(
                                         &message,
-                                        self.provider_response_nudge_inflight,
+                                        self.response_state,
                                         self.any_response_output_active(),
-                                        self.awaiting_provider_response_after_commit,
-                                        self.provider_response_acknowledged_without_progress,
                                     );
                                     trace_openai_active_response_error(
                                         "response_create",
                                         &message,
-                                        self.provider_response_nudge_inflight,
+                                        self.response_state,
                                         self.any_response_output_active(),
-                                        self.awaiting_provider_response_after_commit,
-                                        self.provider_response_acknowledged_without_progress,
                                         suppress,
                                     );
                                     suppress
@@ -2703,18 +2833,14 @@ impl RealtimeSession for OpenAiRealtimeSession {
                         if {
                             let suppress = should_suppress_openai_active_response_error(
                                 &message,
-                                self.provider_response_nudge_inflight,
+                                self.response_state,
                                 self.any_response_output_active(),
-                                self.awaiting_provider_response_after_commit,
-                                self.provider_response_acknowledged_without_progress,
                             );
                             trace_openai_active_response_error(
                                 "raw_next_event",
                                 &message,
-                                self.provider_response_nudge_inflight,
+                                self.response_state,
                                 self.any_response_output_active(),
-                                self.awaiting_provider_response_after_commit,
-                                self.provider_response_acknowledged_without_progress,
                                 suppress,
                             );
                             suppress
@@ -2752,10 +2878,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
         self.clear_response_output_active();
         self.response_interrupt_emitted = false;
         self.response_tool_call_observed = false;
-        self.awaiting_provider_response_after_commit = false;
-        self.provider_response_acknowledged_without_progress = false;
-        self.provider_response_nudge_attempts = 0;
-        self.provider_response_nudge_inflight = false;
+        self.response_state = RealtimeResponseState::Idle;
         Ok(())
     }
 }
@@ -5449,6 +5572,77 @@ mod tests {
         );
     }
 
+    /// Gate (#51): explicit-commit text turns are staged as the typed
+    /// [`StagedTextTurn`] fact (named `item_id` + `text`) rather than an
+    /// untyped positional `(String, String)` tuple, and the staged item id is
+    /// exactly the synthetic id sent to the provider — so a committed turn
+    /// proves a real staged turn keyed by the same identity that reaches
+    /// canonical history. (The broader machine-owned relocation of this
+    /// staging buffer is tracked separately; see the crate-level note on the
+    /// `pending_explicit_commit_text_items` field.)
+    #[tokio::test]
+    async fn explicit_commit_text_turns_stage_as_typed_fact_keyed_by_provider_item_id() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&seen),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ExplicitCommit,
+        );
+
+        for text in ["first staged turn", "second staged turn"] {
+            session
+                .send_input(RealtimeInputChunk::TextChunk(RealtimeTextChunk {
+                    text: text.to_string(),
+                }))
+                .await
+                .expect("text chunk should stage");
+        }
+
+        // Each staged turn is a typed `StagedTextTurn`, preserved in order,
+        // carrying the staged text under a named field.
+        assert_eq!(session.pending_explicit_commit_text_items.len(), 2);
+        assert_eq!(
+            session.pending_explicit_commit_text_items[0].text,
+            "first staged turn"
+        );
+        assert_eq!(
+            session.pending_explicit_commit_text_items[1].text,
+            "second staged turn"
+        );
+
+        // The staged item ids are exactly the synthetic ids sent to the
+        // provider via `conversation.item.create` — the staging fact is keyed
+        // by the same identity that reaches canonical history on commit, so a
+        // committed turn cannot be keyed to a phantom item.
+        let provider_item_ids: Vec<String> = {
+            let seen = seen.lock().await;
+            seen.iter()
+                .filter_map(|event| match event {
+                    ClientEvent::ConversationItemCreate { item, .. } => match item.as_ref() {
+                        Item::Message {
+                            id: Some(id),
+                            role: Role::User,
+                            ..
+                        } => Some(id.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect()
+        };
+        let staged_item_ids: Vec<String> = session
+            .pending_explicit_commit_text_items
+            .iter()
+            .map(|staged| staged.item_id.clone())
+            .collect();
+        assert_eq!(
+            staged_item_ids, provider_item_ids,
+            "staged item ids must match the synthetic ids sent to the provider, in order"
+        );
+    }
+
     #[tokio::test]
     async fn provider_neutral_session_interrupt_targets_active_response() {
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -5937,8 +6131,9 @@ mod tests {
             committed,
             Some(RealtimeSessionEvent::TurnCommitted)
         ));
-        assert!(
-            session.awaiting_provider_response_after_commit,
+        assert_eq!(
+            session.response_state,
+            RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 },
             "provider-managed commit should wait for provider response start"
         );
 
@@ -5952,17 +6147,11 @@ mod tests {
             created.is_none(),
             "response.created is an internal lifecycle acknowledgement, not a public event"
         );
-        assert!(
-            !session.awaiting_provider_response_after_commit,
-            "response.created proves a response exists, so the pre-ack wait window should close"
-        );
-        assert!(
-            session.provider_response_acknowledged_without_progress,
-            "response.created should keep the adapter waiting for real provider progress"
-        );
-        assert!(
-            session.provider_response_nudge_attempts == 0,
-            "response.created should preserve the existing recovery budget when no nudge has fired yet"
+        assert_eq!(
+            session.response_state,
+            RealtimeResponseState::Acknowledged { nudge_attempts: 0 },
+            "response.created should close the pre-ack window, keep the adapter waiting for \
+             real provider progress, and preserve the recovery budget"
         );
     }
 
@@ -5975,9 +6164,10 @@ mod tests {
             }),
             RealtimeTurningMode::ProviderManaged,
         );
-        session.awaiting_provider_response_after_commit = true;
-        session.provider_response_nudge_attempts = 1;
-        session.provider_response_nudge_inflight = true;
+        // A recovery nudge was sent (transport accepted) while awaiting the
+        // provider's first response; the budget has already consumed one
+        // attempt.
+        session.response_state = RealtimeResponseState::Nudged { nudge_attempts: 1 };
 
         let mapped = session
             .map_server_event(ServerEvent::Error {
@@ -5996,21 +6186,12 @@ mod tests {
             mapped.is_none(),
             "provider acknowledgement errors should stay internal to the adapter"
         );
-        assert!(
-            !session.awaiting_provider_response_after_commit,
-            "the adapter should treat the provider error as proof that a response already exists"
-        );
-        assert!(
-            session.provider_response_acknowledged_without_progress,
-            "active-response acknowledgements should keep the adapter waiting for actual provider progress"
-        );
-        assert!(
-            session.provider_response_nudge_attempts == 1,
-            "the recovery budget should stay consumed until real provider progress arrives"
-        );
-        assert!(
-            !session.provider_response_nudge_inflight,
-            "once the provider acknowledges the active response, the outstanding nudge itself is no longer inflight"
+        assert_eq!(
+            session.response_state,
+            RealtimeResponseState::Acknowledged { nudge_attempts: 1 },
+            "the provider error proves a response already exists: the adapter should keep \
+             waiting for actual progress, preserve the consumed recovery budget, and clear the \
+             inflight nudge guard"
         );
     }
 
@@ -6023,9 +6204,7 @@ mod tests {
             }),
             RealtimeTurningMode::ProviderManaged,
         );
-        session.awaiting_provider_response_after_commit = true;
-        session.provider_response_nudge_attempts = 1;
-        session.provider_response_nudge_inflight = true;
+        session.response_state = RealtimeResponseState::Nudged { nudge_attempts: 1 };
 
         let _ = session
             .map_server_event(ServerEvent::ResponseOutputTextDelta {
@@ -6063,9 +6242,7 @@ mod tests {
             }),
             RealtimeTurningMode::ProviderManaged,
         );
-        session.awaiting_provider_response_after_commit = true;
-        session.provider_response_nudge_attempts = 0;
-        session.provider_response_nudge_inflight = false;
+        session.response_state = RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 };
 
         let _ = session
             .map_server_event(ServerEvent::ResponseOutputTextDelta {
@@ -6103,9 +6280,7 @@ mod tests {
             }),
             RealtimeTurningMode::ProviderManaged,
         );
-        session.awaiting_provider_response_after_commit = true;
-        session.provider_response_nudge_attempts = 1;
-        session.provider_response_nudge_inflight = true;
+        session.response_state = RealtimeResponseState::Nudged { nudge_attempts: 1 };
 
         let first = session
             .map_server_event(ServerEvent::Error {
@@ -6141,13 +6316,11 @@ mod tests {
                 response: fake_response("resp_123", ResponseStatus::InProgress),
             })
             .expect("response.created should map");
-        assert!(
-            session.provider_response_acknowledged_without_progress,
-            "response.created should leave the adapter waiting for actual provider progress"
-        );
-        assert!(
-            !session.provider_response_nudge_inflight,
-            "response.created should close the outstanding nudge transport guard once the provider has acknowledged the response"
+        assert_eq!(
+            session.response_state,
+            RealtimeResponseState::Acknowledged { nudge_attempts: 1 },
+            "response.created should leave the adapter waiting for actual provider progress and \
+             close the outstanding nudge transport guard, preserving the consumed budget"
         );
 
         let _ = session
@@ -6156,13 +6329,123 @@ mod tests {
                 response: fake_response("resp_123", ResponseStatus::Completed),
             })
             .expect("response.done should map");
-        assert!(
-            !session.provider_response_nudge_inflight,
-            "the terminal provider boundary should close the nudge guard"
+        assert_eq!(
+            session.response_state,
+            RealtimeResponseState::Idle,
+            "the terminal provider boundary should reset the whole nudge machine, clearing the \
+             acknowledgement-only waiting state and the nudge guard"
         );
+    }
+
+    /// Gate (#52, part 1): the typed `RealtimeResponseState` makes the illegal
+    /// combinations the prior tri-bit boolean shadow allowed unrepresentable.
+    ///
+    /// Pre-#52 four independent fields
+    /// (`awaiting_provider_response_after_commit`,
+    /// `provider_response_acknowledged_without_progress`,
+    /// `provider_response_nudge_inflight`, `provider_response_nudge_attempts`)
+    /// could encode contradictions no transition ever intends:
+    ///   - "awaiting the first acknowledgement" AND "already acknowledged
+    ///     without progress" at the same time, and
+    ///   - "a recovery nudge is inflight" while not waiting on the provider at
+    ///     all (e.g. an inflight bit left set after the turn went idle).
+    /// The enum cannot represent either: every state answers
+    /// `awaiting_after_commit` and `acknowledged_without_progress` mutually
+    /// exclusively, and `nudge_inflight` is only ever true on a state that is
+    /// also `is_waiting`.
+    #[test]
+    fn response_state_enum_forbids_illegal_boolean_combinations() {
+        let states = [
+            RealtimeResponseState::Idle,
+            RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 },
+            RealtimeResponseState::AwaitingProvider { nudge_attempts: 2 },
+            RealtimeResponseState::Nudged { nudge_attempts: 1 },
+            RealtimeResponseState::Acknowledged { nudge_attempts: 0 },
+            RealtimeResponseState::Acknowledged { nudge_attempts: 3 },
+            RealtimeResponseState::Stalled,
+        ];
+        for state in states {
+            // The "awaiting first acknowledgement" and "acknowledged without
+            // progress" facts are mutually exclusive — the old booleans could
+            // both be true at once; the enum cannot.
+            assert!(
+                !(state.awaiting_after_commit() && state.acknowledged_without_progress()),
+                "{state:?} must not claim both awaiting-after-commit and acknowledged-without-progress"
+            );
+            // A nudge can only be inflight while the adapter is actually
+            // waiting on the provider: the old `provider_response_nudge_inflight`
+            // bit had no such guard and could survive into a non-waiting state.
+            assert!(
+                !state.nudge_inflight() || state.is_waiting(),
+                "{state:?} must not report an inflight nudge while not waiting on the provider"
+            );
+            // A terminal/idle state never reports any in-flight waiting fact.
+            if !state.is_waiting() {
+                assert!(
+                    !state.awaiting_after_commit()
+                        && !state.acknowledged_without_progress()
+                        && !state.nudge_inflight(),
+                    "{state:?} is non-waiting and must report no waiting sub-facts"
+                );
+            }
+            // Any waiting state composes exactly the awaiting/acknowledged
+            // facts; non-waiting states (Idle/Stalled) report neither.
+            assert_eq!(
+                state.is_waiting(),
+                state.awaiting_after_commit() || state.acknowledged_without_progress(),
+                "{state:?} waiting flag must equal the disjunction of its sub-facts"
+            );
+        }
+
+        // Non-waiting terminal/idle states carry a zero recovery budget.
+        assert_eq!(RealtimeResponseState::Idle.nudge_attempts(), 0);
+        assert_eq!(RealtimeResponseState::Stalled.nudge_attempts(), 0);
+        // Acknowledgement preserves the consumed recovery budget regardless of
+        // which waiting state it came from.
+        assert_eq!(
+            RealtimeResponseState::Nudged { nudge_attempts: 2 }.acknowledge(),
+            RealtimeResponseState::Acknowledged { nudge_attempts: 2 }
+        );
+        assert_eq!(
+            RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 }.acknowledge(),
+            RealtimeResponseState::Acknowledged { nudge_attempts: 0 }
+        );
+    }
+
+    /// Gate (#52, part 2): a stalled provider turn terminalizes via the
+    /// explicit `RealtimeResponseState::Stalled` transition and surfaces a
+    /// typed `LlmError::NetworkTimeout`, rather than a bare `>= max_attempts`
+    /// boolean read scattered across the wait loop.
+    ///
+    /// The session is placed in the post-acknowledgement waiting state with
+    /// the recovery budget exhausted; the parking transport never advances, so
+    /// the bounded recovery wait elapses (paused tokio time) and the adapter
+    /// must transition to `Stalled` and fail closed.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn stalled_provider_turn_terminalizes_via_explicit_state_transition() {
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(ParkingOpenAiLiveSession {
+                seen: Arc::new(Mutex::new(Vec::new())),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+        // One wait window, no recovery sends, so the very first elapsed window
+        // on an acknowledged-without-progress turn is terminal.
+        session.set_response_nudge_config(Some(5), Some(1));
+        // Provider acknowledged a response but produced no progress, and the
+        // recovery budget is already consumed.
+        session.response_state = RealtimeResponseState::Acknowledged { nudge_attempts: 1 };
+
+        let result = session.next_event().await;
         assert!(
-            !session.provider_response_acknowledged_without_progress,
-            "terminal provider progress should clear the acknowledgement-only waiting state"
+            matches!(result, Err(LlmError::NetworkTimeout { .. })),
+            "an exhausted stalled turn must fail closed with NetworkTimeout, got {result:?}"
+        );
+        assert_eq!(
+            session.response_state,
+            RealtimeResponseState::Stalled,
+            "stalled terminality must be an explicit state transition, not an implicit boolean read"
         );
     }
 

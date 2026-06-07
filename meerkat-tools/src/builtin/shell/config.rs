@@ -152,7 +152,11 @@ impl Default for ShellConfig {
         let defaults = ShellDefaults::default();
         Self {
             enabled: false,
-            default_timeout_secs: defaults.timeout_secs,
+            // Read the default timeout from the single typed owner
+            // (`ToolTimeoutPolicy`) so the shell tool and the dispatcher
+            // enforcement seam cannot diverge on the default value.
+            default_timeout_secs: crate::timeout::ToolTimeoutPolicy::default()
+                .default_timeout_secs(),
             restrict_to_project: true,
             shell: defaults.program,
             shell_path: None,

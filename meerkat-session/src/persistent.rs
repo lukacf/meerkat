@@ -125,11 +125,11 @@ async fn append_and_project_event(
     event_store: &Arc<dyn EventStore>,
     projector: &Arc<SessionProjector>,
     session_id: &SessionId,
-    event: meerkat_core::event::AgentEvent,
+    envelope: meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>,
 ) -> Result<u64, SessionError> {
-    let events = [event];
+    let envelopes = [envelope];
     let seq = event_store
-        .append(session_id, &events)
+        .append_envelopes(session_id, &envelopes)
         .await
         .map_err(|err| SessionError::Store(Box::new(err)))?;
 
@@ -152,10 +152,10 @@ async fn flush_projected_events(
     event_store: &Arc<dyn EventStore>,
     projector: &Arc<SessionProjector>,
     session_id: &SessionId,
-    pending: &mut Vec<meerkat_core::event::AgentEvent>,
+    pending: &mut Vec<meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>>,
 ) -> Result<(), SessionError> {
-    for event in pending.drain(..) {
-        append_and_project_event(event_store, projector, session_id, event).await?;
+    for envelope in pending.drain(..) {
+        append_and_project_event(event_store, projector, session_id, envelope).await?;
     }
     Ok(())
 }
@@ -183,14 +183,17 @@ async fn project_create_time_events(
                 if session_id.is_none() {
                     session_id = session_id_from_event(&envelope.payload);
                 }
-                let event = envelope.payload.clone();
+                // Preserve the canonical envelope identity (typed source,
+                // mob_id, original stream seq) on the durable log; the caller
+                // stream receives the same envelope.
+                let durable_envelope = envelope.clone();
                 if let Some(tx) = caller_event_tx.as_ref()
                     && tx.send(envelope).await.is_err()
                 {
                     tracing::warn!("session event stream receiver dropped; continuing event projection");
                 }
                 if let Some(session_id) = session_id.as_ref() {
-                    pending.push(event);
+                    pending.push(durable_envelope);
                     if let Err(error) =
                         flush_projected_events(&event_store, &projector, session_id, &mut pending).await
                     {
@@ -206,7 +209,7 @@ async fn project_create_time_events(
                         break;
                     }
                 } else {
-                    pending.push(event);
+                    pending.push(durable_envelope);
                 }
             }
             changed = session_rx.changed(), if session_id.is_none() => {
@@ -3685,13 +3688,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
         tokio::spawn(async move {
             while let Some(envelope) = stream.next().await {
-                if let Err(error) = append_and_project_event(
-                    &event_store,
-                    &projector,
-                    &session_id,
-                    envelope.payload,
-                )
-                .await
+                if let Err(error) =
+                    append_and_project_event(&event_store, &projector, &session_id, envelope).await
                 {
                     // Terminal durability fault: the canonical event log append
                     // failed, leaving a sequence hole. Stop draining the stream
@@ -6234,9 +6232,16 @@ mod tests {
         let projector = Arc::new(SessionProjector::new(dir.path().join(".rkat")));
         let session_id = SessionId::new();
 
-        let started = || AgentEvent::RunStarted {
-            session_id: session_id.clone(),
-            prompt: ContentInput::Text("seed".to_string()),
+        let started = || {
+            meerkat_core::event::EventEnvelope::new_session(
+                session_id.clone(),
+                0,
+                None,
+                AgentEvent::RunStarted {
+                    session_id: session_id.clone(),
+                    prompt: ContentInput::Text("seed".to_string()),
+                },
+            )
         };
 
         // A failing durable append must surface a typed SessionError::Store,
@@ -6329,20 +6334,22 @@ mod tests {
 
     #[async_trait::async_trait]
     impl EventStore for RecordingEventStore {
-        async fn append(
+        async fn append_envelopes(
             &self,
             session_id: &SessionId,
-            events: &[AgentEvent],
+            envelopes: &[meerkat_core::event::EventEnvelope<AgentEvent>],
         ) -> Result<u64, EventStoreError> {
             if self.fail_appends.load(Ordering::Acquire) {
                 return Err(EventStoreError::Store(
                     "synthetic transcript rewrite audit append failure".to_string(),
                 ));
             }
-            if events
-                .iter()
-                .any(|event| matches!(event, AgentEvent::TranscriptRewriteCommitted { .. }))
-            {
+            if envelopes.iter().any(|envelope| {
+                matches!(
+                    envelope.payload,
+                    AgentEvent::TranscriptRewriteCommitted { .. }
+                )
+            }) {
                 let call = self.rewrite_append_calls.fetch_add(1, Ordering::AcqRel) + 1;
                 if self.fail_rewrite_append_call.load(Ordering::Acquire) == call {
                     return Err(EventStoreError::Store(
@@ -6352,13 +6359,16 @@ mod tests {
             }
             let mut all_events = self.events.lock().await;
             let session_events = all_events.entry(session_id.clone()).or_default();
-            for event in events {
+            for envelope in envelopes {
                 let seq = session_events.len() as u64 + 1;
                 session_events.push(StoredEvent {
                     seq,
                     schema_version: EVENT_SCHEMA_VERSION,
                     timestamp: meerkat_core::time_compat::SystemTime::now(),
-                    event: event.clone(),
+                    source: envelope.source.clone(),
+                    mob_id: envelope.mob_id.clone(),
+                    stream_seq: envelope.seq,
+                    event: envelope.payload.clone(),
                 });
             }
             let last_seq = session_events.len() as u64;

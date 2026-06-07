@@ -745,6 +745,12 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
             mob_dsl::MobSpawnManyFailureObservationKind::StaleEventCursor
         }
         MobError::WorkNotFound(_) => mob_dsl::MobSpawnManyFailureObservationKind::WorkNotFound,
+        // Per-unit work cancellation is never a spawn-many failure cause;
+        // spawn-many provisioning never invokes `cancel_work`. Classify as
+        // Internal so the exhaustive match stays total.
+        MobError::WorkCancellationUnsupported(_) => {
+            mob_dsl::MobSpawnManyFailureObservationKind::Internal
+        }
         MobError::ActorCommandChannelClosed | MobError::ActorReplyChannelClosed => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
@@ -1936,9 +1942,15 @@ impl MobHandle {
                 })
             }
             MobMachineCommand::CancelWork { work_ref } => {
-                // Work tracking ledger is introduced in C7. Until then,
-                // individual work cancellation is not supported.
-                Err(MobError::WorkNotFound(work_ref))
+                // No work-tracking ledger backs per-unit cancellation, so
+                // there is no authority that can locate and cancel an
+                // individual submitted unit. Fail closed with a typed
+                // `WorkCancellationUnsupported` so the advertised
+                // `mob/cancel_work` surface stays honest (advertise == deliver)
+                // instead of returning a phantom `WorkNotFound` that lies about
+                // having searched a ledger. Member-scoped `cancel_all_work`
+                // remains the supported in-flight cancellation path.
+                Err(MobError::WorkCancellationUnsupported(work_ref))
             }
             MobMachineCommand::CancelAllWork {
                 runtime_id,
@@ -4408,9 +4420,11 @@ impl MobHandle {
 
     /// Cancel a previously submitted unit of work.
     ///
-    /// Returns `Ok(())` if the work was found and cancellation was initiated.
-    /// Returns [`MobError::WorkNotFound`] if no in-flight work with the given
-    /// reference exists.
+    /// Per-unit cancellation has no backing work-tracking ledger, so this
+    /// always fails closed with [`MobError::WorkCancellationUnsupported`]
+    /// rather than returning a phantom success or a misleading
+    /// `WorkNotFound`. Use [`MobHandle::cancel_all_work`] to cancel a
+    /// member's in-flight work.
     pub async fn cancel_work(&self, work_ref: WorkRef) -> Result<(), MobError> {
         match self
             .execute_machine_command(MobMachineCommand::CancelWork { work_ref })

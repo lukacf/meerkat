@@ -70,7 +70,7 @@ impl Default for ToolDispatcherConfig {
             source: ToolDispatcherSource::Empty,
             #[cfg(feature = "comms")]
             comms: None,
-            default_timeout: Duration::from_secs(30),
+            default_timeout: crate::timeout::ToolTimeoutPolicy::default().default_timeout(),
         }
     }
 }

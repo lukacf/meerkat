@@ -21,6 +21,27 @@ const SEARCH_TOOL_NAME: &str = "tool_catalog_search";
 const LOAD_TOOL_NAME: &str = "tool_catalog_load";
 const CONTROL_SOURCE_ID: &str = "control_plane";
 
+/// Typed refusal raised when the deferred tool-load control plane has no
+/// [`ToolScope`] bound.
+///
+/// Without a bound scope there is no visibility authority to consult, so the
+/// control plane refuses to act rather than fall back to default visibility and
+/// admit loads under truth it does not actually own. The deferred-load path
+/// fails closed on this marker (it emits no `RequestDeferredTools` effect).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoToolScope;
+
+/// Visibility facts resolved from a *bound* [`ToolScope`] (or, in tests, an
+/// injected visibility-state override).
+///
+/// This is produced only when a scope authority is actually present; it replaces
+/// the prior `unwrap_or_default()` fallbacks that let the control plane serve
+/// default visibility as if it were authoritative.
+struct ResolvedLoadVisibility {
+    visibility_state: SessionToolVisibilityState,
+    visible_tool_names: BTreeSet<String>,
+}
+
 #[derive(Default)]
 pub struct CatalogControlVisibilityProvider {
     scope: RwLock<Option<ToolScope>>,
@@ -74,6 +95,42 @@ impl CatalogControlVisibilityProvider {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .and_then(|scope| scope.visible_tool_names().ok())
+    }
+
+    /// Resolve the visibility facts the deferred-load path needs from a *bound*
+    /// scope authority. Returns [`NoToolScope`] when no scope is present so the
+    /// caller fails closed instead of serving default visibility.
+    ///
+    /// In tests, an injected `visibility_state_override` stands in for a bound
+    /// scope (the override exists precisely to exercise control-plane behavior
+    /// without a live scope), so its presence resolves successfully.
+    fn resolve_load_visibility(&self) -> Result<ResolvedLoadVisibility, NoToolScope> {
+        #[cfg(test)]
+        if let Some(visibility_state) = self
+            .visibility_state_override
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            return Ok(ResolvedLoadVisibility {
+                visibility_state,
+                visible_tool_names: BTreeSet::new(),
+            });
+        }
+
+        let guard = self
+            .scope
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let scope = guard.as_ref().ok_or(NoToolScope)?;
+        // A bound scope whose visibility cannot be projected is treated as no
+        // authoritative visibility (fail closed), never as default visibility.
+        let visibility_state = scope.visibility_state().map_err(|_| NoToolScope)?;
+        let visible_tool_names = scope.visible_tool_names().unwrap_or_default();
+        Ok(ResolvedLoadVisibility {
+            visibility_state,
+            visible_tool_names,
+        })
     }
 
     fn staged_session_filters_allow_name(&self, name: &str) -> bool {
@@ -260,11 +317,35 @@ impl CatalogControlDispatcher {
             );
         };
 
-        let visibility_state = self.visibility_provider.visibility_state();
-        let visible_tool_names = self
-            .visibility_provider
-            .visible_tool_names()
-            .unwrap_or_default();
+        // Fail closed: a deferred load requires a bound `ToolScope` to consult.
+        // Without one there is no visibility authority, so we refuse every name
+        // and emit no `RequestDeferredTools` effect rather than accepting loads
+        // under default visibility.
+        let Ok(ResolvedLoadVisibility {
+            visibility_state,
+            visible_tool_names,
+        }) = self.visibility_provider.resolve_load_visibility()
+        else {
+            let resolutions = args
+                .names
+                .into_iter()
+                .map(|name| ToolCatalogLoadResolution {
+                    name,
+                    accepted: false,
+                    accepted_noop: false,
+                    rejected_reason: Some(ToolCatalogLoadRejectedReason::TemporarilyUnavailable),
+                })
+                .collect();
+            return (
+                LoadResponse {
+                    catalog_exact: true,
+                    accepted_names: Vec::new(),
+                    noop_names: Vec::new(),
+                    resolutions,
+                },
+                None,
+            );
+        };
         let mut accepted_authorities = BTreeMap::new();
         let mut noop_names = BTreeSet::new();
         let mut resolutions = Vec::new();
@@ -955,6 +1036,102 @@ mod tests {
             effect["authorities"][0]["witness"]["stable_owner_key"],
             "callback:test"
         );
+    }
+
+    /// Gate (#201): with NO `ToolScope` bound, the deferred-load control plane
+    /// fails closed — it refuses every requested name and emits NO
+    /// `RequestDeferredTools` effect, rather than accepting loads under default
+    /// visibility. (Fails-old: the prior `unwrap_or_default()` fallback admitted
+    /// the load and emitted the effect.)
+    #[tokio::test]
+    async fn load_without_scope_refuses_and_emits_no_effect() {
+        let deferred = session_tool("deferred_mcp_tool", "Deferred MCP tool");
+        let dispatcher = Arc::new(ExactCatalogDispatcher {
+            tools: vec![Arc::clone(&deferred)].into(),
+            catalog: vec![ToolCatalogEntry::session_deferred(
+                Arc::clone(&deferred),
+                true,
+                "callback:test".to_string(),
+            )]
+            .into(),
+            pending_sources: Arc::from([]),
+            may_require_control_plane: false,
+        });
+        // No scope and no test-override is set on the provider: there is no
+        // visibility authority to consult.
+        let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
+        let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
+
+        let outcome = control
+            .dispatch(search_call(
+                LOAD_TOOL_NAME,
+                json!({ "names": ["deferred_mcp_tool"] }),
+            ))
+            .await
+            .unwrap();
+        let response: LoadResponse = serde_json::from_str(&outcome.result.text_content()).unwrap();
+
+        assert!(
+            response.accepted_names.is_empty(),
+            "no name may be accepted without a bound ToolScope"
+        );
+        assert_eq!(
+            response.resolutions,
+            vec![ToolCatalogLoadResolution {
+                name: "deferred_mcp_tool".into(),
+                accepted: false,
+                accepted_noop: false,
+                rejected_reason: Some(ToolCatalogLoadRejectedReason::TemporarilyUnavailable),
+            }]
+        );
+        assert!(
+            outcome.session_effects.is_empty(),
+            "no RequestDeferredTools effect may be emitted without a bound ToolScope"
+        );
+    }
+
+    /// Gate (#201): with a `ToolScope` bound, behavior is unchanged — a valid
+    /// deferred load is accepted and the `RequestDeferredTools` effect is
+    /// emitted as before.
+    #[tokio::test]
+    async fn load_with_scope_still_accepts_and_emits_effect() {
+        let deferred = session_tool("deferred_mcp_tool", "Deferred MCP tool");
+        let dispatcher = Arc::new(ExactCatalogDispatcher {
+            tools: vec![Arc::clone(&deferred)].into(),
+            catalog: vec![ToolCatalogEntry::session_deferred(
+                Arc::clone(&deferred),
+                true,
+                "callback:test".to_string(),
+            )]
+            .into(),
+            pending_sources: Arc::from([]),
+            may_require_control_plane: false,
+        });
+        let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
+        visibility_provider.set_scope(generated_visibility_scope(
+            vec![Arc::clone(&deferred)].into(),
+            ["deferred_mcp_tool".to_string()].into_iter().collect(),
+        ));
+        let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
+
+        let outcome = control
+            .dispatch(search_call(
+                LOAD_TOOL_NAME,
+                json!({ "names": ["deferred_mcp_tool"] }),
+            ))
+            .await
+            .unwrap();
+        let response: LoadResponse = serde_json::from_str(&outcome.result.text_content()).unwrap();
+
+        assert_eq!(
+            response.accepted_names,
+            vec!["deferred_mcp_tool".to_string()]
+        );
+        assert_eq!(outcome.session_effects.len(), 1);
+        assert!(matches!(
+            &outcome.session_effects[0],
+            SessionEffect::RequestDeferredTools { .. }
+        ));
     }
 
     #[tokio::test]

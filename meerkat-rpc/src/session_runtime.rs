@@ -3207,6 +3207,47 @@ impl SessionRuntime {
         })
     }
 
+    /// #61/#67: resolve the provider for a direct session create through
+    /// registered model ownership, failing closed.
+    ///
+    /// This is the RPC mirror of REST's `resolve_validation_identity`
+    /// (`meerkat-rest/src/lib.rs`): an explicit provider is validated against
+    /// the catalog owner via `provider_override_mismatch_reason`; otherwise
+    /// the registered model owner (`entry.provider`) supplies the provider.
+    /// When neither an explicit provider nor a registered owner is present we
+    /// return `INVALID_PARAMS` instead of inferring a provider from the model
+    /// string — the surface never re-derives provider identity the registry
+    /// is the owner of.
+    async fn resolve_create_provider(
+        &self,
+        build_config: &AgentBuildConfig,
+    ) -> Result<meerkat_core::Provider, RpcError> {
+        let registry = self.model_registry().await?;
+        let model = build_config.model.as_str();
+        if let Some(provider) = build_config.provider {
+            if let Some(reason) =
+                registered_model_provider_mismatch_reason(&registry, provider, model)
+            {
+                return Err(RpcError {
+                    code: error::INVALID_PARAMS,
+                    message: reason,
+                    data: None,
+                });
+            }
+            return Ok(provider);
+        }
+        registry
+            .entry(model)
+            .map(|entry| entry.provider)
+            .ok_or_else(|| RpcError {
+                code: error::INVALID_PARAMS,
+                message: format!(
+                    "model '{model}' requires an explicit provider or a registered model owner"
+                ),
+                data: None,
+            })
+    }
+
     async fn wire_resolved_capabilities_for_identity(
         &self,
         identity: &SessionLlmIdentity,
@@ -5706,10 +5747,21 @@ impl SessionRuntime {
             build.instance_id = build.instance_id.or_else(|| self.inner.instance_id());
             build.backend = build.backend.or_else(|| self.inner.backend());
             build.config_generation = build.config_generation.or(runtime_generation);
-            let initial_turn_provider_hint = build_config
-                .provider
-                .or_else(|| meerkat_core::Provider::infer_from_model(&build_config.model))
-                .map(|provider| provider.as_str());
+            // #61/#67: resolve the initial-turn provider hint through
+            // registered model ownership (the same fail-closed contract REST
+            // uses at `resolve_validation_identity`), not a from-the-model
+            // string inference. An explicit provider is validated against the
+            // catalog owner; otherwise the registered owner supplies it; when
+            // neither is present the create fails closed rather than guessing
+            // a provider the registry never blessed.
+            let initial_turn_provider = match self.resolve_create_provider(&build_config).await {
+                Ok(provider) => provider,
+                Err(err) => {
+                    promotion_cleanup.restore_now().await;
+                    return Err(err);
+                }
+            };
+            let initial_turn_provider_hint = Some(initial_turn_provider.as_str());
             build.initial_turn_metadata =
                 Some(Self::runtime_stamped_prompt_turn_metadata_from_overrides(
                     skill_references.clone(),
@@ -8533,6 +8585,55 @@ mod tests {
             Some("claude-sonnet-4-5")
         );
         assert_eq!(metadata.provider, Some(meerkat_core::Provider::Anthropic));
+    }
+
+    /// #61/#67 gate: direct session-create provider resolution mirrors REST's
+    /// fail-closed `resolve_validation_identity`.
+    ///
+    /// - A model string with **no** explicit provider and **no** registered
+    ///   catalog owner returns `INVALID_PARAMS` — pre-fix this path inferred
+    ///   a provider from the model string (`Provider::infer_from_model`),
+    ///   minting an unblessed provider hint instead of failing closed.
+    /// - A registered catalog model with no provider resolves to the catalog
+    ///   owner.
+    /// - An explicit provider that contradicts the catalog owner is rejected.
+    #[tokio::test]
+    async fn create_provider_resolves_through_registered_owner_fail_closed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime(temp_factory(&temp), 4);
+
+        // No registered owner + no explicit provider -> fail closed.
+        let unknown = AgentBuildConfig::new("totally-unregistered-model-xyz");
+        let err = runtime
+            .resolve_create_provider(&unknown)
+            .await
+            .expect_err("unknown model with no provider must fail closed, not infer");
+        assert_eq!(err.code, error::INVALID_PARAMS);
+        assert!(
+            err.message
+                .contains("explicit provider or a registered model owner"),
+            "fail-closed message must name the missing owner contract: {}",
+            err.message
+        );
+
+        // Registered catalog model with no explicit provider -> catalog owner.
+        let registered = AgentBuildConfig::new("claude-sonnet-4-5");
+        let provider = runtime
+            .resolve_create_provider(&registered)
+            .await
+            .expect("registered catalog model must resolve to its owner");
+        assert_eq!(provider, meerkat_core::Provider::Anthropic);
+
+        // Explicit provider that contradicts the catalog owner -> rejected.
+        let mismatched = AgentBuildConfig {
+            provider: Some(meerkat_core::Provider::OpenAI),
+            ..AgentBuildConfig::new("claude-sonnet-4-5")
+        };
+        let err = runtime
+            .resolve_create_provider(&mismatched)
+            .await
+            .expect_err("explicit provider contradicting the catalog owner must be rejected");
+        assert_eq!(err.code, error::INVALID_PARAMS);
     }
 
     /// B19 helper sanity: realtime capability lookup must round-trip the

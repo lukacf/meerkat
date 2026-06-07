@@ -245,8 +245,15 @@ impl SessionProjector {
                     Ordering::Less => self.project(event_store, session_id, checkpoint + 1).await,
                 }
             }
-            CheckpointState::Missing => self.project(event_store, session_id, 1).await,
-            CheckpointState::Invalid => self.replay(event_store, session_id).await,
+            // A missing checkpoint with a possibly-present events.jsonl is the
+            // crash window between the events.jsonl write and the checkpoint
+            // write (project_with_mode writes the checkpoint last). Projecting
+            // from seq 1 here APPENDS to that partial events.jsonl, duplicating
+            // derived rows. Rebuild via replay() (truncate-and-rebuild, removing
+            // derived files first) exactly like the Invalid arm.
+            CheckpointState::Missing | CheckpointState::Invalid => {
+                self.replay(event_store, session_id).await
+            }
         }
     }
 }
@@ -308,6 +315,7 @@ pub enum ProjectionError {
 mod tests {
     use super::*;
     use crate::event_store::{EVENT_SCHEMA_VERSION, EventStoreError, StoredEvent};
+    use meerkat_core::event::EventSourceIdentity;
     use meerkat_core::types::{AssistantMessage, Message, StopReason, Usage, UserMessage};
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -335,6 +343,9 @@ mod tests {
                     seq: base_seq + i as u64 + 1,
                     schema_version: EVENT_SCHEMA_VERSION,
                     timestamp: SystemTime::now(),
+                    source: EventSourceIdentity::session(session_id.clone()),
+                    mob_id: None,
+                    stream_seq: 0,
                     event: event.clone(),
                 });
             }
@@ -343,12 +354,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl EventStore for MemEventStore {
-        async fn append(
+        async fn append_envelopes(
             &self,
             session_id: &SessionId,
-            events: &[AgentEvent],
+            envelopes: &[meerkat_core::event::EventEnvelope<AgentEvent>],
         ) -> Result<u64, EventStoreError> {
-            self.add_events(session_id, events);
+            let events: Vec<AgentEvent> = envelopes.iter().map(|env| env.payload.clone()).collect();
+            self.add_events(session_id, &events);
             self.last_seq(session_id).await
         }
 
@@ -623,6 +635,52 @@ mod tests {
         assert!(!events_content.contains("stale projection"));
         let lines: Vec<&str> = events_content.trim().lines().collect();
         assert_eq!(lines.len(), 2);
+
+        let checkpoint = std::fs::read_to_string(session_dir.join("checkpoint")).unwrap();
+        assert_eq!(checkpoint.trim(), "2");
+    }
+
+    #[tokio::test]
+    async fn test_projector_resume_missing_checkpoint_rebuilds_without_duplicates() {
+        // Row #144 gate (fails-old / passes-new): a crash after events.jsonl is
+        // written but before the checkpoint write leaves a partial events.jsonl
+        // and NO checkpoint (CheckpointState::Missing). The OLD code called
+        // project(from_seq=1), which APPENDS to that partial file, duplicating
+        // every derived row. The fix rebuilds via replay (truncate-and-rebuild).
+        let dir = TempDir::new().unwrap();
+        let projector = SessionProjector::new(dir.path().join(".rkat"));
+        let store = MemEventStore::new();
+        let sid = SessionId::new();
+
+        store.add_events(
+            &sid,
+            &[
+                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TextComplete {
+                    content: "first".to_string(),
+                },
+            ],
+        );
+        projector.project(&store, &sid, 1).await.unwrap();
+
+        let session_dir = projector.session_dir(&sid);
+        // Simulate the crash window: events.jsonl exists, checkpoint is gone.
+        tokio::fs::remove_file(session_dir.join("checkpoint"))
+            .await
+            .unwrap();
+        assert!(session_dir.join("events.jsonl").exists());
+
+        let seq = projector.resume(&store, &sid).await.unwrap();
+        assert_eq!(seq, 2);
+
+        // events.jsonl must be rebuilt (exactly 2 lines), NOT appended (4 lines).
+        let events_content = std::fs::read_to_string(session_dir.join("events.jsonl")).unwrap();
+        let lines: Vec<&str> = events_content.trim().lines().collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "missing-checkpoint resume must rebuild, not append duplicates"
+        );
 
         let checkpoint = std::fs::read_to_string(session_dir.join("checkpoint")).unwrap();
         assert_eq!(checkpoint.trim(), "2");

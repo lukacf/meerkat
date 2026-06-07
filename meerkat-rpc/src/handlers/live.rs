@@ -15,13 +15,13 @@ use meerkat_client::realtime_session::RealtimeSessionOpenConfig;
 use meerkat_contracts::{
     LiveChannelParams, LiveCloseResult, LiveCommitInputParams, LiveInputChunkWire, LiveOpenParams,
     LiveOpenResult, LiveOpenTransport, LiveRefreshResult, LiveSendInputParams, LiveStatusResult,
-    LiveTruncateParams, LiveWebrtcAnswerParams, LiveWebrtcAnswerResult, RealtimeTurningMode,
-    WireLiveAdapterStatus, WireLiveDegradationReason,
+    LiveTruncateParams, LiveWebrtcAnswerParams, LiveWebrtcAnswerResult, RealtimeCapabilities,
+    RealtimeTurningMode, WireLiveAdapterStatus, WireLiveDegradationReason,
 };
 use meerkat_core::SessionLlmIdentity;
 use meerkat_core::live_adapter::{
-    LiveAdapterCommand, LiveChannelCapabilities, LiveContinuityMode, LiveInputChunk,
-    LiveProjectionSnapshot, LiveTransportBootstrap,
+    LiveAdapterCommand, LiveAudioConfig, LiveChannelCapabilities, LiveContinuityMode,
+    LiveInputChunk, LiveProjectionSnapshot, LiveTransportBootstrap,
 };
 use meerkat_core::types::{Message, SessionId};
 #[cfg(feature = "live-webrtc")]
@@ -581,21 +581,51 @@ fn wire_live_degradation_reason_from_machine_authority(
     }
 }
 
-/// P1#4: pinned audio format for the live WebSocket transport.
+/// #176: project the provider's typed realtime audio policy into the typed
+/// [`LiveAudioConfig`] the snapshot carries.
 ///
-/// Today every realtime provider we ship ([`OpenAiRealtimeSession`]) negotiates
-/// `pcm_24k_mono` (16-bit signed little-endian PCM, 24 kHz, mono) — the only
-/// value [`meerkat_live::transport::WsConnectParams`] currently parses.
-/// `live/open` returns a WS URL that includes `&format=` so that binary audio
-/// frames are accepted by the WS server post-handshake; without this query
-/// parameter the WS server would reject every binary frame because no format
-/// was negotiated at upgrade time.
+/// The provider/model audio policy is owned by the realtime factory and
+/// published as a typed [`RealtimeCapabilities`] (`audio_input_format` /
+/// `audio_output_format`, each a [`RealtimeAudioFormat`]). The surface does
+/// not decide the format — it reads it here. Returns `None` when the factory
+/// declines to advertise both directions of audio (e.g. a text-only realtime
+/// product), so the caller fails closed rather than inventing a sample rate.
+fn live_audio_config_from_capabilities(
+    capabilities: &RealtimeCapabilities,
+) -> Option<LiveAudioConfig> {
+    let input = capabilities.audio_input_format.as_ref()?;
+    let output = capabilities.audio_output_format.as_ref()?;
+    Some(LiveAudioConfig {
+        input_sample_rate_hz: input.sample_rate_hz,
+        input_channels: u16::from(input.channels),
+        output_sample_rate_hz: output.sample_rate_hz,
+        output_channels: u16::from(output.channels),
+    })
+}
+
+/// #176: derive the WS `&format=` query token from the typed audio policy.
 ///
-/// `audio_format`: pin to provider default until per-session negotiation lands.
-/// When the runtime starts surfacing per-session audio policy (see
-/// [`LiveProjectionSnapshot::audio_config`]) this constant becomes a fallback
-/// rather than the source of truth.
-const LIVE_WS_DEFAULT_AUDIO_FORMAT: &str = "pcm_24k_mono";
+/// The live WS transport (`meerkat_live::transport`) negotiates the binary
+/// frame layout at upgrade time via this query token, and stamps the
+/// inbound binary-chunk `sample_rate_hz` from whatever token it parses. The
+/// only binary format that transport accepts today is 16-bit signed
+/// little-endian PCM, 24 kHz, mono (`pcm_24k_mono`). We map the resolved
+/// typed config to that token and **fail closed** (return `None`) when the
+/// resolved policy does not match a token the WS server can parse — a
+/// mismatch would otherwise have the server silently stamp the wrong rate
+/// onto every binary frame. Surface only reads the typed config; it never
+/// pins the token independently.
+fn live_ws_audio_format_param(audio: &LiveAudioConfig) -> Option<&'static str> {
+    const PCM_24K_MONO_RATE_HZ: u32 = 24_000;
+    const PCM_24K_MONO_CHANNELS: u16 = 1;
+    if audio.input_sample_rate_hz == PCM_24K_MONO_RATE_HZ
+        && audio.input_channels == PCM_24K_MONO_CHANNELS
+    {
+        Some("pcm_24k_mono")
+    } else {
+        None
+    }
+}
 
 /// R10: extract the root system prompt from a projected `seed_messages`
 /// vector for use in `LiveProjectionSnapshot.system_prompt`.
@@ -649,6 +679,7 @@ fn extract_system_prompt_from_seed_messages(seed_messages: &[Message]) -> Option
 fn build_live_projection_snapshot(
     session_id: &SessionId,
     open_config: &RealtimeSessionOpenConfig,
+    audio_config: Option<LiveAudioConfig>,
 ) -> LiveProjectionSnapshot {
     LiveProjectionSnapshot {
         session_id: session_id.clone(),
@@ -670,11 +701,12 @@ fn build_live_projection_snapshot(
         system_prompt: extract_system_prompt_from_seed_messages(&open_config.seed_messages),
         model_id: open_config.llm_identity.model.clone(),
         provider_id: open_config.llm_identity.provider,
-        // Audio config is not part of the open config today; the live
-        // adapter inherits provider defaults. When the runtime starts
-        // surfacing per-session audio policy, this becomes
-        // `Some(LiveAudioConfig { ... })` with the resolved values.
-        audio_config: None,
+        // #176: typed audio policy resolved from the realtime factory's
+        // `RealtimeCapabilities` (the provider/model audio-format owner).
+        // The surface reads this; it never pins a format. `None` only when
+        // the resolving caller had no factory-published audio policy to
+        // read (degraded/test config without a wired factory).
+        audio_config,
         // R3: forward the typed runtime system-context entries so the
         // adapter can fold them into its provider session as authoritative
         // system instructions (peer terminal context, ops_lifecycle
@@ -957,6 +989,11 @@ pub async fn handle_live_open(
     // factory is wired; without a factory (e.g. degraded test config) the
     // channel still opens but reports `Fresh` — there is no seeded state.
     let mut continuity = LiveContinuityMode::Fresh;
+    // #176: the resolved typed audio policy for this channel. Populated from
+    // the realtime factory's `RealtimeCapabilities` (provider/model audio
+    // owner) when a factory wired the channel; the WS `&format=` token and
+    // the snapshot `audio_config` both derive from this single typed value.
+    let mut resolved_audio_config: Option<LiveAudioConfig> = None;
     // P2#3: capture the adapter's real capability set for the response.
     // Only meaningful when a factory wired the channel; otherwise the
     // conservative all-false placeholder remains (no adapter, no claims).
@@ -1011,6 +1048,11 @@ pub async fn handle_live_open(
         // factory implements `open_live_adapter` to bypass the
         // `Box<dyn RealtimeSession>` boxing layer that the legacy
         // `ProviderSessionAdapter` wrapper required.
+        // #176: resolve the typed audio policy from the factory's
+        // `RealtimeCapabilities` (the provider/model audio-format owner)
+        // before opening the adapter. The WS `&format=` token and the
+        // snapshot `audio_config` both read this single typed value.
+        resolved_audio_config = live_audio_config_from_capabilities(&factory.capabilities());
         match factory.open_live_adapter(open_config).await {
             Ok(adapter) => {
                 // P2#3: query the adapter's real capability set before
@@ -1039,7 +1081,11 @@ pub async fn handle_live_open(
                 // (resume, cross-session attach) where no factory-time
                 // seeding has happened yet — `live/open` relies on
                 // factory-time seeding.
-                let snapshot = build_live_projection_snapshot(&session_id, open_config);
+                let snapshot = build_live_projection_snapshot(
+                    &session_id,
+                    open_config,
+                    resolved_audio_config.clone(),
+                );
                 continuity = continuity_from_snapshot(&snapshot);
             }
             Err(err) => {
@@ -1107,15 +1153,45 @@ pub async fn handle_live_open(
                 }
             };
             let token_str = token.to_string();
+            // #176: derive the WS `&format=` token from the resolved typed
+            // audio policy (provider/model owner via `RealtimeCapabilities`),
+            // not a surface-pinned constant. Fail closed when no audio policy
+            // resolved (no wired factory) or it does not map to a token the
+            // WS server can parse — otherwise the server would silently stamp
+            // the wrong sample rate onto every binary frame.
+            let Some(audio_config) = resolved_audio_config.as_ref() else {
+                close_live_channel_after_open_failure(host, runtime, &session_id, &channel_id)
+                    .await;
+                return RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    "live websocket transport requires a resolved audio policy; no realtime \
+                     factory audio format was available"
+                        .to_string(),
+                );
+            };
+            let Some(format_param) = live_ws_audio_format_param(audio_config) else {
+                close_live_channel_after_open_failure(host, runtime, &session_id, &channel_id)
+                    .await;
+                return RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!(
+                        "resolved live audio policy (input {}Hz/{}ch) has no websocket binary \
+                         format the transport can negotiate",
+                        audio_config.input_sample_rate_hz, audio_config.input_channels,
+                    ),
+                );
+            };
             // G38: pin the bearer token to the channel via a `channel` query
             // param so a leaked token cannot be replayed against a different
-            // channel. P1#4: append `&format=...` so binary audio frames are
-            // negotiated as provider-default PCM 24 kHz mono.
+            // channel. #176: `&format=` is the typed audio policy projected
+            // into the WS server's binary-frame negotiation token; the server
+            // stamps inbound binary-chunk sample rates from this token.
             LiveTransportBootstrap::Websocket {
                 url: format!(
-                    "{base_url}{path}?token={token_str}&channel={channel_id}&format={format}",
+                    "{base_url}{path}?token={token_str}&channel={channel_id}&format={format_param}",
                     path = meerkat_live::LIVE_WS_PATH,
-                    format = LIVE_WS_DEFAULT_AUDIO_FORMAT,
                 ),
                 token: token_str,
             }
@@ -1604,7 +1680,11 @@ pub async fn handle_live_refresh(
     // pull the next value here so adapters that gate on `snapshot_version`
     // for stale-refresh detection see strictly increasing generations
     // instead of every refresh stamped `0`.
-    let mut snapshot = build_live_projection_snapshot(&session_id, &open_config);
+    // #176: refresh does not rebuild the WS transport URL and has no
+    // factory in scope to publish a `RealtimeCapabilities` audio policy, so
+    // the snapshot carries no audio_config here. The format the channel
+    // negotiated at open time stays in force on the live transport.
+    let mut snapshot = build_live_projection_snapshot(&session_id, &open_config, None);
     match host.next_snapshot_version(&channel_id).await {
         Ok(v) => snapshot.snapshot_version = v,
         Err(err) => {
@@ -2480,19 +2560,28 @@ mod tests {
     // is admitted post-handshake.
     // ---------------------------------------------------------------------
 
-    /// P1#4: regression — the format-string path used by `handle_live_open`
-    /// must produce a URL that contains `?token=`, `&channel=`, and
-    /// `&format=pcm_24k_mono` in that order. Reconstruct it with the same
-    /// constant the handler uses; if a future refactor drops the `format=`
-    /// query parameter, the WS server will fail closed on every binary
-    /// frame and audio will appear to "vanish" mid-call.
+    /// P1#4 + #176: regression — the format-string path used by
+    /// `handle_live_open` must produce a URL that contains `?token=`,
+    /// `&channel=`, and `&format=pcm_24k_mono` in that order, and the
+    /// `&format=` token must derive from the resolved typed audio policy
+    /// (not a surface-pinned constant). If a future refactor drops the
+    /// `format=` query parameter, the WS server fails closed on every binary
+    /// frame and audio appears to "vanish" mid-call.
     #[test]
     fn live_open_url_carries_token_and_format_params() {
         let base_url = "ws://localhost:9999";
         let path = meerkat_live::LIVE_WS_PATH;
         let token_str = "tok_abc";
         let channel_id = "live_42";
-        let format_param = LIVE_WS_DEFAULT_AUDIO_FORMAT;
+        // #176: token derives from the typed audio policy, not a constant.
+        let audio = LiveAudioConfig {
+            input_sample_rate_hz: 24_000,
+            input_channels: 1,
+            output_sample_rate_hz: 24_000,
+            output_channels: 1,
+        };
+        let format_param =
+            live_ws_audio_format_param(&audio).expect("24kHz mono must map to a WS format token");
         let url = format!(
             "{base_url}{path}?token={token_str}&channel={channel_id}&format={format_param}"
         );
@@ -2506,10 +2595,71 @@ mod tests {
             url.contains("&format=pcm_24k_mono"),
             "URL must include &format=pcm_24k_mono so the WS server accepts binary audio frames: {url}"
         );
-        // The format constant is the only value `WsConnectParams` parses
-        // today; pin it here so accidentally introducing a different
-        // format string fails this regression.
-        assert_eq!(LIVE_WS_DEFAULT_AUDIO_FORMAT, "pcm_24k_mono");
+    }
+
+    /// #176 gate: the WS `&format=` token and the snapshot `audio_config`
+    /// both derive from the resolved typed [`LiveAudioConfig`] (sourced from
+    /// the realtime factory's `RealtimeCapabilities`), and `audio_config` is
+    /// `Some` on open. Pre-fix the snapshot pinned `audio_config: None` and
+    /// the URL pinned a `pcm_24k_mono` constant; this test fails against that
+    /// shape.
+    #[test]
+    fn live_open_audio_format_and_snapshot_derive_from_resolved_audio_config() {
+        use meerkat_contracts::RealtimeAudioFormat;
+
+        // The provider/model audio policy seam: a factory's typed
+        // `RealtimeCapabilities` carrying PCM 24 kHz mono in both directions.
+        let capabilities = RealtimeCapabilities {
+            audio_input_format: Some(RealtimeAudioFormat::pcm(24_000, 1)),
+            audio_output_format: Some(RealtimeAudioFormat::pcm(24_000, 1)),
+            ..RealtimeCapabilities::default()
+        };
+        let resolved = live_audio_config_from_capabilities(&capabilities)
+            .expect("PCM in+out must resolve to a typed LiveAudioConfig");
+        assert_eq!(resolved.input_sample_rate_hz, 24_000);
+        assert_eq!(resolved.input_channels, 1);
+
+        // The WS `&format=` token derives from the typed config.
+        let format_param = live_ws_audio_format_param(&resolved)
+            .expect("resolved 24kHz mono must map to the WS format token");
+        assert_eq!(format_param, "pcm_24k_mono");
+
+        // The snapshot carries the resolved config (Some, not None).
+        let open_config = RealtimeSessionOpenConfig::new(
+            RealtimeTurningMode::ProviderManaged,
+            test_live_identity(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let session_id = SessionId::new();
+        let snapshot =
+            build_live_projection_snapshot(&session_id, &open_config, Some(resolved.clone()));
+        assert_eq!(
+            snapshot.audio_config.as_ref(),
+            Some(&resolved),
+            "snapshot.audio_config must be the resolved typed config, not None"
+        );
+
+        // Fail-closed: an audio policy the WS transport cannot negotiate
+        // yields no token (no silent wrong-rate stamping).
+        let unsupported = LiveAudioConfig {
+            input_sample_rate_hz: 16_000,
+            input_channels: 1,
+            output_sample_rate_hz: 16_000,
+            output_channels: 1,
+        };
+        assert!(
+            live_ws_audio_format_param(&unsupported).is_none(),
+            "16kHz must fail closed: the WS transport has no matching binary format token"
+        );
+
+        // A text-only realtime product (no audio formats) resolves to None,
+        // so the WS open path fails closed instead of inventing a rate.
+        let text_only = RealtimeCapabilities::default();
+        assert!(
+            live_audio_config_from_capabilities(&text_only).is_none(),
+            "a factory advertising no audio formats must resolve to no audio config"
+        );
     }
 
     // ---------------------------------------------------------------------

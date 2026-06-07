@@ -36,6 +36,7 @@ pub mod dispatcher;
 pub mod error;
 pub mod registry;
 pub mod schema;
+pub mod timeout;
 
 #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
 pub use builder::CommsDispatcherConfig;
@@ -63,6 +64,7 @@ pub use meerkat_comms::agent::{
 };
 pub use registry::ToolRegistry;
 pub use schema::{empty_object_schema, schema_for};
+pub use timeout::ToolTimeoutPolicy;
 
 // Capability registrations
 inventory::submit! {

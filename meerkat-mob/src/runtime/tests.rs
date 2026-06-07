@@ -35765,13 +35765,62 @@ async fn test_submit_work_unknown_member_fails() {
 }
 
 #[tokio::test]
-async fn test_cancel_work_returns_not_found() {
+async fn test_cancel_work_returns_unsupported() {
+    // #328 dogma gate: the advertised `mob/cancel_work` surface must fail
+    // closed with a typed `WorkCancellationUnsupported` rather than a phantom
+    // `WorkNotFound` (which lies about having searched a work-tracking ledger
+    // that does not exist). This keeps advertise == deliver: there is no real
+    // per-unit cancellation authority, so the surface honestly reports
+    // "unsupported" instead of a search-and-miss that never happened.
     let (handle, _service) = create_test_mob(sample_definition()).await;
-    let result = handle.cancel_work(WorkRef::new()).await;
-    assert!(
-        matches!(result, Err(MobError::WorkNotFound(_))),
-        "cancel_work must return WorkNotFound before work tracking is wired: {result:?}"
-    );
+    let work_ref = WorkRef::new();
+    let result = handle.cancel_work(work_ref.clone()).await;
+    match result {
+        Err(MobError::WorkCancellationUnsupported(returned)) => {
+            assert_eq!(
+                returned, work_ref,
+                "unsupported error must echo the requested work ref"
+            );
+        }
+        other => panic!(
+            "cancel_work must fail closed with WorkCancellationUnsupported (no phantom WorkNotFound/ok): {other:?}"
+        ),
+    }
+}
+
+/// #210 dogma gate: the flow run-cancel verdict is owned by the MobMachine
+/// (`CancelFlow`'s `run_known` guard over `run_status`) via
+/// `apply_command_admission`, NOT by the shell's `run_cancel_tokens` /
+/// `run_tasks` / `flow_streams` execution-handle maps.
+///
+/// A freshly-running mob has EMPTY tracker maps and the machine has no
+/// `run_status` entry for any run. Cancelling an unknown run must therefore
+/// be REJECTED by machine admission (a typed `InvalidTransition` verdict),
+/// not silently no-op to `Ok(())` as it would if the shell decided the
+/// outcome purely from `run_cancel_tokens` map absence. This proves the
+/// maps are execution handles only and the semantic verdict is
+/// machine-owned. It fails-old if the shell ever short-circuits cancel on
+/// map presence/absence before machine admission.
+#[tokio::test]
+async fn cancel_flow_verdict_comes_from_machine_admission_not_tracker_maps() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    assert_eq!(handle.status().await.unwrap(), MobState::Running);
+
+    // Unknown run: tracker maps are empty AND the machine has no run_status
+    // entry. If map-absence decided the outcome, this would be a silent
+    // `Ok(())` no-op. The machine `run_known` guard rejects it instead.
+    let unknown_run = RunId::new();
+    let result = handle.cancel_flow(unknown_run).await;
+    match result {
+        Err(MobError::InvalidTransition {
+            from: MobState::Running,
+            to: MobState::Running,
+        }) => {}
+        other => panic!(
+            "cancel_flow on an unknown run must be rejected by MobMachine admission \
+             (InvalidTransition), not a shell map-presence no-op: {other:?}"
+        ),
+    }
 }
 
 #[tokio::test]
@@ -37642,6 +37691,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::StaleFenceToken { .. } => "stale_fence_token".to_string(),
         MobError::StaleEventCursor { .. } => "stale_event_cursor".to_string(),
         MobError::WorkNotFound(_) => "work_not_found".to_string(),
+        MobError::WorkCancellationUnsupported(_) => "work_cancellation_unsupported".to_string(),
         MobError::ActorCommandChannelClosed => "actor_command_channel_closed".to_string(),
         MobError::ActorReplyChannelClosed => "actor_reply_channel_closed".to_string(),
         MobError::BridgeSessionNotInLiveAuthority { .. } => {
@@ -39843,4 +39893,52 @@ async fn test_list_members_matching_filters_by_label_and_role() {
     // Empty filter matches every member.
     let all = handle.list_members_matching(MemberFilter::default()).await;
     assert_eq!(all.len(), 2, "empty filter returns both members");
+}
+
+/// #212 dogma gate: the MobMachine emits `EmitKickoffLifecycleNotice` for
+/// EVERY kickoff phase. The shell must forward every machine-emitted intent
+/// mechanically — it may not narrow the set to `Failed`/`Cancelled` by
+/// mapping the other phases to `None` and silently dropping them. This test
+/// pins `kickoff_notice_intent` as a TOTAL projection: every `KickoffIntent`
+/// variant maps to a distinct, non-empty notice tag (no phase silently
+/// dropped). It fails-old (the prior `Option<&'static str>` shape returned
+/// `None` for Pending/Starting/Started/CallbackPending) and passes-new.
+#[test]
+fn kickoff_notice_intent_delivers_every_machine_emitted_phase() {
+    use crate::machines::mob_machine::KickoffIntent;
+
+    // Every DSL-emitted kickoff intent. Mirrors the closed `KickoffIntent`
+    // enum; if a variant is added, this list must grow with it (the
+    // exhaustive `match` in `kickoff_notice_intent` forces the projection
+    // to stay total).
+    let all_intents = [
+        KickoffIntent::Pending,
+        KickoffIntent::Starting,
+        KickoffIntent::Started,
+        KickoffIntent::CallbackPending,
+        KickoffIntent::Failed,
+        KickoffIntent::Cancelled,
+    ];
+
+    let mut seen = std::collections::BTreeSet::new();
+    for intent in all_intents {
+        let tag = super::actor::MobActor::kickoff_notice_intent(intent);
+        assert!(
+            !tag.is_empty(),
+            "kickoff intent {intent:?} must map to a non-empty notice tag (no None-drop)"
+        );
+        assert!(
+            tag.starts_with("mob.kickoff_"),
+            "kickoff notice tag for {intent:?} must use the mob.kickoff_* namespace, got {tag:?}"
+        );
+        assert!(
+            seen.insert(tag),
+            "kickoff notice tag {tag:?} for {intent:?} must be distinct per phase"
+        );
+    }
+    assert_eq!(
+        seen.len(),
+        all_intents.len(),
+        "every machine-emitted kickoff phase must be forwarded with a distinct notice tag"
+    );
 }

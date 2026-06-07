@@ -60,7 +60,7 @@ impl ToolDispatcher {
         Self {
             router,
             identity_registry: RwLock::new(ToolIdentityRegistry::from_catalog(&initial_catalog)),
-            default_timeout: Duration::from_secs(30),
+            default_timeout: crate::timeout::ToolTimeoutPolicy::default().default_timeout(),
         }
     }
 
@@ -1106,6 +1106,50 @@ mod tests {
         assert!(
             matches!(shell_result, Err(ToolError::AccessDenied { .. })),
             "shell dispatch should fail with AccessDenied"
+        );
+    }
+
+    /// Gate (#79): the dispatcher enforcement default and the shell config
+    /// default both flow from the single [`ToolTimeoutPolicy`] owner. There is
+    /// no divergent hardcoded literal: the dispatcher's `Duration` default and
+    /// the shell config's `u64`-seconds default are the same value expressed in
+    /// two units, both sourced from the one policy.
+    #[test]
+    fn timeout_default_is_single_sourced_across_call_sites() {
+        use crate::builtin::shell::ShellConfig;
+        use crate::timeout::ToolTimeoutPolicy;
+
+        let policy = ToolTimeoutPolicy::default();
+
+        // Dispatcher default reads from the policy.
+        let dispatcher = ToolDispatcher::new(Arc::new(EmptyToolDispatcher));
+        assert_eq!(
+            dispatcher.default_timeout,
+            policy.default_timeout(),
+            "dispatcher default must be sourced from ToolTimeoutPolicy"
+        );
+
+        // Shell config default reads from the same policy.
+        let shell = ShellConfig::default();
+        assert_eq!(
+            shell.default_timeout_secs,
+            policy.default_timeout_secs(),
+            "shell config default must be sourced from ToolTimeoutPolicy"
+        );
+
+        // The two call sites therefore agree (no divergent defaults).
+        assert_eq!(
+            Duration::from_secs(shell.default_timeout_secs),
+            dispatcher.default_timeout,
+            "dispatcher and shell defaults must not diverge"
+        );
+
+        // Builder config default also flows from the policy.
+        let builder_default = crate::builder::ToolDispatcherConfig::default();
+        assert_eq!(
+            builder_default.default_timeout,
+            policy.default_timeout(),
+            "builder config default must be sourced from ToolTimeoutPolicy"
         );
     }
 }

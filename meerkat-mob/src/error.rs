@@ -242,6 +242,16 @@ pub enum MobError {
     #[error("work not found: {0}")]
     WorkNotFound(WorkRef),
 
+    /// Per-unit work cancellation is not realized: no work-tracking ledger
+    /// backs `cancel_work`, so there is no authority that can locate and
+    /// cancel an individual submitted unit. Returned instead of a phantom
+    /// `WorkNotFound` so the advertised `mob/cancel_work` surface fails
+    /// closed with an honest "unsupported" signal rather than claiming a
+    /// search-and-miss that never happened. Callers that need to cancel
+    /// in-flight work should use member-scoped `cancel_all_work`.
+    #[error("per-unit work cancellation is unsupported for {0}: no work-tracking ledger is wired")]
+    WorkCancellationUnsupported(WorkRef),
+
     /// The mob actor command channel closed before accepting a command.
     #[error("mob actor command channel closed")]
     ActorCommandChannelClosed,
@@ -514,6 +524,7 @@ mod tests {
                 actual: FenceToken::new(0),
             },
             MobError::WorkNotFound(WorkRef::new()),
+            MobError::WorkCancellationUnsupported(WorkRef::new()),
             MobError::BridgeSessionNotInLiveAuthority {
                 bridge_session_id: "sess-1".to_string(),
             },

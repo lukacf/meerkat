@@ -440,14 +440,19 @@ pub fn public_tools_list() -> Vec<Value> {
         .collect()
 }
 
-pub fn wrap_public_tool_payload(payload: Value) -> Value {
-    let text = serde_json::to_string(&payload).unwrap_or_default();
-    json!({
+/// Wrap a structured payload in the MCP text-content envelope.
+///
+/// Serialization is a TRUE fault: a payload that fails to serialize must surface
+/// as an error, never as an empty-text content envelope masquerading as success.
+pub fn wrap_public_tool_payload(payload: Value) -> Result<Value, String> {
+    let text = serde_json::to_string(&payload)
+        .map_err(|err| format!("Failed to serialize tool payload: {err}"))?;
+    Ok(json!({
         "content": [{
             "type": "text",
             "text": text
         }]
-    })
+    }))
 }
 
 /// Tool names matched by the dispatch arms in [`handle_public_tools_call`].

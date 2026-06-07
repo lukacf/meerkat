@@ -515,11 +515,47 @@ impl Default for SourceHealthSnapshot {
     }
 }
 
+/// Identity of a quarantined skill entry.
+///
+/// Deliberately NOT a [`SkillKey`]: a quarantined entry is, by definition, an
+/// entry that failed validation, so it must never be confusable with a
+/// canonical, loadable key. The raw identifier is preserved verbatim for
+/// operator diagnostics (it may be an invalid slug, e.g. `"Not A Valid
+/// Slug"`), but it cannot be parsed back into a `SkillKey` and handed to
+/// `load()`. This closes the "fabricated canonical-looking SkillKey" gap: a
+/// quarantine placeholder can never shadow or collide with a real skill named
+/// `invalid-skill`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct QuarantinedSkillIdentity {
+    /// Source that emitted the invalid entry.
+    pub source_uuid: SourceUuid,
+    /// Raw, possibly-invalid skill identifier as it appeared at the source
+    /// (directory name, catalog `name`, etc.). Not validated as a `SkillName`.
+    pub raw_id: String,
+}
+
+impl QuarantinedSkillIdentity {
+    pub fn new(source_uuid: SourceUuid, raw_id: impl Into<String>) -> Self {
+        Self {
+            source_uuid,
+            raw_id: raw_id.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for QuarantinedSkillIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.source_uuid, self.raw_id)
+    }
+}
+
 /// Per-skill quarantine diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SkillQuarantineDiagnostic {
-    pub key: SkillKey,
+    /// Typed, non-loadable identity of the quarantined entry.
+    pub identity: QuarantinedSkillIdentity,
     pub location: String,
     pub error_code: String,
     pub error_class: String,

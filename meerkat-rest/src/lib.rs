@@ -3461,28 +3461,10 @@ fn validate_config_for_commit_with_roots(
     Ok(())
 }
 
-fn merge_patch(base: &mut Value, patch: Value) {
-    match (base, patch) {
-        (Value::Object(base_map), Value::Object(patch_map)) => {
-            for (k, v) in patch_map {
-                if v.is_null() {
-                    base_map.remove(&k);
-                } else {
-                    merge_patch(base_map.entry(k).or_insert(Value::Null), v);
-                }
-            }
-        }
-        (base_val, patch_val) => {
-            *base_val = patch_val;
-        }
-    }
-}
-
 fn apply_patch_preview(config: &Config, patch: Value) -> Result<Config, ApiError> {
-    let mut value = serde_json::to_value(config)
-        .map_err(|e| ApiError::Internal(format!("Failed to serialize config: {e}")))?;
-    merge_patch(&mut value, patch);
-    serde_json::from_value(value).map_err(|e| ApiError::BadRequest(format!("Invalid patch: {e}")))
+    // Single owner of RFC-7386 patch semantics: meerkat-core.
+    meerkat_core::apply_config_patch_preview(config, patch)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid patch: {e}")))
 }
 
 /// Spawn a task that forwards events from an mpsc receiver to the broadcast channel,

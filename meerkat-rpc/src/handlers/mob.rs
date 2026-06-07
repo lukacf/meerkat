@@ -1,7 +1,6 @@
 //! `mob/*` method handlers.
 
 use serde::Deserialize;
-use serde::Serialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
 use std::convert::TryFrom;
@@ -2044,72 +2043,38 @@ pub async fn handle_mob_turn_start(
         }
     };
 
-    // Build a turn/start-compatible JSON blob with the resolved session_id.
-    let mut turn_params = serde_json::Map::new();
-    turn_params.insert(
-        "session_id".to_string(),
-        serde_json::Value::String(session_id.to_string()),
-    );
-    turn_params.insert(
-        "prompt".to_string(),
-        serde_json::to_value(mob_params.prompt).unwrap_or(serde_json::Value::Null),
-    );
-    insert_optional(&mut turn_params, "skill_refs", mob_params.skill_refs);
-    insert_optional(
-        &mut turn_params,
-        "flow_tool_overlay",
-        mob_params.flow_tool_overlay,
-    );
-    insert_optional(
-        &mut turn_params,
-        "additional_instructions",
-        mob_params.additional_instructions,
-    );
-    insert_optional(&mut turn_params, "keep_alive", mob_params.keep_alive);
-    insert_optional(&mut turn_params, "model", mob_params.model);
-    insert_optional(&mut turn_params, "provider", mob_params.provider);
-    insert_optional(&mut turn_params, "max_tokens", mob_params.max_tokens);
-    insert_optional(&mut turn_params, "system_prompt", mob_params.system_prompt);
-    insert_optional(&mut turn_params, "output_schema", mob_params.output_schema);
-    insert_optional(
-        &mut turn_params,
-        "structured_output_retries",
-        mob_params.structured_output_retries,
-    );
-    // Forward the tri-state overrides as the canonical tagged form; the
-    // `turn/start` `StartTurnParams` boundary folds them back into the same
-    // `Option<TurnMetadataOverride<T>>`.
-    insert_optional(
-        &mut turn_params,
-        "provider_params",
-        mob_params.provider_params,
-    );
-    insert_optional(&mut turn_params, "auth_binding", mob_params.auth_binding);
-    let raw_json = serde_json::to_string(&turn_params).unwrap_or_default();
-    let raw_value = RawValue::from_string(raw_json).ok();
+    // Construct the typed `turn/start` params directly with the resolved
+    // session_id and delegate to the shared typed entrypoint. No JSON `Map`
+    // round-trip — the tri-state overrides carry through as the canonical
+    // `Option<TurnMetadataOverride<T>>` so any conversion failure stays a
+    // typed error rather than `Value::Null`/empty-JSON laundering.
+    let turn_params = super::turn::StartTurnParams {
+        session_id: session_id.to_string(),
+        prompt: mob_params.prompt,
+        skill_refs: mob_params.skill_refs,
+        skill_references: mob_params.skill_references,
+        flow_tool_overlay: mob_params.flow_tool_overlay,
+        additional_instructions: mob_params.additional_instructions,
+        keep_alive: mob_params.keep_alive,
+        model: mob_params.model,
+        provider: mob_params.provider,
+        max_tokens: mob_params.max_tokens,
+        system_prompt: mob_params.system_prompt,
+        output_schema: mob_params.output_schema,
+        structured_output_retries: mob_params.structured_output_retries,
+        provider_params: mob_params.provider_params,
+        auth_binding: mob_params.auth_binding,
+    };
 
-    super::turn::handle_start(
+    super::turn::start_turn_with_params(
         id,
-        raw_value.as_deref(),
+        turn_params,
         runtime,
         notification_sink,
         runtime_adapter,
         request_context,
     )
     .await
-}
-
-fn insert_optional<T: Serialize>(
-    params: &mut serde_json::Map<String, serde_json::Value>,
-    key: &'static str,
-    value: Option<T>,
-) {
-    if let Some(value) = value {
-        params.insert(
-            key.to_string(),
-            serde_json::to_value(value).unwrap_or(serde_json::Value::Null),
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2887,6 +2852,78 @@ mod tests {
         assert!(
             err.to_string().contains("skill_references is retired"),
             "unexpected error: {err}"
+        );
+    }
+
+    /// `mob/turn_start` must hand `turn/start` typed [`StartTurnParams`] built
+    /// directly from [`MobTurnStartParams`] + the resolved session_id — no
+    /// `serde_json::Map` round-trip, no `to_value(..).unwrap_or(Null)` /
+    /// `to_string().unwrap_or_default()` laundering. This exercises the same
+    /// field move the handler performs and asserts the tri-state overrides and
+    /// resolved session identity survive intact.
+    #[test]
+    fn mob_turn_start_builds_typed_start_turn_params_without_laundering() {
+        let value = serde_json::json!({
+            "mob_id": "m1",
+            "agent_identity": "w1",
+            "prompt": [{"type": "text", "text": "continue"}],
+            "model": "gpt-test",
+            "output_schema": { "type": "object" },
+            "provider_params": { "temperature": 0.2 },
+            "auth_binding": {
+                "realm": "dev",
+                "binding": "default_openai"
+            }
+        });
+        let mob_params: MobTurnStartParams =
+            serde_json::from_value(value).expect("known turn overrides deserialize");
+
+        // Mirror the handler's typed field-move with a resolved session_id.
+        let turn_params = super::super::turn::StartTurnParams {
+            session_id: "resolved-session-123".to_string(),
+            prompt: mob_params.prompt,
+            skill_refs: mob_params.skill_refs,
+            skill_references: mob_params.skill_references,
+            flow_tool_overlay: mob_params.flow_tool_overlay,
+            additional_instructions: mob_params.additional_instructions,
+            keep_alive: mob_params.keep_alive,
+            model: mob_params.model,
+            provider: mob_params.provider,
+            max_tokens: mob_params.max_tokens,
+            system_prompt: mob_params.system_prompt,
+            output_schema: mob_params.output_schema,
+            structured_output_retries: mob_params.structured_output_retries,
+            provider_params: mob_params.provider_params,
+            auth_binding: mob_params.auth_binding,
+        };
+
+        assert_eq!(turn_params.session_id, "resolved-session-123");
+        assert!(matches!(turn_params.prompt, ContentInput::Blocks(_)));
+        assert_eq!(turn_params.model.as_deref(), Some("gpt-test"));
+        // output_schema carried verbatim, not collapsed to Null.
+        assert_eq!(
+            turn_params.output_schema,
+            Some(serde_json::json!({ "type": "object" }))
+        );
+        // Tri-state Set override preserved (not laundered through a JSON Map).
+        assert_eq!(
+            turn_params
+                .provider_params
+                .as_ref()
+                .and_then(|o| o.as_set())
+                .and_then(|v| v.get("temperature"))
+                .and_then(serde_json::Value::as_f64),
+            Some(0.2)
+        );
+        assert_eq!(
+            turn_params
+                .auth_binding
+                .as_ref()
+                .and_then(|o| o.as_set())
+                .expect("auth_binding set override")
+                .binding
+                .as_str(),
+            "default_openai"
         );
     }
 

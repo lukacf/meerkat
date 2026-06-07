@@ -131,27 +131,49 @@ impl From<&ToolError> for ToolDispatchTerminalErrorKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The canonical, typed terminal cause for a runtime/tool-dispatch failure.
+///
+/// This is the single owner of the terminal failure truth: it carries the
+/// typed [`ToolError`] itself, and both the coarse classification
+/// ([`Self::kind`]) and the model-facing transcript text
+/// ([`Self::to_transcript_content`]) are derived purely from that one value.
+/// Callers must not re-derive the failure class by parsing transcript text.
+#[derive(Debug, Clone, PartialEq)]
 pub enum ToolDispatchTerminalCause {
-    RuntimeToolError { kind: ToolDispatchTerminalErrorKind },
+    RuntimeToolError { error: ToolError },
 }
 
 impl ToolDispatchTerminalCause {
     #[must_use]
     pub fn runtime_tool_error(error: &ToolError) -> Self {
         Self::RuntimeToolError {
-            kind: ToolDispatchTerminalErrorKind::from(error),
+            error: error.clone(),
+        }
+    }
+
+    /// The coarse terminal error classification, derived from the typed error.
+    #[must_use]
+    pub fn kind(&self) -> ToolDispatchTerminalErrorKind {
+        match self {
+            Self::RuntimeToolError { error } => ToolDispatchTerminalErrorKind::from(error),
+        }
+    }
+
+    /// The canonical model-facing transcript text for this terminal cause.
+    ///
+    /// This is the sole render boundary: the transcript JSON is derived purely
+    /// from the typed error, so the transcript is never a second source of
+    /// truth that can drift from the typed cause.
+    #[must_use]
+    pub fn to_transcript_content(&self) -> String {
+        match self {
+            Self::RuntimeToolError { error } => error.to_transcript_content(),
         }
     }
 
     #[must_use]
-    pub fn is_runtime_tool_timeout(self) -> bool {
-        matches!(
-            self,
-            Self::RuntimeToolError {
-                kind: ToolDispatchTerminalErrorKind::Timeout
-            }
-        )
+    pub fn is_runtime_tool_timeout(&self) -> bool {
+        self.kind() == ToolDispatchTerminalErrorKind::Timeout
     }
 }
 
@@ -226,13 +248,14 @@ impl ToolDispatchOutcome {
     }
 
     #[must_use]
-    pub fn terminal_cause(&self) -> Option<ToolDispatchTerminalCause> {
-        self.terminal_cause
+    pub fn terminal_cause(&self) -> Option<&ToolDispatchTerminalCause> {
+        self.terminal_cause.as_ref()
     }
 
     #[must_use]
     pub fn is_runtime_tool_timeout(&self) -> bool {
         self.terminal_cause
+            .as_ref()
             .is_some_and(ToolDispatchTerminalCause::is_runtime_tool_timeout)
     }
 
@@ -253,13 +276,14 @@ pub fn terminal_tool_outcome_for_error(
     tool_use_id: impl Into<String>,
     error: ToolError,
 ) -> ToolDispatchOutcome {
-    let terminal_cause = ToolDispatchTerminalCause::runtime_tool_error(&error);
-    let payload = error.to_error_payload();
-    let serialized = serde_json::to_string(&payload)
-        .unwrap_or_else(|_| "{\"error\":\"tool_error\",\"message\":\"tool error\"}".to_string());
+    let terminal_cause = ToolDispatchTerminalCause::RuntimeToolError { error };
+    // The transcript text is derived purely from the typed terminal cause, so
+    // the cause is the sole source of truth and the transcript can never drift
+    // from it. Rendering is infallible (no fallback string launder).
+    let content = terminal_cause.to_transcript_content();
     let mut outcome = ToolDispatchOutcome::sync_result(crate::types::ToolResult::new(
         tool_use_id.into(),
-        serialized,
+        content,
         true,
     ));
     outcome.terminal_cause = Some(terminal_cause);
@@ -693,12 +717,29 @@ mod tests {
 
         assert!(outcome.result.is_error);
         assert!(outcome.is_runtime_tool_timeout());
+        let cause = outcome.terminal_cause().expect("terminal cause present");
+        assert_eq!(cause.kind(), ToolDispatchTerminalErrorKind::Timeout);
         assert_eq!(
-            outcome.terminal_cause(),
-            Some(ToolDispatchTerminalCause::RuntimeToolError {
-                kind: ToolDispatchTerminalErrorKind::Timeout,
-            })
+            cause,
+            &ToolDispatchTerminalCause::RuntimeToolError {
+                error: ToolError::timeout("slow_tool", 50),
+            }
         );
+    }
+
+    #[test]
+    fn terminal_tool_outcome_transcript_text_is_derived_purely_from_terminal_cause() {
+        // Doctrine (Rule 8): the terminal cause is the sole source of truth.
+        // The transcript content must be byte-for-byte derived from it, with
+        // no second derivation and no fallback-string launder path.
+        let error = ToolError::execution_failed_with_data(
+            "boom",
+            serde_json::json!({ "detail": "structured", "n": 7 }),
+        );
+        let outcome = terminal_tool_outcome_for_error("t1", error);
+
+        let cause = outcome.terminal_cause().expect("terminal cause present");
+        assert_eq!(outcome.result.text_content(), cause.to_transcript_content());
     }
 
     #[test]

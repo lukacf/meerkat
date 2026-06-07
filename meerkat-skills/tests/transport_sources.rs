@@ -69,7 +69,10 @@ async fn http_source_uses_configured_uuid_and_quarantines_entry_mismatch() {
 
     let quarantined = source.quarantined_diagnostics().await.unwrap();
     assert_eq!(quarantined.len(), 1);
-    assert_eq!(quarantined[0].key, key(source_uuid, "remote-bad"));
+    // Row #36: quarantine identity is typed (source_uuid + raw_id), not a
+    // loadable SkillKey.
+    assert_eq!(quarantined[0].identity.source_uuid, source_uuid);
+    assert_eq!(quarantined[0].identity.raw_id, "remote-bad");
     assert!(quarantined[0].message.contains("source_uuid mismatch"));
 }
 

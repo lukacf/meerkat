@@ -2192,25 +2192,32 @@ pub async fn mob_list_members(mob_id: &str) -> Result<JsValue, JsValue> {
     // Serialize through the domain shape, then splice in the server-resolved
     // `member_ref` and drop the binding-era `agent_runtime_id` / `fence_token`
     // fields so app code never reasons about incarnation counters.
-    let mut array = serde_json::to_value(&members)
-        .map_err(|e| err_str("serialize_error", e))?
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    for (entry, member) in array.iter_mut().zip(members.iter()) {
-        if let Some(obj) = entry.as_object_mut() {
-            obj.remove("agent_runtime_id");
-            obj.remove("fence_token");
-            let identity_str = member.agent_identity.to_string();
-            obj.insert(
-                "member_ref".to_string(),
-                serde_json::to_value(meerkat_contracts::WireMemberRef::encode(
-                    id.as_str(),
-                    &identity_str,
-                ))
-                .unwrap_or(serde_json::Value::Null),
-            );
+    let serialized = serde_json::to_value(&members).map_err(|e| err_str("serialize_error", e))?;
+    let mut array = match serialized {
+        serde_json::Value::Array(entries) => entries,
+        _ => {
+            return Err(err_str(
+                "serialize_error",
+                "member roster must serialize to a JSON array",
+            ));
         }
+    };
+    for (entry, member) in array.iter_mut().zip(members.iter()) {
+        let obj = entry.as_object_mut().ok_or_else(|| {
+            err_str(
+                "serialize_error",
+                "member roster entry must be a JSON object",
+            )
+        })?;
+        obj.remove("agent_runtime_id");
+        obj.remove("fence_token");
+        let identity_str = member.agent_identity.to_string();
+        let member_ref = serde_json::to_value(meerkat_contracts::WireMemberRef::encode(
+            id.as_str(),
+            &identity_str,
+        ))
+        .map_err(|e| err_str("serialize_error", e))?;
+        obj.insert("member_ref".to_string(), member_ref);
     }
     let json = serde_json::to_string(&array).map_err(|e| err_str("serialize_error", e))?;
     Ok(JsValue::from_str(&json))
@@ -2365,7 +2372,20 @@ pub async fn mob_member_status(mob_id: &str, agent_identity: &str) -> Result<JsV
         .mob_member_status(&id, &mid)
         .await
         .map_err(err_mob)?;
-    let json = serde_json::to_string(&snapshot).map_err(|e| err_str("serialize", e))?;
+    // Serialize through the domain snapshot, then splice in the server-resolved
+    // `member_ref` so the opaque member handle is runtime-owned, not synthesized
+    // client-side from {mobId, agentIdentity}. Same encoder used by spawn/respawn.
+    let mut value = serde_json::to_value(&snapshot).map_err(|e| err_str("serialize", e))?;
+    let obj = value
+        .as_object_mut()
+        .ok_or_else(|| err_str("serialize", "member status snapshot must be a JSON object"))?;
+    let member_ref = serde_json::to_value(meerkat_contracts::WireMemberRef::encode(
+        id.as_str(),
+        agent_identity,
+    ))
+    .map_err(|e| err_str("serialize", e))?;
+    obj.insert("member_ref".to_string(), member_ref);
+    let json = serde_json::to_string(&value).map_err(|e| err_str("serialize", e))?;
     Ok(JsValue::from_str(&json))
 }
 

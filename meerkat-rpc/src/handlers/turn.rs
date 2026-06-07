@@ -207,6 +207,28 @@ pub async fn handle_start(
         Err(resp) => return resp.with_id(id),
     };
 
+    start_turn_with_params(
+        id,
+        params,
+        runtime,
+        notification_sink,
+        runtime_adapter,
+        request_context,
+    )
+    .await
+}
+
+/// Typed `turn/start` entrypoint shared with identity-native callers
+/// (`mob/turn_start`). Takes a fully-formed [`StartTurnParams`] so callers can
+/// route typed params without re-serializing through a JSON `Map`.
+pub async fn start_turn_with_params(
+    id: Option<RpcId>,
+    params: StartTurnParams,
+    runtime: Arc<SessionRuntime>,
+    notification_sink: &NotificationSink,
+    runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    request_context: Option<RequestContext>,
+) -> RpcResponse {
     let session_id = match parse_session_id_for_runtime(id.clone(), &params.session_id, &runtime) {
         Ok(sid) => sid,
         Err(resp) => return resp,

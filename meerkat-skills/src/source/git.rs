@@ -8,8 +8,8 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
 use meerkat_core::skills::{
-    SkillDescriptor, SkillDocument, SkillError, SkillFilter, SkillKey, SkillName,
-    SkillQuarantineDiagnostic, SkillScope, SkillSource, SourceHealthSnapshot,
+    QuarantinedSkillIdentity, SkillDescriptor, SkillDocument, SkillError, SkillFilter, SkillKey,
+    SkillName, SkillQuarantineDiagnostic, SkillScope, SkillSource, SourceHealthSnapshot,
     SourceHealthThresholds, SourceUuid, apply_filter,
 };
 
@@ -217,22 +217,24 @@ impl GitSkillSource {
             let skill_name = match SkillName::parse(file_name) {
                 Ok(skill_name) => skill_name,
                 Err(err) => {
-                    if let Some(key) = invalid_skill_key(&self.config.source_uuid) {
-                        quarantined.push(quarantine(
-                            key,
-                            skill_dir.display().to_string(),
-                            err.to_string(),
-                        ));
-                    }
+                    quarantined.push(quarantine(
+                        QuarantinedSkillIdentity::new(self.config.source_uuid.clone(), file_name),
+                        skill_dir.display().to_string(),
+                        err.to_string(),
+                    ));
                     continue;
                 }
             };
             let key = SkillKey::new(self.config.source_uuid.clone(), skill_name);
+            let identity = QuarantinedSkillIdentity::new(
+                key.source_uuid.clone(),
+                key.skill_name.as_str().to_string(),
+            );
             let content = match std::fs::read_to_string(skill_dir.join("SKILL.md")) {
                 Ok(content) => content,
                 Err(err) => {
                     quarantined.push(quarantine(
-                        key,
+                        identity,
                         skill_dir.display().to_string(),
                         err.to_string(),
                     ));
@@ -250,7 +252,7 @@ impl GitSkillSource {
                     documents.insert(doc.descriptor.key.clone(), doc);
                 }
                 Err(err) => quarantined.push(quarantine(
-                    key,
+                    identity,
                     skill_dir.display().to_string(),
                     err.to_string(),
                 )),
@@ -405,19 +407,17 @@ fn stale_source_error(location: &str, failure_streak: u32, cause: &SkillError) -
     )
 }
 
-fn invalid_skill_key(source_uuid: &SourceUuid) -> Option<SkillKey> {
-    SkillName::parse("invalid-skill")
-        .ok()
-        .map(|skill_name| SkillKey::new(source_uuid.clone(), skill_name))
-}
-
-fn quarantine(key: SkillKey, location: String, message: String) -> SkillQuarantineDiagnostic {
+fn quarantine(
+    identity: QuarantinedSkillIdentity,
+    location: String,
+    message: String,
+) -> SkillQuarantineDiagnostic {
     let now = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default();
     SkillQuarantineDiagnostic {
-        key,
+        identity,
         location,
         error_code: "invalid_git_skill".to_string(),
         error_class: "parse".to_string(),

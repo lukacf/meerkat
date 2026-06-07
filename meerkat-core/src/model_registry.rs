@@ -292,9 +292,40 @@ fn append_self_hosted(
         return Ok(());
     }
 
-    let default_model = config.models.keys().min().cloned().ok_or_else(|| {
-        ConfigError::InternalError("self-hosted models unexpectedly empty".to_string())
-    })?;
+    // The self-hosted default is a declared choice owned by the config, never a
+    // `BTreeMap` key-order artifact. An explicit `default_model` must reference
+    // a configured model; absent that, a single configured model is the
+    // unambiguous default, while multiple models require an explicit
+    // declaration (fail closed).
+    let default_model = match &config.default_model {
+        Some(declared) => {
+            if !config.models.contains_key(declared) {
+                return Err(ConfigError::Validation(format!(
+                    "self_hosted.default_model '{declared}' does not reference a configured \
+                     self_hosted.models entry"
+                )));
+            }
+            declared.clone()
+        }
+        None => {
+            let mut model_ids = config.models.keys();
+            match (model_ids.next(), model_ids.next()) {
+                (Some(only), None) => only.clone(),
+                (Some(_), Some(_)) => {
+                    return Err(ConfigError::MissingField(
+                        "self_hosted.default_model (required when more than one self_hosted.models \
+                         entry is configured)"
+                            .to_string(),
+                    ));
+                }
+                _ => {
+                    return Err(ConfigError::InternalError(
+                        "self-hosted models unexpectedly empty".to_string(),
+                    ));
+                }
+            }
+        }
+    };
     defaults.insert(Provider::SelfHosted, default_model);
 
     for (model_id, model) in &config.models {
@@ -462,6 +493,78 @@ mod tests {
         assert_eq!(
             registry.default_model(Provider::SelfHosted),
             Some("gemma-4-31b")
+        );
+    }
+
+    fn insert_second_self_hosted_model(config: &mut Config) {
+        config.self_hosted.models.insert(
+            "gemma-4-9b".to_string(),
+            SelfHostedModelConfig {
+                server: "local".to_string(),
+                remote_model: "gemma4:9b".to_string(),
+                display_name: "Gemma 4 9B".to_string(),
+                family: "gemma-4".to_string(),
+                tier: ModelTier::Supported,
+                context_window: Some(128_000),
+                max_output_tokens: Some(8_192),
+                vision: false,
+                image_tool_results: false,
+                inline_video: false,
+                supports_temperature: true,
+                supports_thinking: false,
+                supports_reasoning: false,
+                supports_web_search: false,
+                call_timeout_secs: Some(600),
+            },
+        );
+    }
+
+    #[test]
+    fn multiple_self_hosted_models_require_explicit_default() {
+        let mut config = config_with_self_hosted();
+        insert_second_self_hosted_model(&mut config);
+        // No `default_model` declared: the default must not be silently chosen
+        // by `BTreeMap` key order. Fail closed.
+        let err = match ModelRegistry::from_config(&config) {
+            Ok(_) => panic!("multi-model self-hosted config without explicit default should fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("self_hosted.default_model"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn explicit_self_hosted_default_is_honored_not_lexicographic() {
+        let mut config = config_with_self_hosted();
+        insert_second_self_hosted_model(&mut config);
+        // Declare the lexicographically-larger id as the default to prove the
+        // choice is declared, not a `.min()` key-order artifact.
+        config.self_hosted.default_model = Some("gemma-4-9b".to_string());
+        let registry = match ModelRegistry::from_config(&config) {
+            Ok(registry) => registry,
+            Err(err) => panic!("registry construction failed: {err}"),
+        };
+        assert_eq!(
+            registry.default_model(Provider::SelfHosted),
+            Some("gemma-4-9b")
+        );
+    }
+
+    #[test]
+    fn explicit_self_hosted_default_must_reference_configured_model() {
+        let mut config = config_with_self_hosted();
+        insert_second_self_hosted_model(&mut config);
+        config.self_hosted.default_model = Some("does-not-exist".to_string());
+        let err = match ModelRegistry::from_config(&config) {
+            Ok(_) => panic!("default_model referencing an absent model should fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("does not reference a configured self_hosted.models entry"),
+            "unexpected error: {err}"
         );
     }
 

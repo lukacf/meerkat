@@ -73,27 +73,11 @@ fn snapshot_from_store(config: Config, config_store: &Arc<dyn ConfigStore>) -> C
     }
 }
 
-fn merge_patch(base: &mut Value, patch: Value) {
-    match (base, patch) {
-        (Value::Object(base_map), Value::Object(patch_map)) => {
-            for (k, v) in patch_map {
-                if v.is_null() {
-                    base_map.remove(&k);
-                } else {
-                    merge_patch(base_map.entry(k).or_insert(Value::Null), v);
-                }
-            }
-        }
-        (base_val, patch_val) => {
-            *base_val = patch_val;
-        }
-    }
-}
-
 fn apply_patch_preview(config: &Config, patch: Value) -> Result<Config, String> {
-    let mut value = serde_json::to_value(config).map_err(|e| e.to_string())?;
-    merge_patch(&mut value, patch);
-    serde_json::from_value(value).map_err(|e| e.to_string())
+    // RFC-7386 merge-patch acceptance/rejection has a single owner —
+    // meerkat-core. The surface only maps the typed `ConfigError` to its wire
+    // shape; it does not re-implement the merge.
+    meerkat_core::apply_config_patch_preview(config, patch).map_err(|e| e.to_string())
 }
 
 #[allow(clippy::result_large_err)]

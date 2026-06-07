@@ -115,7 +115,7 @@ impl ToolValidationError {
 }
 
 /// Error returned by tool dispatch operations.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ToolError {
     /// The requested tool was not found
     #[error("Tool not found: {name}")]
@@ -192,6 +192,18 @@ impl ToolError {
             payload["data"] = data;
         }
         payload
+    }
+
+    /// Render the canonical model-facing transcript text for this typed error.
+    ///
+    /// This is the single render boundary over the typed error: it projects
+    /// [`Self::to_error_payload`] into the JSON string that appears in the
+    /// conversation transcript. It is infallible — `serde_json::Value` always
+    /// renders via its `Display` impl — so there is no fallback string that
+    /// could mask a serialization fault.
+    #[must_use]
+    pub fn to_transcript_content(&self) -> String {
+        self.to_error_payload().to_string()
     }
 
     pub fn not_found(name: impl Into<String>) -> Self {

@@ -640,6 +640,18 @@ test('Mob decoders reject missing typed status instead of fabricating defaults',
     /Invalid mob member_status response: missing status/,
   );
 
+  const missingMemberRef = new Mob('mob-web-unit', {
+    async mob_member_status() {
+      // status present but member_ref absent: the runtime-owned handle is
+      // required, so the SDK must fail closed rather than fabricate it.
+      return JSON.stringify({ status: 'active', tokens_used: 0, is_final: false });
+    },
+  });
+  await assert.rejects(
+    () => missingMemberRef.memberStatus('worker-1'),
+    /Invalid mob member_status response: missing member_ref/,
+  );
+
   const missingRespawnStatus = new Mob('mob-web-unit', {
     async mob_respawn() {
       return JSON.stringify({
@@ -755,6 +767,9 @@ test('Mob result decoders preserve generated result truth after validation', asy
     async mob_member_status() {
       return JSON.stringify({
         status: 'active',
+        // member_ref is runtime-owned and arrives in the payload; the SDK no
+        // longer fabricates it client-side from {mobId, agentIdentity}.
+        member_ref: 'runtime-owned-ref-worker-1',
         tokens_used: 3,
         is_final: false,
         current_session_id: 'session-1',
@@ -792,6 +807,9 @@ test('Mob result decoders preserve generated result truth after validation', asy
 
   const snapshot = await deliveryMob.memberStatus('worker-1');
   assert.equal(snapshot.current_session_id, 'session-1');
+  // member_ref must originate from the runtime payload, not be synthesized
+  // client-side from {mobId, agentIdentity}.
+  assert.equal(snapshot.member_ref, 'runtime-owned-ref-worker-1');
   // J58: realtime_attachment_status assertion removed; field gone from the
   // wire shape with the live-adapter-mvp sweep.
   assert.equal(snapshot.resolved_capabilities.realtime, true);

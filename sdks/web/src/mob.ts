@@ -72,20 +72,6 @@ interface MobWasmBindings {
   close_subscription: (handle: number) => void;
 }
 
-function encodeBase64UrlJson(payload: Record<string, unknown>): string {
-  const bytes = new TextEncoder().encode(JSON.stringify(payload));
-  let binary = '';
-  for (let i = 0; i < bytes.length; i += 1) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  const b64 = btoa(binary);
-  return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-function encodeMemberRef(mobId: string, agentIdentity: string): string {
-  return encodeBase64UrlJson({ m: mobId, a: agentIdentity });
-}
-
 function spawnSpecPayload(spec: SpawnSpec): Record<string, unknown> {
   return {
     profile: spec.profile,
@@ -581,7 +567,7 @@ function parseMobEvents(raw: unknown): MobEvent[] {
   return parseEventItems(raw, 'Invalid mob/events response', parseMobEvent);
 }
 
-function parseMobMemberSnapshot(raw: unknown, mobId: string, agentIdentity: string): MobMemberSnapshot {
+function parseMobMemberSnapshot(raw: unknown): MobMemberSnapshot {
   const snapshot = requireRecord(
     raw,
     'Invalid mob member_status response: malformed envelope',
@@ -596,7 +582,13 @@ function parseMobMemberSnapshot(raw: unknown, mobId: string, agentIdentity: stri
       snapshot.status,
       'Invalid mob member_status response: missing status',
     ),
-    member_ref: encodeMemberRef(mobId, agentIdentity),
+    // The opaque member handle is runtime-owned: read it from the payload
+    // rather than synthesizing it client-side from {mobId, agentIdentity}.
+    member_ref: requireStringField(
+      snapshot,
+      'member_ref',
+      'Invalid mob member_status response: missing member_ref',
+    ),
     output_preview: optionalStringField(
       snapshot,
       'output_preview',
@@ -986,8 +978,6 @@ export class Mob {
     const json = await this.bindings.mob_member_status(this.mobId, agentIdentity);
     return parseMobMemberSnapshot(
       parseJsonPayload(json, 'Invalid mob member_status response'),
-      this.mobId,
-      agentIdentity,
     );
   }
 

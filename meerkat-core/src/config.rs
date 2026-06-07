@@ -489,6 +489,13 @@ impl Config {
             return;
         };
 
+        // Presence-based: a layer adopts `default_model` only when it declares
+        // one, otherwise the inherited explicit default is preserved (it is the
+        // typed self-hosted default owner, not a re-derived key-order artifact).
+        if self_hosted.contains_key("default_model") {
+            self.self_hosted.default_model = layer.default_model.clone();
+        }
+
         if let Some(servers) = self_hosted.get("servers").and_then(toml::Value::as_table) {
             if servers.is_empty() {
                 self.self_hosted.servers.clear();
@@ -1122,6 +1129,16 @@ impl Default for SelfHostedModelConfig {
 pub struct SelfHostedConfig {
     pub servers: BTreeMap<String, SelfHostedServerConfig>,
     pub models: BTreeMap<String, SelfHostedModelConfig>,
+    /// The model id (key into [`Self::models`]) that is the canonical
+    /// self-hosted default.
+    ///
+    /// The config owns its own default — it is a declared choice, never a
+    /// `BTreeMap` key-order artifact. When more than one model is configured
+    /// this MUST be set (and reference a configured model), otherwise the
+    /// registry fails closed. With exactly one configured model the default is
+    /// unambiguous and may be omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2330,6 +2347,9 @@ bearer_token_env = "OLLAMA_TOKEN"
         config
             .merge_toml_str(
                 r#"
+[self_hosted]
+default_model = "gemma-4-e4b"
+
 [self_hosted.servers.local]
 base_url = "http://127.0.0.1:11434"
 

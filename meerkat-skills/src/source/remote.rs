@@ -3,8 +3,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use indexmap::IndexMap;
 use meerkat_core::skills::{
-    SkillDescriptor, SkillDocument, SkillError, SkillFilter, SkillKey, SkillName,
-    SkillQuarantineDiagnostic, SkillScope, SourceHealthSnapshot, SourceHealthThresholds,
+    QuarantinedSkillIdentity, SkillDescriptor, SkillDocument, SkillError, SkillFilter, SkillKey,
+    SkillName, SkillQuarantineDiagnostic, SkillScope, SourceHealthSnapshot, SourceHealthThresholds,
     SourceUuid, apply_filter, classify_source_health,
 };
 use serde::Deserialize;
@@ -94,6 +94,7 @@ pub fn parse_remote_catalog(
     let mut quarantined = Vec::new();
     for entry in entries {
         let entry_location = format!("{location}:{}", entry.name);
+        let raw_id = entry.name.clone();
         match parse_remote_entry(entry, configured_source_uuid, scope) {
             Ok((descriptor, document)) => {
                 if let Some(doc) = document {
@@ -101,16 +102,14 @@ pub fn parse_remote_catalog(
                 }
                 descriptors.push(descriptor);
             }
-            Err((key, message)) => {
-                if let Some(key) = key {
-                    quarantined.push(quarantine(
-                        key,
-                        entry_location,
-                        "invalid_remote_skill",
-                        "parse",
-                        message,
-                    ));
-                }
+            Err(message) => {
+                quarantined.push(quarantine(
+                    QuarantinedSkillIdentity::new(configured_source_uuid.clone(), raw_id),
+                    entry_location,
+                    "invalid_remote_skill",
+                    "parse",
+                    message,
+                ));
             }
         }
     }
@@ -132,7 +131,7 @@ pub fn parse_remote_document(
     let entry: RemoteSkillEntry = serde_json::from_str(raw)
         .map_err(|e| SkillError::Parse(format!("remote skill document parse error: {e}").into()))?;
     let (descriptor, document) =
-        parse_remote_entry(entry, &key.source_uuid, scope).map_err(|(_, message)| {
+        parse_remote_entry(entry, &key.source_uuid, scope).map_err(|message| {
             SkillError::Parse(format!("remote skill document invalid: {message}").into())
         })?;
     if &descriptor.key != key {
@@ -159,38 +158,27 @@ fn parse_remote_entry(
     entry: RemoteSkillEntry,
     configured_source_uuid: &SourceUuid,
     scope: SkillScope,
-) -> Result<(SkillDescriptor, Option<SkillDocument>), (Option<SkillKey>, String)> {
-    let skill_name = SkillName::parse(&entry.name).map_err(|e| {
-        (
-            fallback_key(configured_source_uuid),
-            format!("invalid remote skill name '{}': {e}", entry.name),
-        )
-    })?;
+) -> Result<(SkillDescriptor, Option<SkillDocument>), String> {
+    let skill_name = SkillName::parse(&entry.name)
+        .map_err(|e| format!("invalid remote skill name '{}': {e}", entry.name))?;
     let key = SkillKey::new(configured_source_uuid.clone(), skill_name.clone());
     if let Some(raw_uuid) = entry.source_uuid {
-        let remote_uuid =
-            SourceUuid::parse(&raw_uuid).map_err(|e| (Some(key.clone()), e.to_string()))?;
+        let remote_uuid = SourceUuid::parse(&raw_uuid).map_err(|e| e.to_string())?;
         if &remote_uuid != configured_source_uuid {
-            return Err((
-                Some(key),
-                format!(
-                    "remote entry source_uuid mismatch: configured {configured_source_uuid}, remote {remote_uuid}"
-                ),
+            return Err(format!(
+                "remote entry source_uuid mismatch: configured {configured_source_uuid}, remote {remote_uuid}"
             ));
         }
     }
 
     if let Some(content) = entry.body {
-        let doc = parse_skill_md(key.clone(), scope, &content, Some(skill_name.as_str()))
-            .map_err(|e| (Some(key.clone()), e.to_string()))?;
+        let doc = parse_skill_md(key, scope, &content, Some(skill_name.as_str()))
+            .map_err(|e| e.to_string())?;
         return Ok((doc.descriptor.clone(), Some(doc)));
     }
 
     let Some(description) = entry.description else {
-        return Err((
-            Some(key),
-            "remote skill entry missing description or body".to_string(),
-        ));
+        return Err("remote skill entry missing description or body".to_string());
     };
     Ok((
         SkillDescriptor {
@@ -241,14 +229,8 @@ pub fn load_cached(cache: &RemoteCache, key: &SkillKey) -> Result<SkillDocument,
         .ok_or_else(|| SkillError::NotFound { key: key.clone() })
 }
 
-fn fallback_key(source_uuid: &SourceUuid) -> Option<SkillKey> {
-    SkillName::parse("invalid-skill")
-        .ok()
-        .map(|skill_name| SkillKey::new(source_uuid.clone(), skill_name))
-}
-
 fn quarantine(
-    key: SkillKey,
+    identity: QuarantinedSkillIdentity,
     location: String,
     error_code: &str,
     error_class: &str,
@@ -259,7 +241,7 @@ fn quarantine(
         .map(|duration| duration.as_secs())
         .unwrap_or_default();
     SkillQuarantineDiagnostic {
-        key,
+        identity,
         location,
         error_code: error_code.to_string(),
         error_class: error_class.to_string(),
@@ -288,10 +270,11 @@ mod tests {
     }
 
     #[test]
-    fn quarantine_placeholder_key_is_never_loadable() {
-        // Row #36: an invalid remote entry (bad skill name) is quarantined for
-        // diagnostics, but the placeholder key it carries must NOT resolve to a
-        // loadable document — load_cached must return NotFound for it.
+    fn quarantine_identity_is_typed_and_not_a_loadable_key() {
+        // Row #36: an invalid remote entry (bad skill name) is quarantined with
+        // a typed `QuarantinedSkillIdentity` carrying the raw id + source. It is
+        // NOT a `SkillKey`, so it cannot fabricate a canonical-looking,
+        // loadable key, and no loadable document exists for the invalid entry.
         let configured = source_uuid();
         let raw = serde_json::json!({
             "skills": [{ "name": "Not A Valid Slug", "description": "broken" }]
@@ -301,19 +284,24 @@ mod tests {
         let parsed = parse_remote_catalog(&raw, &configured, SkillScope::Project, "test").unwrap();
         let cache = cache_from_catalog(parsed);
 
-        // The invalid entry is quarantined...
+        // The invalid entry is quarantined with the raw id preserved verbatim.
         assert_eq!(cache.quarantined.len(), 1, "invalid entry must quarantine");
-        let placeholder_key = cache.quarantined[0].key.clone();
-
-        // ...but its placeholder key is not present in loadable documents.
-        assert!(
-            !cache.documents.contains_key(&placeholder_key),
-            "quarantine placeholder must not be a loadable document key"
+        let identity = &cache.quarantined[0].identity;
+        assert_eq!(identity.source_uuid, configured);
+        assert_eq!(
+            identity.raw_id, "Not A Valid Slug",
+            "raw id must be preserved verbatim for diagnostics"
         );
-        let err = load_cached(&cache, &placeholder_key).unwrap_err();
+
+        // The raw id is not a valid SkillName, so it can never be turned back
+        // into a loadable SkillKey — and no document is loadable for it.
         assert!(
-            matches!(err, SkillError::NotFound { .. }),
-            "loading a quarantine placeholder must return NotFound; got {err:?}"
+            SkillName::parse(&identity.raw_id).is_err(),
+            "quarantine raw id must not parse as a canonical SkillName"
+        );
+        assert!(
+            cache.documents.is_empty(),
+            "quarantine must not produce a loadable document"
         );
     }
 }

@@ -558,9 +558,11 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
         handling_mode: "queue",
       });
     },
-    async mob_member_status(_mobId, agentIdentity) {
+    async mob_member_status(mobId, agentIdentity) {
       return JSON.stringify({
         status: "active",
+        // member_ref is runtime-owned and arrives in the status payload.
+        member_ref: `ref-${mobId}-${agentIdentity}`,
         agent_runtime_id: { identity: agentIdentity, generation: 1 },
         fence_token: 1,
         tokens_used: 7,

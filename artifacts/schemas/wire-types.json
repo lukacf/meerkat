@@ -18221,6 +18221,24 @@
         ],
         "type": "string"
       },
+      "QuarantinedSkillIdentity": {
+        "description": "Identity of a quarantined skill entry.\n\nDeliberately NOT a [`SkillKey`]: a quarantined entry is, by definition, an\nentry that failed validation, so it must never be confusable with a\ncanonical, loadable key. The raw identifier is preserved verbatim for\noperator diagnostics (it may be an invalid slug, e.g. `\"Not A Valid\nSlug\"`), but it cannot be parsed back into a `SkillKey` and handed to\n`load()`. This closes the \"fabricated canonical-looking SkillKey\" gap: a\nquarantine placeholder can never shadow or collide with a real skill named\n`invalid-skill`.",
+        "properties": {
+          "raw_id": {
+            "description": "Raw, possibly-invalid skill identifier as it appeared at the source\n(directory name, catalog `name`, etc.). Not validated as a `SkillName`.",
+            "type": "string"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid",
+            "description": "Source that emitted the invalid entry."
+          }
+        },
+        "required": [
+          "source_uuid",
+          "raw_id"
+        ],
+        "type": "object"
+      },
       "SchemaWarning": {
         "description": "Warnings emitted during schema lowering.",
         "properties": {
@@ -18245,26 +18263,6 @@
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",
         "type": "string"
       },
-      "SkillKey": {
-        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
-        "properties": {
-          "skill_name": {
-            "$ref": "#/$defs/SkillName"
-          },
-          "source_uuid": {
-            "$ref": "#/$defs/SourceUuid"
-          }
-        },
-        "required": [
-          "source_uuid",
-          "skill_name"
-        ],
-        "type": "object"
-      },
-      "SkillName": {
-        "description": "Canonical skill slug (lowercase, dash-separated).",
-        "type": "string"
-      },
       "SkillQuarantineDiagnostic": {
         "description": "Per-skill quarantine diagnostic.",
         "properties": {
@@ -18279,8 +18277,9 @@
             "minimum": 0,
             "type": "integer"
           },
-          "key": {
-            "$ref": "#/$defs/SkillKey"
+          "identity": {
+            "$ref": "#/$defs/QuarantinedSkillIdentity",
+            "description": "Typed, non-loadable identity of the quarantined entry."
           },
           "last_seen_unix_secs": {
             "format": "uint64",
@@ -18295,7 +18294,7 @@
           }
         },
         "required": [
-          "key",
+          "identity",
           "location",
           "error_code",
           "error_class",
@@ -39996,6 +39995,24 @@
         ],
         "type": "string"
       },
+      "QuarantinedSkillIdentity": {
+        "description": "Identity of a quarantined skill entry.\n\nDeliberately NOT a [`SkillKey`]: a quarantined entry is, by definition, an\nentry that failed validation, so it must never be confusable with a\ncanonical, loadable key. The raw identifier is preserved verbatim for\noperator diagnostics (it may be an invalid slug, e.g. `\"Not A Valid\nSlug\"`), but it cannot be parsed back into a `SkillKey` and handed to\n`load()`. This closes the \"fabricated canonical-looking SkillKey\" gap: a\nquarantine placeholder can never shadow or collide with a real skill named\n`invalid-skill`.",
+        "properties": {
+          "raw_id": {
+            "description": "Raw, possibly-invalid skill identifier as it appeared at the source\n(directory name, catalog `name`, etc.). Not validated as a `SkillName`.",
+            "type": "string"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid",
+            "description": "Source that emitted the invalid entry."
+          }
+        },
+        "required": [
+          "source_uuid",
+          "raw_id"
+        ],
+        "type": "object"
+      },
       "SchemaWarning": {
         "description": "Warnings emitted during schema lowering.",
         "properties": {
@@ -40020,26 +40037,6 @@
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",
         "type": "string"
       },
-      "SkillKey": {
-        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
-        "properties": {
-          "skill_name": {
-            "$ref": "#/$defs/SkillName"
-          },
-          "source_uuid": {
-            "$ref": "#/$defs/SourceUuid"
-          }
-        },
-        "required": [
-          "source_uuid",
-          "skill_name"
-        ],
-        "type": "object"
-      },
-      "SkillName": {
-        "description": "Canonical skill slug (lowercase, dash-separated).",
-        "type": "string"
-      },
       "SkillQuarantineDiagnostic": {
         "description": "Per-skill quarantine diagnostic.",
         "properties": {
@@ -40054,8 +40051,9 @@
             "minimum": 0,
             "type": "integer"
           },
-          "key": {
-            "$ref": "#/$defs/SkillKey"
+          "identity": {
+            "$ref": "#/$defs/QuarantinedSkillIdentity",
+            "description": "Typed, non-loadable identity of the quarantined entry."
           },
           "last_seen_unix_secs": {
             "format": "uint64",
@@ -40070,7 +40068,7 @@
           }
         },
         "required": [
-          "key",
+          "identity",
           "location",
           "error_code",
           "error_class",

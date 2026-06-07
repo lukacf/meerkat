@@ -1389,7 +1389,7 @@ fn format_agent_result(
                 "schema_warnings": result.schema_warnings,
                 "skill_diagnostics": result.skill_diagnostics
             });
-            Ok(wrap_tool_payload(payload))
+            wrap_tool_payload(payload)
         }
         Err(SessionError::Agent(meerkat::AgentError::CallbackPending { tool_name, args })) => {
             let payload = json!({
@@ -1404,7 +1404,7 @@ fn format_agent_result(
                     "args": args
                 }]
             });
-            Ok(wrap_tool_payload(payload))
+            wrap_tool_payload(payload)
         }
         Err(e) => Err(format!("Agent error: {e}")),
     }
@@ -1715,7 +1715,7 @@ pub async fn handle_tools_call_with_notifier(
                     message: err.message,
                     data: err.data,
                 })?;
-        return Ok(wrap_tool_payload(payload));
+        return wrap_tool_payload(payload).map_err(ToolCallError::internal);
     }
 
     match tool_name {
@@ -1747,23 +1747,23 @@ pub async fn handle_tools_call_with_notifier(
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
             handle_meerkat_config(state, input)
                 .await
-                .map(wrap_tool_payload)
+                .and_then(|payload| wrap_tool_payload(payload).map_err(ToolCallError::internal))
         }
         "meerkat_capabilities" => handle_meerkat_capabilities(state)
             .await
-            .map(wrap_tool_payload)
-            .map_err(ToolCallError::internal),
+            .map_err(ToolCallError::internal)
+            .and_then(|payload| wrap_tool_payload(payload).map_err(ToolCallError::internal)),
         "meerkat_models_catalog" => handle_meerkat_models_catalog(state)
             .await
-            .map(wrap_tool_payload)
-            .map_err(ToolCallError::internal),
+            .map_err(ToolCallError::internal)
+            .and_then(|payload| wrap_tool_payload(payload).map_err(ToolCallError::internal)),
         "meerkat_skills" => {
             let input: MeerkatSkillsInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
             handle_meerkat_skills(state, input)
                 .await
-                .map(wrap_tool_payload)
                 .map_err(ToolCallError::internal)
+                .and_then(|payload| wrap_tool_payload(payload).map_err(ToolCallError::internal))
         }
         "meerkat_read" => {
             let input: MeerkatSessionIdInput = serde_json::from_value(arguments.clone())
@@ -1859,14 +1859,14 @@ pub async fn handle_tools_call_with_notifier(
                 .map_err(|error| ToolCallError::internal(error.to_string()))?;
             meerkat::handle_schedule_tools_call(&state.schedule_service, name, arguments)
                 .await
-                .map(wrap_tool_payload)
                 .map_err(map_schedule_tool_error)
+                .and_then(|payload| wrap_tool_payload(payload).map_err(ToolCallError::internal))
         }
         name if name.starts_with("workgraph_") => {
             meerkat::handle_workgraph_tools_call(&state.workgraph_service, name, arguments)
                 .await
-                .map(wrap_tool_payload)
                 .map_err(map_workgraph_tool_error)
+                .and_then(|payload| wrap_tool_payload(payload).map_err(ToolCallError::internal))
         }
         #[cfg(feature = "mob")]
         "meerkat_mob_event_stream_open" => {
@@ -1988,23 +1988,26 @@ async fn handle_meerkat_skills(
 }
 
 async fn handle_meerkat_capabilities(state: &MeerkatMcpState) -> Result<Value, String> {
+    // A ConfigError is a TRUE fault (benign absence is already Ok(default) inside the
+    // store), so it must surface as an error, never as a phantom default-config payload.
     let config = state
         .config_runtime
         .get()
         .await
-        .map(|snapshot| snapshot.config)
-        .unwrap_or_default();
+        .map_err(|e| format!("Failed to read config: {e}"))?
+        .config;
     let response = meerkat::surface::build_capabilities_response(&config);
     serde_json::to_value(&response).map_err(|e| format!("Serialization failed: {e}"))
 }
 
 async fn handle_meerkat_models_catalog(state: &MeerkatMcpState) -> Result<Value, String> {
+    // A ConfigError is a TRUE fault: an empty/default catalog must not masquerade as success.
     let config = state
         .config_runtime
         .get()
         .await
-        .map(|snapshot| snapshot.config)
-        .unwrap_or_default();
+        .map_err(|e| format!("Failed to read config: {e}"))?
+        .config;
     let response =
         meerkat::surface::build_models_catalog_response(&config).map_err(|e| e.to_string())?;
     serde_json::to_value(&response).map_err(|e| format!("Serialization failed: {e}"))
@@ -2130,23 +2133,6 @@ fn compare_config_payload_shape(
     }
 }
 
-fn merge_patch(base: &mut Value, patch: Value) {
-    match (base, patch) {
-        (Value::Object(base_map), Value::Object(patch_map)) => {
-            for (k, v) in patch_map {
-                if v.is_null() {
-                    base_map.remove(&k);
-                } else {
-                    merge_patch(base_map.entry(k).or_insert(Value::Null), v);
-                }
-            }
-        }
-        (base_val, patch_val) => {
-            *base_val = patch_val;
-        }
-    }
-}
-
 fn map_schedule_tool_error(error: meerkat::ScheduleToolError) -> ToolCallError {
     ToolCallError::new(error.code, error.message, error.data)
 }
@@ -2171,10 +2157,9 @@ fn map_workgraph_tool_error(error: meerkat::WorkGraphToolError) -> ToolCallError
 }
 
 fn apply_patch_preview(config: &Config, patch: Value) -> Result<Config, ToolCallError> {
-    let mut value = serde_json::to_value(config)
-        .map_err(|e| ToolCallError::internal(format!("Failed to serialize config: {e}")))?;
-    merge_patch(&mut value, patch);
-    serde_json::from_value(value).map_err(|e| ToolCallError::invalid_params(format!("{e}")))
+    // Single owner of RFC-7386 patch semantics: meerkat-core.
+    meerkat_core::apply_config_patch_preview(config, patch)
+        .map_err(|e| ToolCallError::invalid_params(format!("{e}")))
 }
 
 fn canonical_skill_keys(
@@ -2220,7 +2205,7 @@ async fn handle_meerkat_read(
         "state": view.state,
         "billing": view.billing
     });
-    Ok(wrap_tool_payload(payload))
+    wrap_tool_payload(payload)
 }
 
 async fn handle_meerkat_interrupt(
@@ -2255,10 +2240,10 @@ async fn handle_meerkat_interrupt(
         }
         Err(e) => return Err(format!("Failed to interrupt session: {e}")),
     }
-    Ok(wrap_tool_payload(json!({
+    wrap_tool_payload(json!({
         "session_id": session_id.to_string(),
         "interrupted": true
-    })))
+    }))
 }
 
 fn interrupt_not_ready_is_noop(state: meerkat_runtime::RuntimeState) -> bool {
@@ -2292,7 +2277,7 @@ async fn handle_meerkat_sessions(
         })
         .collect();
     let payload = json!({ "sessions": wire_sessions });
-    Ok(wrap_tool_payload(payload))
+    wrap_tool_payload(payload)
 }
 
 async fn handle_meerkat_history(
@@ -2317,9 +2302,9 @@ async fn handle_meerkat_history(
         &state.realm_id,
         &session_id,
     ));
-    Ok(wrap_tool_payload(
-        serde_json::to_value(payload).unwrap_or(Value::Null),
-    ))
+    let payload_value = serde_json::to_value(payload)
+        .map_err(|e| format!("Failed to serialize session history: {e}"))?;
+    wrap_tool_payload(payload_value)
 }
 
 async fn handle_meerkat_blob_get(
@@ -2333,9 +2318,9 @@ async fn handle_meerkat_blob_get(
         .get(&blob_id)
         .await
         .map_err(|err| err.to_string())?;
-    Ok(wrap_tool_payload(
-        serde_json::to_value(payload).unwrap_or(Value::Null),
-    ))
+    let payload_value = serde_json::to_value(payload)
+        .map_err(|e| format!("Failed to serialize blob payload: {e}"))?;
+    wrap_tool_payload(payload_value)
 }
 
 #[derive(Clone)]
@@ -2466,10 +2451,11 @@ async fn handle_meerkat_archive(
     archive_session_with_runtime_cleanup(state, session_id.clone())
         .await
         .map_err(archive_session_error_to_tool_error)?;
-    Ok(wrap_tool_payload(json!({
+    wrap_tool_payload(json!({
         "session_id": session_id.to_string(),
         "archived": true
-    })))
+    }))
+    .map_err(ToolCallError::internal)
 }
 
 fn archive_session_error_to_tool_error(error: SessionError) -> ToolCallError {
@@ -2504,7 +2490,7 @@ async fn handle_meerkat_mcp_add(
         Some(server_name),
         false,
     )
-    .map(wrap_tool_payload)
+    .and_then(wrap_tool_payload)
 }
 
 async fn handle_meerkat_mcp_remove(
@@ -2528,7 +2514,7 @@ async fn handle_meerkat_mcp_remove(
         Some(input.server_name),
         false,
     )
-    .map(wrap_tool_payload)
+    .and_then(wrap_tool_payload)
 }
 
 async fn handle_meerkat_mcp_reload(
@@ -2565,7 +2551,7 @@ async fn handle_meerkat_mcp_reload(
         input.server_name,
         false,
     )
-    .map(wrap_tool_payload)
+    .and_then(wrap_tool_payload)
 }
 
 fn mcp_live_response_value(
@@ -2604,10 +2590,10 @@ async fn handle_meerkat_event_stream_open(
         }),
     );
 
-    Ok(wrap_tool_payload(json!({
+    wrap_tool_payload(json!({
         "stream_id": stream_id,
         "session_id": session_id.to_string()
-    })))
+    }))
 }
 
 async fn handle_meerkat_event_stream_read(
@@ -2630,10 +2616,10 @@ async fn handle_meerkat_event_stream_read(
             Some(timeout) => match tokio::time::timeout(timeout, stream.next()).await {
                 Ok(item) => item,
                 Err(_) => {
-                    return Ok(wrap_tool_payload(json!({
+                    return wrap_tool_payload(json!({
                         "stream_id": input.stream_id,
                         "status": "timeout"
-                    })));
+                    }));
                 }
             },
         }
@@ -2643,11 +2629,11 @@ async fn handle_meerkat_event_stream_read(
         Some(envelope) => {
             let envelope_json = serde_json::to_value(&envelope)
                 .map_err(|e| format!("Failed to serialize stream event: {e}"))?;
-            Ok(wrap_tool_payload(json!({
+            wrap_tool_payload(json!({
                 "stream_id": input.stream_id,
                 "status": "event",
                 "event": envelope_json
-            })))
+            }))
         }
         None => {
             state
@@ -2655,10 +2641,10 @@ async fn handle_meerkat_event_stream_read(
                 .lock()
                 .await
                 .remove(&input.stream_id);
-            Ok(wrap_tool_payload(json!({
+            wrap_tool_payload(json!({
                 "stream_id": input.stream_id,
                 "status": "closed"
-            })))
+            }))
         }
     }
 }
@@ -2672,10 +2658,10 @@ async fn handle_meerkat_event_stream_close(
         .lock()
         .await
         .remove(&input.stream_id);
-    Ok(wrap_tool_payload(json!({
+    wrap_tool_payload(json!({
         "stream_id": input.stream_id,
         "closed": removed.is_some()
-    })))
+    }))
 }
 
 #[cfg(feature = "mob")]
@@ -2709,11 +2695,11 @@ async fn handle_meerkat_mob_event_stream_open(
         .await
         .insert(stream_id.clone(), Arc::new(inner));
 
-    Ok(wrap_tool_payload(json!({
+    wrap_tool_payload(json!({
         "stream_id": stream_id,
         "mob_id": input.mob_id,
         "member_id": input.member_id,
-    })))
+    }))
 }
 
 #[cfg(feature = "mob")]
@@ -2740,10 +2726,10 @@ async fn handle_meerkat_mob_event_stream_read(
                     Some(timeout) => match tokio::time::timeout(timeout, stream.next()).await {
                         Ok(item) => item,
                         Err(_) => {
-                            return Ok(wrap_tool_payload(json!({
+                            return wrap_tool_payload(json!({
                                 "stream_id": input.stream_id,
                                 "status": "timeout"
-                            })));
+                            }));
                         }
                     },
                 }
@@ -2752,11 +2738,11 @@ async fn handle_meerkat_mob_event_stream_read(
                 Some(envelope) => {
                     let event_json = serde_json::to_value(&envelope)
                         .map_err(|e| format!("Failed to serialize event: {e}"))?;
-                    Ok(wrap_tool_payload(json!({
+                    wrap_tool_payload(json!({
                         "stream_id": input.stream_id,
                         "status": "event",
                         "event": event_json
-                    })))
+                    }))
                 }
                 None => {
                     state
@@ -2764,10 +2750,10 @@ async fn handle_meerkat_mob_event_stream_read(
                         .lock()
                         .await
                         .remove(&input.stream_id);
-                    Ok(wrap_tool_payload(json!({
+                    wrap_tool_payload(json!({
                         "stream_id": input.stream_id,
                         "status": "closed"
-                    })))
+                    }))
                 }
             }
         }
@@ -2780,10 +2766,10 @@ async fn handle_meerkat_mob_event_stream_read(
                         match tokio::time::timeout(timeout, router_handle.event_rx.recv()).await {
                             Ok(item) => item,
                             Err(_) => {
-                                return Ok(wrap_tool_payload(json!({
+                                return wrap_tool_payload(json!({
                                     "stream_id": input.stream_id,
                                     "status": "timeout"
-                                })));
+                                }));
                             }
                         }
                     }
@@ -2793,11 +2779,11 @@ async fn handle_meerkat_mob_event_stream_read(
                 Some(attributed) => {
                     let event_json = serde_json::to_value(&attributed)
                         .map_err(|e| format!("Failed to serialize attributed event: {e}"))?;
-                    Ok(wrap_tool_payload(json!({
+                    wrap_tool_payload(json!({
                         "stream_id": input.stream_id,
                         "status": "event",
                         "event": event_json
-                    })))
+                    }))
                 }
                 None => {
                     state
@@ -2805,10 +2791,10 @@ async fn handle_meerkat_mob_event_stream_read(
                         .lock()
                         .await
                         .remove(&input.stream_id);
-                    Ok(wrap_tool_payload(json!({
+                    wrap_tool_payload(json!({
                         "stream_id": input.stream_id,
                         "status": "closed"
-                    })))
+                    }))
                 }
             }
         }
@@ -2825,14 +2811,14 @@ async fn handle_meerkat_mob_event_stream_close(
         .lock()
         .await
         .remove(&input.stream_id);
-    Ok(wrap_tool_payload(json!({
+    wrap_tool_payload(json!({
         "stream_id": input.stream_id,
         "closed": removed.is_some()
-    })))
+    }))
 }
 
 #[cfg(feature = "comms")]
-fn comms_send_tool_payload(receipt: meerkat_core::comms::SendReceipt) -> Value {
+fn comms_send_tool_payload(receipt: meerkat_core::comms::SendReceipt) -> Result<Value, String> {
     wrap_tool_payload(json!({
         "receipt": meerkat_contracts::CommsSendResult::from(receipt),
     }))
@@ -2877,7 +2863,7 @@ async fn handle_meerkat_comms_send(
         .send(cmd)
         .await
         .map_err(|e| normalize_mcp_comms_send_error(peer_name.as_deref(), &e))?;
-    Ok(comms_send_tool_payload(receipt))
+    comms_send_tool_payload(receipt).map_err(ToolCallError::internal)
 }
 
 #[cfg(feature = "comms")]
@@ -2892,11 +2878,13 @@ async fn handle_meerkat_comms_peers(
         .comms_runtime(&session_id)
         .await
         .ok_or_else(|| format!("Session not found or comms not enabled: {session_id}"))?;
-    Ok(comms_peers_tool_payload(comms.peers().await))
+    comms_peers_tool_payload(comms.peers().await)
 }
 
 #[cfg(feature = "comms")]
-fn comms_peers_tool_payload(peers: Vec<meerkat_core::comms::PeerDirectoryEntry>) -> Value {
+fn comms_peers_tool_payload(
+    peers: Vec<meerkat_core::comms::PeerDirectoryEntry>,
+) -> Result<Value, String> {
     wrap_tool_payload(json!(meerkat_contracts::CommsPeersResult::from_entries(
         &peers
     )))
@@ -3050,12 +3038,14 @@ async fn handle_meerkat_run(
             "keep_alive requires comms_name",
         ));
     }
+    // A ConfigError is a TRUE fault and must not be laundered into a default config
+    // that silently picks a phantom default model.
     let config = state
         .config_runtime
         .get()
         .await
-        .map(|snapshot| snapshot.config)
-        .unwrap_or_default();
+        .map_err(|e| ToolCallError::internal(format!("Failed to read config: {e}")))?
+        .config;
     let model = input
         .model
         .as_ref()
@@ -3370,12 +3360,13 @@ async fn handle_meerkat_resume(
 ) -> Result<Value, ToolCallError> {
     validate_public_peer_meta(input.peer_meta.as_ref()).map_err(ToolCallError::invalid_params)?;
     let ingress = state.runtime_ingress_context();
+    // A ConfigError is a TRUE fault and must not be laundered into a default config.
     let config = state
         .config_runtime
         .get()
         .await
-        .map(|snapshot| snapshot.config)
-        .unwrap_or_default();
+        .map_err(|e| ToolCallError::internal(format!("Failed to read config: {e}")))?
+        .config;
 
     let session_id = meerkat::SessionId::parse(&input.session_id)
         .map_err(|err| ToolCallError::invalid_params(invalid_session_id_message(err)))?;
@@ -4061,14 +4052,19 @@ async fn handle_meerkat_resume(
     format_agent_result_tool(result, &session_id)
 }
 
-fn wrap_tool_payload(payload: Value) -> Value {
-    let text = serde_json::to_string(&payload).unwrap_or_default();
-    json!({
+/// Wrap a structured payload in the MCP text-content envelope.
+///
+/// Serialization is a TRUE fault: a payload that fails to serialize must surface
+/// as an error, never as an empty/`null` content envelope masquerading as success.
+fn wrap_tool_payload(payload: Value) -> Result<Value, String> {
+    let text = serde_json::to_string(&payload)
+        .map_err(|err| format!("Failed to serialize tool payload: {err}"))?;
+    Ok(json!({
         "content": [{
             "type": "text",
             "text": text
         }]
-    })
+    }))
 }
 
 fn compose_external_tool_dispatchers(
@@ -4228,6 +4224,21 @@ mod tests {
         async fn health_check(&self) -> Result<(), LlmError> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn test_wrap_tool_payload_returns_typed_result_envelope() {
+        // wrap_tool_payload must surface serialization as a typed Result, never a
+        // silent empty-text/null content envelope. The happy path yields the
+        // text-content envelope carrying the serialized payload.
+        let wrapped = wrap_tool_payload(json!({ "key": "value" }))
+            .expect("valid payload serializes into the content envelope");
+        let text = wrapped["content"][0]["text"]
+            .as_str()
+            .expect("content envelope carries serialized text");
+        assert_eq!(serde_json::from_str::<Value>(text).unwrap()["key"], "value");
+        // The envelope is never the fail-open empty-text shape.
+        assert_ne!(text, "");
     }
 
     fn unwrap_payload(value: Value) -> Value {
@@ -4466,7 +4477,8 @@ mod tests {
             envelope_id,
             interaction_id,
             stream_reserved: true,
-        });
+        })
+        .expect("comms send payload serializes");
         let payload = unwrap_payload(wrapped);
         let receipt = &payload["receipt"];
 
@@ -4484,7 +4496,8 @@ mod tests {
     #[cfg(feature = "comms")]
     #[test]
     fn test_comms_peers_tool_payload_uses_typed_core_wire_contract() {
-        let wrapped = comms_peers_tool_payload(vec![sample_peer_directory_entry()]);
+        let wrapped = comms_peers_tool_payload(vec![sample_peer_directory_entry()])
+            .expect("comms peers payload serializes");
         let payload = unwrap_payload(wrapped);
 
         assert_peer_directory_wire(&payload);

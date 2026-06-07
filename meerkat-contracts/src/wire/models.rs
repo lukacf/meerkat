@@ -131,7 +131,20 @@ pub struct ProviderCatalog {
     pub models: Vec<CatalogModelEntry>,
 }
 
-/// Response for `models/catalog` — the compiled-in model catalog.
+/// Response for `models/catalog` — the resolved model catalog.
+///
+/// This is **not** a pure compiled-in snapshot. Surfaces build it from the
+/// config-backed `ModelRegistry`, which combines the compiled-in
+/// `meerkat-models` catalog with any config-declared self-hosted aliases
+/// (entries that carry a [`CatalogModelEntry::server_id`]). Two responses for
+/// the same binary can therefore differ when the active config declares
+/// different self-hosted models.
+///
+/// Provider resolution for these entries is exact-catalog-match, not name
+/// prefix inference: an entry's provider is the one recorded for its catalog
+/// id (or its self-hosted alias config), never inferred from a `claude-*` /
+/// `gpt-*` / `gemini-*` name prefix. Uncatalogued model names resolve through
+/// the registry, not by prefix guessing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ModelsCatalogResponse {

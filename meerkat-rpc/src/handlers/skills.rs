@@ -26,7 +26,7 @@ fn skill_entry(e: &SkillIntrospectionEntry) -> Result<meerkat_contracts::SkillEn
         key: e.descriptor.key.clone(),
         name: e.descriptor.name.clone(),
         description: e.descriptor.description.clone(),
-        scope: e.descriptor.scope.to_string(),
+        scope: e.descriptor.scope,
         source: skill_source_provenance(source_identity),
         is_active: e.is_active,
         shadowed_by: e.shadowed_by_identity.clone().map(skill_source_provenance),

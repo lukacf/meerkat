@@ -2409,6 +2409,16 @@ impl MethodRouter {
             Err(resp) => return resp,
         };
 
+        // Lower the typed wire replacement into the core `TranscriptReplacement`
+        // at the boundary; a malformed replacement fails closed with a typed
+        // parse error rather than being forwarded.
+        let replacement = match params.replacement.into_core() {
+            Ok(replacement) => replacement,
+            Err(err) => {
+                return RpcResponse::error(id, crate::error::INVALID_PARAMS, err.to_string());
+            }
+        };
+
         match self.resolve_session_owner(&session_id).await {
             Some(SessionOwner::Runtime) => match self
                 .runtime
@@ -2416,7 +2426,7 @@ impl MethodRouter {
                     &session_id,
                     SessionForkReplaceRequest {
                         message_index: params.message_index,
-                        replacement: params.replacement,
+                        replacement,
                         running_behavior: params.running_behavior,
                     },
                 )

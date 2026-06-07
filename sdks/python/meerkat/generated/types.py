@@ -1320,15 +1320,6 @@ class BridgeCapabilities:
 
 
 @dataclass
-class BridgeDeliveryCompletion:
-    """Request payload for BridgeDeliveryCompletion."""
-    session_id: str
-    text: str
-    tool_calls: int
-    turns: int
-
-
-@dataclass
 class BridgeDeliveryPayload:
     """Deliver one logical input to a member."""
     content: ContentInput
@@ -1341,11 +1332,20 @@ class BridgeDeliveryPayload:
 
 @dataclass
 class BridgeDeliveryResponse:
-    """Full response to a delivery command."""
+    """Full response to a delivery command.
+
+The bridge delivery wire contract advertises only the accept-boundary
+outcome (`outcome`) and the canonical input id. There is deliberately no
+turn-completion payload here: a `DeliverMemberInput` command acknowledges
+admission of one logical input, not the eventual turn result. Turn
+completion is observed through the runtime completion seam
+(`CompletionFeed` / `CompletionOutcome`), never re-derived onto this
+delivery acknowledgement — advertising a completion field that every
+producer fills with `None` was pure schema theater and has been removed
+so the wire shape matches what is actually delivered."""
     input_id: str
     outcome: BridgeDeliveryOutcome
     canonical_input_id: Optional[str] = None
-    completion: Optional[BridgeDeliveryCompletion] = None
 
 
 @dataclass
@@ -2410,7 +2410,20 @@ class ProviderCatalog:
 
 @dataclass
 class ModelsCatalogResponse:
-    """Response for `models/catalog` — the compiled-in model catalog."""
+    """Response for `models/catalog` — the resolved model catalog.
+
+This is **not** a pure compiled-in snapshot. Surfaces build it from the
+config-backed `ModelRegistry`, which combines the compiled-in
+`meerkat-models` catalog with any config-declared self-hosted aliases
+(entries that carry a [`CatalogModelEntry::server_id`]). Two responses for
+the same binary can therefore differ when the active config declares
+different self-hosted models.
+
+Provider resolution for these entries is exact-catalog-match, not name
+prefix inference: an entry's provider is the one recorded for its catalog
+id (or its self-hosted alias config), never inferred from a `claude-*` /
+`gpt-*` / `gemini-*` name prefix. Uncatalogued model names resolve through
+the registry, not by prefix guessing."""
     contract_version: dict[str, Any]
     providers: list[dict[str, Any]]
 
@@ -3504,7 +3517,6 @@ class BridgeReplyObservation(TypedDict, total=False):
 
 class BridgeReplyDelivery(TypedDict, total=False):
     canonical_input_id: NotRequired[str]
-    completion: NotRequired[BridgeDeliveryCompletion]
     input_id: Required[str]
     outcome: Required[BridgeDeliveryOutcome]
     result: Required[Literal['delivery']]

@@ -563,35 +563,6 @@
         ],
         "title": "BridgeCommand"
       },
-      "BridgeDeliveryCompletion": {
-        "additionalProperties": false,
-        "properties": {
-          "session_id": {
-            "type": "string"
-          },
-          "text": {
-            "type": "string"
-          },
-          "tool_calls": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "turns": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "session_id",
-          "text",
-          "turns",
-          "tool_calls"
-        ],
-        "title": "BridgeDeliveryCompletion",
-        "type": "object"
-      },
       "BridgeDeliveryOutcome": {
         "description": "Outcome of a delivery attempt.",
         "oneOf": [
@@ -1011,22 +982,12 @@
           },
           {
             "additionalProperties": false,
-            "description": "Full response to a delivery command.",
+            "description": "Full response to a delivery command.\n\nThe bridge delivery wire contract advertises only the accept-boundary\noutcome (`outcome`) and the canonical input id. There is deliberately no\nturn-completion payload here: a `DeliverMemberInput` command acknowledges\nadmission of one logical input, not the eventual turn result. Turn\ncompletion is observed through the runtime completion seam\n(`CompletionFeed` / `CompletionOutcome`), never re-derived onto this\ndelivery acknowledgement — advertising a completion field that every\nproducer fills with `None` was pure schema theater and has been removed\nso the wire shape matches what is actually delivered.",
             "properties": {
               "canonical_input_id": {
                 "type": [
                   "string",
                   "null"
-                ]
-              },
-              "completion": {
-                "anyOf": [
-                  {
-                    "$ref": "#/components/schemas/BridgeDeliveryCompletion"
-                  },
-                  {
-                    "type": "null"
-                  }
                 ]
               },
               "input_id": {
@@ -3172,7 +3133,7 @@
         "type": "object"
       },
       "ModelsCatalogResponse": {
-        "description": "Response for `models/catalog` — the compiled-in model catalog.",
+        "description": "Response for `models/catalog` — the resolved model catalog.\n\nThis is **not** a pure compiled-in snapshot. Surfaces build it from the\nconfig-backed `ModelRegistry`, which combines the compiled-in\n`meerkat-models` catalog with any config-declared self-hosted aliases\n(entries that carry a [`CatalogModelEntry::server_id`]). Two responses for\nthe same binary can therefore differ when the active config declares\ndifferent self-hosted models.\n\nProvider resolution for these entries is exact-catalog-match, not name\nprefix inference: an entry's provider is the one recorded for its catalog\nid (or its self-hosted alias config), never inferred from a `claude-*` /\n`gpt-*` / `gemini-*` name prefix. Uncatalogued model names resolve through\nthe registry, not by prefix guessing.",
         "properties": {
           "contract_version": {
             "$ref": "#/components/schemas/ContractVersion",
@@ -5200,8 +5161,8 @@
             "type": "string"
           },
           "scope": {
-            "description": "Scope: \"builtin\", \"project\", or \"user\".",
-            "type": "string"
+            "$ref": "#/components/schemas/SkillScope",
+            "description": "Typed discovery scope (`builtin`, `project`, or `user`)."
           },
           "shadowed_by": {
             "anyOf": [
@@ -5343,6 +5304,26 @@
           "quarantined"
         ],
         "type": "object"
+      },
+      "SkillScope": {
+        "description": "Where a skill was discovered.",
+        "oneOf": [
+          {
+            "const": "builtin",
+            "description": "Embedded in a component crate.",
+            "type": "string"
+          },
+          {
+            "const": "project",
+            "description": "Project-level: `.rkat/skills/`.",
+            "type": "string"
+          },
+          {
+            "const": "user",
+            "description": "User-level: `~/.rkat/skills/`.",
+            "type": "string"
+          }
+        ]
       },
       "SkillSourceProvenance": {
         "description": "Typed source provenance for a skill entry. `display_name` is presentation\nmetadata only; `source_uuid` is the stable identity.",

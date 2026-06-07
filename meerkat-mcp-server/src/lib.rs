@@ -119,7 +119,7 @@ fn skill_entry_from_introspection(
         key: entry.descriptor.key.clone(),
         name: entry.descriptor.name.clone(),
         description: entry.descriptor.description.clone(),
-        scope: entry.descriptor.scope.to_string(),
+        scope: entry.descriptor.scope,
         source: skill_source_provenance(source_identity),
         is_active: entry.is_active,
         shadowed_by: entry
@@ -1994,7 +1994,7 @@ async fn handle_meerkat_skills(
                 key: doc.descriptor.key.clone(),
                 name: doc.descriptor.name.clone(),
                 description: doc.descriptor.description.clone(),
-                scope: doc.descriptor.scope.to_string(),
+                scope: doc.descriptor.scope,
                 source: skill_source_provenance(source_identity),
                 body: doc.body,
             })

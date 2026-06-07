@@ -2678,7 +2678,6 @@ async fn try_handle_supervisor_bridge_command(
                                 input_id: request_input_id,
                                 canonical_input_id: Some(input_id.to_string()),
                                 outcome: BridgeDeliveryOutcome::Accepted,
-                                completion: None,
                             }
                         }
                         crate::accept::AcceptOutcome::Deduplicated { existing_id, .. } => {
@@ -2689,7 +2688,6 @@ async fn try_handle_supervisor_bridge_command(
                                 outcome: BridgeDeliveryOutcome::Deduplicated {
                                     existing_input_id: existing_id,
                                 },
-                                completion: None,
                             }
                         }
                         crate::accept::AcceptOutcome::Rejected { reason } => {
@@ -2701,7 +2699,6 @@ async fn try_handle_supervisor_bridge_command(
                                     cause,
                                     reason: reason.to_string(),
                                 },
-                                completion: None,
                             }
                         }
                     };

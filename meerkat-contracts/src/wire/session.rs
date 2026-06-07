@@ -81,14 +81,18 @@ pub struct ForkSessionAtParams {
 }
 
 /// Request payload for `session/fork_replace`.
+///
+/// `replacement` rides as the typed [`WireTranscriptReplacement`] mirror so
+/// the emitted JSON schema is the closed replacement enum rather than a bare
+/// `serde_json::Value`. The consuming surface lowers it into the core
+/// [`TranscriptReplacement`] via [`WireTranscriptReplacement::into_core`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ForkSessionReplaceParams {
     pub session_id: String,
     pub message_index: usize,
-    #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
-    pub replacement: TranscriptReplacement,
+    pub replacement: WireTranscriptReplacement,
     #[serde(default)]
     pub running_behavior: TranscriptEditRunningBehavior,
 }
@@ -1070,6 +1074,103 @@ impl TranscriptRewriteMessage {
     }
 }
 
+/// Typed wire mirror of [`meerkat_core::TranscriptReplacement`].
+///
+/// R-#87 (P3 dogma): `ForkSessionReplaceParams.replacement` previously carried
+/// the core `TranscriptReplacement` directly with a
+/// `#[schemars(with = "serde_json::Value")]` override, so the emitted JSON
+/// schema collapsed to a bare `Value` (artifacts/schemas/params.json) and the
+/// SDK codegen saw an untyped bag. The core enum cannot derive `JsonSchema`
+/// directly: it embeds `Message` and `AssistantBlock`, neither of which has a
+/// `JsonSchema` impl in `meerkat-core` (and `Message::BlockAssistant` carries
+/// `Box<RawValue>` tool-call args).
+///
+/// This wire mirror is schema-emittable because it is built entirely from
+/// types that already carry `JsonSchema` derives in this module:
+/// [`TranscriptRewriteMessage`] (the public message shape, with its own
+/// `into_core`), [`WireContentBlock`], and [`WireAssistantBlock`]. Conversion
+/// into the core enum is fallible — every inner conversion already returns a
+/// typed [`WireConversionError`](crate::wire::error::WireConversionError), so
+/// malformed payloads surface a typed parse fault at the boundary rather than
+/// being smuggled through as an opaque `Value`.
+///
+/// The serde tag/rename mirror the core enum (`#[serde(tag = "type",
+/// rename_all = "snake_case")]`) so the wire bytes are unchanged: the only
+/// observable delta is that the schema is now the closed enum.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WireTranscriptReplacement {
+    /// Replace the addressed message with a full canonical message.
+    Message { message: TranscriptRewriteMessage },
+    /// Replace one user-message content block.
+    UserContentBlock {
+        block_index: usize,
+        block: WireContentBlock,
+    },
+    /// Replace one block in a block-assistant message.
+    AssistantBlock {
+        block_index: usize,
+        block: WireAssistantBlock,
+    },
+    /// Replace one content block inside one tool-result payload.
+    ToolResultContentBlock {
+        result_index: usize,
+        block_index: usize,
+        block: WireContentBlock,
+    },
+}
+
+impl WireTranscriptReplacement {
+    /// Lower the typed wire replacement into the core
+    /// [`TranscriptReplacement`].
+    ///
+    /// Each inner conversion is fallible and surfaces a typed
+    /// [`WireConversionError`](crate::wire::error::WireConversionError):
+    /// `Message` delegates to [`TranscriptRewriteMessage::into_core`];
+    /// `ContentBlock`/`AssistantBlock` conversions wrap their `&'static str` /
+    /// typed failures into [`WireConversionError::TranscriptMessage`] so the
+    /// surface sees one closed error type.
+    pub fn into_core(
+        self,
+    ) -> Result<TranscriptReplacement, crate::wire::error::WireConversionError> {
+        match self {
+            Self::Message { message } => Ok(TranscriptReplacement::Message {
+                message: message.into_core()?,
+            }),
+            Self::UserContentBlock { block_index, block } => {
+                Ok(TranscriptReplacement::UserContentBlock {
+                    block_index,
+                    block: ContentBlock::try_from(block).map_err(|err| {
+                        crate::wire::error::WireConversionError::TranscriptMessage {
+                            debug: format!("invalid user content block: {err}"),
+                        }
+                    })?,
+                })
+            }
+            Self::AssistantBlock { block_index, block } => {
+                Ok(TranscriptReplacement::AssistantBlock {
+                    block_index,
+                    block: AssistantBlock::try_from(block)?,
+                })
+            }
+            Self::ToolResultContentBlock {
+                result_index,
+                block_index,
+                block,
+            } => Ok(TranscriptReplacement::ToolResultContentBlock {
+                result_index,
+                block_index,
+                block: ContentBlock::try_from(block).map_err(|err| {
+                    crate::wire::error::WireConversionError::TranscriptMessage {
+                        debug: format!("invalid tool-result content block: {err}"),
+                    }
+                })?,
+            }),
+        }
+    }
+}
+
 /// Canonical transcript message for public wire surfaces.
 ///
 /// Not `PartialEq`: the `BlockAssistant.blocks` variant carries
@@ -1301,8 +1402,24 @@ mod tests {
             }
         }))
         .unwrap();
+        // The wire field is now the typed `WireTranscriptReplacement` mirror
+        // (so the schema is the closed enum, not a bare Value).
         assert!(matches!(
             &fork_replace.replacement,
+            WireTranscriptReplacement::Message {
+                message: TranscriptRewriteMessage::User { content, .. },
+            } if matches!(content, WireContentInput::Text(text) if text == "edited follow up")
+        ));
+
+        // Lowering into the core enum is typed and fallible; the user
+        // message round-trips into a core `Message::User`.
+        let core = fork_replace
+            .replacement
+            .clone()
+            .into_core()
+            .expect("typed wire replacement lowers into core");
+        assert!(matches!(
+            core,
             TranscriptReplacement::Message {
                 message: Message::User(user),
             } if user.text_content() == "edited follow up"

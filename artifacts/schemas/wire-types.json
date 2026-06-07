@@ -6735,36 +6735,6 @@
     ],
     "title": "BridgeCommand"
   },
-  "BridgeDeliveryCompletion": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "properties": {
-      "session_id": {
-        "type": "string"
-      },
-      "text": {
-        "type": "string"
-      },
-      "tool_calls": {
-        "format": "uint32",
-        "minimum": 0,
-        "type": "integer"
-      },
-      "turns": {
-        "format": "uint32",
-        "minimum": 0,
-        "type": "integer"
-      }
-    },
-    "required": [
-      "session_id",
-      "text",
-      "turns",
-      "tool_calls"
-    ],
-    "title": "BridgeDeliveryCompletion",
-    "type": "object"
-  },
   "BridgeDeliveryOutcome": {
     "$defs": {
       "BridgeDeliveryRejectionCause": {
@@ -7270,34 +7240,6 @@
   },
   "BridgeDeliveryResponse": {
     "$defs": {
-      "BridgeDeliveryCompletion": {
-        "additionalProperties": false,
-        "properties": {
-          "session_id": {
-            "type": "string"
-          },
-          "text": {
-            "type": "string"
-          },
-          "tool_calls": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "turns": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "session_id",
-          "text",
-          "turns",
-          "tool_calls"
-        ],
-        "type": "object"
-      },
       "BridgeDeliveryOutcome": {
         "description": "Outcome of a delivery attempt.",
         "oneOf": [
@@ -7447,22 +7389,12 @@
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "Full response to a delivery command.",
+    "description": "Full response to a delivery command.\n\nThe bridge delivery wire contract advertises only the accept-boundary\noutcome (`outcome`) and the canonical input id. There is deliberately no\nturn-completion payload here: a `DeliverMemberInput` command acknowledges\nadmission of one logical input, not the eventual turn result. Turn\ncompletion is observed through the runtime completion seam\n(`CompletionFeed` / `CompletionOutcome`), never re-derived onto this\ndelivery acknowledgement — advertising a completion field that every\nproducer fills with `None` was pure schema theater and has been removed\nso the wire shape matches what is actually delivered.",
     "properties": {
       "canonical_input_id": {
         "type": [
           "string",
           "null"
-        ]
-      },
-      "completion": {
-        "anyOf": [
-          {
-            "$ref": "#/$defs/BridgeDeliveryCompletion"
-          },
-          {
-            "type": "null"
-          }
         ]
       },
       "input_id": {
@@ -8138,34 +8070,6 @@
         },
         "type": "object"
       },
-      "BridgeDeliveryCompletion": {
-        "additionalProperties": false,
-        "properties": {
-          "session_id": {
-            "type": "string"
-          },
-          "text": {
-            "type": "string"
-          },
-          "tool_calls": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "turns": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "session_id",
-          "text",
-          "turns",
-          "tool_calls"
-        ],
-        "type": "object"
-      },
       "BridgeDeliveryOutcome": {
         "description": "Outcome of a delivery attempt.",
         "oneOf": [
@@ -8491,22 +8395,12 @@
       },
       {
         "additionalProperties": false,
-        "description": "Full response to a delivery command.",
+        "description": "Full response to a delivery command.\n\nThe bridge delivery wire contract advertises only the accept-boundary\noutcome (`outcome`) and the canonical input id. There is deliberately no\nturn-completion payload here: a `DeliverMemberInput` command acknowledges\nadmission of one logical input, not the eventual turn result. Turn\ncompletion is observed through the runtime completion seam\n(`CompletionFeed` / `CompletionOutcome`), never re-derived onto this\ndelivery acknowledgement — advertising a completion field that every\nproducer fills with `None` was pure schema theater and has been removed\nso the wire shape matches what is actually delivered.",
         "properties": {
           "canonical_input_id": {
             "type": [
               "string",
               "null"
-            ]
-          },
-          "completion": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/BridgeDeliveryCompletion"
-              },
-              {
-                "type": "null"
-              }
             ]
           },
           "input_id": {
@@ -9216,34 +9110,6 @@
           }
         ]
       },
-      "BridgeDeliveryCompletion": {
-        "additionalProperties": false,
-        "properties": {
-          "session_id": {
-            "type": "string"
-          },
-          "text": {
-            "type": "string"
-          },
-          "tool_calls": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "turns": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "session_id",
-          "text",
-          "turns",
-          "tool_calls"
-        ],
-        "type": "object"
-      },
       "BridgeDeliveryOutcome": {
         "description": "Outcome of a delivery attempt.",
         "oneOf": [
@@ -9661,22 +9527,12 @@
           },
           {
             "additionalProperties": false,
-            "description": "Full response to a delivery command.",
+            "description": "Full response to a delivery command.\n\nThe bridge delivery wire contract advertises only the accept-boundary\noutcome (`outcome`) and the canonical input id. There is deliberately no\nturn-completion payload here: a `DeliverMemberInput` command acknowledges\nadmission of one logical input, not the eventual turn result. Turn\ncompletion is observed through the runtime completion seam\n(`CompletionFeed` / `CompletionOutcome`), never re-derived onto this\ndelivery acknowledgement — advertising a completion field that every\nproducer fills with `None` was pure schema theater and has been removed\nso the wire shape matches what is actually delivered.",
             "properties": {
               "canonical_input_id": {
                 "type": [
                   "string",
                   "null"
-                ]
-              },
-              "completion": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/BridgeDeliveryCompletion"
-                  },
-                  {
-                    "type": "null"
-                  }
                 ]
               },
               "input_id": {
@@ -11135,34 +10991,6 @@
         },
         "type": "object"
       },
-      "BridgeDeliveryCompletion": {
-        "additionalProperties": false,
-        "properties": {
-          "session_id": {
-            "type": "string"
-          },
-          "text": {
-            "type": "string"
-          },
-          "tool_calls": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "turns": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "session_id",
-          "text",
-          "turns",
-          "tool_calls"
-        ],
-        "type": "object"
-      },
       "BridgeDeliveryOutcome": {
         "description": "Outcome of a delivery attempt.",
         "oneOf": [
@@ -11487,22 +11315,12 @@
           },
           {
             "additionalProperties": false,
-            "description": "Full response to a delivery command.",
+            "description": "Full response to a delivery command.\n\nThe bridge delivery wire contract advertises only the accept-boundary\noutcome (`outcome`) and the canonical input id. There is deliberately no\nturn-completion payload here: a `DeliverMemberInput` command acknowledges\nadmission of one logical input, not the eventual turn result. Turn\ncompletion is observed through the runtime completion seam\n(`CompletionFeed` / `CompletionOutcome`), never re-derived onto this\ndelivery acknowledgement — advertising a completion field that every\nproducer fills with `None` was pure schema theater and has been removed\nso the wire shape matches what is actually delivered.",
             "properties": {
               "canonical_input_id": {
                 "type": [
                   "string",
                   "null"
-                ]
-              },
-              "completion": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/BridgeDeliveryCompletion"
-                  },
-                  {
-                    "type": "null"
-                  }
                 ]
               },
               "input_id": {
@@ -29767,6 +29585,26 @@
         "description": "Canonical skill slug (lowercase, dash-separated).",
         "type": "string"
       },
+      "SkillScope": {
+        "description": "Where a skill was discovered.",
+        "oneOf": [
+          {
+            "const": "builtin",
+            "description": "Embedded in a component crate.",
+            "type": "string"
+          },
+          {
+            "const": "project",
+            "description": "Project-level: `.rkat/skills/`.",
+            "type": "string"
+          },
+          {
+            "const": "user",
+            "description": "User-level: `~/.rkat/skills/`.",
+            "type": "string"
+          }
+        ]
+      },
       "SkillSourceProvenance": {
         "description": "Typed source provenance for a skill entry. `display_name` is presentation\nmetadata only; `source_uuid` is the stable identity.",
         "properties": {
@@ -29840,8 +29678,8 @@
         "type": "string"
       },
       "scope": {
-        "description": "Scope: \"builtin\", \"project\", or \"user\".",
-        "type": "string"
+        "$ref": "#/$defs/SkillScope",
+        "description": "Typed discovery scope (`builtin`, `project`, or `user`)."
       },
       "shadowed_by": {
         "anyOf": [
@@ -29891,6 +29729,26 @@
       "SkillName": {
         "description": "Canonical skill slug (lowercase, dash-separated).",
         "type": "string"
+      },
+      "SkillScope": {
+        "description": "Where a skill was discovered.",
+        "oneOf": [
+          {
+            "const": "builtin",
+            "description": "Embedded in a component crate.",
+            "type": "string"
+          },
+          {
+            "const": "project",
+            "description": "Project-level: `.rkat/skills/`.",
+            "type": "string"
+          },
+          {
+            "const": "user",
+            "description": "User-level: `~/.rkat/skills/`.",
+            "type": "string"
+          }
+        ]
       },
       "SkillSourceProvenance": {
         "description": "Typed source provenance for a skill entry. `display_name` is presentation\nmetadata only; `source_uuid` is the stable identity.",
@@ -29965,8 +29823,8 @@
         "type": "string"
       },
       "scope": {
-        "description": "Scope: \"builtin\", \"project\", or \"user\".",
-        "type": "string"
+        "$ref": "#/$defs/SkillScope",
+        "description": "Typed discovery scope (`builtin`, `project`, or `user`)."
       },
       "source": {
         "$ref": "#/$defs/SkillSourceProvenance",
@@ -30006,8 +29864,8 @@
             "type": "string"
           },
           "scope": {
-            "description": "Scope: \"builtin\", \"project\", or \"user\".",
-            "type": "string"
+            "$ref": "#/$defs/SkillScope",
+            "description": "Typed discovery scope (`builtin`, `project`, or `user`)."
           },
           "shadowed_by": {
             "anyOf": [
@@ -30054,6 +29912,26 @@
       "SkillName": {
         "description": "Canonical skill slug (lowercase, dash-separated).",
         "type": "string"
+      },
+      "SkillScope": {
+        "description": "Where a skill was discovered.",
+        "oneOf": [
+          {
+            "const": "builtin",
+            "description": "Embedded in a component crate.",
+            "type": "string"
+          },
+          {
+            "const": "project",
+            "description": "Project-level: `.rkat/skills/`.",
+            "type": "string"
+          },
+          {
+            "const": "user",
+            "description": "User-level: `~/.rkat/skills/`.",
+            "type": "string"
+          }
+        ]
       },
       "SkillSourceProvenance": {
         "description": "Typed source provenance for a skill entry. `display_name` is presentation\nmetadata only; `source_uuid` is the stable identity.",

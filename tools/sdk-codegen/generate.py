@@ -103,7 +103,6 @@ COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES = [
     "BridgeBindPayload",
     "BridgeBindResponse",
     "BridgeCapabilities",
-    "BridgeDeliveryCompletion",
     "BridgeDeliveryPayload",
     "BridgeDeliveryResponse",
     "BridgeDestroyResponse",

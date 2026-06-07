@@ -105,6 +105,120 @@ define_metadata_string!(
     RustPayloadModulePath
 );
 
+/// Fail-closed construction error for Rust-metadata newtypes that are emitted
+/// verbatim into generated source (identifiers, module paths). These values are
+/// authored by composition catalog code today; the validating constructors below
+/// reject malformed values at construction rather than letting an invalid
+/// identifier or a traversal-bearing path reach `protocol_codegen` emission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RustMetadataValidationError {
+    /// The value is empty.
+    Empty { kind: &'static str },
+    /// The value is not a valid Rust identifier (`[A-Za-z_][A-Za-z0-9_]*`).
+    NotIdentifier { kind: &'static str, value: String },
+    /// A module path component is absolute, contains a `..` traversal, a
+    /// backslash, or whitespace.
+    UnsafeModulePath { value: String, reason: &'static str },
+}
+
+impl fmt::Display for RustMetadataValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty { kind } => write!(f, "{kind} must not be empty"),
+            Self::NotIdentifier { kind, value } => {
+                write!(f, "{kind} `{value}` is not a valid Rust identifier")
+            }
+            Self::UnsafeModulePath { value, reason } => {
+                write!(f, "module path `{value}` is not repo-relative: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RustMetadataValidationError {}
+
+/// Returns true iff `value` is a valid Rust identifier: a non-empty string whose
+/// first character is an ASCII letter or `_` and whose remaining characters are
+/// ASCII alphanumeric or `_`. (Raw identifiers / unicode idents are out of scope
+/// for generated helper names.)
+fn is_rust_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+impl RustItemIdent {
+    /// Fail-closed constructor: the item identifier must be a valid Rust
+    /// identifier (it is emitted directly into generated item names).
+    pub fn new_validated(value: impl Into<String>) -> Result<Self, RustMetadataValidationError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(RustMetadataValidationError::Empty {
+                kind: "RustItemIdent",
+            });
+        }
+        if !is_rust_identifier(&value) {
+            return Err(RustMetadataValidationError::NotIdentifier {
+                kind: "RustItemIdent",
+                value,
+            });
+        }
+        Ok(Self(value))
+    }
+}
+
+impl RustMethodName {
+    /// Fail-closed constructor: the method name must be a valid Rust identifier
+    /// (it is emitted directly into generated `fn` names / call sites).
+    pub fn new_validated(value: impl Into<String>) -> Result<Self, RustMetadataValidationError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(RustMetadataValidationError::Empty {
+                kind: "RustMethodName",
+            });
+        }
+        if !is_rust_identifier(&value) {
+            return Err(RustMetadataValidationError::NotIdentifier {
+                kind: "RustMethodName",
+                value,
+            });
+        }
+        Ok(Self(value))
+    }
+}
+
+impl RustModulePath {
+    /// Fail-closed constructor: the module path must be a non-empty,
+    /// repo-relative path with no absolute prefix, no `..` traversal, no
+    /// backslash, and no whitespace (it is written into a generated file path).
+    pub fn new_validated(value: impl Into<String>) -> Result<Self, RustMetadataValidationError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(RustMetadataValidationError::Empty {
+                kind: "RustModulePath",
+            });
+        }
+        let reason = if value.starts_with('/') {
+            Some("absolute path")
+        } else if value.contains('\\') {
+            Some("backslash separator")
+        } else if value.split('/').any(|component| component == "..") {
+            Some("`..` traversal component")
+        } else if value.chars().any(char::is_whitespace) {
+            Some("whitespace")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            return Err(RustMetadataValidationError::UnsafeModulePath { value, reason });
+        }
+        Ok(Self(value))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionSchema {
     pub name: CompositionId,
@@ -3066,4 +3180,67 @@ fn validate_witness_transition_ref(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod rust_metadata_validation_tests {
+    use super::{RustItemIdent, RustMethodName, RustModulePath};
+
+    #[test]
+    fn rust_item_ident_rejects_non_identifier() {
+        assert!(RustItemIdent::new_validated("valid_ident0").is_ok());
+        assert!(RustItemIdent::new_validated("_leading").is_ok());
+        assert!(
+            RustItemIdent::new_validated("invalid name").is_err(),
+            "whitespace must be rejected"
+        );
+        assert!(
+            RustItemIdent::new_validated("0starts_digit").is_err(),
+            "leading digit must be rejected"
+        );
+        assert!(
+            RustItemIdent::new_validated("has-dash").is_err(),
+            "dash must be rejected"
+        );
+        assert!(
+            RustItemIdent::new_validated("").is_err(),
+            "empty must be rejected"
+        );
+    }
+
+    #[test]
+    fn rust_method_name_rejects_non_identifier() {
+        assert!(RustMethodName::new_validated("handle_request").is_ok());
+        assert!(RustMethodName::new_validated("foo bar").is_err());
+        assert!(RustMethodName::new_validated("foo::bar").is_err());
+    }
+
+    #[test]
+    fn rust_module_path_rejects_traversal_and_absolute() {
+        assert!(RustModulePath::new_validated("meerkat/foo/bar.rs").is_ok());
+        assert!(
+            RustModulePath::new_validated("../escape").is_err(),
+            "`..` traversal must be rejected"
+        );
+        assert!(
+            RustModulePath::new_validated("a/../b").is_err(),
+            "embedded `..` component must be rejected"
+        );
+        assert!(
+            RustModulePath::new_validated("/absolute/path").is_err(),
+            "absolute path must be rejected"
+        );
+        assert!(
+            RustModulePath::new_validated("has space/x.rs").is_err(),
+            "whitespace must be rejected"
+        );
+        assert!(
+            RustModulePath::new_validated("win\\style").is_err(),
+            "backslash must be rejected"
+        );
+        assert!(
+            RustModulePath::new_validated("").is_err(),
+            "empty must be rejected"
+        );
+    }
 }

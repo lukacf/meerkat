@@ -6310,6 +6310,16 @@ impl MobActor {
                         agent_identity = %entry.agent_identity,
                         "timed out ensuring mob comms drain ready"
                     );
+                    // A readiness timeout is a confirmed-never fault, not a
+                    // resumable no-op: surface it so Resume cannot report
+                    // success when comms-drain readiness was never observed.
+                    if first_error.is_none() {
+                        first_error = Some(MobError::ReadyWaitTimedOut {
+                            pending_member_ids: vec![MeerkatId::from(
+                                entry.agent_identity.as_str(),
+                            )],
+                        });
+                    }
                     continue;
                 }
             };
@@ -6337,6 +6347,17 @@ impl MobActor {
                         agent_identity = %entry.agent_identity,
                         "timed out ensuring autonomous runtime ready"
                     );
+                    // A readiness timeout is a confirmed-never fault, not a
+                    // resumable no-op: surface it so Resume cannot report
+                    // success when autonomous-runtime readiness was never
+                    // observed.
+                    if first_error.is_none() {
+                        first_error = Some(MobError::ReadyWaitTimedOut {
+                            pending_member_ids: vec![MeerkatId::from(
+                                entry.agent_identity.as_str(),
+                            )],
+                        });
+                    }
                     continue;
                 }
             };

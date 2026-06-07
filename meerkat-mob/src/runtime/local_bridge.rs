@@ -114,14 +114,20 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
             }
         };
 
+        // Provenance is the member's canonical runtime identity, not a synthetic
+        // `local-bridge:` session string: peer_id/display_identity are stamped
+        // from the same `LogicalRuntimeId` carried in `runtime_id`, so the
+        // origin parses back to the canonical runtime id rather than a
+        // transport-prefixed session string.
+        let runtime_id = LogicalRuntimeId::for_session(&self.session_id);
         let input = Input::Peer(PeerInput {
             header: InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: InputOrigin::Peer {
-                    peer_id: format!("local-bridge:{}", self.session_id),
-                    display_identity: Some(format!("local-bridge:{}", self.session_id)),
-                    runtime_id: Some(LogicalRuntimeId::for_session(&self.session_id)),
+                    peer_id: runtime_id.0.clone(),
+                    display_identity: Some(runtime_id.0.clone()),
+                    runtime_id: Some(runtime_id),
                 },
                 durability: InputDurability::Durable,
                 visibility: InputVisibility::default(),

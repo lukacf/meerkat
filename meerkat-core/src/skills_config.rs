@@ -324,18 +324,22 @@ fn merge_project_over_user(
     project: SkillsConfig,
     project_has_file: bool,
 ) -> SkillsConfig {
-    let mut seen: HashSet<String> = HashSet::new();
+    // Dedup on the canonical `source_uuid`, not the display `name`. Two repos
+    // can legitimately share a display name while carrying distinct source
+    // identities; deduping on name would silently shadow one before the source
+    // identity registry ever sees it (row #340).
+    let mut seen: HashSet<SourceUuid> = HashSet::new();
     let mut merged_repos: Vec<SkillRepositoryConfig> = Vec::new();
 
     // Project first (highest precedence)
     for repo in project.repositories {
-        if seen.insert(repo.name.clone()) {
+        if seen.insert(repo.source_uuid.clone()) {
             merged_repos.push(repo);
         }
     }
     // Then user repos not shadowed by project
     for repo in user.repositories {
-        if seen.insert(repo.name.clone()) {
+        if seen.insert(repo.source_uuid.clone()) {
             merged_repos.push(repo);
         }
     }
@@ -631,12 +635,14 @@ auth_token = "ghp_token"
 
     #[test]
     fn test_merge_project_over_user() {
+        // The "company" repo is the SAME canonical source across both layers
+        // (shared `source_uuid`), so the project layer shadows the user copy.
+        let company_uuid = SourceUuid::parse("00000000-0000-4000-8000-000000000001").expect("uuid");
         let user = SkillsConfig {
             repositories: vec![
                 SkillRepositoryConfig {
                     name: "company".into(),
-                    source_uuid: SourceUuid::parse("00000000-0000-4000-8000-000000000001")
-                        .expect("uuid"),
+                    source_uuid: company_uuid.clone(),
                     transport: SkillRepoTransport::Filesystem {
                         path: "user-path".into(),
                     },
@@ -665,8 +671,7 @@ auth_token = "ghp_token"
                 },
                 SkillRepositoryConfig {
                     name: "company".into(),
-                    source_uuid: SourceUuid::parse("00000000-0000-4000-8000-000000000004")
-                        .expect("uuid"),
+                    source_uuid: company_uuid,
                     transport: SkillRepoTransport::Filesystem {
                         path: "project-company-path".into(),
                     },
@@ -690,6 +695,45 @@ auth_token = "ghp_token"
 
     #[test]
     fn test_merge_project_shadows_user_repo() {
+        // Genuine shadowing is by canonical identity: the SAME `source_uuid`
+        // present in both layers resolves to the project's copy (project wins).
+        let shared_uuid = SourceUuid::parse("00000000-0000-4000-8000-000000000005").expect("uuid");
+        let user = SkillsConfig {
+            repositories: vec![SkillRepositoryConfig {
+                name: "shared".into(),
+                source_uuid: shared_uuid.clone(),
+                transport: SkillRepoTransport::Filesystem {
+                    path: "user-shared".into(),
+                },
+            }],
+            ..Default::default()
+        };
+
+        let project = SkillsConfig {
+            repositories: vec![SkillRepositoryConfig {
+                name: "shared".into(),
+                source_uuid: shared_uuid,
+                transport: SkillRepoTransport::Filesystem {
+                    path: "project-shared".into(),
+                },
+            }],
+            ..Default::default()
+        };
+
+        let merged = merge_project_over_user(user, project, true);
+        assert_eq!(merged.repositories.len(), 1);
+        let SkillRepoTransport::Filesystem { path } = &merged.repositories[0].transport else {
+            unreachable!("Expected Filesystem transport");
+        };
+        assert_eq!(path, "project-shared");
+    }
+
+    /// Row #340: two repositories that share a display `name` but carry distinct
+    /// `source_uuid`s must BOTH survive the merge — dedup is on canonical source
+    /// identity, never on the display name (which would silently shadow one
+    /// before the source identity registry ever saw it).
+    #[test]
+    fn test_merge_keeps_distinct_source_uuids_with_same_name() {
         let user = SkillsConfig {
             repositories: vec![SkillRepositoryConfig {
                 name: "shared".into(),
@@ -715,11 +759,20 @@ auth_token = "ghp_token"
         };
 
         let merged = merge_project_over_user(user, project, true);
-        assert_eq!(merged.repositories.len(), 1);
-        let SkillRepoTransport::Filesystem { path } = &merged.repositories[0].transport else {
-            unreachable!("Expected Filesystem transport");
-        };
-        assert_eq!(path, "project-shared");
+        assert_eq!(
+            merged.repositories.len(),
+            2,
+            "distinct source identities must not collapse on a shared display name"
+        );
+        // Project precedence: the project repo is emitted first.
+        assert_eq!(
+            merged.repositories[0].source_uuid,
+            SourceUuid::parse("00000000-0000-4000-8000-000000000006").expect("uuid")
+        );
+        assert_eq!(
+            merged.repositories[1].source_uuid,
+            SourceUuid::parse("00000000-0000-4000-8000-000000000005").expect("uuid")
+        );
     }
 
     #[tokio::test]

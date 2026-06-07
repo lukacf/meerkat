@@ -401,6 +401,13 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
 
+                // The supersession verdict keys the entire commit: if the
+                // incoming session snapshot is classified as superseded (the
+                // persisted head is already a valid append-extension of it),
+                // the snapshot write is skipped AND so are the receipt + input
+                // writes, so receipt/input ordering identity never advances
+                // past the retained session truth.
+                let mut session_snapshot_superseded = false;
                 if let Some(session) = session_snapshot.as_ref() {
                     let mut persist_session_snapshot = true;
                     let previous = tx
@@ -428,6 +435,7 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                             .is_ok()
                         }) {
                             persist_session_snapshot = false;
+                            session_snapshot_superseded = true;
                         } else {
                             return Err(RuntimeStoreError::WriteFailed(err.to_string()));
                         }
@@ -437,6 +445,18 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                     {
                         upsert_runtime_snapshot(&tx, &runtime_id, &delta.session_snapshot)?;
                     }
+                }
+
+                // When the session snapshot was superseded and skipped, the
+                // boundary receipt and input-state updates must also be skipped:
+                // advancing them against a retained (older) session snapshot
+                // would split receipt/input ordering identity from session
+                // truth. Commit the (no-op) transaction so the read lock is
+                // released cleanly.
+                if session_snapshot_superseded {
+                    tx.commit()
+                        .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                    return Ok(());
                 }
 
                 insert_receipt(&tx, &runtime_id, &receipt)?;
@@ -1050,7 +1070,7 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                         session_snapshot: serde_json::to_vec(&incoming).unwrap(),
                     }),
                     receipt.clone(),
-                    vec![],
+                    vec![input_state()],
                     Some(incoming.id().clone()),
                 )
                 .await
@@ -1060,12 +1080,22 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                 store.load_session_snapshot(&runtime_id).await.unwrap(),
                 Some(current_snapshot)
             );
+            // The session snapshot was classified superseded and skipped, so the
+            // boundary receipt + input-state writes must NOT advance against the
+            // retained (more-advanced) session snapshot.
             assert_eq!(
                 store
                     .load_boundary_receipt(&runtime_id, &receipt.run_id, receipt.sequence)
                     .await
                     .unwrap(),
-                Some(receipt)
+                None
+            );
+            assert!(
+                store
+                    .load_input_states(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_empty()
             );
         }
 

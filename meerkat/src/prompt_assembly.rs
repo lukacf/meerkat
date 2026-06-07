@@ -13,21 +13,50 @@
 use meerkat_core::{Config, SystemPromptConfig, prompt::normalize_agents_md_content};
 use std::path::Path;
 
+/// A fault assembling the system prompt from explicitly-configured sources.
+///
+/// An explicitly-configured prompt source (`config.agent.system_prompt_file`)
+/// that the user opted into but that cannot be read must fail closed rather
+/// than silently falling through to an alternate prompt — otherwise the agent
+/// runs on a prompt the operator never intended. Sources that are merely
+/// *absent* (no `AGENTS.md` present, no `system_prompt_file` configured) are
+/// legitimately optional and never produce this error.
+#[derive(Debug, thiserror::Error)]
+pub enum PromptAssemblyError {
+    /// An explicitly-configured `system_prompt_file` could not be read.
+    #[error("configured system_prompt_file '{path}' is not readable: {source}")]
+    SystemPromptFileUnreadable {
+        /// The configured path that failed to read.
+        path: String,
+        /// The underlying I/O error.
+        source: std::io::Error,
+    },
+}
+
 /// Assemble the final system prompt. Single canonical path.
 ///
 /// `per_request_prompt` is the per-request override from `AgentBuildConfig.system_prompt`.
 /// `extra_sections` is a forward-compatible slot for additional content
 /// (e.g., skill inventory in Phase 3). For now callers pass `&[]`.
+///
+/// Returns [`PromptAssemblyError`] when an explicitly-configured prompt source
+/// is present but unusable (e.g. an unreadable `system_prompt_file`). Optional
+/// sources that are simply absent never fail.
 pub async fn assemble_system_prompt(
     config: &Config,
     per_request_prompt: Option<&str>,
     context_root: Option<&Path>,
     extra_sections: &[&str],
     tool_usage_instructions: &str,
-) -> String {
+) -> Result<String, PromptAssemblyError> {
     // 1. Per-request override wins outright (skips AGENTS.md and config).
     if let Some(prompt) = per_request_prompt {
-        return append_sections(prompt, extra_sections, &[], tool_usage_instructions);
+        return Ok(append_sections(
+            prompt,
+            extra_sections,
+            &[],
+            tool_usage_instructions,
+        ));
     }
 
     // 2-4. This crate owns filesystem reads and prompt precedence, then passes
@@ -35,10 +64,18 @@ pub async fn assemble_system_prompt(
     let mut spc = SystemPromptConfig::new();
 
     // 2. Config-level file override → feeds into SystemPromptConfig.
+    //    The operator explicitly pointed at this file, so an unreadable file
+    //    is a fault and fails closed — it must never silently fall through to
+    //    the inline/default prompt the operator did not ask for.
     if let Some(ref path) = config.agent.system_prompt_file {
         match tokio::fs::read_to_string(path).await {
             Ok(content) => spc.system_prompt = Some(content),
-            Err(e) => tracing::warn!("system_prompt_file not readable: {}: {e}", path.display()),
+            Err(source) => {
+                return Err(PromptAssemblyError::SystemPromptFileUnreadable {
+                    path: path.display().to_string(),
+                    source,
+                });
+            }
         }
     }
 
@@ -68,12 +105,12 @@ pub async fn assemble_system_prompt(
         .into_iter()
         .collect();
 
-    append_sections(
+    Ok(append_sections(
         &base,
         extra_sections,
         &config_tool_sections,
         tool_usage_instructions,
-    )
+    ))
 }
 
 async fn load_project_agents_md_in(dir: &Path) -> Option<String> {
@@ -138,8 +175,9 @@ mod tests {
     #[tokio::test]
     async fn test_per_request_override_wins() {
         let config = default_config();
-        let result =
-            assemble_system_prompt(&config, Some("Per-request prompt"), None, &[], "").await;
+        let result = assemble_system_prompt(&config, Some("Per-request prompt"), None, &[], "")
+            .await
+            .unwrap();
         assert_eq!(result, "Per-request prompt");
     }
 
@@ -149,8 +187,9 @@ mod tests {
         config.agent.system_prompt = Some("Config inline prompt".to_string());
         config.agent.tool_instructions = Some("Config tool instructions".to_string());
 
-        let result =
-            assemble_system_prompt(&config, Some("Per-request prompt"), None, &[], "").await;
+        let result = assemble_system_prompt(&config, Some("Per-request prompt"), None, &[], "")
+            .await
+            .unwrap();
         // Per-request override skips config.agent.system_prompt and tool_instructions
         assert_eq!(result, "Per-request prompt");
         assert!(!result.contains("Config inline"));
@@ -167,7 +206,8 @@ mod tests {
             &[],
             "Dispatcher tool instructions",
         )
-        .await;
+        .await
+        .unwrap();
         assert!(result.starts_with("Per-request prompt"));
         assert!(result.contains("Dispatcher tool instructions"));
     }
@@ -185,7 +225,9 @@ mod tests {
         let mut config = default_config();
         config.agent.system_prompt_file = Some(file_path);
 
-        let result = assemble_system_prompt(&config, None, None, &[], "").await;
+        let result = assemble_system_prompt(&config, None, None, &[], "")
+            .await
+            .unwrap();
         assert!(result.contains("File-based prompt"));
         assert!(!result.contains(DEFAULT_SYSTEM_PROMPT));
     }
@@ -202,20 +244,28 @@ mod tests {
         config.agent.system_prompt_file = Some(file_path);
         config.agent.system_prompt = Some("Inline prompt".to_string());
 
-        let result = assemble_system_prompt(&config, None, None, &[], "").await;
+        let result = assemble_system_prompt(&config, None, None, &[], "")
+            .await
+            .unwrap();
         assert!(result.contains("File-based prompt"));
         assert!(!result.contains("Inline prompt"));
     }
 
     #[tokio::test]
-    async fn test_config_file_unreadable_falls_through() {
+    async fn test_explicit_prompt_file_unreadable_is_error() {
         let mut config = default_config();
+        // The operator explicitly pointed at this file; an unreadable file is
+        // a fault and must fail closed rather than silently falling through to
+        // the inline/default prompt.
         config.agent.system_prompt_file = Some(PathBuf::from("/nonexistent/path/prompt.txt"));
         config.agent.system_prompt = Some("Inline fallback".to_string());
 
         let result = assemble_system_prompt(&config, None, None, &[], "").await;
-        // File unreadable → falls through to inline
-        assert!(result.contains("Inline fallback"));
+        let err = result.expect_err("unreadable configured system_prompt_file must error");
+        assert!(matches!(
+            err,
+            PromptAssemblyError::SystemPromptFileUnreadable { .. }
+        ));
     }
 
     // --- Precedence level 3: config inline override ---
@@ -225,7 +275,9 @@ mod tests {
         let mut config = default_config();
         config.agent.system_prompt = Some("Inline prompt".to_string());
 
-        let result = assemble_system_prompt(&config, None, None, &[], "").await;
+        let result = assemble_system_prompt(&config, None, None, &[], "")
+            .await
+            .unwrap();
         assert!(result.contains("Inline prompt"));
         assert!(!result.contains(DEFAULT_SYSTEM_PROMPT));
     }
@@ -241,7 +293,9 @@ mod tests {
         let mut config = default_config();
         config.agent.system_prompt = Some("Inline prompt".to_string());
 
-        let result = assemble_system_prompt(&config, None, Some(temp.path()), &[], "").await;
+        let result = assemble_system_prompt(&config, None, Some(temp.path()), &[], "")
+            .await
+            .unwrap();
         assert!(result.contains("Inline prompt"));
         assert!(result.contains("Context root instructions"));
         assert!(!result.contains(DEFAULT_SYSTEM_PROMPT));
@@ -259,7 +313,9 @@ mod tests {
             .unwrap();
 
         let config = default_config();
-        let result = assemble_system_prompt(&config, None, Some(temp.path()), &[], "").await;
+        let result = assemble_system_prompt(&config, None, Some(temp.path()), &[], "")
+            .await
+            .unwrap();
         let agents_section_start = result.find("# Project Instructions").unwrap();
         let agents_content = &result[agents_section_start..];
         assert!(agents_content.len() <= AGENTS_MD_MAX_BYTES + 100);
@@ -277,7 +333,9 @@ mod tests {
             .unwrap();
 
         let config = default_config();
-        let result = assemble_system_prompt(&config, None, Some(temp.path()), &[], "").await;
+        let result = assemble_system_prompt(&config, None, Some(temp.path()), &[], "")
+            .await
+            .unwrap();
         assert!(result.contains("Fallback instructions"));
     }
 
@@ -286,7 +344,9 @@ mod tests {
     #[tokio::test]
     async fn test_default_prompt_when_no_overrides() {
         let config = default_config();
-        let result = assemble_system_prompt(&config, None, None, &[], "").await;
+        let result = assemble_system_prompt(&config, None, None, &[], "")
+            .await
+            .unwrap();
         assert!(result.contains(DEFAULT_SYSTEM_PROMPT));
     }
 
@@ -297,7 +357,9 @@ mod tests {
         let mut config = default_config();
         config.agent.tool_instructions = Some("Use tools carefully".to_string());
 
-        let result = assemble_system_prompt(&config, None, None, &[], "").await;
+        let result = assemble_system_prompt(&config, None, None, &[], "")
+            .await
+            .unwrap();
         assert!(result.contains("Use tools carefully"));
     }
 
@@ -306,7 +368,9 @@ mod tests {
         let mut config = default_config();
         config.agent.tool_instructions = Some("Config tools".to_string());
 
-        let result = assemble_system_prompt(&config, None, None, &[], "Dispatcher tools").await;
+        let result = assemble_system_prompt(&config, None, None, &[], "Dispatcher tools")
+            .await
+            .unwrap();
         let config_pos = result.find("Config tools").unwrap();
         let dispatcher_pos = result.find("Dispatcher tools").unwrap();
         assert!(
@@ -321,7 +385,9 @@ mod tests {
     async fn test_dispatcher_tool_instructions_appended() {
         let config = default_config();
         let result =
-            assemble_system_prompt(&config, None, None, &[], "Dispatcher tool instructions").await;
+            assemble_system_prompt(&config, None, None, &[], "Dispatcher tool instructions")
+                .await
+                .unwrap();
         assert!(result.contains("Dispatcher tool instructions"));
     }
 
@@ -337,7 +403,8 @@ mod tests {
             &["## Available Skills\n- /task-workflow"],
             "",
         )
-        .await;
+        .await
+        .unwrap();
         assert!(result.contains("## Available Skills"));
         assert!(result.contains("/task-workflow"));
     }
@@ -349,7 +416,8 @@ mod tests {
 
         let result =
             assemble_system_prompt(&config, None, None, &["Skills section"], "Dispatcher tools")
-                .await;
+                .await
+                .unwrap();
         let skills_pos = result.find("Skills section").unwrap();
         let config_tools_pos = result.find("Config tools").unwrap();
         let dispatcher_pos = result.find("Dispatcher tools").unwrap();
@@ -360,7 +428,9 @@ mod tests {
     #[tokio::test]
     async fn test_empty_extra_sections_no_double_newlines() {
         let config = default_config();
-        let result = assemble_system_prompt(&config, None, None, &["", ""], "").await;
+        let result = assemble_system_prompt(&config, None, None, &["", ""], "")
+            .await
+            .unwrap();
         // Should not have extra blank sections
         assert!(!result.contains("\n\n\n\n"));
     }
@@ -380,7 +450,8 @@ mod tests {
             &["Skills inventory"],
             "Dispatcher tools",
         )
-        .await;
+        .await
+        .unwrap();
 
         assert!(result.contains("Inline base"));
         assert!(result.contains("Skills inventory"));
@@ -416,7 +487,8 @@ mod tests {
             ],
             "Dispatcher tools",
         )
-        .await;
+        .await
+        .unwrap();
 
         let skills_pos = result.find("Skills section").unwrap();
         let instr1_pos = result.find("Additional instruction 1").unwrap();
@@ -443,7 +515,8 @@ mod tests {
             &["My additional instruction"],
             "Dispatcher tools block",
         )
-        .await;
+        .await
+        .unwrap();
 
         let instruction_pos = result.find("My additional instruction").unwrap();
         let dispatcher_pos = result.find("Dispatcher tools block").unwrap();

@@ -1088,6 +1088,21 @@ where
         // still include the text projection for compatibility.
         let run_prompt_input = user_input.clone();
 
+        // Run-start hooks own the start veto. They must run — and be able to
+        // deny — BEFORE we publish `RunStarted` or commit the user message to
+        // the transcript. Otherwise observers see a `RunStarted` for a run that
+        // immediately fails at run-start (a false-start window), and the denied
+        // run leaves a stray user message in the session. On denial we emit a
+        // terminal-failure event with no preceding `RunStarted`.
+        if let Err(err) = self
+            .run_started_hooks(&run_prompt_input, event_tx.as_ref())
+            .await
+        {
+            self.handle_run_failure(&err, event_tx.as_ref()).await;
+            self.clear_runtime_execution_kind();
+            return Err(err);
+        }
+
         if typed_turn_appends.is_empty() {
             // Add user message — preserve image blocks when present.
             let user_message = if user_input.has_non_text_content() {
@@ -1104,15 +1119,6 @@ where
 
         self.emit_run_started_event(run_prompt_input.clone(), event_tx.as_ref())
             .await;
-
-        if let Err(err) = self
-            .run_started_hooks(&run_prompt_input, event_tx.as_ref())
-            .await
-        {
-            self.handle_run_failure(&err, event_tx.as_ref()).await;
-            self.clear_runtime_execution_kind();
-            return Err(err);
-        }
 
         self.tool_dispatch_context =
             crate::ToolDispatchContext::from_current_turn_input(&run_prompt_input)

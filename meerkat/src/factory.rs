@@ -4770,7 +4770,8 @@ impl AgentFactory {
                     &extra_sections,
                     &tool_usage_instructions,
                 )
-                .await,
+                .await
+                .map_err(|err| BuildAgentError::Config(err.to_string()))?,
             )
         } else {
             None

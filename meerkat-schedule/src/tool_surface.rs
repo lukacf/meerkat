@@ -45,8 +45,12 @@ impl AgentToolDispatcher for ScheduleToolSurface {
             });
         }
 
-        let args: Value = serde_json::from_str(call.args.get())
-            .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
+        let args: Value = serde_json::from_str(call.args.get()).map_err(|error| {
+            ToolError::invalid_arguments(
+                call.name,
+                format!("invalid schedule tool-call arguments JSON: {error}"),
+            )
+        })?;
         let result = handle_schedule_tools_call(&self.service, call.name, &args)
             .await
             .map_err(|error| ToolError::ExecutionFailed {

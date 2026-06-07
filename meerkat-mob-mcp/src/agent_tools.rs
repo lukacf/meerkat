@@ -747,6 +747,13 @@ impl AgentMobToolSurface {
             return false;
         }
 
+        // Wired truth is the committed comms-edge/trust authority: by the time we
+        // reach here, both `mob_wire` (helper -> parent) and
+        // `apply_external_peer_reciprocal_trust` (parent -> helper) have committed
+        // (each fails closed with an early `false` above). The `peer_added`
+        // notices below are best-effort delivery courtesy, NOT the source of
+        // wired truth — a dropped notification must not flip a committed edge to
+        // not-wired (row #229).
         let notify_parent = Self::notify_peer_added(
             &helper_runtime,
             name,
@@ -765,8 +772,18 @@ impl AgentMobToolSurface {
             &parent_description,
         )
         .await;
+        if !(notify_parent && notify_helper) {
+            tracing::warn!(
+                mob_id = %mob_id,
+                helper = %helper_comms_name,
+                notify_parent,
+                notify_helper,
+                "delegate helper trust edges committed but peer_added notification(s) failed; \
+                 reporting wired=true from committed edge authority"
+            );
+        }
 
-        notify_parent && notify_helper
+        true
     }
 
     async fn dispatch_delegate(

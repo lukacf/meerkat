@@ -3077,7 +3077,6 @@ async fn meerkat_machine_spine_snapshot_reports_registered_idle_session() {
     assert!(snapshot.binding.completions_present);
     assert!(snapshot.binding.ops_registry_present);
     assert_eq!(snapshot.control.phase, RuntimeState::Idle);
-    assert!(!snapshot.binding.attachment_live);
     assert_eq!(snapshot.binding.cursor_state.agent_applied_cursor, 0);
     assert_eq!(snapshot.binding.cursor_state.runtime_observed_seq, 0);
     assert_eq!(snapshot.binding.cursor_state.runtime_last_injected_seq, 0);
@@ -15786,7 +15785,8 @@ async fn persistent_commit_success_persists_receipt_and_terminalizes_once() {
     let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
     let store: Arc<dyn RuntimeStore> = inner.clone();
     let (driver, runtime_id, run_id, input_id) = persistent_staged_run_driver(store).await;
-    let session_snapshot = b"session-data".to_vec();
+    let session_snapshot = serde_json::to_vec(&meerkat_core::Session::with_id(SessionId::new()))
+        .expect("serialize session snapshot");
 
     commit_runtime_loop_run(
         &driver,
@@ -15868,7 +15868,10 @@ async fn persistent_commit_success_uses_one_durable_receipt_terminal_write() {
         run_id.clone(),
         vec![input_id.clone()],
         batch_receipt(run_id.clone(), vec![input_id.clone()]),
-        Some(b"session-data".to_vec()),
+        Some(
+            serde_json::to_vec(&meerkat_core::Session::with_id(SessionId::new()))
+                .expect("serialize session snapshot"),
+        ),
     )
     .await
     .expect("persistent commit should succeed");
@@ -20126,7 +20129,6 @@ struct RuntimeParitySnapshotSummary {
     formal_active_runtime_id: Option<String>,
     formal_current_run_id: Option<String>,
     pre_run_phase: Option<String>,
-    attachment_live: bool,
     queue_len: usize,
     steer_queue_len: usize,
     current_run_contributor_count: usize,
@@ -22598,7 +22600,6 @@ async fn runtime_parity_snapshot_summary(
                     .control
                     .pre_run_phase
                     .map(runtime_parity_state_label),
-                attachment_live: snapshot.binding.attachment_live,
                 queue_len: snapshot.inputs.queue.len(),
                 steer_queue_len: snapshot.inputs.steer_queue.len(),
                 current_run_contributor_count: snapshot.inputs.current_run_contributors.len(),

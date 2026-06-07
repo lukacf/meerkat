@@ -603,7 +603,6 @@ impl MeerkatMachine {
             ops_lifecycle,
             completions_present,
             ops_registry_present,
-            attachment_live,
             epoch_id,
             _visibility_state,
             formal_pre_run_phase,
@@ -668,7 +667,6 @@ impl MeerkatMachine {
                 Arc::clone(&entry.ops_lifecycle),
                 true,
                 true,
-                entry.attachment_is_live(),
                 entry.epoch_id.clone(),
                 entry.tool_visibility_owner.visibility_state().ok()?,
                 formal_pre_run_phase,
@@ -750,7 +748,6 @@ impl MeerkatMachine {
             driver_present: true,
             completions_present,
             ops_registry_present,
-            attachment_live,
             epoch_id,
             cursor_state: {
                 let cursor_state = ops_lifecycle.completion_cursor_snapshot();

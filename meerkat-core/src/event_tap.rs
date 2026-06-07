@@ -3,6 +3,23 @@
 //! The `EventTap` is a shared mutex checked by both the `LlmClientAdapter` (for TextDelta)
 //! and the agent's `run_loop` (for lifecycle events). The host loop installs/clears a
 //! subscriber per interaction.
+//!
+//! # Projection contract: best-effort observability, never authority
+//!
+//! The event tap is a **best-effort observability projection**, not a source of
+//! truth. Every tap operation (`tap_try_send`, `tap_send_terminal`, `tap_emit`)
+//! may drop, truncate, or time out an event without affecting correctness, and
+//! callers intentionally discard the result (`let _ = tap_emit(...)`).
+//!
+//! The authoritative truth a tap event mirrors lives elsewhere:
+//! - terminal run outcome → the `Agent::run*` return value / `RunResult`;
+//! - lifecycle/turn phase → the generated MeerkatMachine turn-state authority;
+//! - durable history → the persisted event store.
+//!
+//! No consumer may reconstruct terminal or lifecycle truth from tap events.
+//! In particular, [`AgentEvent::StreamTruncated`](crate::event::AgentEvent::StreamTruncated)
+//! is a UI hint that the stream lost frames under backpressure — it must never be
+//! read as a terminal or failure verdict.
 
 use crate::event::AgentEvent;
 #[cfg(target_arch = "wasm32")]

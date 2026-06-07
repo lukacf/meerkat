@@ -39,6 +39,21 @@ pub enum CompositeDispatcherError {
     ToolInitFailed { name: String, message: String },
 }
 
+/// Render a `ToolOutput::Json` value into its tool-result text content.
+///
+/// A bare JSON string is carried verbatim; any other value is serialized.
+/// Serialization failure is propagated as a typed [`ToolError`] rather than
+/// being collapsed into empty successful output — a structured success must
+/// never launder a serialization fault into a silently-empty result.
+fn json_output_content(name: &str, value: &Value) -> Result<String, ToolError> {
+    match value {
+        Value::String(s) => Ok(s.clone()),
+        _ => serde_json::to_string(value).map_err(|err| ToolError::ExecutionFailed {
+            message: format!("failed to serialize JSON tool output for '{name}': {err}"),
+        }),
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 struct ImageGenerationToolBinding {
     runtime: crate::builtin::image_generation::ImageGenerationToolRuntime,
@@ -547,20 +562,14 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 let async_ops = tool.async_ops_for_output(&output);
                 let result = match output {
                     ToolOutput::Json(value) => {
-                        let content = match &value {
-                            Value::String(s) => s.clone(),
-                            _ => serde_json::to_string(&value).unwrap_or_default(),
-                        };
+                        let content = json_output_content(call.name, &value)?;
                         ToolResult::new(call.id.to_string(), content, false)
                     }
                     ToolOutput::JsonWithEffects {
                         value,
                         session_effects,
                     } => {
-                        let content = match &value {
-                            Value::String(s) => s.clone(),
-                            _ => serde_json::to_string(&value).unwrap_or_default(),
-                        };
+                        let content = json_output_content(call.name, &value)?;
                         return Ok(ToolDispatchOutcome::new(
                             ToolResult::new(call.id.to_string(), content, false),
                             async_ops,
@@ -600,20 +609,14 @@ impl AgentToolDispatcher for CompositeDispatcher {
                     let async_ops = tool.async_ops_for_output(&output);
                     let result = match output {
                         ToolOutput::Json(value) => {
-                            let content = match &value {
-                                Value::String(s) => s.clone(),
-                                _ => serde_json::to_string(&value).unwrap_or_default(),
-                            };
+                            let content = json_output_content(call.name, &value)?;
                             ToolResult::new(call.id.to_string(), content, false)
                         }
                         ToolOutput::JsonWithEffects {
                             value,
                             session_effects,
                         } => {
-                            let content = match &value {
-                                Value::String(s) => s.clone(),
-                                _ => serde_json::to_string(&value).unwrap_or_default(),
-                            };
+                            let content = json_output_content(call.name, &value)?;
                             return Ok(ToolDispatchOutcome::new(
                                 ToolResult::new(call.id.to_string(), content, false),
                                 async_ops,
@@ -1140,6 +1143,22 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result.result.text_content())
             .expect("content should be valid JSON");
         assert!(parsed["iso8601"].is_string());
+    }
+
+    #[test]
+    fn json_output_content_carries_string_verbatim_and_serializes_objects() {
+        // Bare strings carry verbatim (no JSON quoting).
+        let s = json_output_content("t", &Value::String("hello".into()))
+            .expect("string content should render");
+        assert_eq!(s, "hello");
+
+        // Objects are serialized; the result must be non-empty and valid JSON,
+        // never the empty-string collapse the old unwrap_or_default() produced.
+        let obj = json_output_content("t", &serde_json::json!({"k": 1}))
+            .expect("object content should serialize");
+        assert!(!obj.is_empty());
+        let parsed: Value = serde_json::from_str(&obj).expect("serialized object is valid JSON");
+        assert_eq!(parsed["k"], 1);
     }
 
     #[tokio::test]

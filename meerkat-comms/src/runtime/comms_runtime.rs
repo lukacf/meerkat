@@ -696,18 +696,26 @@ impl CoreCommsRuntime for CommsRuntime {
                 }
                 match stream {
                     InputStreamMode::None => {
-                        let injector = CoreCommsRuntime::event_injector(self).ok_or_else(|| {
-                            SendError::Unsupported("event injector unavailable".into())
-                        })?;
+                        // Generate the interaction id *first* and stamp it onto the
+                        // injected event so the returned public handle correlates
+                        // with the event — not a fresh unrelated UUID (#269).
+                        let interaction_id = Uuid::new_v4();
+                        let injector = self.event_injector_concrete();
                         let content = match blocks {
                             Some(blocks) => meerkat_core::types::ContentInput::Blocks(blocks),
                             None => meerkat_core::types::ContentInput::Text(body),
                         };
                         injector
-                            .inject(content, PlainEventSource::from(source), handling_mode, None)
+                            .inject_with_interaction_id(
+                                interaction_id,
+                                content,
+                                PlainEventSource::from(source),
+                                handling_mode,
+                                None,
+                            )
                             .map_err(map_event_injector_error)?;
                         Ok(SendReceipt::InputAccepted {
-                            interaction_id: meerkat_core::InteractionId(Uuid::new_v4()),
+                            interaction_id: meerkat_core::InteractionId(interaction_id),
                             stream_reserved: false,
                         })
                     }
@@ -2816,10 +2824,19 @@ impl CommsRuntime {
 
     /// Get an event injector for this runtime's inbox.
     pub fn event_injector(&self) -> Arc<dyn meerkat_core::EventInjector> {
-        Arc::new(crate::CommsEventInjector::new(
+        Arc::new(self.event_injector_concrete())
+    }
+
+    /// Get the concrete event injector for this runtime's inbox.
+    ///
+    /// Returns the in-crate [`crate::CommsEventInjector`] so callers can reach
+    /// inherent methods (e.g. `inject_with_interaction_id`) that are not part of
+    /// the cross-crate `EventInjector` trait surface.
+    fn event_injector_concrete(&self) -> crate::CommsEventInjector {
+        crate::CommsEventInjector::new(
             self.router.inbox_sender().clone(),
             self.subscriber_registry.clone(),
-        ))
+        )
     }
 
     #[doc(hidden)]
@@ -6814,6 +6831,45 @@ mod tests {
             &interactions[0].content,
             meerkat_core::InteractionContent::Message { body, .. } if body == "standalone test input"
         ));
+    }
+
+    /// ROW #269 gate: a non-stream comms `Input` returns an `InteractionId`
+    /// that matches the `interaction_id` stamped on the injected event
+    /// (correlatable), not a fresh unrelated UUID.
+    #[tokio::test]
+    async fn test_core_send_input_no_reservation_returns_correlated_id() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = inproc_only_with_test_peer_authority(&format!("input-corr-{suffix}"));
+
+        let cmd = CommsCommand::Input {
+            blocks: None,
+            session_id: SessionId::new(),
+            body: "correlated input".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            source: InputSource::Rpc,
+            stream: InputStreamMode::None,
+            allow_self_session: true,
+        };
+
+        let returned_id = match CoreCommsRuntime::send(&runtime, cmd).await.unwrap() {
+            SendReceipt::InputAccepted {
+                interaction_id,
+                stream_reserved,
+            } => {
+                assert!(!stream_reserved);
+                interaction_id
+            }
+            other => panic!("Expected InputAccepted, got: {other:?}"),
+        };
+
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(&runtime).await;
+        assert_eq!(interactions.len(), 1);
+        // The injected event's interaction id is the SAME as the returned
+        // handle — the handle correlates with the event, not a fresh UUID.
+        assert_eq!(
+            interactions[0].id, returned_id,
+            "returned InteractionId must match the injected event's interaction id"
+        );
     }
 
     #[tokio::test]

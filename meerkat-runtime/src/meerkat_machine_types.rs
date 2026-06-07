@@ -1714,7 +1714,6 @@ pub struct MeerkatBindingSnapshot {
     pub driver_present: bool,
     pub completions_present: bool,
     pub ops_registry_present: bool,
-    pub attachment_live: bool,
     pub epoch_id: RuntimeEpochId,
     pub cursor_state: MeerkatCursorSnapshot,
 }
@@ -2028,16 +2027,6 @@ impl MeerkatMachineSpineSnapshot {
         }
 
         // --- Drain invariants ---
-
-        // DrainBindingInvariant: drain.phase != Inactive => binding.live
-        if let Some(phase) = self.drain.phase {
-            if phase != CommsDrainPhase::Inactive && !self.binding.attachment_live {
-                // binding.live maps to session being registered (it is, since we have a snapshot)
-                // This invariant is about the binding being live, which is always true if we have
-                // a snapshot. Skip this check since getting a snapshot implies the session exists.
-            }
-            let _ = phase; // suppress unused warning
-        }
 
         // DrainModeInvariant: drain.phase != Inactive => mode is set and not Disabled
         if let Some(phase) = self.drain.phase

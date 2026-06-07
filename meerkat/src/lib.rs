@@ -407,7 +407,7 @@ pub mod surface;
 #[cfg(not(target_arch = "wasm32"))]
 mod prompt_assembly;
 #[cfg(not(target_arch = "wasm32"))]
-pub use prompt_assembly::assemble_system_prompt;
+pub use prompt_assembly::{PromptAssemblyError, assemble_system_prompt};
 
 // SDK helpers (filesystem-dependent: .rkat dir, hook config files)
 #[cfg(not(target_arch = "wasm32"))]

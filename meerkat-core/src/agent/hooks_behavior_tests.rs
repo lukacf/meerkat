@@ -643,6 +643,58 @@ async fn run_started_deny_blocks_run() {
     ));
 }
 
+/// Row #130: a run-start hook denial must NOT advertise a `RunStarted` event
+/// (no false-start window) and must not leave a stray user message in the
+/// transcript. The hook owns the start veto, so it runs before `RunStarted`
+/// is published or the user message is committed.
+#[tokio::test]
+async fn run_started_deny_emits_no_run_started_event() {
+    let seen_args = Arc::new(Mutex::new(Vec::new()));
+    let seen_tokens = Arc::new(Mutex::new(Vec::new()));
+    let hooks = TestHookEngine {
+        run_started_deny: true,
+        ..test_hooks()
+    };
+    let mut agent = build_agent(ClientMode::TextOnly, hooks, seen_args, seen_tokens).await;
+
+    let (tx, mut rx) = mpsc::channel::<AgentEvent>(32);
+    let err = agent
+        .run_with_events("test".to_string().into(), tx)
+        .await
+        .expect_err("run-start denial should terminalize the run");
+    assert!(matches!(
+        err,
+        AgentError::HookDenied {
+            point: HookPoint::RunStarted,
+            ..
+        }
+    ));
+
+    let mut saw_run_started = false;
+    let mut saw_run_failed = false;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            AgentEvent::RunStarted { .. } => saw_run_started = true,
+            AgentEvent::RunFailed { .. } => saw_run_failed = true,
+            _ => {}
+        }
+    }
+    assert!(
+        !saw_run_started,
+        "run-start denial must not advertise a RunStarted (false-start window)"
+    );
+    assert!(saw_run_failed, "run-start denial should emit RunFailed");
+
+    assert!(
+        !agent
+            .session()
+            .messages()
+            .iter()
+            .any(|message| matches!(message, Message::User(_))),
+        "run-start denial must not commit the user message to the transcript"
+    );
+}
+
 #[tokio::test]
 async fn turn_boundary_deny_blocks_next_turn() {
     let seen_args = Arc::new(Mutex::new(Vec::new()));

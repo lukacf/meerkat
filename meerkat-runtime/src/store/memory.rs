@@ -185,7 +185,13 @@ impl RuntimeStore for InMemoryRuntimeStore {
         // All writes in one lock acquisition (atomic for in-memory)
         let rid = runtime_id.0.clone();
 
-        // Session delta
+        // Session delta. The supersession verdict computed here keys the
+        // entire commit: if the incoming session snapshot is classified as
+        // superseded (the persisted head is already a valid append-extension
+        // of it), the snapshot write is skipped AND so are the receipt + input
+        // writes, so receipt/input ordering identity never advances past the
+        // retained session truth.
+        let mut session_snapshot_superseded = false;
         if let Some(delta) = session_delta {
             let incoming_session =
                 serde_json::from_slice::<meerkat_core::Session>(&delta.session_snapshot);
@@ -220,6 +226,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
                             .is_ok()
                         }) {
                             persist_session_snapshot = false;
+                            session_snapshot_superseded = true;
                         } else {
                             return Err(RuntimeStoreError::WriteFailed(err.to_string()));
                         }
@@ -230,11 +237,23 @@ impl RuntimeStore for InMemoryRuntimeStore {
                         "session snapshot for {session_store_key} is not a Session: {err}"
                     )));
                 }
-                (Err(_), None) => {}
+                (Err(err), None) => {
+                    return Err(RuntimeStoreError::WriteFailed(format!(
+                        "session snapshot is not a Session: {err}"
+                    )));
+                }
             }
             if persist_session_snapshot {
                 inner.sessions.insert(rid.clone(), delta.session_snapshot);
             }
+        }
+
+        // When the session snapshot was superseded and skipped, the boundary
+        // receipt and input-state updates for that boundary must also be
+        // skipped: advancing them against a retained (older) session snapshot
+        // would split receipt/input ordering identity from session truth.
+        if session_snapshot_superseded {
+            return Ok(());
         }
 
         // Receipt
@@ -464,12 +483,13 @@ mod tests {
         let bundle = StoredInputState::new_accepted(input_id.clone());
         let receipt = make_receipt(run_id.clone(), 0);
 
+        let session = session_with_user("hello");
+        let session_snapshot = serde_json::to_vec(&session).unwrap();
+
         store
             .atomic_apply(
                 &rid,
-                Some(SessionDelta {
-                    session_snapshot: b"session-data".to_vec(),
-                }),
+                Some(SessionDelta { session_snapshot }),
                 receipt.clone(),
                 vec![persistable(bundle)],
                 None,
@@ -485,6 +505,42 @@ mod tests {
         // Load receipt
         let loaded = store.load_boundary_receipt(&rid, &run_id, 0).await.unwrap();
         assert!(loaded.is_some());
+    }
+
+    #[tokio::test]
+    async fn atomic_apply_rejects_non_session_snapshot_without_owner_context() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("test-runtime");
+        let run_id = RunId::new();
+        let input_id = InputId::new();
+
+        let bundle = StoredInputState::new_accepted(input_id);
+        let receipt = make_receipt(run_id, 0);
+
+        // Owner-context absence is not a license to store arbitrary bytes as a
+        // session snapshot: a non-deserializable snapshot must fail closed.
+        let err = store
+            .atomic_apply(
+                &rid,
+                Some(SessionDelta {
+                    session_snapshot: b"session-data".to_vec(),
+                }),
+                receipt,
+                vec![persistable(bundle)],
+                None,
+            )
+            .await
+            .expect_err("non-Session snapshot must be rejected");
+
+        match err {
+            RuntimeStoreError::WriteFailed(message) => {
+                assert!(
+                    message.contains("not a Session"),
+                    "unexpected WriteFailed message: {message}"
+                );
+            }
+            other => panic!("expected WriteFailed, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -806,13 +862,74 @@ mod tests {
             store.load_session_snapshot(&rid).await.unwrap(),
             Some(current_snapshot)
         );
+        // The session snapshot was classified superseded and skipped, so the
+        // boundary receipt for that boundary must NOT advance against the
+        // retained (more-advanced) session snapshot.
         assert_eq!(
             store
                 .load_boundary_receipt(&rid, &receipt.run_id, receipt.sequence)
                 .await
                 .unwrap(),
-            Some(receipt)
+            None
         );
+    }
+
+    #[tokio::test]
+    async fn atomic_apply_skips_inputs_when_session_snapshot_superseded() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("runtime-superseded-inputs");
+        let incoming = session_with_user("turn input");
+        let mut current = incoming.clone();
+        current.push(meerkat_core::types::Message::Assistant(
+            meerkat_core::types::AssistantMessage {
+                content: "peer response already applied".to_string(),
+                tool_calls: Vec::new(),
+                stop_reason: meerkat_core::types::StopReason::EndTurn,
+                usage: meerkat_core::types::Usage::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
+            },
+        ));
+        let current_snapshot = serde_json::to_vec(&current).unwrap();
+        let receipt = make_receipt(RunId::new(), 21);
+        let input_id = InputId::new();
+        let bundle = StoredInputState::new_accepted(input_id.clone());
+
+        store
+            .commit_session_snapshot(
+                &rid,
+                SessionDelta {
+                    session_snapshot: current_snapshot.clone(),
+                },
+            )
+            .await
+            .unwrap();
+
+        store
+            .atomic_apply(
+                &rid,
+                Some(SessionDelta {
+                    session_snapshot: serde_json::to_vec(&incoming).unwrap(),
+                }),
+                receipt.clone(),
+                vec![persistable(bundle)],
+                Some(incoming.id().clone()),
+            )
+            .await
+            .unwrap();
+
+        // Snapshot retained, receipt + input-state writes skipped as a unit.
+        assert_eq!(
+            store.load_session_snapshot(&rid).await.unwrap(),
+            Some(current_snapshot)
+        );
+        assert_eq!(
+            store
+                .load_boundary_receipt(&rid, &receipt.run_id, receipt.sequence)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(store.load_input_states(&rid).await.unwrap().is_empty());
     }
 
     #[tokio::test]

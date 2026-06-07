@@ -4038,13 +4038,19 @@ async fn handle_auth_command(
                 profile: None,
                 origin: meerkat_core::connection::BindingOrigin::Configured,
             };
+            // A persisted-store backend that cannot be opened is a fault, not
+            // an absence of credentials. Collapsing the open error to None would
+            // launder a real store failure into a "no credentials"/Unknown
+            // status. Propagate the typed TokenStoreError instead.
             let token_store: Option<Arc<dyn meerkat_providers::auth_store::TokenStore>> =
                 if meerkat_providers::auth_store::credential_source_uses_persisted_store(
                     &profile.source,
                 ) {
-                    meerkat_providers::auth_store::TokenStoreBackend::default_auto()
-                        .and_then(|backend| backend.open())
-                        .ok()
+                    Some(
+                        meerkat_providers::auth_store::TokenStoreBackend::default_auto()
+                            .and_then(|backend| backend.open())
+                            .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?,
+                    )
                 } else {
                     None
                 };
@@ -5759,13 +5765,15 @@ async fn project_cli_auth_status(
             stored = Some(rehydrated);
             snapshot = auth_lease.snapshot(&lease_key);
         } else if phase != AuthStatusPhase::Unknown {
+            // A store-load fault is a real error, not absent credentials.
+            // Propagate the typed TokenStoreError rather than collapsing it
+            // to None, which would report a store fault as "no credentials".
             stored = store
                 .load(&meerkat_providers::auth_store::TokenKey::from_auth_binding(
                     auth_binding,
                 ))
                 .await
-                .ok()
-                .flatten();
+                .map_err(|e| anyhow::anyhow!("TokenStore load failed: {e}"))?;
         }
     }
     if stored

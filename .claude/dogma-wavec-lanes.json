@@ -1,0 +1,202 @@
+{
+ "C-core-agent": {
+  "crates": [
+   "meerkat-core (only files under src/agent/)"
+  ],
+  "rows": [
+   25,
+   120,
+   128,
+   129,
+   166,
+   205,
+   239,
+   272,
+   273,
+   274,
+   276,
+   309,
+   323,
+   324
+  ]
+ },
+ "C-core-data": {
+  "crates": [
+   "meerkat-core (all files EXCEPT src/agent/)"
+  ],
+  "rows": [
+   1,
+   76,
+   93,
+   103,
+   132,
+   141,
+   142,
+   143,
+   178,
+   207,
+   233,
+   253,
+   254,
+   270,
+   275,
+   308,
+   312,
+   319,
+   322,
+   331,
+   332,
+   356
+  ]
+ },
+ "C-mob": {
+  "crates": [
+   "meerkat-mob"
+  ],
+  "rows": [
+   14,
+   70,
+   126,
+   181,
+   258,
+   259,
+   260,
+   261,
+   282,
+   293,
+   314,
+   320,
+   333,
+   334,
+   336
+  ]
+ },
+ "C-rpc": {
+  "crates": [
+   "meerkat-rpc"
+  ],
+  "rows": [
+   97,
+   115,
+   198,
+   199,
+   209,
+   249,
+   301,
+   326,
+   338,
+   346,
+   348,
+   355
+  ]
+ },
+ "C-runtime": {
+  "crates": [
+   "meerkat-runtime"
+  ],
+  "rows": [
+   2,
+   24,
+   105,
+   106,
+   263,
+   267,
+   288
+  ]
+ },
+ "C-realtime": {
+  "crates": [
+   "meerkat-openai",
+   "meerkat-gemini",
+   "meerkat-live"
+  ],
+  "rows": [
+   51,
+   68,
+   123,
+   149,
+   230,
+   208,
+   113,
+   243
+  ]
+ },
+ "C-session": {
+  "crates": [
+   "meerkat-session"
+  ],
+  "rows": [
+   34,
+   86,
+   225,
+   297,
+   310
+  ]
+ },
+ "C-auth-prov": {
+  "crates": [
+   "meerkat-auth-core",
+   "meerkat-llm-core",
+   "meerkat-models"
+  ],
+  "rows": [
+   8,
+   100,
+   111,
+   75,
+   122,
+   177
+  ]
+ },
+ "C-tools": {
+  "crates": [
+   "meerkat-tools"
+  ],
+  "rows": [
+   64,
+   202,
+   299
+  ]
+ },
+ "C-mcp-mob": {
+  "crates": [
+   "meerkat-mcp-server",
+   "meerkat-mob-mcp",
+   "meerkat-mob-pack"
+  ],
+  "rows": [
+   169,
+   157,
+   185,
+   245
+  ]
+ },
+ "C-facade": {
+  "crates": [
+   "meerkat"
+  ],
+  "rows": [
+   72,
+   167,
+   337
+  ]
+ },
+ "C-misc": {
+  "crates": [
+   "meerkat-memory",
+   "meerkat-skills",
+   "meerkat-hooks",
+   "meerkat-cli",
+   "meerkat-comms"
+  ],
+  "rows": [
+   140,
+   279,
+   220,
+   231,
+   170,
+   82,
+   291
+  ]
+ }
+}

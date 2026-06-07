@@ -42,6 +42,41 @@ impl CommsEventInjector {
             subscriber_registry: registry,
         }
     }
+
+    /// Inject a plain event stamped with a caller-chosen interaction id.
+    ///
+    /// Unlike [`EventInjector::inject`] (which injects with `interaction_id:
+    /// None`), this stamps the injected inbox item with `interaction_id`, so a
+    /// caller that returns the same id as a public handle yields a *correlated*
+    /// interaction id — the returned handle correlates with the injected event
+    /// rather than being a fresh unrelated UUID. No subscriber channel is
+    /// reserved (that is [`SubscribableInjector::inject_with_subscription`]'s
+    /// job); this is the non-stream correlation case.
+    pub fn inject_with_interaction_id(
+        &self,
+        interaction_id: uuid::Uuid,
+        content: ContentInput,
+        source: PlainEventSource,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
+    ) -> Result<(), EventInjectorError> {
+        let body = content.text_content();
+        let blocks = match content {
+            ContentInput::Text(_) => None,
+            ContentInput::Blocks(blocks) => Some(blocks),
+        };
+        match self.sender.send_classified(InboxItem::PlainEvent {
+            body,
+            source,
+            handling_mode,
+            interaction_id: Some(interaction_id),
+            blocks,
+            render_metadata,
+        }) {
+            AdmissionOutcome::Admitted => Ok(()),
+            AdmissionOutcome::Dropped { reason } => Err(drop_reason_to_injector_error(reason)),
+        }
+    }
 }
 
 impl EventInjector for CommsEventInjector {

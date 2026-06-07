@@ -6,10 +6,12 @@ use meerkat_comms::{
     comms_tool_unavailable_reason, handle_tools_call_with_context,
 };
 use meerkat_core::AgentToolDispatcher;
+use meerkat_core::ToolCallArguments;
 use meerkat_core::ToolDispatchContext;
 use meerkat_core::error::ToolError;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
 use meerkat_core::{ToolCallability, ToolCatalogCapabilities, ToolCatalogEntry};
+#[cfg(test)]
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -126,11 +128,12 @@ impl AgentToolDispatcher for CommsToolSurface {
             return Err(ToolError::unavailable(call.name, reason));
         }
 
-        let args: Value = serde_json::from_str(call.args.get())
-            .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
-        let result = handle_tools_call_with_context(&self.tool_context, call.name, &args, context)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed { message: e })?;
+        let args = ToolCallArguments::from_raw_json(call.args)
+            .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+        let result =
+            handle_tools_call_with_context(&self.tool_context, call.name, args.as_value(), context)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed { message: e })?;
         Ok(ToolResult::new(call.id.to_string(), result.to_string(), false).into())
     }
 }
@@ -290,5 +293,27 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn non_object_args_are_rejected_as_invalid_arguments() {
+        let (router, trusted_peers) = make_tool_context();
+        let surface = CommsToolSurface::new(router, trusted_peers);
+        // `peers` is callable without runtime authority; non-object args must
+        // be rejected at the boundary instead of being coerced to a string Value
+        // and forwarded into handle_tools_call_with_context.
+        for body in ["\"a string\"", "[1, 2, 3]", "42"] {
+            let args_raw = serde_json::value::RawValue::from_string(body.to_string()).unwrap();
+            let call = ToolCallView {
+                id: "test-1",
+                name: "peers",
+                args: &args_raw,
+            };
+            let result = surface.dispatch(call).await;
+            assert!(
+                matches!(result, Err(ToolError::InvalidArguments { .. })),
+                "non-object arg {body:?} must be rejected as InvalidArguments, got {result:?}"
+            );
+        }
     }
 }

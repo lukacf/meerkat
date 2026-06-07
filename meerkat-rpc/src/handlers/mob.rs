@@ -167,26 +167,23 @@ fn spawn_result_payload(mob_id: &MobId, result: &SpawnResult) -> serde_json::Val
 /// Project a domain `MobMemberStatus` into its wire twin.
 ///
 /// `MobMemberStatus` is `#[non_exhaustive]`, so a plain exhaustive match is not
-/// possible without a wildcard. We do map every known variant explicitly and
-/// log at `error!` on the wildcard arm so a future upstream variant surfaces in
-/// traces as "wire projection silently collapsed to Unknown" rather than
-/// vanishing into a defaulted value. Adding the variant to this match is the
-/// expected response to the log line.
-fn project_member_status(status: MobMemberStatus) -> WireMobMemberStatus {
+/// possible without a wildcard. We map every known variant explicitly and fail
+/// the wire projection on the wildcard arm: an unmapped upstream variant is a
+/// genuine projection-boundary fault, and reporting it as `Unknown` (a valid
+/// status the client trusts) would launder an unrepresentable domain state into
+/// a fabricated valid one. Adding the variant to this match is the expected
+/// response to the returned error.
+fn project_member_status(status: MobMemberStatus) -> Result<WireMobMemberStatus, String> {
     match status {
-        MobMemberStatus::Active => WireMobMemberStatus::Active,
-        MobMemberStatus::Retiring => WireMobMemberStatus::Retiring,
-        MobMemberStatus::Broken => WireMobMemberStatus::Broken,
-        MobMemberStatus::Completed => WireMobMemberStatus::Completed,
-        MobMemberStatus::Unknown => WireMobMemberStatus::Unknown,
-        other => {
-            tracing::error!(
-                ?other,
-                "MobMemberStatus variant has no WireMobMemberStatus mapping; \
-                 projecting to Unknown — add an explicit arm in `project_member_status`"
-            );
-            WireMobMemberStatus::Unknown
-        }
+        MobMemberStatus::Active => Ok(WireMobMemberStatus::Active),
+        MobMemberStatus::Retiring => Ok(WireMobMemberStatus::Retiring),
+        MobMemberStatus::Broken => Ok(WireMobMemberStatus::Broken),
+        MobMemberStatus::Completed => Ok(WireMobMemberStatus::Completed),
+        MobMemberStatus::Unknown => Ok(WireMobMemberStatus::Unknown),
+        other => Err(format!(
+            "MobMemberStatus variant {other:?} has no WireMobMemberStatus mapping; \
+             add an explicit arm in `project_member_status`"
+        )),
     }
 }
 
@@ -217,9 +214,9 @@ fn runtime_binding_from_wire(
 fn member_list_entry_wire(
     mob_id: &MobId,
     entry: &meerkat_mob::runtime::MobMemberListEntry,
-) -> MobMemberListEntryWire {
+) -> Result<MobMemberListEntryWire, String> {
     let identity_str = entry.agent_identity.to_string();
-    MobMemberListEntryWire {
+    Ok(MobMemberListEntryWire {
         agent_identity: identity_str.clone(),
         member_ref: meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
         role: entry.role.to_string(),
@@ -237,27 +234,24 @@ fn member_list_entry_wire(
             .map(std::string::ToString::to_string)
             .collect(),
         labels: entry.labels.clone(),
-        status: project_member_status(entry.status),
+        status: project_member_status(entry.status)?,
         error: entry.error.clone(),
         is_final: entry.is_final,
-    }
+    })
 }
 
 /// Project the deep member-status snapshot into the app-facing RPC shape.
 /// Runtime incarnation ids and fence tokens are bridge-internal binding atoms;
 /// `MobMemberSnapshot` intentionally keeps them out of generic serde, and this
 /// endpoint must not reinsert them.
-fn member_status_payload(snapshot: &MobMemberSnapshot) -> serde_json::Value {
-    match serde_json::to_value(snapshot) {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::error!(
-                ?error,
-                "failed to serialize MobMemberSnapshot for mob/member_status"
-            );
-            serde_json::Value::Object(serde_json::Map::new())
-        }
-    }
+///
+/// A serialization failure is a typed fault on the authoritative status reply:
+/// the caller surfaces it as a JSON-RPC error rather than laundering it into a
+/// fabricated empty `{}` object that a client would read as a valid status.
+fn member_status_payload(
+    snapshot: &MobMemberSnapshot,
+) -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::to_value(snapshot)
 }
 
 pub async fn handle_create(
@@ -345,11 +339,19 @@ pub async fn handle_members(
     };
     match state.mob_list_members(&mob_id).await {
         Ok(members) => {
-            let typed: Vec<_> = members
+            let typed: Result<Vec<_>, String> = members
                 .iter()
                 .map(|entry| member_list_entry_wire(&mob_id, entry))
                 .collect();
-            RpcResponse::success(id, serde_json::json!({"mob_id": mob_id, "members": typed}))
+            match typed {
+                Ok(typed) => RpcResponse::success(
+                    id,
+                    serde_json::json!({"mob_id": mob_id, "members": typed}),
+                ),
+                Err(projection_error) => {
+                    RpcResponse::error(id, error::INTERNAL_ERROR, projection_error)
+                }
+            }
         }
         Err(err) => invalid_params(id, err.to_string()),
     }
@@ -962,9 +964,12 @@ pub async fn handle_ingress_interaction(
             ))
         }
         Ok(meerkat_mob::runtime::EnsureMemberOutcome::Existed(entry)) => {
-            meerkat_contracts::MobEnsureMemberOutcomeWire::Existed(member_list_entry_wire(
-                &mob_id, &entry,
-            ))
+            match member_list_entry_wire(&mob_id, &entry) {
+                Ok(wire) => meerkat_contracts::MobEnsureMemberOutcomeWire::Existed(wire),
+                Err(projection_error) => {
+                    return RpcResponse::error(id, error::INTERNAL_ERROR, projection_error);
+                }
+            }
         }
         Err(err) => return invalid_params(id, err.to_string()),
     };
@@ -1678,7 +1683,14 @@ pub async fn handle_member_status(
         )
         .await
     {
-        Ok(snapshot) => RpcResponse::success(id, member_status_payload(&snapshot)),
+        Ok(snapshot) => match member_status_payload(&snapshot) {
+            Ok(value) => RpcResponse::success(id, value),
+            Err(serialize_error) => RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("failed to serialize mob member status: {serialize_error}"),
+            ),
+        },
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -2153,10 +2165,15 @@ pub async fn handle_ensure_member(
             RpcResponse::success(id, meerkat_contracts::MobEnsureMemberResult { outcome })
         }
         Ok(meerkat_mob::runtime::EnsureMemberOutcome::Existed(entry)) => {
-            let outcome = meerkat_contracts::MobEnsureMemberOutcomeWire::Existed(
-                member_list_entry_wire(&mob_id, &entry),
-            );
-            RpcResponse::success(id, meerkat_contracts::MobEnsureMemberResult { outcome })
+            match member_list_entry_wire(&mob_id, &entry) {
+                Ok(wire) => {
+                    let outcome = meerkat_contracts::MobEnsureMemberOutcomeWire::Existed(wire);
+                    RpcResponse::success(id, meerkat_contracts::MobEnsureMemberResult { outcome })
+                }
+                Err(projection_error) => {
+                    RpcResponse::error(id, error::INTERNAL_ERROR, projection_error)
+                }
+            }
         }
         Err(err) => invalid_params(id, err.to_string()),
     }
@@ -2271,14 +2288,21 @@ pub async fn handle_list_members_matching(
         }),
     };
     let entries = handle.list_members_matching(filter).await;
-    let members: Vec<Value> = entries
+    let members: Result<Vec<Value>, String> = entries
         .iter()
-        .filter_map(|entry| serde_json::to_value(member_list_entry_wire(&mob_id, entry)).ok())
+        .map(|entry| {
+            let wire = member_list_entry_wire(&mob_id, entry)?;
+            serde_json::to_value(wire)
+                .map_err(|error| format!("failed to serialize mob member list entry: {error}"))
+        })
         .collect();
-    RpcResponse::success(
-        id,
-        meerkat_contracts::MobListMembersMatchingResult { members },
-    )
+    match members {
+        Ok(members) => RpcResponse::success(
+            id,
+            meerkat_contracts::MobListMembersMatchingResult { members },
+        ),
+        Err(projection_error) => RpcResponse::error(id, error::INTERNAL_ERROR, projection_error),
+    }
 }
 
 #[cfg(test)]

@@ -246,6 +246,21 @@ where
     T: AgentToolDispatcher + ?Sized + 'static,
     S: AgentSessionStore + ?Sized + 'static,
 {
+    /// Best-effort intra-loop session checkpoint.
+    ///
+    /// This is deliberately NOT the authoritative persistence path: the
+    /// `PersistentSessionService` re-persists the full session with
+    /// `?`-propagation after each turn (`persist_full_session_or_discard_live`),
+    /// and that is the path callers rely on for durability. This in-loop save
+    /// is a redundant convenience for the keep-alive checkpointer / store and
+    /// must therefore stay non-terminal: a failure here is logged, not
+    /// propagated, because the authoritative persistence boundary owns the
+    /// durable outcome.
+    ///
+    /// Consistent with that contract, [`RunResult`](crate::types::RunResult)
+    /// exposes no persistence-success field — the run result never claims a
+    /// persistence outcome, so a best-effort miss here cannot launder into a
+    /// false success.
     async fn save_session_best_effort(&mut self) {
         self.sync_system_context_state_to_session();
         if let Some(ref checkpointer) = self.checkpointer {
@@ -1169,6 +1184,12 @@ where
         self.save_session_best_effort().await;
         self.emit_extraction_failed_event(&extraction_error, event_tx.as_ref())
             .await;
+        // `ExtractionFailed` IS the terminal observability event for a failed
+        // extraction. Mark the run-completed event as already emitted so the
+        // outer run loop does not additionally publish a success-shaped
+        // `RunCompleted` (which carries `terminal_cause_kind: None` and would
+        // launder the failed run as a clean completion to late observers).
+        self.run_completed_event_emitted = true;
         Ok(result)
     }
 
@@ -2585,6 +2606,27 @@ where
                         if let Some(output_schema) = self.config.output_schema.clone()
                             && !self.turn_in_extraction_flow()?
                         {
+                            // Compile schema and capture warnings BEFORE emitting
+                            // any success-shaped boundary event. Schema compile is
+                            // a fallible extraction-setup step; if it fails the run
+                            // must terminalize as an extraction failure, so we must
+                            // not advertise `TurnCompleted`/`RunCompleted(success)`
+                            // ahead of an outcome that can still fail (row #194).
+                            let compiled = match self.client.compile_schema(&output_schema) {
+                                Ok(compiled) => compiled,
+                                Err(error) => {
+                                    return self
+                                        .complete_extraction_failed(
+                                            &run_id,
+                                            turn_count,
+                                            tool_call_count,
+                                            error.to_string(),
+                                            &event_tx,
+                                        )
+                                        .await;
+                                }
+                            };
+
                             emit_event!(AgentEvent::TurnCompleted { stop_reason, usage });
 
                             // The main agentic turn has committed. Extraction
@@ -2615,23 +2657,6 @@ where
                                 .await;
                             self.run_completed_event_emitted = true;
 
-                            // Compile schema and capture warnings. Once the
-                            // main run is complete, schema setup failure is an
-                            // extraction failure, not a run failure.
-                            let compiled = match self.client.compile_schema(&output_schema) {
-                                Ok(compiled) => compiled,
-                                Err(error) => {
-                                    return self
-                                        .complete_extraction_failed(
-                                            &run_id,
-                                            turn_count,
-                                            tool_call_count,
-                                            error.to_string(),
-                                            &event_tx,
-                                        )
-                                        .await;
-                                }
-                            };
                             self.extraction_state
                                 .set_schema_warnings(compiled.warnings.clone());
 
@@ -7805,6 +7830,40 @@ mod tests {
         }
     }
 
+    /// Row #194: a client that completes the main agentic turn normally but
+    /// whose `compile_schema` fails, so structured-output extraction setup
+    /// cannot proceed.
+    struct CompileSchemaFailingClient;
+
+    #[async_trait]
+    impl AgentLlmClient for CompileSchemaFailingClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            Ok(text_response("main answer"))
+        }
+
+        fn compile_schema(
+            &self,
+            _output_schema: &crate::types::OutputSchema,
+        ) -> Result<crate::schema::CompiledSchema, crate::schema::SchemaError> {
+            Err(crate::schema::SchemaError::InvalidRoot)
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
     fn text_response(text: &str) -> super::LlmStreamResult {
         super::LlmStreamResult::new(
             vec![AssistantBlock::Text {
@@ -8313,6 +8372,68 @@ mod tests {
         assert!(
             !saw_run_failed,
             "extraction must not trip agentic max_turns after RunCompleted"
+        );
+    }
+
+    /// Row #194: when a structured-output run's `compile_schema` fails, the
+    /// success-shaped boundary events (`TurnCompleted` / `RunCompleted`) must
+    /// NOT be emitted before the extraction-failed terminal. Schema compile is
+    /// a fallible extraction-setup step that runs before any success event.
+    #[tokio::test]
+    async fn compile_schema_failure_emits_no_run_completed_before_terminal() {
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": { "type": "string" }
+            },
+            "required": ["answer"]
+        }))
+        .unwrap();
+
+        let client = Arc::new(CompileSchemaFailingClient);
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .output_schema(schema)
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        let result = agent
+            .run_with_events("prompt".to_string().into(), tx)
+            .await
+            .expect(
+                "compile_schema failure terminalizes as an extraction failure, not a run error",
+            );
+
+        // The run terminalizes as an extraction failure (not a success).
+        assert!(
+            result.extraction_error.is_some(),
+            "compile_schema failure must surface as an extraction error"
+        );
+        assert!(result.structured_output.is_none());
+
+        let mut saw_run_completed = false;
+        let mut saw_turn_completed = false;
+        let mut saw_extraction_failed = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::event::AgentEvent::RunCompleted { .. } => saw_run_completed = true,
+                crate::event::AgentEvent::TurnCompleted { .. } => saw_turn_completed = true,
+                crate::event::AgentEvent::ExtractionFailed { .. } => saw_extraction_failed = true,
+                _ => {}
+            }
+        }
+
+        assert!(
+            !saw_run_completed,
+            "RunCompleted(success) must not precede the extraction-failed terminal"
+        );
+        assert!(
+            !saw_turn_completed,
+            "TurnCompleted must not be emitted before the fallible schema compile resolves"
+        );
+        assert!(
+            saw_extraction_failed,
+            "compile_schema failure must emit ExtractionFailed"
         );
     }
 

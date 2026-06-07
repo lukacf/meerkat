@@ -6349,6 +6349,7 @@ mod tests {
     ///     without progress" at the same time, and
     ///   - "a recovery nudge is inflight" while not waiting on the provider at
     ///     all (e.g. an inflight bit left set after the turn went idle).
+    ///
     /// The enum cannot represent either: every state answers
     /// `awaiting_after_commit` and `acknowledged_without_progress` mutually
     /// exclusively, and `nudge_inflight` is only ever true on a state that is

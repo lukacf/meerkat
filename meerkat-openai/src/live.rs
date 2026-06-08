@@ -886,7 +886,12 @@ impl Default for OpenAiRealtimePolicy {
             voice: Voice::from(OPENAI_REALTIME_DEFAULT_VOICE.to_string()),
             input_language: resolve_realtime_input_language(None),
             output_language_instruction: resolve_realtime_output_language_instruction(None),
-            transcription_model: OPENAI_REALTIME_DEFAULT_TRANSCRIPTION_MODEL.to_string(),
+            // Identity-free default: the canonical realtime model's
+            // catalog-owned transcription companion. Re-resolved against the
+            // real identity by `OpenAiRealtimeSession::set_current_identity`.
+            transcription_model: openai_canonical_realtime_transcription_companion()
+                .unwrap_or_default()
+                .to_string(),
         }
     }
 }
@@ -1007,28 +1012,37 @@ fn openai_audio_response_config(voice: &Voice) -> ResponseConfig {
     }
 }
 
-/// Default input transcription model for the OpenAI realtime adapter when
-/// the active realtime model has no model-specific transcription companion.
-const OPENAI_REALTIME_DEFAULT_TRANSCRIPTION_MODEL: &str = "gpt-4o-mini-transcribe";
-
 /// Resolve the input audio transcription model for a realtime session,
 /// keyed off the active realtime model identity.
 ///
 /// #149: previously a process-env ladder collapsing onto a bare literal at
-/// the `session.update` build site. The transcription model is a
-/// provider-owned operational fact that follows the realtime model, so it
-/// resolves from the typed model identity here. A future realtime model
-/// keys its own transcription companion through this match instead of an
-/// inline literal scattered across wire builders.
-fn openai_realtime_transcription_model_for(_identity: &meerkat_core::SessionLlmIdentity) -> String {
-    // gpt-realtime-2 (and the current gpt-realtime family) pair with the
-    // mini transcription model for input ASR. The `_identity` parameter is
-    // the model-keyed resolution seam: a future realtime model with a
-    // different transcription companion branches on `_identity.model` here,
-    // never via an inline literal at a `session.update` build site. Today
-    // every OpenAI realtime model shares the one companion, so the resolver
-    // returns the shared default.
-    OPENAI_REALTIME_DEFAULT_TRANSCRIPTION_MODEL.to_string()
+/// the `session.update` build site. The transcription model is a per-model
+/// operational fact owned by the catalog row
+/// (`ModelCapabilities::transcription_companion_model`), so it resolves from
+/// the typed model identity here rather than from an inline literal scattered
+/// across wire builders. A future realtime model with a different
+/// transcription companion changes only its catalog row, not this seam.
+///
+/// Falls closed for an uncatalogued model (or a model with no companion)
+/// onto the canonical realtime model's catalog companion rather than
+/// synthesizing a literal from a model-name prefix.
+fn openai_realtime_transcription_model_for(identity: &meerkat_core::SessionLlmIdentity) -> String {
+    meerkat_core::model_profile::capabilities::capabilities_for(identity.provider, &identity.model)
+        .and_then(|caps| caps.transcription_companion_model)
+        .or_else(openai_canonical_realtime_transcription_companion)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// The canonical realtime model's catalog transcription companion, used by the
+/// identity-free policy default and as the fall-closed companion when a model
+/// has no row of its own.
+fn openai_canonical_realtime_transcription_companion() -> Option<&'static str> {
+    meerkat_core::model_profile::capabilities::capabilities_for(
+        Provider::OpenAI,
+        OPENAI_CANONICAL_REALTIME_MODEL,
+    )
+    .and_then(|caps| caps.transcription_companion_model)
 }
 
 fn openai_realtime_tools(visible_tools: &[ToolDef]) -> Vec<Tool> {
@@ -1360,25 +1374,35 @@ fn trace_openai_realtime_lifecycle(message: impl AsRef<str>) {
 /// that advertisement model-owned rather than a hand-written literal.
 const OPENAI_CANONICAL_REALTIME_MODEL: &str = "gpt-realtime-2";
 
-/// #68: project the realtime capability set from the typed model profile
-/// keyed by the session's [`SessionLlmIdentity`].
+/// #68: project the realtime capability set from the typed model capability
+/// row keyed by the session's [`SessionLlmIdentity`].
 ///
 /// Capabilities follow model identity: the per-model catalog row
-/// (`ModelProfile`) owns whether the model accepts inline video
-/// (`inline_video`), which drives the `Video` input/output kinds and
-/// `video_supported`. Text + audio and the realtime transport facts
-/// (turning modes, interrupt, transcript, tool lifecycle, the 24 kHz PCM
-/// audio formats) are invariants of the OpenAI realtime transport itself
-/// and are not catalog-row-varying today.
+/// (`ModelCapabilities`) owns the realtime transport facts — the turning
+/// modes (`realtime_supports_provider_managed_turns` /
+/// `realtime_supports_explicit_commit`), interrupt
+/// (`realtime_interrupt_supported`), transcript
+/// (`realtime_transcript_supported`), and whether the model accepts inline
+/// video (`inline_video`, which drives the `Video` input/output kinds and
+/// `video_supported`). The core->wire mapping (core-side bools ->
+/// `RealtimeTurningMode` list, interrupt/transcript flags) lives HERE, at the
+/// provider boundary, because `meerkat-core` does not depend on
+/// `meerkat-contracts`. Text + audio and the 24 kHz PCM audio formats are
+/// invariants of the OpenAI realtime transport itself.
 ///
 /// When the provider/model pair has no catalog row the projection falls
-/// back to the transport-invariant base (no video) rather than synthesizing
-/// capability facts from a model-name prefix.
+/// closed to the transport-invariant base (no video, no turning modes, no
+/// interrupt/transcript) rather than synthesizing capability facts from a
+/// model-name prefix.
 fn openai_realtime_capabilities_for(
     identity: &meerkat_core::SessionLlmIdentity,
 ) -> RealtimeCapabilities {
-    let video = meerkat_core::model_profile::profile_for(identity.provider, &identity.model)
-        .is_some_and(|profile| profile.inline_video);
+    let caps = meerkat_core::model_profile::capabilities::capabilities_for(
+        identity.provider,
+        &identity.model,
+    );
+
+    let video = caps.is_some_and(|c| c.inline_video);
 
     let mut input_kinds = vec![RealtimeInputKind::Text, RealtimeInputKind::Audio];
     let mut output_kinds = vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio];
@@ -1387,15 +1411,24 @@ fn openai_realtime_capabilities_for(
         output_kinds.push(RealtimeOutputKind::Video);
     }
 
+    // Map the core-side turning-mode bools into the wire `RealtimeTurningMode`
+    // vocabulary. This is the boundary translation: core never names
+    // `RealtimeTurningMode` (no contracts dep), so the catalog stores the
+    // facts as bools and the provider reconstitutes the typed list here.
+    let mut turning_modes = Vec::new();
+    if caps.is_some_and(|c| c.realtime_supports_provider_managed_turns) {
+        turning_modes.push(RealtimeTurningMode::ProviderManaged);
+    }
+    if caps.is_some_and(|c| c.realtime_supports_explicit_commit) {
+        turning_modes.push(RealtimeTurningMode::ExplicitCommit);
+    }
+
     RealtimeCapabilities {
         input_kinds,
         output_kinds,
-        turning_modes: vec![
-            RealtimeTurningMode::ProviderManaged,
-            RealtimeTurningMode::ExplicitCommit,
-        ],
-        interrupt_supported: true,
-        transcript_supported: true,
+        turning_modes,
+        interrupt_supported: caps.is_some_and(|c| c.realtime_interrupt_supported),
+        transcript_supported: caps.is_some_and(|c| c.realtime_transcript_supported),
         tool_lifecycle_events_supported: true,
         video_supported: video,
         audio_input_format: Some(RealtimeAudioFormat::pcm(
@@ -4868,18 +4901,45 @@ mod tests {
         assert!(caps.output_kinds.contains(&RealtimeOutputKind::Audio));
 
         // Video tracks the catalog row's `inline_video`. The capability is
-        // projected from the typed profile, so it must agree with the
+        // projected from the typed capability row, so it must agree with the
         // catalog rather than a hand-written literal.
-        let profile = meerkat_core::model_profile::profile_for(realtime.provider, &realtime.model)
-            .expect("gpt-realtime-2 must be catalogued");
+        let row = meerkat_core::model_profile::capabilities::capabilities_for(
+            realtime.provider,
+            &realtime.model,
+        )
+        .expect("gpt-realtime-2 must be catalogued");
         assert_eq!(
-            caps.video_supported, profile.inline_video,
+            caps.video_supported, row.inline_video,
             "video_supported must project the catalog inline_video, not a static literal"
         );
         assert_eq!(
             caps.input_kinds.contains(&RealtimeInputKind::Video),
-            profile.inline_video,
+            row.inline_video,
             "Video input kind must follow the catalog inline_video flag"
+        );
+
+        // #68: the realtime transport facts (turning modes, interrupt,
+        // transcript) project from the catalog row's core-side bools, not from
+        // hand-written literals at the provider boundary.
+        assert_eq!(
+            caps.turning_modes
+                .contains(&RealtimeTurningMode::ProviderManaged),
+            row.realtime_supports_provider_managed_turns,
+            "ProviderManaged turning mode must follow the catalog bool"
+        );
+        assert_eq!(
+            caps.turning_modes
+                .contains(&RealtimeTurningMode::ExplicitCommit),
+            row.realtime_supports_explicit_commit,
+            "ExplicitCommit turning mode must follow the catalog bool"
+        );
+        assert_eq!(
+            caps.interrupt_supported, row.realtime_interrupt_supported,
+            "interrupt_supported must follow the catalog bool"
+        );
+        assert_eq!(
+            caps.transcript_supported, row.realtime_transcript_supported,
+            "transcript_supported must follow the catalog bool"
         );
 
         // The factory-level (identity-free) advertisement projects the same
@@ -4944,9 +5004,16 @@ mod tests {
     #[test]
     fn realtime_transcription_model_is_model_keyed() {
         let realtime = sample_realtime_identity();
+        // Catalog-sourced: gpt-realtime-2's `transcription_companion_model`.
+        let companion = meerkat_core::model_profile::capabilities::capabilities_for(
+            realtime.provider,
+            &realtime.model,
+        )
+        .and_then(|caps| caps.transcription_companion_model)
+        .expect("gpt-realtime-2 must declare a transcription companion model");
         assert_eq!(
             openai_realtime_transcription_model_for(&realtime),
-            OPENAI_REALTIME_DEFAULT_TRANSCRIPTION_MODEL
+            companion
         );
     }
 

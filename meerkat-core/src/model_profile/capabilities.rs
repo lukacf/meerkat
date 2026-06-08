@@ -36,6 +36,11 @@ use crate::model_profile::catalog::ModelTier;
 /// - context/output (`context_window`, `max_output_tokens`, plus `_beta` variants)
 /// - modalities (`vision`, `image_tool_results`, `inline_video`, `realtime`,
 ///   `image_generation`)
+/// - realtime transport capability facts (`realtime_supports_provider_managed_turns`,
+///   `realtime_supports_explicit_commit`, `realtime_interrupt_supported`,
+///   `realtime_transcript_supported`, `transcription_companion_model`) — what
+///   the model's realtime bidirectional transport can actually do; only
+///   meaningful when `realtime` is true
 /// - sampling (`supports_temperature`, `supports_top_p`, `supports_top_k`)
 /// - reasoning (`thinking`, `supports_reasoning`, `effort_levels`)
 /// - features (`supports_web_search`, `supports_inference_geo`,
@@ -76,6 +81,26 @@ pub struct ModelCapabilities {
     /// Whether the model supports a realtime bidirectional streaming transport
     /// (e.g. OpenAI `*-realtime*` endpoints, Gemini `*-live*` endpoints).
     pub realtime: bool,
+    /// Realtime transport: whether the model's realtime session supports
+    /// provider-managed turn detection (server VAD). Only meaningful when
+    /// `realtime` is true; `false` on non-realtime rows.
+    pub realtime_supports_provider_managed_turns: bool,
+    /// Realtime transport: whether the model's realtime session supports
+    /// explicit (client-driven) turn commit. Only meaningful when `realtime`
+    /// is true; `false` on non-realtime rows.
+    pub realtime_supports_explicit_commit: bool,
+    /// Realtime transport: whether the model's realtime session supports
+    /// interrupting (barge-in) the model's in-flight response. Only meaningful
+    /// when `realtime` is true; `false` on non-realtime rows.
+    pub realtime_interrupt_supported: bool,
+    /// Realtime transport: whether the model's realtime session emits spoken
+    /// input/output transcripts. Only meaningful when `realtime` is true;
+    /// `false` on non-realtime rows.
+    pub realtime_transcript_supported: bool,
+    /// Realtime transport: the companion model id used for input audio
+    /// transcription (ASR) on this model's realtime session. `None` on
+    /// non-realtime rows (and on realtime rows with no companion).
+    pub transcription_companion_model: Option<&'static str>,
     /// Whether this specific model can drive Meerkat image generation.
     ///
     /// This is a per-MODEL fact owned by the catalog row, not a per-provider

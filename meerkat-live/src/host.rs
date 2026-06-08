@@ -830,8 +830,6 @@ pub enum LiveProjectionError {
     /// Carries the code so callers route on the typed class, not the message.
     #[error("session error [{code}]: {message}")]
     Session { code: &'static str, message: String },
-    #[error("projection sink internal error: {0}")]
-    Internal(String),
 }
 
 impl LiveProjectionError {
@@ -860,7 +858,16 @@ impl LiveProjectionError {
             SessionError::PersistenceDisabled | SessionError::CompactionDisabled => {
                 Self::CapabilityDisabled { code, message }
             }
-            _ => Self::Session { code, message },
+            // Exhaustive over the remaining `SessionError` kinds (no `_`
+            // catch-all): a store error, an agent-level failure, or a
+            // structured `FailedWithData` all carry the stable typed `code`
+            // into `Session { code, message }` rather than a prose-only
+            // `Internal(to_string())`. Spelling these out means a future
+            // `SessionError` variant forces a compile error here instead of
+            // silently folding into a catch-all.
+            SessionError::Store(_)
+            | SessionError::Agent(_)
+            | SessionError::FailedWithData { .. } => Self::Session { code, message },
         }
     }
 }
@@ -1481,7 +1488,16 @@ impl LiveToolDispatchError {
             SessionError::PersistenceDisabled | SessionError::CompactionDisabled => {
                 Self::CapabilityDisabled { code, message }
             }
-            _ => Self::Session { code, message },
+            // Exhaustive over the remaining `SessionError` kinds (no `_`
+            // catch-all): a store error, an agent-level failure, or a
+            // structured `FailedWithData` all carry the stable typed `code`
+            // into `Session { code, message }` rather than a prose-only
+            // `Internal(to_string())`. Spelling these out means a future
+            // `SessionError` variant forces a compile error here instead of
+            // silently folding into a catch-all.
+            SessionError::Store(_)
+            | SessionError::Agent(_)
+            | SessionError::FailedWithData { .. } => Self::Session { code, message },
         }
     }
 }

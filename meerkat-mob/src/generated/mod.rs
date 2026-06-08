@@ -5,6 +5,7 @@
 // `pub mod` index, and `xtask audit-generated-headers` forbids the
 // codegen marker here to keep that honest.
 
+pub mod catalog_input;
 pub mod protocol_mob_destroying_session_ingress;
 pub mod protocol_mob_external_peer_reciprocal_trust;
 pub mod protocol_mob_external_peer_trust_repair;

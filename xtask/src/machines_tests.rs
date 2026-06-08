@@ -518,6 +518,7 @@ fn schema_input_rows_classify_same_left_only_and_different_surfaces() {
     ));
 }
 
+#[cfg(feature = "machine-authority")]
 fn peer_terminal_projection_mismatches(source: &str) -> Vec<String> {
     let parsed = syn::parse_file(source).expect("parse projection fixture");
     let mut visitor = PeerResponseTerminalProjectionVisitor::new("meerkat-runtime/src/accept.rs");
@@ -525,6 +526,7 @@ fn peer_terminal_projection_mismatches(source: &str) -> Vec<String> {
     visitor.mismatches
 }
 
+#[cfg(feature = "machine-authority")]
 #[test]
 fn peer_terminal_projection_flags_construction_string_and_call_via_ast() {
     let flagged = peer_terminal_projection_mismatches(
@@ -543,6 +545,7 @@ fn peer_terminal_projection_flags_construction_string_and_call_via_ast() {
     );
 }
 
+#[cfg(feature = "machine-authority")]
 #[test]
 fn peer_terminal_projection_ignores_names_in_comments_and_unrelated_calls() {
     // The banned names appear only in a comment and in an unrelated call/path;
@@ -562,6 +565,7 @@ fn peer_terminal_projection_ignores_names_in_comments_and_unrelated_calls() {
     );
 }
 
+#[cfg(feature = "machine-authority")]
 fn peer_terminal_shell_mismatches(source: &str) -> Vec<String> {
     let parsed = syn::parse_file(source).expect("parse shell fixture");
     let mut visitor = PeerResponseTerminalShellVisitor::new("meerkat-rpc/src/session_runtime.rs");
@@ -569,6 +573,7 @@ fn peer_terminal_shell_mismatches(source: &str) -> Vec<String> {
     visitor.mismatches
 }
 
+#[cfg(feature = "machine-authority")]
 #[test]
 fn peer_terminal_shell_flags_pub_identity_bus_and_peer_name_projection() {
     let flagged = peer_terminal_shell_mismatches(
@@ -589,6 +594,7 @@ fn peer_terminal_shell_flags_pub_identity_bus_and_peer_name_projection() {
     );
 }
 
+#[cfg(feature = "machine-authority")]
 #[test]
 fn peer_terminal_shell_allows_enum_variant_carrier_and_typed_facts() {
     // An enum-variant `peer_name: PeerName` carrier is an allowed shape, and a

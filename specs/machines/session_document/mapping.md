@@ -238,6 +238,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyLiveSessionAuthorityDurableRevision`
   - anchors: `session_document_authority`
   - scenarios: `session_first_turn_restore_recover`, `session_system_context_snapshot_restore`, `session_realtime_transcript_materialize_and_restore`, `session_durable_config_authorize_restore`
+- `RecoverSessionFromStoreAuthorized`
+  - anchors: `session_document_authority`
+  - scenarios: `session_first_turn_restore_recover`, `session_durable_config_authorize_restore`
+- `RecoverSessionFromStoreUnrecoverable`
+  - anchors: `session_document_authority`
+  - scenarios: `session_first_turn_restore_recover`
+- `ApplyPendingToolResults`
+  - anchors: `session_document_authority`
+  - scenarios: `session_initial_inputs_stage`, `session_system_context_apply_discard`
+- `TranscriptEditFork`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`
+- `TranscriptEditRewrite`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`
 
 ### Effects
 - `SessionFirstTurnPhaseResolved`
@@ -309,6 +324,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LiveSessionAuthorityClassified`
   - anchors: `session_document_authority`
   - scenarios: `session_first_turn_pending_consume`, `session_initial_inputs_stage`, `session_first_turn_restore_recover`, `session_system_context_append_resolve`, `session_system_context_apply_discard`, `session_system_context_snapshot_restore`, `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`, `session_durable_config_authorize_restore`
+- `SessionStoreRecoverySourceResolved`
+  - anchors: `session_document_authority`
+  - scenarios: `session_initial_inputs_stage`, `session_first_turn_restore_recover`, `session_system_context_apply_discard`, `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`
+- `SessionToolResultsApplied`
+  - anchors: `session_document_authority`
+  - scenarios: `session_initial_inputs_stage`
+- `TranscriptRewriteCommitted`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`
 
 ### Invariants
 - `(none)`

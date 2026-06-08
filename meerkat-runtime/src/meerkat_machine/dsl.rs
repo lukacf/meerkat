@@ -2363,6 +2363,25 @@ pub enum LiveChannelDegradationReason {
     Other,
 }
 
+/// #51: provider-neutral role for a staged realtime transcript item, carried on
+/// the `RealtimeTranscriptAppended` staging effect. Mirror of
+/// `meerkat_core::realtime_transcript::RealtimeTranscriptRole`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeTranscriptRoleKind {
+    #[default]
+    User,
+    Assistant,
+}
+
+/// #51: output lane for a staged realtime transcript item (display text vs
+/// spoken transcript). Mirror of `meerkat_core::realtime_transcript::TranscriptLane`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeTranscriptLaneKind {
+    #[default]
+    Display,
+    Spoken,
+}
+
 /// Typed mirror of the public runtime lifecycle projection. The shell passes
 /// only the observed variant; generated transitions own the semantic facts
 /// derived from it.

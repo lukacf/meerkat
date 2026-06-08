@@ -4666,6 +4666,7 @@ fn generate_session_document_authority(machine: &MachineSchema) -> Result<String
         "RealtimeTranscriptLaneKind",
         "RealtimeTranscriptStopReasonKind",
         "RealtimeTranscriptMaterializeDecision",
+        "TranscriptEditKind",
         "SessionSystemPromptSource",
         "ObservedSessionTailKind",
         "PendingContinuationDisposition",
@@ -4755,6 +4756,7 @@ fn session_document_default_variant(name: &str) -> Result<&'static str> {
         "RealtimeTranscriptLaneKind" => Ok("Display"),
         "RealtimeTranscriptStopReasonKind" => Ok("Other"),
         "RealtimeTranscriptMaterializeDecision" => Ok("Wait"),
+        "TranscriptEditKind" => Ok("Fork"),
         "SessionSystemPromptSource" => Ok("DirectMutation"),
         "ObservedSessionTailKind" => Ok("Empty"),
         "PendingContinuationDisposition" => Ok("NoPendingBoundary"),
@@ -5669,6 +5671,7 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "RealtimeTranscriptLaneKind",
         "RealtimeTranscriptStopReasonKind",
         "RealtimeTranscriptMaterializeDecision",
+        "TranscriptEditKind",
         "SessionSystemPromptSource",
         "ObservedSessionTailKind",
         "PendingContinuationDisposition",
@@ -5715,6 +5718,8 @@ const STA_LOCAL_ENUMS: &[&str] = &[
     "StartTurnDisposition",
     "StartTurnPublicTerminal",
     "StartTurnDispatchAuthorization",
+    "RuntimeKeepAliveRequest",
+    "TurnHandlingMode",
 ];
 const STA_EXTERNAL_ENUM: &str = "PendingContinuationDisposition";
 const STA_EXTERNAL_ENUM_PATH: &str =
@@ -5785,6 +5790,8 @@ fn sta_default_variant(name: &str) -> Result<&'static str> {
         "StartTurnDisposition" => Ok("RunContentTurn"),
         "StartTurnPublicTerminal" => Ok("NoPendingBoundary"),
         "StartTurnDispatchAuthorization" => Ok("Authorized"),
+        "RuntimeKeepAliveRequest" => Ok("Preserve"),
+        "TurnHandlingMode" => Ok("Queue"),
         other => bail!("unknown SessionTurnAdmissionMachine enum `{other}`"),
     }
 }

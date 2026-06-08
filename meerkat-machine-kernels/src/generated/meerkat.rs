@@ -5136,6 +5136,110 @@ impl std::fmt::Display for PreRunPhase {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RealtimeTranscriptLaneKind {
+    #[default]
+    #[serde(rename = "Display")]
+    Display,
+    #[serde(rename = "Spoken")]
+    Spoken,
+}
+impl RealtimeTranscriptLaneKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Display => "Display",
+            Self::Spoken => "Spoken",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RealtimeTranscriptLaneKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Display" => Ok(Self::Display),
+            "Spoken" => Ok(Self::Spoken),
+            other => Err(format!(
+                "invalid RealtimeTranscriptLaneKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RealtimeTranscriptLaneKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RealtimeTranscriptLaneKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RealtimeTranscriptRoleKind {
+    #[default]
+    #[serde(rename = "User")]
+    User,
+    #[serde(rename = "Assistant")]
+    Assistant,
+}
+impl RealtimeTranscriptRoleKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::User => "User",
+            Self::Assistant => "Assistant",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RealtimeTranscriptRoleKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "User" => Ok(Self::User),
+            "Assistant" => Ok(Self::Assistant),
+            other => Err(format!(
+                "invalid RealtimeTranscriptRoleKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RealtimeTranscriptRoleKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RealtimeTranscriptRoleKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RecoveredInputKind {
     #[default]
     #[serde(rename = "Prompt")]
@@ -13297,6 +13401,15 @@ pub mod effects {
         pub degradation_detail: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RealtimeTranscriptAppended {
+        pub channel_id: String,
+        pub item_id: String,
+        pub text: String,
+        pub role: RealtimeTranscriptRoleKind,
+        pub lane: RealtimeTranscriptLaneKind,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnqueueClassifiedEntry {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerIngressClassified {
@@ -13584,6 +13697,7 @@ pub enum Effect {
     MobEventStreamTerminalResolved(effects::MobEventStreamTerminalResolved),
     MobEventStreamCloseResolved(effects::MobEventStreamCloseResolved),
     LiveChannelStatusResolved(effects::LiveChannelStatusResolved),
+    RealtimeTranscriptAppended(effects::RealtimeTranscriptAppended),
     EnqueueClassifiedEntry(effects::EnqueueClassifiedEntry),
     PeerIngressClassified(effects::PeerIngressClassified),
     PeerResponseReplyClassified(effects::PeerResponseReplyClassified),
@@ -13737,6 +13851,7 @@ pub enum EffectKind {
     MobEventStreamTerminalResolved,
     MobEventStreamCloseResolved,
     LiveChannelStatusResolved,
+    RealtimeTranscriptAppended,
     EnqueueClassifiedEntry,
     PeerIngressClassified,
     PeerResponseReplyClassified,

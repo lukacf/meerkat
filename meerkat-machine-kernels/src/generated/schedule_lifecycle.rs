@@ -273,6 +273,34 @@ impl std::fmt::Display for ScheduleLifecycleState {
         f.write_str(self.as_str())
     }
 }
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct TargetBindingId(pub String);
+impl From<String> for TargetBindingId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for TargetBindingId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for TargetBindingId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -291,14 +319,11 @@ pub struct State {
     pub phase: Phase,
     pub schedule_id: ScheduleId,
     pub revision: u64,
-    pub trigger_key: String,
-    pub target_binding_key: String,
+    pub trigger_key: TargetBindingId,
+    pub target_binding_key: TargetBindingId,
     pub misfire_policy: MisfirePolicy,
-    pub misfire_policy_key: String,
     pub overlap_policy: OverlapPolicy,
-    pub overlap_policy_key: String,
     pub missing_target_policy: MissingTargetPolicy,
-    pub missing_target_policy_key: String,
     pub planning_horizon_days: u64,
     pub planning_horizon_occurrences: u64,
     pub planning_cursor_utc_ms: Option<u64>,
@@ -317,27 +342,21 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Create {
         pub schedule_id: ScheduleId,
-        pub trigger_key: String,
-        pub target_binding_key: String,
+        pub trigger_key: TargetBindingId,
+        pub target_binding_key: TargetBindingId,
         pub misfire_policy: MisfirePolicy,
-        pub misfire_policy_key: String,
         pub overlap_policy: OverlapPolicy,
-        pub overlap_policy_key: String,
         pub missing_target_policy: MissingTargetPolicy,
-        pub missing_target_policy_key: String,
         pub planning_horizon_days: Option<u64>,
         pub planning_horizon_occurrences: Option<u64>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Revise {
-        pub trigger_key: String,
-        pub target_binding_key: String,
+        pub trigger_key: TargetBindingId,
+        pub target_binding_key: TargetBindingId,
         pub misfire_policy: MisfirePolicy,
-        pub misfire_policy_key: String,
         pub overlap_policy: OverlapPolicy,
-        pub overlap_policy_key: String,
         pub missing_target_policy: MissingTargetPolicy,
-        pub missing_target_policy_key: String,
         pub planning_horizon_days: u64,
         pub planning_horizon_occurrences: u64,
         pub at_utc_ms: u64,
@@ -354,7 +373,7 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SyncTargetSnapshot {
-        pub target_binding_key: String,
+        pub target_binding_key: TargetBindingId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Pause {
@@ -541,14 +560,11 @@ pub fn initial_state() -> State {
         phase: Phase::Active,
         schedule_id: ScheduleId("schedule-0".to_string()),
         revision: 1,
-        trigger_key: "trigger-0".to_string(),
-        target_binding_key: "target-0".to_string(),
+        trigger_key: TargetBindingId("trigger-0".to_string()),
+        target_binding_key: TargetBindingId("target-0".to_string()),
         misfire_policy: MisfirePolicy::Skip,
-        misfire_policy_key: "misfire:skip".to_string(),
         overlap_policy: OverlapPolicy::SkipIfRunning,
-        overlap_policy_key: "overlap:skip_if_running".to_string(),
         missing_target_policy: MissingTargetPolicy::MarkMisfired,
-        missing_target_policy_key: "missing_target:mark_misfired".to_string(),
         planning_horizon_days: 30,
         planning_horizon_occurrences: 64,
         planning_cursor_utc_ms: None,

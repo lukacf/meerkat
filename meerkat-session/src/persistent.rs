@@ -54,7 +54,7 @@ use meerkat_core::service::{
 };
 use meerkat_core::session_document::{
     LiveSessionAuthorityKind, LiveSessionAuthorityReason, SessionDocumentEffect,
-    SessionDocumentMachineAuthority,
+    SessionDocumentKey, SessionDocumentMachineAuthority, TranscriptEditKind,
 };
 use meerkat_core::types::{RunResult, SessionId, ToolResult};
 use meerkat_core::{DeferredFirstTurnPhase, SessionDeferredTurnState, SessionLifecycleTerminal};
@@ -287,26 +287,6 @@ fn control_error_into_session_error(err: SessionControlError) -> SessionError {
         SessionControlError::Session(session_err) => session_err,
         other => SessionError::Unsupported(other.to_string()),
     }
-}
-
-/// Whether a SessionStore projection may stand in as the authoritative read
-/// source when the runtime snapshot is absent and the session was not
-/// snapshot-quarantined (see `runtime_projection_fallback_quarantined`).
-///
-/// INVARIANT-1 FOLLOW-UP: this recovery-source eligibility is currently a shell
-/// predicate — a persisted projection is treated as substantive (and thus a
-/// valid authority) when it carries canonical session metadata or build state.
-/// It is deliberately LOAD-BEARING: it is what lets a store-only session (one
-/// created/persisted without ever running through the runtime, so it has no
-/// runtime snapshot) load at all, distinct from the quarantine path which only
-/// covers a rejected+cleared snapshot. The canonical home for this decision is
-/// a `SessionDocumentMachine` recovery-source projection (the planned LUC-524
-/// fold of session-document facts into a canonical machine in `meerkat-core`);
-/// that machine is not yet built, so the decision lives here for now. Do NOT
-/// remove this predicate before that machine exists — store-only sessions would
-/// otherwise silently fail to load.
-fn runtime_backed_store_projection_can_recover_authority(session: &Session) -> bool {
-    session.session_metadata().is_some() || session.build_state().is_some()
 }
 
 fn is_durable_session_sync_unsupported(err: &SessionError) -> bool {
@@ -1705,15 +1685,30 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             .load(id)
                             .await
                             .map_err(|e| SessionError::Store(Box::new(e)))?;
+                        // Recovery-source eligibility (whether a store-only
+                        // projection may stand in as authoritative when the
+                        // runtime snapshot is absent) is owned by the canonical
+                        // SessionDocumentMachine. The shell extracts only the two
+                        // pure presence observations and mirrors the verdict; the
+                        // separate quarantine fallback OR-term remains shell-side
+                        // (a distinct runtime fact). Fails closed: a machine drive
+                        // error makes the projection ineligible (the quarantine
+                        // fallback cannot rescue an unresolved verdict).
                         match store_projection {
-                            Some(session)
-                                if runtime_backed_store_projection_can_recover_authority(
-                                    &session,
-                                ) || self.runtime_projection_fallback_quarantined(id).await =>
-                            {
-                                Some(session)
+                            Some(session) => {
+                                match self.store_projection_recovery_source_resolved(id, &session) {
+                                    Ok(true) => Some(session),
+                                    Ok(false)
+                                        if self
+                                            .runtime_projection_fallback_quarantined(id)
+                                            .await =>
+                                    {
+                                        Some(session)
+                                    }
+                                    Ok(false) | Err(_) => None,
+                                }
                             }
-                            _ => None,
+                            None => None,
                         }
                     }
                 }
@@ -2279,6 +2274,45 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }
     }
 
+    /// Whether a SessionStore projection may stand in as the authoritative read
+    /// source when the runtime snapshot is absent. The shell extracts only the
+    /// two pure presence observations (canonical metadata / build state) and
+    /// mirrors the canonical SessionDocumentMachine recovery-source verdict; it
+    /// decides nothing. Fails closed if the machine emits no verdict.
+    fn store_projection_recovery_source_resolved(
+        &self,
+        id: &SessionId,
+        session: &Session,
+    ) -> Result<bool, SessionError> {
+        let mut authority = SessionDocumentMachineAuthority::new();
+        let effects = authority
+            .recover_session_from_store(
+                SessionDocumentKey::new(id.to_string()),
+                session.session_metadata().is_some(),
+                session.build_state().is_some(),
+            )
+            .map_err(|err| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "generated session document authority rejected store-projection recovery \
+                     source resolution for session {id}: {err}"
+                )))
+            })?;
+        effects
+            .iter()
+            .find_map(|effect| match effect {
+                SessionDocumentEffect::SessionStoreRecoverySourceResolved { recoverable } => {
+                    Some(*recoverable)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "generated session document authority returned no store-projection recovery \
+                     source verdict for session {id}"
+                )))
+            })
+    }
+
     async fn discard_stale_live_session_if_needed(
         &self,
         id: &SessionId,
@@ -2583,6 +2617,56 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
         let _ = self.discard_stale_live_session_if_needed(id).await?;
         Ok(guard)
+    }
+
+    /// Drive the canonical SessionDocumentMachine transcript-edit authorization.
+    /// The four transcript-edit entry points know their directive statically
+    /// (fork callers pass `Fork`, rewrite callers pass `Rewrite`); the machine
+    /// owns the commit verdict and echoes the authorized directive so the shell
+    /// routes to the correct persist handler without re-deriving it. Fails closed:
+    /// a machine drive error, an absent verdict, an echoed-directive mismatch, or
+    /// `success == false` blocks the commit.
+    fn authorize_transcript_edit(
+        &self,
+        id: &SessionId,
+        directive: TranscriptEditKind,
+    ) -> Result<(), SessionError> {
+        let mut authority = SessionDocumentMachineAuthority::new();
+        let effects = authority
+            .transcript_edit(SessionDocumentKey::new(id.to_string()), directive)
+            .map_err(|err| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "generated session document authority rejected transcript edit for \
+                     session {id}: {err}"
+                )))
+            })?;
+        let (kind, success) = effects
+            .iter()
+            .find_map(|effect| match effect {
+                SessionDocumentEffect::TranscriptRewriteCommitted { kind, success } => {
+                    Some((*kind, *success))
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "generated session document authority returned no transcript edit commit \
+                     verdict for session {id}"
+                )))
+            })?;
+        if kind != directive {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "generated session document authority echoed transcript edit directive {kind:?} \
+                 for requested {directive:?} on session {id}"
+            ))));
+        }
+        if !success {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "generated session document authority rejected transcript edit commit for \
+                 session {id}"
+            ))));
+        }
+        Ok(())
     }
 
     async fn persist_transcript_fork(
@@ -5605,6 +5689,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceTranscriptEditExt
         }
 
         let forked = source.fork_at(req.message_index);
+        self.authorize_transcript_edit(id, TranscriptEditKind::Fork)?;
         self.persist_transcript_fork(id.clone(), forked).await
     }
 
@@ -5618,6 +5703,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceTranscriptEditExt
         let forked = source
             .fork_replacing(req.message_index, req.replacement)
             .map_err(meerkat_core::TranscriptEditError::into_session_error)?;
+        self.authorize_transcript_edit(id, TranscriptEditKind::Fork)?;
         self.persist_transcript_fork(id.clone(), forked).await
     }
 
@@ -5642,6 +5728,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceTranscriptEditExt
                 req.expected_parent_revision,
             )
             .map_err(meerkat_core::TranscriptEditError::into_session_error)?;
+        self.authorize_transcript_edit(id, TranscriptEditKind::Rewrite)?;
         let saved = self.persist_transcript_rewrite(source, &commit).await?;
         Ok(SessionTranscriptRewriteResult {
             session_id: saved.id().clone(),
@@ -5690,6 +5777,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceTranscriptEditExt
                 req.expected_parent_revision,
             )
             .map_err(meerkat_core::TranscriptEditError::into_session_error)?;
+        self.authorize_transcript_edit(id, TranscriptEditKind::Rewrite)?;
         let saved = self.persist_transcript_rewrite(source, &commit).await?;
         Ok(SessionTranscriptRewriteResult {
             session_id: saved.id().clone(),

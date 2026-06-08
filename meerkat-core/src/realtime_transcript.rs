@@ -144,6 +144,35 @@ pub enum RealtimeTranscriptEvent {
     AssistantTurnInterrupted { response_id: String },
 }
 
+/// Typed staged-transcript append seam (#51).
+///
+/// Provider adapters that stage a transcript item before it is committed —
+/// e.g. the OpenAI realtime adapter's explicit-commit text-input path, which
+/// accepts a user text item via `send_input` while the turn is open and holds
+/// it until `commit_turn_with_modality` — lower the staged turn into this typed
+/// input rather than an adapter-local `Vec`. Lowering the staged turn makes it a
+/// machine-owned fact (the generated `MeerkatMachine` emits
+/// `RealtimeTranscriptAppended` when this is applied), so a committed turn proves
+/// a real staged turn and the staged set survives a crash/cancel between stage
+/// and commit instead of living only in adapter memory.
+///
+/// `item_id` is the opaque synthetic provider item id (the same id sent to the
+/// provider via `ConversationItemCreate` and reused on
+/// [`RealtimeTranscriptEvent`]); `text` is the staged content; `role` and `lane`
+/// are the typed classifiers the generated transcript authority dispatches on.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppendRealtimeTranscript {
+    /// Opaque synthetic provider item id for the staged turn.
+    pub item_id: String,
+    /// Staged transcript content.
+    pub text: String,
+    /// Provider-neutral role of the staged item.
+    pub role: RealtimeTranscriptRole,
+    /// Output lane the staged content belongs to.
+    pub lane: TranscriptLane,
+}
+
 /// Canonical message materialized by applying a realtime transcript event.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RealtimeTranscriptMaterializedMessage {

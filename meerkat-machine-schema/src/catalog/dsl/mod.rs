@@ -285,6 +285,8 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
             // newtype (`SessionId(pub String)`) so the `Map` key satisfies
             // `Ord + Hash + Clone`; the model domain is the string identity.
             NamedTypeBinding::string("SessionId"),
+            // WAVE G1 fold (#86): machine-owned transcript edit directive.
+            NamedTypeBinding::string_enum("TranscriptEditKind", &["Fork", "Rewrite"]),
             NamedTypeBinding::string_enum(
                 "SessionFirstTurnPhase",
                 &["Inactive", "Pending", "Consumed"],
@@ -406,6 +408,12 @@ pub fn session_turn_admission_schema_metadata() -> MachineSchemaMetadata {
                 "TurnAdmissionPhase",
                 &["Idle", "Admitted", "Running", "Completing", "ShuttingDown"],
             ),
+            // WAVE G1 folds (#345 keep-alive tri-state, #338 live-interrupt handling mode).
+            NamedTypeBinding::string_enum(
+                "RuntimeKeepAliveRequest",
+                &["Enable", "Disable", "Preserve"],
+            ),
+            NamedTypeBinding::string_enum("TurnHandlingMode", &["Queue", "Steer"]),
             NamedTypeBinding::string_enum(
                 "StartTurnExecutionKind",
                 &["ContentTurn", "ResumePending"],
@@ -480,6 +488,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string("AgentRuntimeId"),
             NamedTypeBinding::string("RuntimeEpochId"),
             NamedTypeBinding::string("CommsRuntimeId"),
+            // WAVE G1 fold (#51): machine-owned staged realtime transcript item
+            // role/lane classifiers carried on the RealtimeTranscriptAppended effect.
+            NamedTypeBinding::string_enum("RealtimeTranscriptRoleKind", &["User", "Assistant"]),
+            NamedTypeBinding::string_enum("RealtimeTranscriptLaneKind", &["Display", "Spoken"]),
             NamedTypeBinding::string("AuthBindingRef"),
             NamedTypeBinding::string_enum(
                 meerkat_core::turn_execution_authority::ContentShape::SCHEMA_TYPE_NAME,
@@ -2375,6 +2387,8 @@ pub fn schedule_lifecycle_schema_metadata() -> MachineSchemaMetadata {
         // receives `ConfirmOccurrencesSuperseded { occurrence_id }` from
         // the occurrence authority; both sides must agree on the atom.
         vec![
+            // WAVE G1 fold (#250): opaque typed target-binding identity newtype.
+            NamedTypeBinding::string("TargetBindingId"),
             NamedTypeBinding::string_enum("MisfirePolicy", &["Skip", "CatchUpWithin"]),
             NamedTypeBinding::string_enum("MissingTargetPolicy", &["MarkMisfired", "Skip"]),
             NamedTypeBinding::string("OccurrenceId"),

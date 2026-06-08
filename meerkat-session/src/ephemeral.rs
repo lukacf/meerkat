@@ -22,6 +22,9 @@ use meerkat_core::service::{
     SessionUsage, SessionView, StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
     TurnToolOverlay,
 };
+use meerkat_core::session_document::{
+    SessionDocumentEffect, SessionDocumentKey, SessionDocumentMachineAuthority,
+};
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{ContentInput, RunResult, SessionId, ToolResult, Usage};
 use meerkat_core::{
@@ -46,8 +49,8 @@ use tokio::sync::{OwnedSemaphorePermit, RwLock, mpsc, oneshot, watch};
 use crate::staged_registry::{MaterializationStatus, StagedSessionRegistry};
 pub use crate::turn_admission::ObservedSessionTailKind;
 use crate::turn_admission::{
-    StartTurnDispatchAuthorization, StartTurnDisposition, StartTurnPublicTerminal,
-    TurnAdmissionPhase, TurnAdmissionProjection, TurnAdmissionSlot,
+    RuntimeKeepAliveRequest, StartTurnDispatchAuthorization, StartTurnDisposition,
+    StartTurnPublicTerminal, TurnAdmissionPhase, TurnAdmissionProjection, TurnAdmissionSlot,
 };
 
 /// Capacity for the internal agent event channel.
@@ -3536,10 +3539,17 @@ async fn session_task<A: SessionAgent>(
                     .as_ref()
                     .and_then(|metadata| metadata.flow_tool_overlay.clone())
                     .or(runtime.flow_tool_overlay);
-                let keep_alive_policy_present = metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.keep_alive)
-                    .is_some();
+                // #345: forward the typed keep-alive request to the machine
+                // rather than collapsing presence into a bool. This ephemeral
+                // admission path only observes presence/absence of a resolved
+                // KeepAlivePolicy (a present policy enables keep-alive, an absent
+                // one preserves the existing setting); the explicit Disable
+                // request flows from the inbound `Option<bool>` override path.
+                let keep_alive_request =
+                    match metadata.as_ref().and_then(|metadata| metadata.keep_alive) {
+                        Some(_) => RuntimeKeepAliveRequest::Enable,
+                        None => RuntimeKeepAliveRequest::Preserve,
+                    };
                 let pre_turn_context_appends = runtime.pre_turn_context_appends;
                 let typed_turn_appends = runtime.typed_turn_appends;
                 let prompt = if typed_turn_appends.is_empty() {
@@ -3587,6 +3597,10 @@ async fn session_task<A: SessionAgent>(
                     .iter()
                     .flat_map(|pending| pending.results.clone())
                     .collect::<Vec<_>>();
+                // Consumed tool-results count; the SAME value feeds the staging
+                // disposition and the apply authorization so the two agree.
+                let pending_tool_results_count =
+                    u64::try_from(flattened_tool_results.len()).unwrap_or(u64::MAX);
 
                 let resolution = {
                     let mut slot = lock_turn_admission(&control.turn_admission);
@@ -3594,7 +3608,7 @@ async fn session_task<A: SessionAgent>(
                         execution_kind,
                         &prompt,
                         agent.observed_session_tail(),
-                        u64::try_from(flattened_tool_results.len()).unwrap_or(u64::MAX),
+                        pending_tool_results_count,
                     )
                 };
                 let resolution = match resolution {
@@ -3657,7 +3671,7 @@ async fn session_task<A: SessionAgent>(
 
                 let persist_runtime_keep_alive = {
                     let mut slot = lock_turn_admission(&control.turn_admission);
-                    slot.resolve_runtime_keep_alive(keep_alive_policy_present)
+                    slot.resolve_runtime_keep_alive(keep_alive_request)
                 };
                 let persist_runtime_keep_alive = match persist_runtime_keep_alive {
                     Ok(persist_runtime_keep_alive) => persist_runtime_keep_alive,
@@ -3720,7 +3734,60 @@ async fn session_task<A: SessionAgent>(
                     let _ = result_tx.send(Err(error));
                     continue;
                 }
-                if let Err(error) = agent.apply_pending_tool_results(flattened_tool_results) {
+                // The canonical SessionDocumentMachine owns the authorized
+                // apply count; the agent's apply becomes the gated effect
+                // handler. Fail closed: a machine drive error, an absent verdict,
+                // or a count that disagrees with the staged disposition takes the
+                // same pre-run failure path as a rejected apply (and never
+                // commits the pending results).
+                let apply_authorization = {
+                    let mut authority = SessionDocumentMachineAuthority::new();
+                    authority
+                        .apply_pending_tool_results(
+                            SessionDocumentKey::new(agent.session_id().to_string()),
+                            pending_tool_results_count,
+                        )
+                        .map_err(|err| {
+                            meerkat_core::error::AgentError::InternalError(format!(
+                                "generated session document authority rejected pending \
+                                 tool-results apply: {err}"
+                            ))
+                        })
+                        .and_then(|effects| {
+                            effects
+                                .iter()
+                                .find_map(|effect| match effect {
+                                    SessionDocumentEffect::SessionToolResultsApplied {
+                                        applied_count,
+                                        ..
+                                    } => Some(*applied_count),
+                                    _ => None,
+                                })
+                                .ok_or_else(|| {
+                                    meerkat_core::error::AgentError::InternalError(
+                                        "generated session document authority returned no \
+                                         pending tool-results apply verdict"
+                                            .to_string(),
+                                    )
+                                })
+                        })
+                        .and_then(|applied_count| {
+                            if applied_count == pending_tool_results_count {
+                                Ok(())
+                            } else {
+                                Err(meerkat_core::error::AgentError::InternalError(format!(
+                                    "generated session document authority authorized \
+                                     {applied_count} pending tool-results but the staged \
+                                     disposition consumed {pending_tool_results_count}"
+                                )))
+                            }
+                        })
+                };
+                let apply_result = match apply_authorization {
+                    Ok(()) => agent.apply_pending_tool_results(flattened_tool_results),
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = apply_result {
                     let _ = agent.set_flow_tool_overlay(None);
                     restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
                     if restore_staged_capacity_on_pre_run_failure

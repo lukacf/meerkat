@@ -79,6 +79,60 @@ impl std::fmt::Display for PendingContinuationDisposition {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RuntimeKeepAliveRequest {
+    #[default]
+    #[serde(rename = "Enable")]
+    Enable,
+    #[serde(rename = "Disable")]
+    Disable,
+    #[serde(rename = "Preserve")]
+    Preserve,
+}
+impl RuntimeKeepAliveRequest {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Enable => "Enable",
+            Self::Disable => "Disable",
+            Self::Preserve => "Preserve",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeKeepAliveRequest {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Enable" => Ok(Self::Enable),
+            "Disable" => Ok(Self::Disable),
+            "Preserve" => Ok(Self::Preserve),
+            other => Err(format!("invalid RuntimeKeepAliveRequest value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeKeepAliveRequest {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeKeepAliveRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum StartTurnDispatchAuthorization {
     #[default]
     #[serde(rename = "Authorized")]
@@ -329,6 +383,56 @@ impl std::fmt::Display for TurnAdmissionPhase {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum TurnHandlingMode {
+    #[default]
+    #[serde(rename = "Queue")]
+    Queue,
+    #[serde(rename = "Steer")]
+    Steer,
+}
+impl TurnHandlingMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queue => "Queue",
+            Self::Steer => "Steer",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for TurnHandlingMode {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Queue" => Ok(Self::Queue),
+            "Steer" => Ok(Self::Steer),
+            other => Err(format!("invalid TurnHandlingMode value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for TurnHandlingMode {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for TurnHandlingMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -384,7 +488,11 @@ pub mod inputs {
     pub struct ResolveLastStartTurnPublicTerminal {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveRuntimeKeepAlive {
-        pub keep_alive_policy_present: bool,
+        pub keep_alive_request: RuntimeKeepAliveRequest,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveLiveInterruptRequired {
+        pub handling_mode: TurnHandlingMode,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveStartTurnDisposition {
@@ -410,6 +518,7 @@ pub enum Input {
     AuthorizeCancelAfterBoundary(inputs::AuthorizeCancelAfterBoundary),
     ResolveLastStartTurnPublicTerminal(inputs::ResolveLastStartTurnPublicTerminal),
     ResolveRuntimeKeepAlive(inputs::ResolveRuntimeKeepAlive),
+    ResolveLiveInterruptRequired(inputs::ResolveLiveInterruptRequired),
     ResolveStartTurnDisposition(inputs::ResolveStartTurnDisposition),
 }
 impl Input {
@@ -429,6 +538,7 @@ impl Input {
                 InputKind::ResolveLastStartTurnPublicTerminal
             }
             Self::ResolveRuntimeKeepAlive(_) => InputKind::ResolveRuntimeKeepAlive,
+            Self::ResolveLiveInterruptRequired(_) => InputKind::ResolveLiveInterruptRequired,
             Self::ResolveStartTurnDisposition(_) => InputKind::ResolveStartTurnDisposition,
         }
     }
@@ -447,6 +557,7 @@ pub enum InputKind {
     AuthorizeCancelAfterBoundary,
     ResolveLastStartTurnPublicTerminal,
     ResolveRuntimeKeepAlive,
+    ResolveLiveInterruptRequired,
     ResolveStartTurnDisposition,
 }
 
@@ -482,6 +593,10 @@ pub mod effects {
     pub struct RuntimeKeepAliveResolved {
         pub persist_keep_alive: bool,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveInterruptRequired {
+        pub required: bool,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -493,6 +608,7 @@ pub enum Effect {
     StartTurnDispositionResolved(effects::StartTurnDispositionResolved),
     StartTurnPublicTerminalResolved(effects::StartTurnPublicTerminalResolved),
     RuntimeKeepAliveResolved(effects::RuntimeKeepAliveResolved),
+    LiveInterruptRequired(effects::LiveInterruptRequired),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -503,6 +619,7 @@ pub enum EffectKind {
     StartTurnDispositionResolved,
     StartTurnPublicTerminalResolved,
     RuntimeKeepAliveResolved,
+    LiveInterruptRequired,
 }
 
 #[allow(non_camel_case_types)]
@@ -539,7 +656,10 @@ pub enum TransitionId {
     ResolveDispositionDirectPending,
     ResolveDispositionDirectNoPending,
     ResolveRuntimeKeepAliveEnable,
+    ResolveRuntimeKeepAliveDisable,
     ResolveRuntimeKeepAlivePreserve,
+    ResolveLiveInterruptRequiredSteer,
+    ResolveLiveInterruptRequiredQueue,
     ResolveLastStartTurnPublicTerminalNoPendingIdle,
     ResolveLastStartTurnPublicTerminalNoPendingAdmitted,
     ResolveLastStartTurnPublicTerminalNoPendingRunning,

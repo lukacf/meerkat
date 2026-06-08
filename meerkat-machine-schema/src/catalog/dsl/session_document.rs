@@ -317,6 +317,33 @@ pub enum LiveSessionAuthorityReason {
     StoredTranscriptRevisionDiverged,
 }
 
+// ---------------------------------------------------------------------------
+// Transcript-edit region (folded from the meerkat-session persistent.rs
+// `persist_transcript_fork` / `persist_transcript_rewrite` commit paths under
+// LUC-524). The persist paths commit a fork or rewrite DIRECTLY via
+// `save_normalized_session` / `commit_session_transcript_rewrite_snapshot`
+// with no machine authorization gate. This region authorizes the commit: the
+// shell carries the typed `TranscriptEditKind` directive (fork vs rewrite) and
+// drives the transition BEFORE persisting; `save_normalized_session` /
+// `commit_session_transcript_rewrite_snapshot` become the effect HANDLER, not
+// the decision-maker.
+// ---------------------------------------------------------------------------
+
+/// Typed class of an authorized transcript-edit commit.
+///
+/// `Fork` covers `fork_session` / `fork_session_replace` (the
+/// `persist_transcript_fork` path); `Rewrite` covers
+/// `rewrite_session_transcript` / `restore_session_transcript_revision` (the
+/// `persist_transcript_rewrite` path). The producer constructs the typed
+/// directive at the seam — no shell code reclassifies an edit kind from a
+/// string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TranscriptEditKind {
+    #[default]
+    Fork,
+    Rewrite,
+}
+
 machine! {
     machine SessionDocumentMachine {
         version: 1,
@@ -573,6 +600,57 @@ machine! {
                 runtime_system_context_diverged: bool,
                 stored_is_archived: bool,
             },
+
+            // -----------------------------------------------------------
+            // Recovery-source-projection region (KEYSTONE, folded from the
+            // meerkat-session persistent.rs shell predicate
+            // `runtime_backed_store_projection_can_recover_authority`). When
+            // the runtime snapshot is absent, the session-store projection may
+            // stand in as the authoritative read source iff it carries
+            // canonical session metadata or build state. The shell extracts the
+            // two typed presence observations and drives this input; THIS
+            // machine — not a handwritten shell `||` reducer — owns the
+            // recoverable verdict. The shell mirrors `recoverable` onto its load
+            // fallback (recoverable -> the projection is authoritative; not
+            // recoverable -> fall through to the quarantine check / `None`).
+            // Fails closed.
+            // -----------------------------------------------------------
+            RecoverSessionFromStore {
+                session_id: SessionId,
+                has_metadata: bool,
+                has_build_state: bool,
+            },
+
+            // -----------------------------------------------------------
+            // Apply-pending-tool-results region (folded from the
+            // meerkat-session ephemeral.rs `agent.apply_pending_tool_results`
+            // call site). Staging already consults generated authority for the
+            // accepted COUNT (StageSessionToolResults); the APPLY of those
+            // staged results into the live transcript was still a direct
+            // mutation outside the turn machine. This input authorizes the
+            // apply: the shell carries the consumed result count and drives the
+            // transition; `agent.apply_pending_tool_results` becomes the effect
+            // HANDLER driven by the emitted `applied_count`, not the decision
+            // point.
+            // -----------------------------------------------------------
+            ApplyPendingToolResults {
+                session_id: SessionId,
+                result_count: u64,
+            },
+
+            // -----------------------------------------------------------
+            // Transcript-edit region. The shell carries the typed
+            // `TranscriptEditKind` directive (fork vs rewrite) and drives this
+            // input BEFORE persisting; THIS machine authorizes the commit and
+            // emits `TranscriptRewriteCommitted`. The persist paths
+            // (`save_normalized_session` for fork,
+            // `commit_session_transcript_rewrite_snapshot` for rewrite) become
+            // the effect HANDLER driven by the verdict, not the decision-maker.
+            // -----------------------------------------------------------
+            TranscriptEdit {
+                session_id: SessionId,
+                fork_or_rewrite_directive: Enum<TranscriptEditKind>,
+            },
         }
 
         effect SessionDocumentEffect {
@@ -680,6 +758,36 @@ machine! {
             LiveSessionAuthorityClassified {
                 authority: Enum<LiveSessionAuthorityKind>,
                 reason: Enum<LiveSessionAuthorityReason>,
+            },
+
+            // Recovery-source-projection verdict (KEYSTONE). The shell mirrors
+            // `recoverable`: true -> the store projection is an authoritative
+            // read source; false -> it is not (fall through to quarantine /
+            // `None`). This is a total verdict over the two typed presence
+            // observations, so it is emitted on both branches (never a
+            // no-match) — a store-only session that legitimately carries no
+            // metadata or build state resolves to `recoverable: false`
+            // explicitly rather than silently failing to load.
+            SessionStoreRecoverySourceResolved { recoverable: bool },
+
+            // Apply-pending-tool-results verdict. The shell mirrors
+            // `applied_count` onto its `agent.apply_pending_tool_results` call:
+            // it applies exactly the machine-authorized count. The verdict is
+            // vacuous-accept (it mirrors the consumed count), matching the
+            // staging-side `SessionToolResultsStageResolved` shape.
+            SessionToolResultsApplied {
+                session_id: SessionId,
+                applied_count: u64,
+            },
+
+            // Transcript-edit commit verdict. The shell mirrors `success` onto
+            // its persist path: it commits the fork/rewrite only after the
+            // machine authorizes it. The typed `kind` echoes the authorized
+            // directive so the shell routes to the correct persist handler
+            // without re-deriving it.
+            TranscriptRewriteCommitted {
+                kind: Enum<TranscriptEditKind>,
+                success: bool,
             },
         }
 
@@ -853,6 +961,17 @@ machine! {
             model_override_present && provider_override_present == false
         }
 
+        // Recovery-source-projection predicate (port of the retired shell
+        // `runtime_backed_store_projection_can_recover_authority`): a persisted
+        // store projection is a valid authoritative read source iff it carries
+        // canonical session metadata OR build state.
+        helper store_projection_can_recover_authority(
+            has_metadata: bool,
+            has_build_state: bool
+        ) -> bool {
+            has_metadata || has_build_state
+        }
+
         disposition SessionFirstTurnPhaseResolved => local seam NoOwnerRealization,
         disposition SessionFirstTurnOverridesResolved => local seam NoOwnerRealization,
         disposition SessionInitialPromptStageResolved => local seam NoOwnerRealization,
@@ -876,6 +995,9 @@ machine! {
         disposition SessionResumeOverridesAuthorized => local seam NoOwnerRealization,
         disposition SessionResumeOverridesRejected => local seam NoOwnerRealization,
         disposition LiveSessionAuthorityClassified => local seam NoOwnerRealization,
+        disposition SessionStoreRecoverySourceResolved => local seam NoOwnerRealization,
+        disposition SessionToolResultsApplied => local seam NoOwnerRealization,
+        disposition TranscriptRewriteCommitted => local seam NoOwnerRealization,
 
         // ---------------------------------------------------------------
         // MarkSessionInitialTurnPending
@@ -2759,6 +2881,108 @@ machine! {
             emit LiveSessionAuthorityClassified {
                 authority: LiveSessionAuthorityKind::DurableAuthoritative,
                 reason: LiveSessionAuthorityReason::StoredTranscriptRevisionDiverged
+            }
+        }
+
+        // ===============================================================
+        // Recovery-source-projection region (KEYSTONE). Both transitions read
+        // the two typed presence observations and resolve the recoverable
+        // verdict via `store_projection_can_recover_authority`. The verdict is
+        // total over the boolean cube, so it is emitted on both branches; the
+        // shell mirrors `recoverable` onto its load fallback and decides
+        // nothing. Fails closed.
+        // ===============================================================
+
+        transition RecoverSessionFromStoreAuthorized {
+            on input RecoverSessionFromStore {
+                session_id,
+                has_metadata,
+                has_build_state
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && store_projection_can_recover_authority(has_metadata, has_build_state)
+            }
+            update {}
+            to Ready
+            emit SessionStoreRecoverySourceResolved { recoverable: true }
+        }
+
+        transition RecoverSessionFromStoreUnrecoverable {
+            on input RecoverSessionFromStore {
+                session_id,
+                has_metadata,
+                has_build_state
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && store_projection_can_recover_authority(has_metadata, has_build_state) == false
+            }
+            update {}
+            to Ready
+            emit SessionStoreRecoverySourceResolved { recoverable: false }
+        }
+
+        // ===============================================================
+        // Apply-pending-tool-results region. The transition reads the consumed
+        // result count and authorizes the apply, emitting `applied_count` equal
+        // to `result_count` (vacuous-accept, mirroring the staging-side
+        // StageSessionToolResults shape). The shell mirrors `applied_count`
+        // onto its `agent.apply_pending_tool_results` call and decides nothing.
+        // ===============================================================
+
+        transition ApplyPendingToolResults {
+            on input ApplyPendingToolResults {
+                session_id,
+                result_count
+            }
+            guard { self.lifecycle_phase == Phase::Ready }
+            update {}
+            to Ready
+            emit SessionToolResultsApplied {
+                session_id: session_id,
+                applied_count: result_count
+            }
+        }
+
+        // ===============================================================
+        // Transcript-edit region. Each transition reads the typed
+        // `TranscriptEditKind` directive and authorizes the commit, echoing the
+        // kind so the shell routes to the correct persist handler. The shell
+        // mirrors `success` onto its persist path and decides nothing.
+        // ===============================================================
+
+        transition TranscriptEditFork {
+            on input TranscriptEdit {
+                session_id,
+                fork_or_rewrite_directive
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && fork_or_rewrite_directive == TranscriptEditKind::Fork
+            }
+            update {}
+            to Ready
+            emit TranscriptRewriteCommitted {
+                kind: TranscriptEditKind::Fork,
+                success: true
+            }
+        }
+
+        transition TranscriptEditRewrite {
+            on input TranscriptEdit {
+                session_id,
+                fork_or_rewrite_directive
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && fork_or_rewrite_directive == TranscriptEditKind::Rewrite
+            }
+            update {}
+            to Ready
+            emit TranscriptRewriteCommitted {
+                kind: TranscriptEditKind::Rewrite,
+                success: true
             }
         }
     }

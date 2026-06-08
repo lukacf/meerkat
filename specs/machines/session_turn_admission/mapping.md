@@ -111,9 +111,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveRuntimeKeepAliveEnable`
   - anchors: `session_turn_admission_authority`
   - scenarios: `turn_admission_runtime_keep_alive`
+- `ResolveRuntimeKeepAliveDisable`
+  - anchors: `session_turn_admission_authority`
+  - scenarios: `turn_admission_runtime_keep_alive`
 - `ResolveRuntimeKeepAlivePreserve`
   - anchors: `session_turn_admission_authority`
   - scenarios: `turn_admission_runtime_keep_alive`
+- `ResolveLiveInterruptRequiredSteer`
+  - anchors: `session_turn_admission_authority`
+  - scenarios: `turn_admission_interrupt_and_shutdown`, `turn_admission_runtime_keep_alive`
+- `ResolveLiveInterruptRequiredQueue`
+  - anchors: `session_turn_admission_authority`
+  - scenarios: `turn_admission_interrupt_and_shutdown`, `turn_admission_runtime_keep_alive`
 - `ResolveLastStartTurnPublicTerminalNoPendingIdle`
   - anchors: `session_turn_admission_authority`
   - scenarios: `turn_admission_start_turn_disposition`
@@ -152,6 +161,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RuntimeKeepAliveResolved`
   - anchors: `session_turn_admission_authority`
   - scenarios: `turn_admission_runtime_keep_alive`
+- `LiveInterruptRequired`
+  - anchors: `session_turn_admission_authority`
+  - scenarios: `turn_admission_interrupt_and_shutdown`, `turn_admission_runtime_keep_alive`
 
 ### Invariants
 - `shutdown_phase_is_not_active`

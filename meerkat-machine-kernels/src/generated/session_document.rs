@@ -1029,6 +1029,56 @@ impl std::fmt::Display for SystemContextSource {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum TranscriptEditKind {
+    #[default]
+    #[serde(rename = "Fork")]
+    Fork,
+    #[serde(rename = "Rewrite")]
+    Rewrite,
+}
+impl TranscriptEditKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fork => "Fork",
+            Self::Rewrite => "Rewrite",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for TranscriptEditKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Fork" => Ok(Self::Fork),
+            "Rewrite" => Ok(Self::Rewrite),
+            other => Err(format!("invalid TranscriptEditKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for TranscriptEditKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for TranscriptEditKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -1239,6 +1289,22 @@ pub mod inputs {
         pub runtime_system_context_diverged: bool,
         pub stored_is_archived: bool,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverSessionFromStore {
+        pub session_id: SessionId,
+        pub has_metadata: bool,
+        pub has_build_state: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ApplyPendingToolResults {
+        pub session_id: SessionId,
+        pub result_count: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct TranscriptEdit {
+        pub session_id: SessionId,
+        pub fork_or_rewrite_directive: TranscriptEditKind,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1272,6 +1338,9 @@ pub enum Input {
     ResolvePendingContinuation(inputs::ResolvePendingContinuation),
     AuthorizeSessionResumeOverrides(inputs::AuthorizeSessionResumeOverrides),
     ClassifyLiveSessionAuthority(inputs::ClassifyLiveSessionAuthority),
+    RecoverSessionFromStore(inputs::RecoverSessionFromStore),
+    ApplyPendingToolResults(inputs::ApplyPendingToolResults),
+    TranscriptEdit(inputs::TranscriptEdit),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -1325,6 +1394,9 @@ impl Input {
             Self::ResolvePendingContinuation(_) => InputKind::ResolvePendingContinuation,
             Self::AuthorizeSessionResumeOverrides(_) => InputKind::AuthorizeSessionResumeOverrides,
             Self::ClassifyLiveSessionAuthority(_) => InputKind::ClassifyLiveSessionAuthority,
+            Self::RecoverSessionFromStore(_) => InputKind::RecoverSessionFromStore,
+            Self::ApplyPendingToolResults(_) => InputKind::ApplyPendingToolResults,
+            Self::TranscriptEdit(_) => InputKind::TranscriptEdit,
         }
     }
 }
@@ -1359,6 +1431,9 @@ pub enum InputKind {
     ResolvePendingContinuation,
     AuthorizeSessionResumeOverrides,
     ClassifyLiveSessionAuthority,
+    RecoverSessionFromStore,
+    ApplyPendingToolResults,
+    TranscriptEdit,
 }
 
 pub mod effects {
@@ -1465,6 +1540,20 @@ pub mod effects {
         pub authority: LiveSessionAuthorityKind,
         pub reason: LiveSessionAuthorityReason,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionStoreRecoverySourceResolved {
+        pub recoverable: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionToolResultsApplied {
+        pub session_id: SessionId,
+        pub applied_count: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct TranscriptRewriteCommitted {
+        pub kind: TranscriptEditKind,
+        pub success: bool,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1496,6 +1585,9 @@ pub enum Effect {
     SessionResumeOverridesAuthorized(effects::SessionResumeOverridesAuthorized),
     SessionResumeOverridesRejected(effects::SessionResumeOverridesRejected),
     LiveSessionAuthorityClassified(effects::LiveSessionAuthorityClassified),
+    SessionStoreRecoverySourceResolved(effects::SessionStoreRecoverySourceResolved),
+    SessionToolResultsApplied(effects::SessionToolResultsApplied),
+    TranscriptRewriteCommitted(effects::TranscriptRewriteCommitted),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -1522,6 +1614,9 @@ pub enum EffectKind {
     SessionResumeOverridesAuthorized,
     SessionResumeOverridesRejected,
     LiveSessionAuthorityClassified,
+    SessionStoreRecoverySourceResolved,
+    SessionToolResultsApplied,
+    TranscriptRewriteCommitted,
 }
 
 #[allow(non_camel_case_types)]
@@ -1599,6 +1694,11 @@ pub enum TransitionId {
     ClassifyLiveSessionAuthorityDurableUncommitted,
     ClassifyLiveSessionAuthorityDurableSystemContext,
     ClassifyLiveSessionAuthorityDurableRevision,
+    RecoverSessionFromStoreAuthorized,
+    RecoverSessionFromStoreUnrecoverable,
+    ApplyPendingToolResults,
+    TranscriptEditFork,
+    TranscriptEditRewrite,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -9,6 +9,7 @@ use meerkat_contracts::{
     RealtimeAudioChunk, RealtimeAudioFormat, RealtimeCapabilities, RealtimeInputChunk,
     RealtimeInputKind, RealtimeOutputKind, RealtimeTurningMode,
 };
+use meerkat_core::realtime_transcript::{AppendRealtimeTranscript, TranscriptLane};
 use meerkat_core::{
     Message, PendingSystemContextAppend, Provider, RealtimeTranscriptEvent, RealtimeTranscriptRole,
     ToolDef, ToolResult,
@@ -1430,18 +1431,21 @@ pub struct OpenAiRealtimeSession {
     has_staged_audio: bool,
     /// R4-1 (P1) / #51: text items staged via `send_input` while
     /// `turning_mode == ExplicitCommit`, awaiting `commit_turn_with_modality`.
-    /// Each entry is a typed [`StagedTextTurn`] (`item_id` + `text`) — the
-    /// synthetic item id sent to the provider via `ConversationItemCreate`
-    /// plus the staged user text — rather than an untyped positional tuple.
-    /// On commit the canonical user-turn synthesis path drains this and emits
-    /// the same `TurnStarted` / `InputTranscriptPartial` /
-    /// `InputTranscriptFinalForItem` / `TurnCommitted` sequence the
-    /// `ProviderManaged` text-input path emits inline — so explicit-commit
-    /// text turns enter canonical history, just like `ProviderManaged` text
-    /// turns. The only semantic difference between the two modes for text
-    /// input is when `response.create` fires (caller-driven vs server-driven),
-    /// not whether the user turn is recorded.
-    pending_explicit_commit_text_items: Vec<StagedTextTurn>,
+    /// Each entry is the machine-owned typed staging seam
+    /// [`AppendRealtimeTranscript`] (`item_id` + `text` + typed `role`/`lane`
+    /// classifiers) — the same fact the generated `MeerkatMachine` consumes to
+    /// emit `RealtimeTranscriptAppended`. The synthetic item id is the one sent
+    /// to the provider via `ConversationItemCreate`; `role`/`lane` are
+    /// [`RealtimeTranscriptRole::User`] / [`TranscriptLane::Display`] for an
+    /// explicit-commit text turn. On commit the canonical user-turn synthesis
+    /// path drains this and emits the same `TurnStarted` /
+    /// `InputTranscriptPartial` / `InputTranscriptFinalForItem` /
+    /// `TurnCommitted` sequence the `ProviderManaged` text-input path emits
+    /// inline — so explicit-commit text turns enter canonical history, just
+    /// like `ProviderManaged` text turns. The only semantic difference between
+    /// the two modes for text input is when `response.create` fires
+    /// (caller-driven vs server-driven), not whether the user turn is recorded.
+    pending_explicit_commit_text_items: Vec<AppendRealtimeTranscript>,
     pending_events: VecDeque<RealtimeSessionEvent>,
     pending_mcp_calls: BTreeMap<String, PendingMcpCall>,
     item_previous: BTreeMap<String, Option<String>>,
@@ -1519,25 +1523,6 @@ struct PendingMcpCall {
     call_id: Option<String>,
     tool_name: Option<String>,
     final_arguments: Option<String>,
-}
-
-/// R4-1/#51: a single text turn staged via `send_input` while
-/// `turning_mode == ExplicitCommit`, awaiting `commit_turn_with_modality`.
-///
-/// Pre-#51 this was an untyped positional `(String, String)` tuple whose
-/// fields carried no names and could be transposed at any push/drain site.
-/// The named struct makes the staged turn a typed fact: `item_id` is the
-/// synthetic id sent to the provider via `ConversationItemCreate` and reused
-/// on the typed transcript seam, and `text` is the staged user text. On
-/// commit the canonical user-turn synthesis path drains these and emits the
-/// same `TurnStarted` / `InputTranscriptPartial` /
-/// `InputTranscriptFinalForItem` / `TurnCommitted` sequence the
-/// `ProviderManaged` text-input path emits inline, so explicit-commit text
-/// turns enter canonical history identically.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StagedTextTurn {
-    item_id: String,
-    text: String,
 }
 
 impl OpenAiRealtimeSession {
@@ -2732,18 +2717,25 @@ impl RealtimeSession for OpenAiRealtimeSession {
                             RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 };
                     }
                     RealtimeTurningMode::ExplicitCommit => {
-                        // R4-1 (P1): defer canonical-history synthesis until
-                        // commit. The provider has accepted the
+                        // R4-1 (P1) / #51: defer canonical-history synthesis
+                        // until commit. The provider has accepted the
                         // `conversation.item.create` for this text item and
                         // assigned it `synthetic_item_id`; on
                         // `commit_turn_with_modality` we drain the staged
                         // queue and emit the same observation sequence
                         // ProviderManaged emits inline so explicit-commit
-                        // text turns reach canonical history.
+                        // text turns reach canonical history. The staged turn
+                        // is held as the machine-owned typed staging seam
+                        // `AppendRealtimeTranscript` (the exact fact the
+                        // generated `MeerkatMachine` consumes to emit
+                        // `RealtimeTranscriptAppended`): an explicit-commit
+                        // text turn is a `User` item on the `Display` lane.
                         self.pending_explicit_commit_text_items
-                            .push(StagedTextTurn {
+                            .push(AppendRealtimeTranscript {
                                 item_id: synthetic_item_id,
                                 text,
+                                role: RealtimeTranscriptRole::User,
+                                lane: TranscriptLane::Display,
                             });
                     }
                 }
@@ -5838,14 +5830,16 @@ mod tests {
         );
     }
 
-    /// Gate (#51): explicit-commit text turns are staged as the typed
-    /// [`StagedTextTurn`] fact (named `item_id` + `text`) rather than an
-    /// untyped positional `(String, String)` tuple, and the staged item id is
-    /// exactly the synthetic id sent to the provider — so a committed turn
-    /// proves a real staged turn keyed by the same identity that reaches
-    /// canonical history. (The broader machine-owned relocation of this
-    /// staging buffer is tracked separately; see the crate-level note on the
-    /// `pending_explicit_commit_text_items` field.)
+    /// Gate (#51): explicit-commit text turns are staged as the machine-owned
+    /// typed [`AppendRealtimeTranscript`] seam (named `item_id` + `text` +
+    /// typed `role`/`lane` classifiers) — the exact fact the generated
+    /// `MeerkatMachine` consumes to emit `RealtimeTranscriptAppended` — and the
+    /// staged item id is exactly the synthetic id sent to the provider, so a
+    /// committed turn proves a real staged turn keyed by the same identity that
+    /// reaches canonical history. (The cross-crate emit/consume of the staged
+    /// fact into machine-owned realtime-transcript state — so it survives a
+    /// crash/cancel between stage and commit — is wired runtime-side; see the
+    /// crate-level note on the `pending_explicit_commit_text_items` field.)
     #[tokio::test]
     async fn explicit_commit_text_turns_stage_as_typed_fact_keyed_by_provider_item_id() {
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -5866,8 +5860,10 @@ mod tests {
                 .expect("text chunk should stage");
         }
 
-        // Each staged turn is a typed `StagedTextTurn`, preserved in order,
-        // carrying the staged text under a named field.
+        // Each staged turn is the machine-owned typed `AppendRealtimeTranscript`
+        // seam, preserved in order, carrying the staged text under a named
+        // field with the typed `User`/`Display` classifiers the generated
+        // transcript authority dispatches on.
         assert_eq!(session.pending_explicit_commit_text_items.len(), 2);
         assert_eq!(
             session.pending_explicit_commit_text_items[0].text,
@@ -5877,6 +5873,10 @@ mod tests {
             session.pending_explicit_commit_text_items[1].text,
             "second staged turn"
         );
+        for staged in &session.pending_explicit_commit_text_items {
+            assert_eq!(staged.role, RealtimeTranscriptRole::User);
+            assert_eq!(staged.lane, TranscriptLane::Display);
+        }
 
         // The staged item ids are exactly the synthetic ids sent to the
         // provider via `conversation.item.create` — the staging fact is keyed

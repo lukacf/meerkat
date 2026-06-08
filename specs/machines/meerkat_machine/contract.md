@@ -268,22 +268,68 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Inputs
 - `RegisterSession`(session_id: SessionId)
 - `UnregisterSession`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
-- `ResolveRuntimeOpsLifecycleDurability`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
-- `HydrateSessionLlmState`(current_identity: SessionLlmIdentity, current_capability_surface: Option<SessionLlmCapabilitySurface>, current_capability_surface_status: SessionLlmCapabilitySurfaceStatus, current_capability_base_filter: ToolFilter)
 - `ReconfigureSessionLlmIdentity`(previous_identity: SessionLlmIdentity, previous_visibility_state: SessionToolVisibilityState, previous_capability_surface: Option<SessionLlmCapabilitySurface>, previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus, previous_capability_base_filter: ToolFilter, view_image_tool_available: Bool, previous_view_image_visible: Bool, next_view_image_visible: Bool, previous_active_visibility_revision: u64, previous_staged_visibility_revision: u64, target_identity: SessionLlmIdentity, target_capability_surface: SessionLlmCapabilitySurface, next_visibility_state: SessionToolVisibilityState, next_capability_base_filter: ToolFilter, next_active_visibility_revision: u64, tool_visibility_delta: SessionToolVisibilityDelta)
-- `ClearSessionLlmState`
 - `PrepareBindings`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, session_id: SessionId)
 - `SetPeerIngressContext`(keep_alive: Bool)
-- `ResolvePeerIngressReceive`(kind: PeerIngressAdmittedKind, auth_required: Bool, auth_exempt: Bool, trusted: Bool, queued_work_present: Bool, queue_closed: Bool, queue_capacity_available: Bool)
-- `ResolvePeerIngressDequeue`(kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, queued_work_remaining: Bool)
 - `NotifyDrainExited`(reason: DrainExitReason)
-- `InterruptCurrentRun`
-- `ResolveUserInterruptPublicResult`(observation: UserInterruptObservationKind, target_present: Bool, staged_promotion_busy: Bool)
 - `CancelAfterBoundary`(reason: String)
 - `StagePersistentFilter`(filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness>)
 - `PublishCommittedVisibleSet`(active_filter: ToolFilter, staged_filter: ToolFilter, active_requested_deferred_names: Set<String>, staged_requested_deferred_names: Set<String>, active_deferred_authorities: Map<String, ToolVisibilityWitness>, staged_deferred_authorities: Map<String, ToolVisibilityWitness>, active_visibility_revision: u64, staged_visibility_revision: u64)
 - `Recover`
 - `Retire`(session_id: SessionId)
+- `Reset`
+- `StopRuntimeExecutor`(reason: String)
+- `Destroy`(session_id: SessionId)
+- `EnsureSessionWithExecutor`(session_id: SessionId)
+- `SetSilentIntents`(session_id: SessionId, intents: Set<String>)
+- `ContainsSession`(session_id: SessionId)
+- `SessionHasExecutor`(session_id: SessionId)
+- `SessionHasComms`(session_id: SessionId)
+- `OpsLifecycleRegistry`(session_id: SessionId)
+- `InputState`(session_id: SessionId, input_id: InputId)
+- `ListActiveInputs`(session_id: SessionId)
+- `Abort`(session_id: SessionId)
+- `AbortAll`
+- `Wait`(session_id: SessionId)
+- `Ingest`(session_id: SessionId, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, work_id: WorkId, origin: WorkOrigin)
+- `PublishEvent`(kind: RuntimeEventKind)
+- `RuntimeState`(runtime_id: String)
+- `AdmitModelRoutingAssistantTurn`
+- `BeginImageOperation`(operation_id: String, target_model: String, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingImageApprovalReason>, realtime_detach_allowed: Bool, requires_scoped_override: Bool)
+- `DenyImageOperationPlan`(operation_id: String, reason: RoutingImagePlanDenialReason, terminal_payload: String)
+- `ActivateImageOperationOverride`(operation_id: String, target_model: String, target_realtime_capable: Bool)
+- `ClassifyImageOperationTerminal`(operation_id: String, observation: RoutingImageTerminalObservation, http_status_code: Option<u64>, error_code: RoutingImageProviderErrorCode, provider_text: RoutingProviderTextDisposition)
+- `CompleteImageOperation`(operation_id: String, terminal: RoutingImageTerminal, terminal_payload: String)
+- `RestoreImageOperationOverride`(operation_id: String)
+- `LoadBoundaryReceipt`(runtime_id: String, sequence: u64)
+- `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
+- `AcceptWithoutWake`(input_id: InputId)
+- `Prepare`(session_id: SessionId, run_id: RunId)
+- `Commit`(input_id: InputId, run_id: RunId)
+- `Fail`(run_id: RunId)
+- `Recycle`
+- `ServiceTurnCommitted`(run_id: RunId)
+- `RequestDeferredTools`(authorities: Map<String, ToolVisibilityWitness>)
+
+## Surface-only Inputs
+- `ContainsSession`
+- `SessionHasExecutor`
+- `SessionHasComms`
+- `OpsLifecycleRegistry`
+- `InputState`
+- `ListActiveInputs`
+- `RuntimeState`
+- `ModelRoutingStatus`
+- `LoadBoundaryReceipt`
+
+## Runtime-Internal Inputs
+- `ResolveRuntimeOpsLifecycleDurability`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
+- `HydrateSessionLlmState`(current_identity: SessionLlmIdentity, current_capability_surface: Option<SessionLlmCapabilitySurface>, current_capability_surface_status: SessionLlmCapabilitySurfaceStatus, current_capability_base_filter: ToolFilter)
+- `ClearSessionLlmState`
+- `ResolvePeerIngressReceive`(kind: PeerIngressAdmittedKind, auth_required: Bool, auth_exempt: Bool, trusted: Bool, queued_work_present: Bool, queue_closed: Bool, queue_capacity_available: Bool)
+- `ResolvePeerIngressDequeue`(kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, queued_work_remaining: Bool)
+- `InterruptCurrentRun`
+- `ResolveUserInterruptPublicResult`(observation: UserInterruptObservationKind, target_present: Bool, staged_promotion_busy: Bool)
 - `StageDeferredSession`(session_id: SessionId, keep_alive: Bool, has_comms_name: Bool, llm_identity: SessionLlmIdentity, machine_archived_resume_authorized: Bool)
 - `UpdateDeferredSessionKeepAlive`(session_id: SessionId, keep_alive: Bool, has_comms_name: Bool)
 - `UpdateDeferredSessionLlmIdentity`(session_id: SessionId, llm_identity: SessionLlmIdentity)
@@ -302,43 +348,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SetMobOperatorCreateAuthority`(allowed: Bool)
 - `GrantMobOperatorManageMob`(mob_id: String)
 - `SetMobOperatorSpawnProfilesInMob`(mob_id: String, profiles: Set<String>)
-- `Reset`
-- `StopRuntimeExecutor`(reason: String)
 - `RuntimeExecutorExited`
 - `ResolveRuntimeCompletionResult`(run_id: Option<RunId>, terminal: RuntimeCompletionTerminalObservation, finalization: RuntimeCompletionFinalizationObservation)
 - `ResolveRuntimeCompletionCleanup`(session_id: SessionId, observation_session_id: SessionId, observation_agent_runtime_id: Option<AgentRuntimeId>, observation_fence_token: Option<FenceToken>, observation_runtime_generation: Option<Generation>, observation_runtime_epoch_id: Option<RuntimeEpochId>, outcome: RuntimeCompletionObservedOutcome, archived_by_authority: Bool, live_session: RuntimeCompletionLiveSessionObservation)
 - `ResolveRuntimeCompletionWaitFailure`(session_id: SessionId, failure: RuntimeCompletionWaitFailureObservation)
-- `Destroy`(session_id: SessionId)
 - `RecoverRuntimeAuthority`(session_id: SessionId, state: RuntimeLifecycleObservedState, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, current_run_id: Option<RunId>, pre_run_phase: Option<PreRunPhase>, silent_intent_overrides: Set<String>)
-- `EnsureSessionWithExecutor`(session_id: SessionId)
-- `SetSilentIntents`(session_id: SessionId, intents: Set<String>)
-- `ContainsSession`(session_id: SessionId)
-- `SessionHasExecutor`(session_id: SessionId)
-- `SessionHasComms`(session_id: SessionId)
-- `OpsLifecycleRegistry`(session_id: SessionId)
-- `InputState`(session_id: SessionId, input_id: InputId)
-- `ListActiveInputs`(session_id: SessionId)
-- `Abort`(session_id: SessionId)
-- `AbortAll`
-- `Wait`(session_id: SessionId)
-- `Ingest`(session_id: SessionId, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, work_id: WorkId, origin: WorkOrigin)
-- `PublishEvent`(kind: RuntimeEventKind)
-- `RuntimeState`(runtime_id: String)
 - `ModelRoutingStatus`(session_id: SessionId)
 - `SetModelRoutingBaseline`(baseline_model: String, realtime_capable: Bool)
 - `RequestFiniteSwitchTurn`(request_id: String, target_model: String, turns: u64, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingSwitchApprovalReason>, realtime_detach_allowed: Bool)
 - `RequestUntilChangedSwitchTurn`(request_id: String, target_model: String, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingSwitchApprovalReason>, realtime_detach_allowed: Bool)
 - `CompleteUntilChangedSwitchTurnReconfigure`(request_id: String)
-- `AdmitModelRoutingAssistantTurn`
-- `BeginImageOperation`(operation_id: String, target_model: String, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingImageApprovalReason>, realtime_detach_allowed: Bool, requires_scoped_override: Bool)
-- `DenyImageOperationPlan`(operation_id: String, reason: RoutingImagePlanDenialReason, terminal_payload: String)
-- `ActivateImageOperationOverride`(operation_id: String, target_model: String, target_realtime_capable: Bool)
-- `ClassifyImageOperationTerminal`(operation_id: String, observation: RoutingImageTerminalObservation, http_status_code: Option<u64>, error_code: RoutingImageProviderErrorCode, provider_text: RoutingProviderTextDisposition)
-- `CompleteImageOperation`(operation_id: String, terminal: RoutingImageTerminal, terminal_payload: String)
-- `RestoreImageOperationOverride`(operation_id: String)
-- `LoadBoundaryReceipt`(runtime_id: String, sequence: u64)
-- `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
-- `AcceptWithoutWake`(input_id: InputId)
 - `ResolveLiveBoundaryContextReceipt`(run_id: RunId, input_id: String)
 - `ResolveAdmissionPlan`(input_id: String, input_kind: AdmissionInputKind, requested_lane: Option<InputLane>, continuation_kind: AdmissionContinuationKind, silent_intent_match: Bool, existing_superseded_input_id: Option<String>, runtime_running: Bool, active_turn_boundary_available: Bool, without_wake: Bool)
 - `ResolveAdmissionValidation`(input_id: String, input_kind: AdmissionInputKind, input_origin: AdmissionInputOriginKind, durability: InputDurabilityKind, peer_handling_mode_valid: Bool, peer_response_terminal_structurally_valid: Bool, peer_response_terminal_observed_status: PeerResponseTerminalObservedStatus)
@@ -358,12 +377,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyRuntimeLifecycleDurability`(state: RuntimeLifecycleObservedState)
 - `ClassifyRuntimeLoopQueueAdmission`(state: RuntimeLifecycleObservedState, current_run_bound: Bool)
 - `ResolveVisibleRuntimePhase`(dsl_phase: RuntimeLifecycleObservedState, dsl_pre_run_phase: Option<RuntimeLifecycleObservedState>, control_phase: RuntimeLifecycleObservedState, control_pre_run_phase: Option<RuntimeLifecycleObservedState>, has_runtime_persistence: Bool)
-- `Prepare`(session_id: SessionId, run_id: RunId)
-- `Commit`(input_id: InputId, run_id: RunId)
-- `Fail`(run_id: RunId)
 - `CancelRun`(run_id: RunId)
 - `RollbackRun`(run_id: RunId)
-- `Recycle`
 - `StartConversationRun`(run_id: RunId, primitive_kind: TurnPrimitiveKind, admitted_content_shape: ContentShape, vision_enabled: Bool, image_tool_results_enabled: Bool, max_extraction_retries: u64)
 - `StartImmediateAppend`(run_id: RunId)
 - `StartImmediateContext`(run_id: RunId)
@@ -392,7 +407,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `TimeBudgetExceeded`(run_id: RunId)
 - `ForceCancelNoRun`
 - `RunCompleted`(run_id: RunId)
-- `ServiceTurnCommitted`(run_id: RunId)
 - `RunFailed`(run_id: RunId, runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>, runtime_apply_failure_message: Option<String>, machine_terminal_failure_observed: Bool, terminal_failure_source: Option<RunFailureSourceKind>, error: String)
 - `RunCancelled`(run_id: RunId)
 - `RecoverAdmittedInput`(input_id: String, input_kind: RecoveredInputKind, runtime_boundary: RecoveredRunApplyBoundary, runtime_execution_kind: RecoveredRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<RecoveredPeerResponseTerminalApplyIntent>, lane: InputLane)
@@ -477,7 +491,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ReplaceFilterToolAuthorityCatalog`(catalog: Map<String, ToolVisibilityWitness>)
 - `CommitVisibilityFilter`(filter: ToolFilter, revision: u64)
 - `StageDeferredNames`(names: Set<String>)
-- `RequestDeferredTools`(authorities: Map<String, ToolVisibilityWitness>)
 - `ReplaceDeferredToolAuthorityCatalog`(catalog: Map<String, ToolVisibilityWitness>)
 - `CommitDeferredNames`(authorities: Map<String, ToolVisibilityWitness>)
 - `SetTurnToolOverlay`(allow_active: Bool, allow_names: Set<String>, deny_names: Set<String>)
@@ -537,17 +550,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveSupervisorBridgeCommandAdmission`(supervisor_peer_id: String, supervisor_epoch: u64, sender_peer_id: Option<String>)
 - `AuthorizeSupervisorMobPeerOverlay`(supervisor_peer_id: String, supervisor_epoch: u64, recipient_peer_id: String, overlay_epoch: u64, endpoints: Set<PeerEndpoint>, endpoint_count: u64, command_peer_id: String, command_endpoint: PeerEndpoint, command_kind: MobPeerOverlayCommandKind)
 - `ApplyMobPeerOverlay`(epoch: u64, endpoints: Set<PeerEndpoint>)
-
-## Surface-only Inputs
-- `ContainsSession`
-- `SessionHasExecutor`
-- `SessionHasComms`
-- `OpsLifecycleRegistry`
-- `InputState`
-- `ListActiveInputs`
-- `RuntimeState`
-- `ModelRoutingStatus`
-- `LoadBoundaryReceipt`
 
 ## Signals
 - `Initialize`
@@ -679,6 +681,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `MobEventStreamTerminalResolved`(stream_id: String, reason: RpcEventStreamTerminalReason, error_code: Option<RpcEventStreamTerminalErrorCode>, detail: Option<String>, sequence: u64)
 - `MobEventStreamCloseResolved`(stream_id: String, closed: Bool, already_closed: Bool, sequence: u64)
 - `LiveChannelStatusResolved`(channel_id: String, status: LiveChannelPublicStatus, sequence: u64, status_observation_sequence: u64, degradation_reason: Option<LiveChannelDegradationReason>, degradation_detail: Option<String>)
+- `RealtimeTranscriptAppended`(channel_id: String, item_id: String, text: String, role: RealtimeTranscriptRoleKind, lane: RealtimeTranscriptLaneKind, sequence: u64)
 - `EnqueueClassifiedEntry`
 - `PeerIngressClassified`(class: PeerIngressInputClass, actionable: Bool, kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, lifecycle_kind: Option<PeerIngressLifecycleClass>, lifecycle_peer: Option<String>, request_id: Option<String>, response_terminality: Option<PeerIngressResponseTerminality>)
 - `PeerResponseReplyClassified`(response_terminality: PeerIngressResponseTerminality)

@@ -41,6 +41,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolvePendingContinuation`(session_tail: ObservedSessionTailKind, staged_tool_result_count: u64)
 - `AuthorizeSessionResumeOverrides`(provider_override_present: Bool, model_override_present: Bool, has_build_only_overrides: Bool, first_turn_phase: SessionFirstTurnPhase)
 - `ClassifyLiveSessionAuthority`(stored_transcript_diverged: Bool, live_has_uncommitted_transcript: Bool, runtime_system_context_diverged: Bool, stored_is_archived: Bool)
+- `RecoverSessionFromStore`(session_id: SessionId, has_metadata: Bool, has_build_state: Bool)
+- `ApplyPendingToolResults`(session_id: SessionId, result_count: u64)
+- `TranscriptEdit`(session_id: SessionId, fork_or_rewrite_directive: TranscriptEditKind)
 
 ## Signals
 
@@ -68,6 +71,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SessionResumeOverridesAuthorized`(provider_selection: ResumeProviderSelection, self_hosted_selection: ResumeSelfHostedSelection, provider_overridden: Bool)
 - `SessionResumeOverridesRejected`(reason: ResumeOverrideRejection)
 - `LiveSessionAuthorityClassified`(authority: LiveSessionAuthorityKind, reason: LiveSessionAuthorityReason)
+- `SessionStoreRecoverySourceResolved`(recoverable: Bool)
+- `SessionToolResultsApplied`(session_id: SessionId, applied_count: u64)
+- `TranscriptRewriteCommitted`(kind: TranscriptEditKind, success: Bool)
 
 ## Helpers
 - `phase_allows_initial_turn_overrides`(phase: SessionFirstTurnPhase) -> `Bool`
@@ -89,6 +95,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `resume_reject_build_only_after_first_turn`(has_build_only_overrides: Bool, first_turn_phase: SessionFirstTurnPhase) -> `Bool`
 - `resume_overrides_admissible`(provider_override_present: Bool, model_override_present: Bool, has_build_only_overrides: Bool, first_turn_phase: SessionFirstTurnPhase) -> `Bool`
 - `resume_provider_recompute_from_model`(model_override_present: Bool, provider_override_present: Bool) -> `Bool`
+- `store_projection_can_recover_authority`(has_metadata: Bool, has_build_state: Bool) -> `Bool`
 
 ## Invariants
 
@@ -663,6 +670,44 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - ``
 - Emits: `LiveSessionAuthorityClassified`
+- To: `Ready`
+
+### `RecoverSessionFromStoreAuthorized`
+- From: `Ready`
+- On: `RecoverSessionFromStore`(session_id, has_metadata, has_build_state)
+- Guards:
+  - ``
+- Emits: `SessionStoreRecoverySourceResolved`
+- To: `Ready`
+
+### `RecoverSessionFromStoreUnrecoverable`
+- From: `Ready`
+- On: `RecoverSessionFromStore`(session_id, has_metadata, has_build_state)
+- Guards:
+  - ``
+- Emits: `SessionStoreRecoverySourceResolved`
+- To: `Ready`
+
+### `ApplyPendingToolResults`
+- From: `Ready`
+- On: `ApplyPendingToolResults`(session_id, result_count)
+- Emits: `SessionToolResultsApplied`
+- To: `Ready`
+
+### `TranscriptEditFork`
+- From: `Ready`
+- On: `TranscriptEdit`(session_id, fork_or_rewrite_directive)
+- Guards:
+  - ``
+- Emits: `TranscriptRewriteCommitted`
+- To: `Ready`
+
+### `TranscriptEditRewrite`
+- From: `Ready`
+- On: `TranscriptEdit`(session_id, fork_or_rewrite_directive)
+- Guards:
+  - ``
+- Emits: `TranscriptRewriteCommitted`
 - To: `Ready`
 
 ## Coverage

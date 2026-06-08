@@ -1315,6 +1315,28 @@ pub enum LiveChannelDegradationReason {
     Other,
 }
 
+/// #51: provider-neutral role for a staged realtime transcript item. Mirror of
+/// `meerkat_core::realtime_transcript::RealtimeTranscriptRole`, carried on the
+/// `RealtimeTranscriptAppended` staging effect so the machine owns the staged
+/// turn's role rather than the adapter inferring it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeTranscriptRoleKind {
+    #[default]
+    User,
+    Assistant,
+}
+
+/// #51: output lane for a staged realtime transcript item. Mirror of
+/// `meerkat_core::realtime_transcript::TranscriptLane`, carried on the
+/// `RealtimeTranscriptAppended` staging effect so the machine owns the staged
+/// turn's lane (display text vs spoken transcript).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeTranscriptLaneKind {
+    #[default]
+    Display,
+    Spoken,
+}
+
 /// Typed mirror of the public runtime lifecycle projection. The shell passes
 /// only the observed variant; generated transitions own the semantic facts
 /// derived from it (terminality, input admission, queue admission, and ingress
@@ -4479,6 +4501,31 @@ macro_rules! meerkat_catalog_machine_dsl {
                 degradation_reason: Option<Enum<LiveChannelDegradationReason>>,
                 degradation_detail: Option<String>,
             },
+            // #51: machine-owned realtime transcript staging fact. Emitted when
+            // a realtime turn stages a transcript item (the explicit-commit
+            // text-input path in the OpenAI realtime adapter stages a user text
+            // item via `send_input` while the turn is open, awaiting
+            // `commit_turn_with_modality`). Pre-#51 this staged turn lived only
+            // in the adapter as `pending_explicit_commit_text_items:
+            // Vec<StagedTextTurn>`, so a crash/cancel between stage and commit
+            // could orphan an untracked pending text item. Lowering the staged
+            // turn to this effect makes the staged item a machine-owned fact:
+            // a committed turn proves a real staged turn, and the staged set is
+            // recoverable rather than living in adapter memory. `item_id` is the
+            // opaque synthetic provider item id (sent via `ConversationItemCreate`
+            // and reused on the typed transcript seam); `text` is the staged
+            // content; `role`/`lane` are the closed classifiers mirrored from
+            // `meerkat_core::realtime_transcript` (`RealtimeTranscriptRole` /
+            // `TranscriptLane`). `sequence` orders staging within the channel
+            // (same convention as the surrounding Live-region effects).
+            RealtimeTranscriptAppended {
+                channel_id: String,
+                item_id: String,
+                text: String,
+                role: Enum<RealtimeTranscriptRoleKind>,
+                lane: Enum<RealtimeTranscriptLaneKind>,
+                sequence: u64,
+            },
             EnqueueClassifiedEntry,
             PeerIngressClassified {
                 class: Enum<PeerIngressInputClass>,
@@ -4727,6 +4774,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition MobEventStreamTerminalResolved => local seam SurfaceResultAlignment,
         disposition MobEventStreamCloseResolved => local seam SurfaceResultAlignment,
         disposition LiveChannelStatusResolved => local seam SurfaceResultAlignment,
+        disposition RealtimeTranscriptAppended => local seam SurfaceResultAlignment,
         disposition EnqueueClassifiedEntry => local seam NoOwnerRealization,
         disposition PeerIngressClassified => local seam NoOwnerRealization,
         disposition PeerResponseReplyClassified => local seam NoOwnerRealization,

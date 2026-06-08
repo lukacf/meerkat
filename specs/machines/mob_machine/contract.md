@@ -143,69 +143,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Inputs
 - `RunFlow`(run_id: RunId, step_ids: Set<StepId>, ordered_steps: Seq<StepId>, step_status: Map<StepId, Option<StepRunStatus>>, output_recorded: Map<StepId, Bool>, step_condition_results: Map<StepId, Option<Bool>>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, step_target_counts: Map<StepId, u64>, step_target_success_counts: Map<StepId, u64>, step_target_terminal_failure_counts: Map<StepId, u64>, escalation_threshold: u64, max_step_retries: u32, max_active_nodes: u64, max_active_frames: u64, max_frame_depth: u64)
-- `CreateRunSeed`(run_id: RunId, step_ids: Set<StepId>, ordered_steps: Seq<StepId>, step_status: Map<StepId, Option<StepRunStatus>>, output_recorded: Map<StepId, Bool>, step_condition_results: Map<StepId, Option<Bool>>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, step_target_counts: Map<StepId, u64>, step_target_success_counts: Map<StepId, u64>, step_target_terminal_failure_counts: Map<StepId, u64>, escalation_threshold: u64, max_step_retries: u32, max_active_nodes: u64, max_active_frames: u64, max_frame_depth: u64)
-- `CreateFrameSeed`(run_id: RunId, frame_id: FrameId, frame_scope: FrameScope, loop_instance_id: Option<LoopInstanceId>, iteration: u32, tracked_nodes: Set<FlowNodeId>, ordered_nodes: Seq<FlowNodeId>, node_kind: Map<FlowNodeId, FlowNodeKind>, node_dependencies: Map<FlowNodeId, Seq<FlowNodeId>>, node_dependency_modes: Map<FlowNodeId, DependencyMode>, node_branches: Map<FlowNodeId, Option<BranchId>>, node_step_ids: Map<FlowNodeId, StepId>, node_loop_ids: Map<FlowNodeId, LoopId>, node_status: Map<FlowNodeId, NodeRunStatus>, ready_queue: Seq<FlowNodeId>, output_recorded: Map<FlowNodeId, Bool>, node_condition_results: Map<FlowNodeId, Option<Bool>>, last_admitted_node: Option<FlowNodeId>)
-- `CreateLoopSeed`(loop_instance_id: LoopInstanceId, parent_frame_id: FrameId, parent_node_id: FlowNodeId, loop_id: LoopId, depth: u32, max_iterations: u64)
-- `RecordLoopBodyFrameCompleted`(loop_instance_id: LoopInstanceId, iteration: u64)
-- `RecordLoopUntilConditionMet`(loop_instance_id: LoopInstanceId, iteration: u64)
-- `RecordLoopUntilConditionFailed`(loop_instance_id: LoopInstanceId, iteration: u64)
-- `AuthorizeFlowRunReducerCommand`(run_id: RunId, command: FlowRunReducerCommandKind, step_id: Option<StepId>, step_status: Option<StepRunStatus>, target_count: Option<u64>, frame_id: Option<FrameId>, node_id: Option<FlowNodeId>, loop_instance_id: Option<LoopInstanceId>, retry_key: Option<String>)
-- `AuthorizeFlowFrameReducerCommand`(frame_id: FrameId, command: FlowFrameReducerCommandKind, node_id: Option<FlowNodeId>, node_status: Option<NodeRunStatus>, terminal_status: Option<FrameStatus>)
-- `AuthorizeLoopIterationReducerCommand`(loop_instance_id: LoopInstanceId, command: LoopIterationReducerCommandKind, body_frame_id: Option<FrameId>, body_frame_iteration: Option<u64>)
 - `CancelFlow`(run_id: RunId)
 - `FlowStatus`
-- `ClassifyFlowRunTerminality`(run_id: RunId, status: FlowRunStatus)
-- `ClassifyFlowStepTerminality`(run_id: RunId, step_id: StepId, status: StepRunStatus)
-- `ClassifyFlowFrameTerminalStatus`(frame_id: FrameId)
-- `ClassifyFlowRunPublicResult`(run_id: RunId, status: FlowRunStatus)
 - `Spawn`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_material_digest: String, external_addressable: Bool, runtime_mode: SpawnPolicyRuntimeMode, bridge_session_id: Option<SessionId>, replacing: Option<SessionId>)
-- `AuthorizeSpawnProfile`(agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: Bool)
-- `ClassifySpawnManyFailure`(observation: MobSpawnManyFailureObservationKind)
-- `ClassifyMemberWait`(agent_identity: AgentIdentity)
-- `ResolveFlowDelegationEdgeAdmission`(from_role: String, to_role: String, rule_verdict: MobFlowDelegationEdgeRuleVerdictKind, mode: MobFlowDelegationEdgeModeKind)
-- `ClassifyRemoteMemberRuntimeObservation`(observed_state: MobRemoteMemberRuntimeObservedState)
-- `ResolveSpawnMemberAdmission`(manage_scope_present: Bool, profile_scope_contains: Bool, privileged_resume_bridge_session_present: Bool, privileged_resume_session_present: Bool, privileged_backend_present: Bool, privileged_runtime_mode_present: Bool, privileged_launch_mode_present: Bool, privileged_tool_access_policy_present: Bool, privileged_budget_split_policy_present: Bool, privileged_tooling_present: Bool, privileged_auth_binding_present: Bool)
-- `ResolveCurrentMobAdmission`(can_manage_mob: Bool)
-- `ResolveSpawnToolAdmission`(can_manage_mob: Bool, spawn_profile_scope_present: Bool)
-- `ResolveCreateMobAdmission`(can_create_mobs: Bool)
-- `ResolveProfileMutationAdmission`(can_mutate_profiles: Bool)
-- `ClassifyMemberOperationEligibility`
-- `ClassifyBridgeRejectionRecovery`(rejection_cause: MobBridgeRejectionCause)
-- `ClassifyPendingSupervisorAcceptance`(rejection_cause: MobBridgeRejectionCause)
 - `EnsureMember`(agent_identity: AgentIdentity)
 - `Reconcile`(desired: Set<AgentIdentity>, retire_stale: Bool)
 - `Retire`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: Option<SessionId>)
-- `RetireAbsent`(agent_identity: AgentIdentity)
-- `RequestPendingSessionIngressDetachForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
 - `Respawn`(agent_runtime_id: AgentRuntimeId)
 - `RetireAll`
-- `BindOwnerBridgeSession`(bridge_session_id: SessionId, destroy_on_owner_archive: Bool, implicit_delegation_mob: Bool)
 - `WireMembers`(edge: WiringEdge)
 - `WireMembersWithTrust`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
 - `UnwireMembers`(edge: WiringEdge)
 - `WireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
-- `RegisterMemberPeer`(agent_identity: AgentIdentity, peer_endpoint: MemberPeerEndpoint)
-- `AuthorizeMemberPeerRebind`(agent_identity: AgentIdentity, expected_peer_endpoint: MemberPeerEndpoint)
-- `AuthorizeMemberPeerOverlay`(agent_identity: AgentIdentity, expected_peer_endpoint: MemberPeerEndpoint)
-- `AuthorizeMemberTrustWiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
-- `AuthorizeMemberTrustUnwiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
-- `AuthorizeMemberTrustCleanup`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
-- `AuthorizeMemberTrustCleanupObserved`(edge: WiringEdge, a_identity: AgentIdentity, a_peer_id: PeerId, b_identity: AgentIdentity, b_peer_id: PeerId)
-- `AuthorizeExternalPeerReciprocalTrust`(key: ExternalPeerKey, agent_identity: AgentIdentity)
 - `UnwireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
-- `ProvisionSupervisorAuthority`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion)
-- `ClearSupervisorPendingRotation`(current_peer_id: PeerId, current_epoch: u64, protocol_version: SupervisorProtocolVersion)
-- `RecordSupervisorPendingRotation`(current_peer_id: PeerId, current_epoch: u64, pending_peer_id: PeerId, pending_signing_key: PeerSigningKey, pending_epoch: u64, protocol_version: SupervisorProtocolVersion, accepted_peer_ids: Set<PeerId>)
-- `CommitSupervisorRotation`(current_peer_id: PeerId, current_epoch: u64, next_peer_id: PeerId, next_signing_key: PeerSigningKey, next_epoch: u64, protocol_version: SupervisorProtocolVersion)
-- `ClearSupervisorAuthorityForDestroy`(current_peer_id: PeerId, current_signing_key: PeerSigningKey, current_epoch: u64, protocol_version: SupervisorProtocolVersion)
-- `RestoreSupervisorAuthorityAfterDestroyRollback`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId>)
-- `SessionIngressDetachedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
-- `SessionIngressDetachFailedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String)
 - `SubmitWork`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: WorkOrigin)
-- `ResolveSubmitWorkRejection`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, origin: WorkOrigin)
 - `CancelWork`(work_id: WorkId)
 - `CancelAllWork`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
-- `ResolveCancelAllWorkRejection`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `Stop`
 - `Resume`
 - `Complete`
@@ -219,18 +172,79 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SubscribeAgentEvents`(agent_identity: AgentIdentity)
 - `SubscribeAllAgentEvents`(session_bound_runtimes: Set<AgentRuntimeId>)
 - `SubscribeMobEvents`(initial_cursor: u64, channel_capacity: u64, poll_interval_ms: u64, session_bound_runtimes: Set<AgentRuntimeId>)
-- `SubscribeStructuralEvents`(after_cursor: u64, latest_cursor: u64, explicit_after_cursor: Bool, batch_limit: u64, channel_capacity: u64)
-- `AuthorizeMobEventRouterMemberSubscription`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
-- `AuthorizeMobEventRouterMemberRemoval`(agent_identity: AgentIdentity)
 - `PollEvents`
-- `PollEventsStrict`(after_cursor: u64, latest_cursor: u64, limit: u64)
 - `ReplayAllEvents`
 - `RecordOperatorActionProvenance`(tool_name: String, principal_token: OpaquePrincipalToken, caller_provenance: Option<MobToolCallerProvenance>, audit_invocation_id: Option<String>)
 - `GetMember`
 - `SetSpawnPolicy`(enabled: Bool)
-- `ResolveSpawnPolicy`(agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<SpawnPolicyRuntimeMode>)
 - `Shutdown`
 - `ForceCancel`(agent_identity: AgentIdentity)
+
+## Surface-only Inputs
+- `FlowStatus`
+- `RosterSnapshot`
+- `ListMembers`
+- `ListMembersIncludingRetiring`
+- `ListAllMembers`
+- `MemberStatus`
+- `CancelWork`
+- `PollEvents`
+- `ReplayAllEvents`
+- `GetMember`
+
+## Runtime-Internal Inputs
+- `CreateRunSeed`(run_id: RunId, step_ids: Set<StepId>, ordered_steps: Seq<StepId>, step_status: Map<StepId, Option<StepRunStatus>>, output_recorded: Map<StepId, Bool>, step_condition_results: Map<StepId, Option<Bool>>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, step_target_counts: Map<StepId, u64>, step_target_success_counts: Map<StepId, u64>, step_target_terminal_failure_counts: Map<StepId, u64>, escalation_threshold: u64, max_step_retries: u32, max_active_nodes: u64, max_active_frames: u64, max_frame_depth: u64)
+- `CreateFrameSeed`(run_id: RunId, frame_id: FrameId, frame_scope: FrameScope, loop_instance_id: Option<LoopInstanceId>, iteration: u32, tracked_nodes: Set<FlowNodeId>, ordered_nodes: Seq<FlowNodeId>, node_kind: Map<FlowNodeId, FlowNodeKind>, node_dependencies: Map<FlowNodeId, Seq<FlowNodeId>>, node_dependency_modes: Map<FlowNodeId, DependencyMode>, node_branches: Map<FlowNodeId, Option<BranchId>>, node_step_ids: Map<FlowNodeId, StepId>, node_loop_ids: Map<FlowNodeId, LoopId>, node_status: Map<FlowNodeId, NodeRunStatus>, ready_queue: Seq<FlowNodeId>, output_recorded: Map<FlowNodeId, Bool>, node_condition_results: Map<FlowNodeId, Option<Bool>>, last_admitted_node: Option<FlowNodeId>)
+- `CreateLoopSeed`(loop_instance_id: LoopInstanceId, parent_frame_id: FrameId, parent_node_id: FlowNodeId, loop_id: LoopId, depth: u32, max_iterations: u64)
+- `RecordLoopBodyFrameCompleted`(loop_instance_id: LoopInstanceId, iteration: u64)
+- `RecordLoopUntilConditionMet`(loop_instance_id: LoopInstanceId, iteration: u64)
+- `RecordLoopUntilConditionFailed`(loop_instance_id: LoopInstanceId, iteration: u64)
+- `AuthorizeFlowRunReducerCommand`(run_id: RunId, command: FlowRunReducerCommandKind, step_id: Option<StepId>, step_status: Option<StepRunStatus>, target_count: Option<u64>, frame_id: Option<FrameId>, node_id: Option<FlowNodeId>, loop_instance_id: Option<LoopInstanceId>, retry_key: Option<String>)
+- `AuthorizeFlowFrameReducerCommand`(frame_id: FrameId, command: FlowFrameReducerCommandKind, node_id: Option<FlowNodeId>, node_status: Option<NodeRunStatus>, terminal_status: Option<FrameStatus>)
+- `AuthorizeLoopIterationReducerCommand`(loop_instance_id: LoopInstanceId, command: LoopIterationReducerCommandKind, body_frame_id: Option<FrameId>, body_frame_iteration: Option<u64>)
+- `ClassifyFlowRunTerminality`(run_id: RunId, status: FlowRunStatus)
+- `ClassifyFlowStepTerminality`(run_id: RunId, step_id: StepId, status: StepRunStatus)
+- `ClassifyFlowFrameTerminalStatus`(frame_id: FrameId)
+- `ClassifyFlowRunPublicResult`(run_id: RunId, status: FlowRunStatus)
+- `AuthorizeSpawnProfile`(agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: Bool)
+- `ClassifySpawnManyFailure`(observation: MobSpawnManyFailureObservationKind)
+- `ClassifyMemberWait`(agent_identity: AgentIdentity)
+- `ResolveFlowDelegationEdgeAdmission`(from_role: String, to_role: String, rule_verdict: MobFlowDelegationEdgeRuleVerdictKind, mode: MobFlowDelegationEdgeModeKind)
+- `ClassifyRemoteMemberRuntimeObservation`(observed_state: MobRemoteMemberRuntimeObservedState)
+- `ResolveSpawnMemberAdmission`(manage_scope_present: Bool, profile_scope_contains: Bool, privileged_resume_bridge_session_present: Bool, privileged_resume_session_present: Bool, privileged_backend_present: Bool, privileged_runtime_mode_present: Bool, privileged_launch_mode_present: Bool, privileged_tool_access_policy_present: Bool, privileged_budget_split_policy_present: Bool, privileged_tooling_present: Bool, privileged_auth_binding_present: Bool)
+- `ResolveCurrentMobAdmission`(can_manage_mob: Bool)
+- `ResolveSpawnToolAdmission`(can_manage_mob: Bool, spawn_profile_scope_present: Bool)
+- `ResolveCreateMobAdmission`(can_create_mobs: Bool)
+- `ResolveProfileMutationAdmission`(can_mutate_profiles: Bool)
+- `ClassifyMemberOperationEligibility`
+- `ClassifyBridgeRejectionRecovery`(rejection_cause: MobBridgeRejectionCause)
+- `ClassifyPendingSupervisorAcceptance`(rejection_cause: MobBridgeRejectionCause)
+- `RetireAbsent`(agent_identity: AgentIdentity)
+- `RequestPendingSessionIngressDetachForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
+- `BindOwnerBridgeSession`(bridge_session_id: SessionId, destroy_on_owner_archive: Bool, implicit_delegation_mob: Bool)
+- `RegisterMemberPeer`(agent_identity: AgentIdentity, peer_endpoint: MemberPeerEndpoint)
+- `AuthorizeMemberPeerRebind`(agent_identity: AgentIdentity, expected_peer_endpoint: MemberPeerEndpoint)
+- `AuthorizeMemberPeerOverlay`(agent_identity: AgentIdentity, expected_peer_endpoint: MemberPeerEndpoint)
+- `AuthorizeMemberTrustWiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
+- `AuthorizeMemberTrustUnwiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
+- `AuthorizeMemberTrustCleanup`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
+- `AuthorizeMemberTrustCleanupObserved`(edge: WiringEdge, a_identity: AgentIdentity, a_peer_id: PeerId, b_identity: AgentIdentity, b_peer_id: PeerId)
+- `AuthorizeExternalPeerReciprocalTrust`(key: ExternalPeerKey, agent_identity: AgentIdentity)
+- `ProvisionSupervisorAuthority`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion)
+- `ClearSupervisorPendingRotation`(current_peer_id: PeerId, current_epoch: u64, protocol_version: SupervisorProtocolVersion)
+- `RecordSupervisorPendingRotation`(current_peer_id: PeerId, current_epoch: u64, pending_peer_id: PeerId, pending_signing_key: PeerSigningKey, pending_epoch: u64, protocol_version: SupervisorProtocolVersion, accepted_peer_ids: Set<PeerId>)
+- `CommitSupervisorRotation`(current_peer_id: PeerId, current_epoch: u64, next_peer_id: PeerId, next_signing_key: PeerSigningKey, next_epoch: u64, protocol_version: SupervisorProtocolVersion)
+- `ClearSupervisorAuthorityForDestroy`(current_peer_id: PeerId, current_signing_key: PeerSigningKey, current_epoch: u64, protocol_version: SupervisorProtocolVersion)
+- `RestoreSupervisorAuthorityAfterDestroyRollback`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId>)
+- `SessionIngressDetachedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
+- `SessionIngressDetachFailedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String)
+- `ResolveSubmitWorkRejection`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, origin: WorkOrigin)
+- `ResolveCancelAllWorkRejection`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `SubscribeStructuralEvents`(after_cursor: u64, latest_cursor: u64, explicit_after_cursor: Bool, batch_limit: u64, channel_capacity: u64)
+- `AuthorizeMobEventRouterMemberSubscription`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `AuthorizeMobEventRouterMemberRemoval`(agent_identity: AgentIdentity)
+- `PollEventsStrict`(after_cursor: u64, latest_cursor: u64, limit: u64)
+- `ResolveSpawnPolicy`(agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<SpawnPolicyRuntimeMode>)
 - `KickoffMarkPending`(member_id: String)
 - `KickoffMarkStarting`(member_id: String)
 - `StartupMarkReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
@@ -244,18 +258,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `UpdateCoordinationWorkIntentStatus`(intent_id: WorkIntentId, expected_revision: u64, requested_status: MobCoordinationWorkIntentStatus, now_ms: u64)
 - `UpdateCoordinationResourceClaimStatus`(claim_id: ResourceClaimId, expected_revision: u64, requested_status: MobCoordinationResourceClaimStatus, now_ms: u64)
 - `ObserveCoordinationResourceClaimOverlap`(claim_id: ResourceClaimId, now_ms: u64, candidate_overlap_ids: Seq<ResourceClaimId>)
-
-## Surface-only Inputs
-- `FlowStatus`
-- `RosterSnapshot`
-- `ListMembers`
-- `ListMembersIncludingRetiring`
-- `ListAllMembers`
-- `MemberStatus`
-- `CancelWork`
-- `PollEvents`
-- `ReplayAllEvents`
-- `GetMember`
 
 ## Signals
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)

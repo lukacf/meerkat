@@ -16,12 +16,13 @@ use meerkat_core::lifecycle::RuntimeExecutionKind;
 
 mod authority {
     pub(crate) use crate::generated::session_turn_admission::{
-        SessionTurnAdmissionEffect, SessionTurnAdmissionMachineAuthority,
+        RuntimeKeepAliveRequest, SessionTurnAdmissionEffect, SessionTurnAdmissionMachineAuthority,
         StartTurnDispatchAuthorization, StartTurnDisposition, StartTurnExecutionKind,
         StartTurnPublicTerminal, TurnAdmissionPhase,
     };
 }
 
+pub(crate) use authority::RuntimeKeepAliveRequest;
 pub(crate) use authority::StartTurnDispatchAuthorization;
 pub(crate) use authority::StartTurnDisposition;
 pub(crate) use authority::StartTurnPublicTerminal;
@@ -401,12 +402,12 @@ impl TurnAdmissionSlot {
 
     pub(crate) fn resolve_runtime_keep_alive(
         &mut self,
-        keep_alive_policy_present: bool,
+        request: RuntimeKeepAliveRequest,
     ) -> Result<bool, TurnAdmissionError> {
         let from = self.phase();
         let effects = self
             .authority
-            .resolve_runtime_keep_alive(keep_alive_policy_present)
+            .resolve_runtime_keep_alive(request)
             .map_err(|_| TurnAdmissionError {
                 from,
                 op: "resolve_runtime_keep_alive",

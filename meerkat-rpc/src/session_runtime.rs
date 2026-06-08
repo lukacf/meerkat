@@ -1556,8 +1556,17 @@ impl SessionRuntime {
                 TurnMetadataOverride::Clear => TurnMetadataOverride::Clear,
             });
         let auth_binding = metadata.auth_binding.clone();
+        // Reconstruct the tri-state keep-alive request from the typed
+        // keep-alive policy rather than collapsing presence: a materialized
+        // `KeepAlivePolicy` is an explicit `Enable`, while its absence is
+        // `Preserve` (no per-turn keep-alive intent). `Disable` does not
+        // survive in `RuntimeTurnMetadata` because it carries no negative
+        // keep-alive policy slot; the tri-state `Disable` lives only on the
+        // inbound `TurnOverrides.keep_alive: Option<bool>` and is folded into
+        // `RuntimeKeepAliveRequest` at admission, not rehydrated from metadata.
+        let keep_alive = metadata.keep_alive.map(|_| true);
         let overrides = crate::handlers::turn::TurnOverrides {
-            keep_alive: metadata.keep_alive.as_ref().map(|_| true),
+            keep_alive,
             model: metadata.model.as_ref().map(ToString::to_string),
             provider: metadata
                 .provider
@@ -3944,6 +3953,13 @@ impl SessionRuntime {
         if contributing_input_ids.is_empty() {
             return false;
         }
+        // TODO(#338): the SessionTurnAdmission machine now owns the
+        // `LiveInterruptRequired` classification (TurnHandlingMode +
+        // ResolveLiveInterruptRequired), but projecting it per admitted input
+        // requires runtime admission-path wiring (dispatch at admission +
+        // `live_interrupt_required` projected onto MeerkatAdmittedInputSnapshot).
+        // Until that runtime seam lands, the shell reads the already-projected
+        // per-input `handling_mode` rather than re-scanning ad hoc.
         self.runtime_adapter
             .meerkat_machine_spine_snapshot(session_id)
             .await

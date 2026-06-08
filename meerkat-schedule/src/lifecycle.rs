@@ -1843,12 +1843,12 @@ impl Schedule {
                 let write_precondition = ScheduleWritePrecondition::matches(&schedule)?;
                 let target_binding_key = target_stable_key(&target)?;
                 let dsl_input = sched_dsl::ScheduleLifecycleInput::SyncTargetSnapshot {
-                    target_binding_key: target_binding_key.clone(),
+                    target_binding_key: target_binding_key.clone().into(),
                 };
                 let (transition, dsl_state) = run_schedule_dsl(&schedule, dsl_input)?;
-                if dsl_state.target_binding_key != target_binding_key {
+                if dsl_state.target_binding_key.0 != target_binding_key {
                     return Err(ScheduleLifecycleError::TargetBindingKeyMismatch {
-                        machine_key: dsl_state.target_binding_key.clone(),
+                        machine_key: dsl_state.target_binding_key.0.clone(),
                         snapshot_key: target_binding_key,
                     });
                 }
@@ -1964,14 +1964,11 @@ fn create_schedule_via_dsl(
 
     let dsl_input = sched_dsl::ScheduleLifecycleInput::Create {
         schedule_id: sched_dsl::ScheduleId(schedule_id.0.to_string()),
-        trigger_key: trigger_stable_key(&trigger)?,
-        target_binding_key: target_stable_key(&target)?,
+        trigger_key: trigger_stable_key(&trigger)?.into(),
+        target_binding_key: target_stable_key(&target)?.into(),
         misfire_policy: to_dsl_misfire_policy(&misfire_policy),
-        misfire_policy_key: misfire_policy_authority_key(&misfire_policy)?,
         overlap_policy: to_dsl_overlap_policy(&overlap_policy),
-        overlap_policy_key: overlap_policy_authority_key(&overlap_policy)?,
         missing_target_policy: to_dsl_missing_target_policy(&missing_target_policy),
-        missing_target_policy_key: missing_target_policy_authority_key(&missing_target_policy)?,
         planning_horizon_days: planning_horizon_days.map(u64::from),
         planning_horizon_occurrences: planning_horizon_occurrences.map(u64::from),
     };
@@ -1979,14 +1976,7 @@ fn create_schedule_via_dsl(
     let transition = sched_dsl::ScheduleLifecycleMachineMutator::apply(&mut dsl_auth, dsl_input)
         .map_err(|source| ScheduleLifecycleError::TransitionRejected { source })?;
     let dsl_state = dsl_auth.state().clone();
-    verify_schedule_snapshot_keys(
-        &dsl_state,
-        &trigger,
-        &target,
-        &misfire_policy,
-        &overlap_policy,
-        &missing_target_policy,
-    )?;
+    verify_schedule_snapshot_keys(&dsl_state, &trigger, &target)?;
 
     let now = Utc::now();
     let schedule = Schedule {
@@ -2079,29 +2069,17 @@ fn apply_update(
     if revision_affecting_change {
         // Use the DSL Revise transition for the revision bump + planning cursor clear
         let dsl_input = sched_dsl::ScheduleLifecycleInput::Revise {
-            trigger_key: trigger_stable_key(&next_trigger)?,
-            target_binding_key: target_stable_key(&next_target)?,
+            trigger_key: trigger_stable_key(&next_trigger)?.into(),
+            target_binding_key: target_stable_key(&next_target)?.into(),
             misfire_policy: to_dsl_misfire_policy(&next_misfire_policy),
-            misfire_policy_key: misfire_policy_authority_key(&next_misfire_policy)?,
             overlap_policy: to_dsl_overlap_policy(&next_overlap_policy),
-            overlap_policy_key: overlap_policy_authority_key(&next_overlap_policy)?,
             missing_target_policy: to_dsl_missing_target_policy(&next_missing_target_policy),
-            missing_target_policy_key: missing_target_policy_authority_key(
-                &next_missing_target_policy,
-            )?,
             planning_horizon_days: u64::from(next_planning_horizon_days),
             planning_horizon_occurrences: u64::from(next_planning_horizon_occurrences),
             at_utc_ms: schedule_datetime_to_millis(at_utc, "at_utc")?,
         };
         let (transition, dsl_state) = run_schedule_dsl(schedule, dsl_input)?;
-        verify_schedule_snapshot_keys(
-            &dsl_state,
-            &next_trigger,
-            &next_target,
-            &next_misfire_policy,
-            &next_overlap_policy,
-            &next_missing_target_policy,
-        )?;
+        verify_schedule_snapshot_keys(&dsl_state, &next_trigger, &next_target)?;
         write_back_schedule(&dsl_state, schedule)?;
         schedule.trigger = next_trigger;
         schedule.target = next_target;
@@ -2173,43 +2151,19 @@ fn verify_schedule_snapshot_keys(
     dsl: &sched_dsl::ScheduleLifecycleMachineState,
     trigger: &TriggerSpec,
     target: &TargetBinding,
-    misfire_policy: &crate::types::MisfirePolicy,
-    overlap_policy: &crate::types::OverlapPolicy,
-    missing_target_policy: &crate::types::MissingTargetPolicy,
 ) -> Result<(), ScheduleLifecycleError> {
     let trigger_key = trigger_stable_key(trigger)?;
-    if dsl.trigger_key != trigger_key {
+    if dsl.trigger_key.0 != trigger_key {
         return Err(ScheduleLifecycleError::TargetBindingKeyMismatch {
-            machine_key: dsl.trigger_key.clone(),
+            machine_key: dsl.trigger_key.0.clone(),
             snapshot_key: trigger_key,
         });
     }
     let target_key = target_stable_key(target)?;
-    if dsl.target_binding_key != target_key {
+    if dsl.target_binding_key.0 != target_key {
         return Err(ScheduleLifecycleError::TargetBindingKeyMismatch {
-            machine_key: dsl.target_binding_key.clone(),
+            machine_key: dsl.target_binding_key.0.clone(),
             snapshot_key: target_key,
-        });
-    }
-    let misfire_key = misfire_policy_authority_key(misfire_policy)?;
-    if dsl.misfire_policy_key != misfire_key {
-        return Err(ScheduleLifecycleError::TargetBindingKeyMismatch {
-            machine_key: dsl.misfire_policy_key.clone(),
-            snapshot_key: misfire_key,
-        });
-    }
-    let overlap_key = overlap_policy_authority_key(overlap_policy)?;
-    if dsl.overlap_policy_key != overlap_key {
-        return Err(ScheduleLifecycleError::TargetBindingKeyMismatch {
-            machine_key: dsl.overlap_policy_key.clone(),
-            snapshot_key: overlap_key,
-        });
-    }
-    let missing_target_key = missing_target_policy_authority_key(missing_target_policy)?;
-    if dsl.missing_target_policy_key != missing_target_key {
-        return Err(ScheduleLifecycleError::TargetBindingKeyMismatch {
-            machine_key: dsl.missing_target_policy_key.clone(),
-            snapshot_key: missing_target_key,
         });
     }
     Ok(())

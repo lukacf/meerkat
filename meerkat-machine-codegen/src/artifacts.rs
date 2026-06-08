@@ -593,13 +593,28 @@ pub fn render_machine_contract_markdown(
     pushln!(&mut out);
 
     render_state_markdown(&mut out, schema);
-    render_enum_markdown(&mut out, "Inputs", &schema.inputs);
+    let runtime_internal_inputs: BTreeSet<&str> = schema
+        .runtime_internal_inputs
+        .iter()
+        .map(|input| input.as_str())
+        .collect();
+    render_input_subset(&mut out, "Inputs", &schema.inputs, |name| {
+        !runtime_internal_inputs.contains(name)
+    });
     if !schema.surface_only_inputs.is_empty() {
         pushln!(&mut out, "## Surface-only Inputs");
         for input in &schema.surface_only_inputs {
             pushln!(&mut out, "- `{input}`");
         }
         pushln!(&mut out);
+    }
+    if !runtime_internal_inputs.is_empty() {
+        render_input_subset(
+            &mut out,
+            "Runtime-Internal Inputs",
+            &schema.inputs,
+            |name| runtime_internal_inputs.contains(name),
+        );
     }
     render_enum_markdown(&mut out, "Signals", &schema.signals);
     render_enum_markdown(&mut out, "Effects", &schema.effects);
@@ -1977,6 +1992,36 @@ fn render_state_markdown(out: &mut String, schema: &MachineSchema) {
 fn render_enum_markdown(out: &mut String, label: &str, schema: &EnumSchema) {
     writeln!(out, "## {label}");
     for variant in &schema.variants {
+        if variant.fields.is_empty() {
+            pushln!(out, "- `{}`", variant.name);
+        } else {
+            writeln!(
+                out,
+                "- `{}`({})",
+                variant.name,
+                render_field_list(&variant.fields)
+            )
+            .expect("write to string");
+        }
+    }
+    pushln!(out);
+}
+
+/// Render a labelled subset of an input enum's variants, keeping only those whose
+/// name satisfies `keep`. Used to split the public command surface from the
+/// runtime-internal inputs in the generated machine contract.
+fn render_input_subset(
+    out: &mut String,
+    label: &str,
+    schema: &EnumSchema,
+    keep: impl Fn(&str) -> bool,
+) {
+    writeln!(out, "## {label}");
+    for variant in schema
+        .variants
+        .iter()
+        .filter(|variant| keep(variant.name.as_str()))
+    {
         if variant.fields.is_empty() {
             pushln!(out, "- `{}`", variant.name);
         } else {

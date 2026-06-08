@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for SessionTurnAdmissionMachine.
 
-CONSTANTS BooleanValues, NatValues, PendingContinuationDispositionValues, StartTurnDispatchAuthorizationValues, StartTurnDispositionValues, StartTurnExecutionKindValues, StartTurnPublicTerminalValues, TurnAdmissionPhaseValues
+CONSTANTS BooleanValues, NatValues, PendingContinuationDispositionValues, RuntimeKeepAliveRequestValues, StartTurnDispatchAuthorizationValues, StartTurnDispositionValues, StartTurnExecutionKindValues, StartTurnPublicTerminalValues, TurnAdmissionPhaseValues, TurnHandlingModeValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -284,17 +284,41 @@ ResolveDispositionDirectNoPending(execution_kind_present, execution_kind, prompt
     /\ UNCHANGED << interrupt_pending, shutdown_pending >>
 
 
-ResolveRuntimeKeepAliveEnable(keep_alive_policy_present) ==
+ResolveRuntimeKeepAliveEnable(keep_alive_request) ==
     /\ phase = "Admitted"
-    /\ keep_alive_policy_present
+    /\ (keep_alive_request = "Enable")
     /\ phase' = "Admitted"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
 
 
-ResolveRuntimeKeepAlivePreserve(keep_alive_policy_present) ==
+ResolveRuntimeKeepAliveDisable(keep_alive_request) ==
     /\ phase = "Admitted"
-    /\ (keep_alive_policy_present = FALSE)
+    /\ (keep_alive_request = "Disable")
+    /\ phase' = "Admitted"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+
+
+ResolveRuntimeKeepAlivePreserve(keep_alive_request) ==
+    /\ phase = "Admitted"
+    /\ (keep_alive_request = "Preserve")
+    /\ phase' = "Admitted"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+
+
+ResolveLiveInterruptRequiredSteer(handling_mode) ==
+    /\ phase = "Admitted"
+    /\ (handling_mode = "Steer")
+    /\ phase' = "Admitted"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
+
+
+ResolveLiveInterruptRequiredQueue(handling_mode) ==
+    /\ phase = "Admitted"
+    /\ (handling_mode = "Queue")
     /\ phase' = "Admitted"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << interrupt_pending, shutdown_pending, last_public_terminal >>
@@ -371,8 +395,11 @@ Next ==
     \/ \E execution_kind_present \in BOOLEAN : \E execution_kind \in StartTurnExecutionKindValues : \E prompt_trimmed_text_byte_count \in 0..2 : \E prompt_non_text_block_count \in 0..2 : \E pending_continuation \in PendingContinuationDispositionValues : ResolveDispositionDirectPrompt(execution_kind_present, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation)
     \/ \E execution_kind_present \in BOOLEAN : \E execution_kind \in StartTurnExecutionKindValues : \E prompt_trimmed_text_byte_count \in 0..2 : \E prompt_non_text_block_count \in 0..2 : \E pending_continuation \in PendingContinuationDispositionValues : ResolveDispositionDirectPending(execution_kind_present, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation)
     \/ \E execution_kind_present \in BOOLEAN : \E execution_kind \in StartTurnExecutionKindValues : \E prompt_trimmed_text_byte_count \in 0..2 : \E prompt_non_text_block_count \in 0..2 : \E pending_continuation \in PendingContinuationDispositionValues : ResolveDispositionDirectNoPending(execution_kind_present, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation)
-    \/ \E keep_alive_policy_present \in BOOLEAN : ResolveRuntimeKeepAliveEnable(keep_alive_policy_present)
-    \/ \E keep_alive_policy_present \in BOOLEAN : ResolveRuntimeKeepAlivePreserve(keep_alive_policy_present)
+    \/ \E keep_alive_request \in RuntimeKeepAliveRequestValues : ResolveRuntimeKeepAliveEnable(keep_alive_request)
+    \/ \E keep_alive_request \in RuntimeKeepAliveRequestValues : ResolveRuntimeKeepAliveDisable(keep_alive_request)
+    \/ \E keep_alive_request \in RuntimeKeepAliveRequestValues : ResolveRuntimeKeepAlivePreserve(keep_alive_request)
+    \/ \E handling_mode \in TurnHandlingModeValues : ResolveLiveInterruptRequiredSteer(handling_mode)
+    \/ \E handling_mode \in TurnHandlingModeValues : ResolveLiveInterruptRequiredQueue(handling_mode)
     \/ ResolveLastStartTurnPublicTerminalNoPendingIdle
     \/ ResolveLastStartTurnPublicTerminalNoPendingAdmitted
     \/ ResolveLastStartTurnPublicTerminalNoPendingRunning

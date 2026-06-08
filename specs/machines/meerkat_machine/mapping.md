@@ -5176,6 +5176,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LiveChannelStatusResolved`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `model_routing_and_image_operation`, `live_topology_and_supervision`
+- `RealtimeTranscriptAppended`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`, `product_turn_streaming`
 - `EnqueueClassifiedEntry`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`

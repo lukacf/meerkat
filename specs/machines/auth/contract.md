@@ -34,11 +34,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClearCredentialLifecycle`
 - `ReleaseCredentialLifecycle`
 - `Release`
-- `RestoreAuthoritySnapshot`(lifecycle_phase: AuthLifecyclePhase, expires_at: Option<u64>, last_refresh: Option<u64>, refresh_attempt: u64, credential_present: Bool, credential_generation: u64, credential_published_at_millis: Option<u64>)
-- `RestoreCredentialLifecycleSnapshot`(lifecycle_phase: Option<AuthLifecyclePhase>, expires_at: Option<u64>, last_refresh: Option<u64>, refresh_attempt: u64, credential_present: Bool, credential_generation: u64, credential_published_at_millis: Option<u64>, restored_oauth_membership_observed: Bool)
-- `RestoreOAuthBrowserFlow`(flow_id: String, provider: Option<String>, redirect_uri: Option<String>, expires_at_millis: Option<u64>)
-- `RestoreOAuthDeviceFlow`(flow_id: String, provider: Option<String>, expires_at_millis: Option<u64>)
-- `RestoreOAuthDevicePoll`(flow_id: String)
 - `AdmitOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, expires_at_millis: u64, max_outstanding_flows: u64, observed_global_outstanding_flows: u64)
 - `VerifyOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, now_millis: u64)
 - `ConsumeOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, now_millis: u64)
@@ -50,6 +45,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `FinishOAuthDevicePoll`(flow_id: String)
 - `ConsumeOAuthDeviceFlow`(flow_id: String, provider: String, now_millis: u64)
 - `ExpireOAuthDeviceFlow`(flow_id: String)
+
+## Runtime-Internal Inputs
+- `RestoreAuthoritySnapshot`(lifecycle_phase: AuthLifecyclePhase, expires_at: Option<u64>, last_refresh: Option<u64>, refresh_attempt: u64, credential_present: Bool, credential_generation: u64, credential_published_at_millis: Option<u64>)
+- `RestoreCredentialLifecycleSnapshot`(lifecycle_phase: Option<AuthLifecyclePhase>, expires_at: Option<u64>, last_refresh: Option<u64>, refresh_attempt: u64, credential_present: Bool, credential_generation: u64, credential_published_at_millis: Option<u64>, restored_oauth_membership_observed: Bool)
+- `RestoreOAuthBrowserFlow`(flow_id: String, provider: Option<String>, redirect_uri: Option<String>, expires_at_millis: Option<u64>)
+- `RestoreOAuthDeviceFlow`(flow_id: String, provider: Option<String>, expires_at_millis: Option<u64>)
+- `RestoreOAuthDevicePoll`(flow_id: String)
 - `ResolveCredentialUseAdmission`(intent: CredentialUseIntent)
 - `ResolveOAuthLoginCredentialDisposition`(credential_present: Bool, force_refresh: Bool, refresh_allowed: Bool)
 

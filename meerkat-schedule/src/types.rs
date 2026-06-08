@@ -649,29 +649,25 @@ pub(crate) fn validate_schedule_machine_projection(schedule: &Schedule) -> Resul
             schedule.schedule_id
         ));
     }
-    if trigger_stable_key(&schedule.trigger)? != machine.trigger_key {
+    if trigger_stable_key(&schedule.trigger)? != machine.trigger_key.0 {
         return Err(format!(
             "schedule {} trigger projection does not match machine_state",
             schedule.schedule_id
         ));
     }
-    if schedule.target.stable_key()? != machine.target_binding_key {
+    if schedule.target.stable_key()? != machine.target_binding_key.0 {
         return Err(format!(
             "schedule {} target projection does not match machine_state",
             schedule.schedule_id
         ));
     }
-    if schedule_misfire_policy_to_machine(&schedule.misfire_policy) != machine.misfire_policy
-        || policy_key("misfire_policy", &schedule.misfire_policy)? != machine.misfire_policy_key
-    {
+    if schedule_misfire_policy_to_machine(&schedule.misfire_policy) != machine.misfire_policy {
         return Err(format!(
             "schedule {} misfire policy projection does not match machine_state",
             schedule.schedule_id
         ));
     }
-    if schedule_overlap_policy_to_machine(&schedule.overlap_policy) != machine.overlap_policy
-        || policy_key("overlap_policy", &schedule.overlap_policy)? != machine.overlap_policy_key
-    {
+    if schedule_overlap_policy_to_machine(&schedule.overlap_policy) != machine.overlap_policy {
         return Err(format!(
             "schedule {} overlap policy projection does not match machine_state",
             schedule.schedule_id
@@ -679,8 +675,6 @@ pub(crate) fn validate_schedule_machine_projection(schedule: &Schedule) -> Resul
     }
     if schedule_missing_target_policy_to_machine(&schedule.missing_target_policy)
         != machine.missing_target_policy
-        || policy_key("missing_target_policy", &schedule.missing_target_policy)?
-            != machine.missing_target_policy_key
     {
         return Err(format!(
             "schedule {} missing-target policy projection does not match machine_state",
@@ -1868,11 +1862,8 @@ struct ScheduleMachineStateWire {
     trigger_key: String,
     target_binding_key: String,
     misfire_policy: String,
-    misfire_policy_key: String,
     overlap_policy: String,
-    overlap_policy_key: String,
     missing_target_policy: String,
-    missing_target_policy_key: String,
     planning_horizon_days: u64,
     planning_horizon_occurrences: u64,
     planning_cursor_utc_ms: Option<u64>,
@@ -1890,17 +1881,14 @@ impl From<&sched_dsl::ScheduleLifecycleMachineState> for ScheduleMachineStateWir
             schedule_id: state.schedule_id.0.clone(),
             lifecycle_phase: schedule_lifecycle_state_to_wire(state.lifecycle_phase).to_string(),
             revision: state.revision,
-            trigger_key: state.trigger_key.clone(),
-            target_binding_key: state.target_binding_key.clone(),
+            trigger_key: state.trigger_key.0.clone(),
+            target_binding_key: state.target_binding_key.0.clone(),
             misfire_policy: schedule_misfire_policy_to_wire(state.misfire_policy).to_string(),
-            misfire_policy_key: state.misfire_policy_key.clone(),
             overlap_policy: schedule_overlap_policy_to_wire(state.overlap_policy).to_string(),
-            overlap_policy_key: state.overlap_policy_key.clone(),
             missing_target_policy: schedule_missing_target_policy_to_wire(
                 state.missing_target_policy,
             )
             .to_string(),
-            missing_target_policy_key: state.missing_target_policy_key.clone(),
             planning_horizon_days: state.planning_horizon_days,
             planning_horizon_occurrences: state.planning_horizon_occurrences,
             planning_cursor_utc_ms: state.planning_cursor_utc_ms,
@@ -1923,16 +1911,13 @@ impl TryFrom<ScheduleMachineStateWire> for sched_dsl::ScheduleLifecycleMachineSt
             schedule_id: sched_dsl::ScheduleId(wire.schedule_id),
             lifecycle_phase: schedule_lifecycle_state_from_wire(&wire.lifecycle_phase)?,
             revision: wire.revision,
-            trigger_key: wire.trigger_key,
-            target_binding_key: wire.target_binding_key,
+            trigger_key: wire.trigger_key.into(),
+            target_binding_key: wire.target_binding_key.into(),
             misfire_policy: schedule_misfire_policy_from_wire(&wire.misfire_policy)?,
-            misfire_policy_key: wire.misfire_policy_key,
             overlap_policy: schedule_overlap_policy_from_wire(&wire.overlap_policy)?,
-            overlap_policy_key: wire.overlap_policy_key,
             missing_target_policy: schedule_missing_target_policy_from_wire(
                 &wire.missing_target_policy,
             )?,
-            missing_target_policy_key: wire.missing_target_policy_key,
             planning_horizon_days: wire.planning_horizon_days,
             planning_horizon_occurrences: wire.planning_horizon_occurrences,
             planning_cursor_utc_ms: wire.planning_cursor_utc_ms,

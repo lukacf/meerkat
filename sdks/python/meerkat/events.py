@@ -29,6 +29,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from .errors import MeerkatError
+from .generated.event_inventory import KNOWN_AGENT_EVENT_TYPES
+
 if TYPE_CHECKING:
     from .types import SkillKey
 
@@ -1116,8 +1119,12 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
 def parse_event(raw: dict[str, Any]) -> Event:
     """Parse a raw event dict (from the wire) into a typed :class:`Event`.
 
-    Unknown event types are returned as :class:`UnknownEvent` for
-    forward-compatibility with newer server versions.
+    Fails CLOSED on an unknown discriminant: a ``type`` that is not in the
+    generated :data:`KNOWN_AGENT_EVENT_TYPES` inventory raises
+    :class:`~meerkat.errors.MeerkatError`. A type that is in the inventory but
+    has no parser class in this SDK version is surfaced as :class:`UnknownEvent`
+    for forward-compatibility; a known type with a malformed payload is
+    preserved as a ``malformed_event`` :class:`UnknownEvent`.
     """
     if "event" in raw and ("scope_id" in raw or "scope_path" in raw):
         inner_raw = raw.get("event")
@@ -1143,7 +1150,26 @@ def parse_event(raw: dict[str, Any]) -> Event:
     event_type = raw.get("type", "")
     cls = _EVENT_MAP.get(event_type)
     if cls is None:
-        return UnknownEvent(type=event_type, data=raw)
+        if not event_type:
+            # Row #283: a frame with no `type` discriminant is malformed — it is
+            # NOT a typed event, so preserve it as `malformed_event` rather than
+            # fabricating an UnknownEvent from a missing discriminant (and rather
+            # than rejecting a control/keepalive frame outright).
+            return _malformed(raw, "missing event type discriminant")
+        if event_type in KNOWN_AGENT_EVENT_TYPES:
+            # A schema-known event type this SDK version has no parser class for
+            # yet: a genuine forward-compatible event, surfaced as an explicit
+            # UnknownEvent marker (raw preserved) — not a fabricated typed event.
+            return UnknownEvent(type=event_type, data=raw)
+        # Fail CLOSED: a present `type` absent from the schema-derived
+        # KNOWN_AGENT_EVENT_TYPES inventory is a contract violation for a
+        # version-matched client and is rejected, not laundered. (Version skew is
+        # handled separately by the contract-version check.)
+        raise MeerkatError(
+            "UNKNOWN_EVENT_TYPE",
+            f"unknown agent event type {event_type!r}",
+            details=raw,
+        )
 
     try:
         _validate_known_event(event_type, raw)

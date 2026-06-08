@@ -752,6 +752,43 @@ def _typescript_type_from_schema(
             return ("unknown", optional)
 
 
+def _known_event_types(schemas: dict) -> list[str]:
+    """Canonical event-type inventory from the WireEvent schema authority.
+
+    This is the single source of truth for the fail-closed event parsers in
+    every SDK: a wire frame whose ``type`` is absent from this list is a
+    contract violation for a version-matched client and the parser must raise,
+    not fabricate a forward-compat ``UnknownEvent``.
+    """
+    events_schema = schemas.get("events", {})
+    wire_event = events_schema.get("WireEvent", {})
+    values = wire_event.get("known_event_types", [])
+    if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+        raise KeyError("WireEvent.known_event_types must be a string array")
+    return list(values)
+
+
+def _workitem_enum(schemas: dict, field: str) -> list[str]:
+    """Closed string-enum values for a ``WorkItem`` field from the schema.
+
+    Drives the named ``WorkGraphStatus`` / ``WorkGraphPriority`` unions so SDK
+    consumers stop hand-modeling them (dogma row #256).
+    """
+    wire_schema = schemas.get("wire-types", {})
+    work_item = wire_schema.get("WorkItem", {})
+    properties = work_item.get("properties", {}) if isinstance(work_item, dict) else {}
+    field_schema = properties.get(field, {}) if isinstance(properties, dict) else {}
+    values = field_schema.get("enum") if isinstance(field_schema, dict) else None
+    if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+        raise KeyError(f"WorkItem.{field} must be a closed string enum in wire-types.json")
+    return list(values)
+
+
+def _contract_version_string(schemas: dict) -> str:
+    version_info = schemas.get("version", {})
+    return version_info.get("contract_version", "0.2.0")
+
+
 def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = True, has_skills: bool = True) -> None:
     """Generate Python type definitions from schemas."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -760,6 +797,15 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     init_content = '"""Generated types for Meerkat Python SDK."""\n\n'
     init_content += "from .types import *  # noqa: F401,F403\n"
     init_content += "from .errors import *  # noqa: F401,F403\n"
+    init_content += (
+        "from .event_inventory import (  # noqa: F401\n"
+        "    KNOWN_AGENT_EVENT_TYPES,\n"
+        "    is_known_agent_event_type,\n"
+        ")\n"
+    )
+    init_content += (
+        "from .version_compat import is_compatible_with  # noqa: F401\n"
+    )
     (output_dir / "__init__.py").write_text(init_content)
 
     # Generate types from version and wire-types schemas
@@ -1271,6 +1317,12 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         append_python_alias(name, wire_schema, f"Mob RPC helper wire type for {name}.")
     for name in WORKGRAPH_RPC_CONTRACT_ALIAS_TYPES:
         append_python_alias(name, wire_schema, f"WorkGraph RPC helper wire type for {name}.")
+    # Row #256: emit the WorkGraph status/priority closed unions as named
+    # generated Literal aliases derived from the WorkItem schema's closed enums.
+    work_status = ", ".join(json.dumps(v) for v in _workitem_enum(schemas, "status"))
+    work_priority = ", ".join(json.dumps(v) for v in _workitem_enum(schemas, "priority"))
+    types_content += f"\nWorkGraphStatus = Literal[{work_status}]\n"
+    types_content += f"\nWorkGraphPriority = Literal[{work_priority}]\n"
     append_python_alias("McpLiveOperation", wire_schema, "Shared operation kind for live MCP operations.")
     append_python_alias("McpLiveOpStatus", wire_schema, "Shared status for live MCP operations.")
     for name in MCP_CONFIG_ALIAS_TYPES:
@@ -1559,6 +1611,19 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         append_typescript_alias(name, wire_schema)
     for name in WORKGRAPH_RPC_CONTRACT_ALIAS_TYPES:
         append_typescript_alias(name, wire_schema)
+    # Row #256: emit the WorkGraph status/priority closed unions as named
+    # generated types so the hand-authored sdks/typescript/src/types.ts stops
+    # re-declaring them. Derived from the WorkItem schema's closed enums. Also
+    # emit runtime const arrays so the work-item parser validates against the
+    # generated inventory instead of an inline hand list.
+    status_values = _workitem_enum(schemas, "status")
+    priority_values = _workitem_enum(schemas, "priority")
+    status_items = ", ".join(json.dumps(v) for v in status_values)
+    priority_items = ", ".join(json.dumps(v) for v in priority_values)
+    types_content += f"\nexport const WORK_GRAPH_STATUSES = [{status_items}] as const;\n"
+    types_content += "export type WorkGraphStatus = typeof WORK_GRAPH_STATUSES[number];\n"
+    types_content += f"\nexport const WORK_GRAPH_PRIORITIES = [{priority_items}] as const;\n"
+    types_content += "export type WorkGraphPriority = typeof WORK_GRAPH_PRIORITIES[number];\n"
     append_typescript_alias("McpLiveOperation", wire_schema)
     append_typescript_alias("McpLiveOpStatus", wire_schema)
     for name in MCP_CONFIG_ALIAS_TYPES:
@@ -1725,7 +1790,13 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     (output_dir / "errors.ts").write_text(errors_content)
 
     # Index file
-    index_content = "// Generated exports\nexport * from './types.js';\nexport * from './errors.js';\n"
+    index_content = (
+        "// Generated exports\n"
+        "export * from './types.js';\n"
+        "export * from './errors.js';\n"
+        "export * from './events.js';\n"
+        "export * from './version_compat.js';\n"
+    )
     (output_dir / "index.ts").write_text(index_content)
 
 
@@ -1806,9 +1877,8 @@ def generate_web_event_types(schemas: dict, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     events_schema = schemas.get("events", {})
     agent_schema = events_schema.get("AgentEvent", {})
-    wire_event = events_schema.get("WireEvent", {})
     defs = agent_schema.get("$defs", {})
-    known_event_types = wire_event.get("known_event_types", [])
+    known_event_types = _known_event_types(schemas)
     variants = agent_schema.get("oneOf", [])
 
     def is_simple_object_literal(type_string: str) -> bool:
@@ -1878,6 +1948,141 @@ def generate_web_event_types(schemas: dict, output_dir: Path) -> None:
         lines.append("")
 
     (output_dir / "events.ts").write_text("\n".join(lines))
+
+
+def generate_typescript_event_inventory(schemas: dict, output_dir: Path) -> None:
+    """Emit the canonical event-type inventory for the TypeScript SDK.
+
+    Mirrors the web SDK's generated ``KNOWN_AGENT_EVENT_TYPES`` so the
+    TypeScript event parser (``sdks/typescript/src/events.ts``) can fail closed
+    on a wire frame whose ``type`` is not in the schema authority instead of
+    fabricating an ``UnknownEvent`` (dogma rows #283/#222).
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    known_event_types = _known_event_types(schemas)
+    known_items = ",\n  ".join(json.dumps(value) for value in known_event_types)
+    lines = [
+        "// Generated event-type inventory for the Meerkat TypeScript SDK",
+        "// Source: artifacts/schemas/events.json (WireEvent.known_event_types)",
+        "//",
+        "// This is the single source of truth for the fail-closed event parser.",
+        "// A wire frame whose `type` is not in this set is a contract violation",
+        "// for a version-matched client and must be rejected, not coerced.",
+        "",
+        "export const KNOWN_AGENT_EVENT_TYPES = [",
+        f"  {known_items}",
+        "] as const;",
+        "",
+        "export type KnownAgentEventType = typeof KNOWN_AGENT_EVENT_TYPES[number];",
+        "",
+        "/** True iff `type` is a schema-known agent event discriminant. */",
+        "export function isKnownAgentEventType(type: string): type is KnownAgentEventType {",
+        "  return (KNOWN_AGENT_EVENT_TYPES as readonly string[]).includes(type);",
+        "}",
+        "",
+    ]
+    (output_dir / "events.ts").write_text("\n".join(lines))
+
+
+def generate_python_event_inventory(schemas: dict, output_dir: Path) -> None:
+    """Emit the canonical event-type inventory for the Python SDK.
+
+    The frozenset drives the fail-closed parser in
+    ``sdks/python/meerkat/events.py`` (dogma row #283 Python analog).
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    known_event_types = _known_event_types(schemas)
+    known_items = ",\n    ".join(json.dumps(value) for value in known_event_types)
+    content = (
+        '"""Generated canonical event-type inventory for the Meerkat Python SDK.\n\n'
+        "Source: artifacts/schemas/events.json (WireEvent.known_event_types)\n\n"
+        "Single source of truth for the fail-closed event parser: a wire frame\n"
+        "whose ``type`` is not in this set is a contract violation for a\n"
+        'version-matched client and must be rejected, not coerced.\n"""\n\n'
+        "from __future__ import annotations\n\n"
+        "KNOWN_AGENT_EVENT_TYPES: frozenset[str] = frozenset({\n"
+        f"    {known_items},\n"
+        "})\n\n\n"
+        "def is_known_agent_event_type(event_type: str) -> bool:\n"
+        '    """True iff ``event_type`` is a schema-known agent event discriminant."""\n'
+        "    return event_type in KNOWN_AGENT_EVENT_TYPES\n"
+    )
+    (output_dir / "event_inventory.py").write_text(content)
+
+
+def _version_compat_doc() -> str:
+    return (
+        "Compatibility: same major version (for 1.0+), or same major+minor "
+        "(for 0.x). Mirrors `meerkat_contracts::ContractVersion::is_compatible_with`."
+    )
+
+
+def generate_typescript_version_compat(schemas: dict, output_dir: Path) -> None:
+    """Emit the version-compatibility helper for the TypeScript SDK.
+
+    Mirrors ``ContractVersion::is_compatible_with`` so the SDK stops
+    hand-implementing the compatibility rule (dogma row #193).
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "// Generated contract-version compatibility helper for the Meerkat SDK",
+        "// Source: meerkat-contracts ContractVersion::is_compatible_with (version.rs)",
+        "//",
+        f"// {_version_compat_doc()}",
+        "",
+        "function coreParts(version: string): number[] {",
+        '  const core = version.split("-", 1)[0].split("+", 1)[0];',
+        '  return core.split(".").map(Number);',
+        "}",
+        "",
+        "/**",
+        " * True iff a server contract version is compatible with a client contract",
+        " * version under the canonical rule (0.x: same major+minor; >=1.0: same major).",
+        " */",
+        "export function isCompatibleWith(server: string, client: string): boolean {",
+        "  const s = coreParts(server);",
+        "  const c = coreParts(client);",
+        "  if (s.some(Number.isNaN) || c.some(Number.isNaN) || s.length < 2 || c.length < 2) {",
+        "    return false;",
+        "  }",
+        "  if (s[0] === 0 && c[0] === 0) {",
+        "    return s[1] === c[1];",
+        "  }",
+        "  return s[0] === c[0];",
+        "}",
+        "",
+    ]
+    (output_dir / "version_compat.ts").write_text("\n".join(lines))
+
+
+def generate_python_version_compat(schemas: dict, output_dir: Path) -> None:
+    """Emit the version-compatibility helper for the Python SDK (dogma row #193)."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    content = (
+        '"""Generated contract-version compatibility helper for the Meerkat SDK.\n\n'
+        "Source: meerkat-contracts ContractVersion::is_compatible_with (version.rs)\n\n"
+        f"{_version_compat_doc()}\n"
+        '"""\n\n'
+        "from __future__ import annotations\n\n\n"
+        "def _core_parts(version: str) -> list[int]:\n"
+        '    core = version.split("-", 1)[0].split("+", 1)[0]\n'
+        '    return [int(part) for part in core.split(".")]\n\n\n'
+        "def is_compatible_with(server: str, client: str) -> bool:\n"
+        '    """True iff a server contract version is compatible with a client version.\n\n'
+        "    Canonical rule: 0.x requires same major+minor; >=1.0 requires same major.\n"
+        '    """\n'
+        "    try:\n"
+        "        s_parts = _core_parts(server)\n"
+        "        c_parts = _core_parts(client)\n"
+        "    except (ValueError, IndexError):\n"
+        "        return False\n"
+        "    if len(s_parts) < 2 or len(c_parts) < 2:\n"
+        "        return False\n"
+        "    if s_parts[0] == 0 and c_parts[0] == 0:\n"
+        "        return s_parts[1] == c_parts[1]\n"
+        "    return s_parts[0] == c_parts[0]\n"
+    )
+    (output_dir / "version_compat.py").write_text(content)
 
 
 def _contract_string_list(source: dict[str, Any], key: str) -> list[str]:
@@ -2897,11 +3102,19 @@ def main():
     py_output = output_root / "sdks" / "python" / "meerkat" / "generated"
     generate_python_types(schemas, py_output, has_comms=has_comms, has_skills=has_skills)
     print(f"Generated Python types in {py_output}")
+    generate_python_event_inventory(schemas, py_output)
+    print(f"Generated Python event inventory in {py_output}")
+    generate_python_version_compat(schemas, py_output)
+    print(f"Generated Python version compat helper in {py_output}")
 
     # Generate TypeScript
     ts_output = output_root / "sdks" / "typescript" / "src" / "generated"
     generate_typescript_types(schemas, ts_output, has_comms=has_comms, has_skills=has_skills)
     print(f"Generated TypeScript types in {ts_output}")
+    generate_typescript_event_inventory(schemas, ts_output)
+    print(f"Generated TypeScript event inventory in {ts_output}")
+    generate_typescript_version_compat(schemas, ts_output)
+    print(f"Generated TypeScript version compat helper in {ts_output}")
 
     # Generate web event types from the canonical contracts artifact.
     web_events_output = output_root / "sdks" / "web" / "src" / "generated"

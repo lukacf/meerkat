@@ -174,6 +174,8 @@ from .generated.types import (
     WorkAttentionStatus as WorkAttentionStatus,
     WorkAttentionTarget as WorkAttentionTarget,
     WorkCompletionPolicy as WorkCompletionPolicy,
+    WorkGraphStatus as WorkGraphStatus,
+    WorkGraphPriority as WorkGraphPriority,
     WorkItemRef as WorkItemRef,
     WorkOwnerKey as WorkOwnerKey,
     WorkOwnerKind as WorkOwnerKind,
@@ -449,15 +451,9 @@ class ScheduleToolCall(TypedDict, total=False):
     arguments: Any
 
 
-WorkGraphStatus = Literal[
-    "open",
-    "in_progress",
-    "blocked",
-    "completed",
-    "cancelled",
-    "failed",
-]
-WorkGraphPriority = Literal["low", "medium", "high"]
+# `WorkGraphStatus` and `WorkGraphPriority` are generated from the WorkItem
+# schema's closed enums and imported/re-exported from `.generated.types` above
+# (dogma row #256). They are no longer hand-declared here.
 WorkGraphEdgeKind = Literal[
     "blocks",
     "parent",

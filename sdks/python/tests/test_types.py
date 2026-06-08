@@ -2032,18 +2032,23 @@ def test_parse_tool_execution_completed_does_not_coerce_missing_or_malformed_is_
 
 
 def test_parse_unknown_event_type():
+    # Fail CLOSED: a `type` not in the generated KNOWN_AGENT_EVENT_TYPES
+    # inventory is a contract violation for a version-matched client and must
+    # raise a typed error, not be laundered into a fabricated UnknownEvent.
     raw = {"type": "future_event_v2", "data": "something"}
-    event = parse_event(raw)
-    assert isinstance(event, UnknownEvent)
-    assert event.type == "future_event_v2"
-    assert event.data == raw
+    with pytest.raises(MeerkatError) as excinfo:
+        parse_event(raw)
+    assert excinfo.value.code == "UNKNOWN_EVENT_TYPE"
 
 
 def test_parse_missing_type():
+    # A frame with no `type` is a malformed wire shape — preserved as a
+    # `malformed_event` UnknownEvent (not fabricated into a typed event, and not
+    # a hard throw that would crash a streaming consumer on a control frame).
     raw = {"delta": "oops"}
     event = parse_event(raw)
     assert isinstance(event, UnknownEvent)
-    assert event.type == ""
+    assert event.type == "malformed_event"
 
 
 def test_parse_compaction_started():

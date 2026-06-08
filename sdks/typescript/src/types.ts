@@ -33,6 +33,8 @@ import type {
   WorkAttentionMode,
   WorkAttentionStatus,
   WorkCompletionPolicy,
+  WorkGraphStatus,
+  WorkGraphPriority,
 } from "./generated/types.js";
 import type { TurnTerminalCauseKind, Usage } from "./events.js";
 
@@ -43,6 +45,8 @@ export type {
   WorkAttentionMode,
   WorkAttentionStatus,
   WorkCompletionPolicy,
+  WorkGraphStatus,
+  WorkGraphPriority,
 } from "./generated/types.js";
 
 declare const peerIdBrand: unique symbol;
@@ -990,15 +994,9 @@ export interface ScheduleToolCallRequest {
   readonly arguments?: unknown;
 }
 
-export type WorkGraphStatus =
-  | "open"
-  | "in_progress"
-  | "blocked"
-  | "completed"
-  | "cancelled"
-  | "failed";
-
-export type WorkGraphPriority = "low" | "medium" | "high";
+// `WorkGraphStatus` and `WorkGraphPriority` are generated from the WorkItem
+// schema's closed enums and re-exported above (see the `./generated/types.js`
+// import). They are no longer hand-declared here (dogma row #256).
 
 export type WorkGraphEdgeKind =
   | "blocks"

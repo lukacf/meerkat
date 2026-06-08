@@ -38,6 +38,7 @@ import urllib.request
 from .errors import CapabilityUnavailableError, MeerkatError
 from .events import Usage, parse_event
 from .generated.types import CONTRACT_VERSION
+from .generated.version_compat import is_compatible_with as _generated_is_compatible_with
 from .generated.types import (
     AttentionListRequest,
     AttentionListResult,
@@ -2473,14 +2474,18 @@ class MeerkatClient:
 
     @staticmethod
     def _parse_agent_event_envelope(raw: dict[str, Any]) -> EventEnvelope:
-        payload = raw.get("payload", {})
+        # Only parse a payload that is actually present as an object. An absent
+        # or non-object payload leaves `payload=None` (mirrors the TS envelope
+        # parser) rather than synthesizing a typeless frame that the
+        # fail-closed `parse_event` would (correctly) reject.
+        payload = raw.get("payload")
         return EventEnvelope(
             event_id=str(raw.get("event_id", "")),
             source=MeerkatClient._parse_event_source_identity(raw.get("source")),
             source_id=str(raw.get("source_id", "")),
             seq=int(raw.get("seq", 0)),
             timestamp_ms=int(raw.get("timestamp_ms", 0)),
-            payload=parse_event(payload if isinstance(payload, dict) else {}),
+            payload=parse_event(payload) if isinstance(payload, dict) else None,
         )
 
     @staticmethod
@@ -3573,18 +3578,10 @@ class MeerkatClient:
 
     @staticmethod
     def _check_version_compatible(server: str, client: str) -> bool:
-        def core_parts(version: str) -> list[int]:
-            core = version.split("-", 1)[0].split("+", 1)[0]
-            return [int(x) for x in core.split(".")]
-
-        try:
-            s_parts = core_parts(server)
-            c_parts = core_parts(client)
-            if s_parts[0] == 0 and c_parts[0] == 0:
-                return s_parts[1] == c_parts[1]
-            return s_parts[0] == c_parts[0]
-        except (ValueError, IndexError):
-            return False
+        # Drive contract-version compatibility off the generated helper
+        # (mirrors `ContractVersion::is_compatible_with`) instead of a
+        # hand-rolled copy of the rule (dogma row #193).
+        return _generated_is_compatible_with(server, client)
 
     @staticmethod
     def _parse_run_result(data: dict[str, Any]) -> RunResult:

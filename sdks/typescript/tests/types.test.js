@@ -794,22 +794,23 @@ describe("Typed Events", () => {
     }
   });
 
-  it("should return UnknownEvent for unrecognised types", () => {
-    const event = parseEvent({ type: "future_event_v2", data: "something" });
-    // Unknown events have the raw type string
-    assert.equal(event.type, "future_event_v2");
+  it("fails closed (throws) on an unrecognised type not in the schema inventory", () => {
+    // An event whose `type` is not in the generated KNOWN_AGENT_EVENT_TYPES
+    // inventory is a contract violation for a version-matched client and must
+    // be rejected with a typed error, not laundered into a fabricated
+    // UnknownEvent. (Version skew is handled separately.)
+    assert.throws(
+      () => parseEvent({ type: "future_event_v2", data: "something" }),
+      (err) => err instanceof MeerkatError && err.code === "UNKNOWN_EVENT_TYPE",
+    );
   });
 
-  it("fails closed on a frame missing the type discriminant", () => {
-    // A frame with no `type` is a malformed wire shape, not a forward-compat
-    // future event, so it must surface as malformed_event rather than being
-    // laundered into a fabricated UnknownEvent with an empty type.
+  it("preserves a frame missing the type discriminant as malformed_event", () => {
+    // A frame with no `type` is a malformed wire shape — preserved as a
+    // `malformed_event` frame (not fabricated into a typed event, and not a hard
+    // throw that would crash a streaming consumer on a control/keepalive frame).
     const event = parseEvent({ delta: "oops" });
     assert.equal(event.type, "malformed_event");
-    if (event.type === "malformed_event") {
-      assert.equal(event.rawType, "");
-      assert.deepEqual(event.raw, { delta: "oops" });
-    }
   });
 
   it("should parse scoped wrapper events", () => {

@@ -3183,6 +3183,10 @@ WorkCompletionPolicy = WorkCompletionPolicySelfAttest | WorkCompletionPolicyHost
 # WorkGraph RPC helper wire type for WorkOwnerKind.
 WorkOwnerKind = Literal['principal', 'agent', 'session', 'mob', 'label']
 
+WorkGraphStatus = Literal["open", "in_progress", "blocked", "completed", "cancelled", "failed"]
+
+WorkGraphPriority = Literal["low", "medium", "high"]
+
 # Shared operation kind for live MCP operations.
 McpLiveOperation = Literal['add', 'remove', 'reload']
 

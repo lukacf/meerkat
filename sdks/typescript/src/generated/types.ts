@@ -1460,6 +1460,12 @@ export type WorkCompletionPolicy = WorkCompletionPolicySelfAttest | WorkCompleti
 
 export type WorkOwnerKind = "principal" | "agent" | "session" | "mob" | "label";
 
+export const WORK_GRAPH_STATUSES = ["open", "in_progress", "blocked", "completed", "cancelled", "failed"] as const;
+export type WorkGraphStatus = typeof WORK_GRAPH_STATUSES[number];
+
+export const WORK_GRAPH_PRIORITIES = ["low", "medium", "high"] as const;
+export type WorkGraphPriority = typeof WORK_GRAPH_PRIORITIES[number];
+
 export type McpLiveOperation = "add" | "remove" | "reload";
 
 export type McpLiveOpStatus = "staged" | "applied" | "rejected";

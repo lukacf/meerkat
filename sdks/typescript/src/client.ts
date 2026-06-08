@@ -41,8 +41,11 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import { Buffer } from "node:buffer";
 import { MeerkatError, CapabilityUnavailableError } from "./generated/errors.js";
+import { isCompatibleWith } from "./generated/version_compat.js";
 import {
   CONTRACT_VERSION,
+  WORK_GRAPH_STATUSES,
+  WORK_GRAPH_PRIORITIES,
   type AttentionBindingRequest,
   type LiveChannelParams,
   type LiveCloseResult,
@@ -3356,21 +3359,10 @@ export class MeerkatClient {
   }
 
   private static checkVersionCompatible(server: string, client: string): boolean {
-    const coreParts = (version: string): number[] =>
-      version
-        .split("-", 1)[0]
-        .split("+", 1)[0]
-        .split(".")
-        .map(Number);
-
-    try {
-      const s = coreParts(server);
-      const c = coreParts(client);
-      if (s[0] === 0 && c[0] === 0) return s[1] === c[1];
-      return s[0] === c[0];
-    } catch {
-      return false;
-    }
+    // Drive contract-version compatibility off the generated helper
+    // (mirrors `ContractVersion::is_compatible_with`) instead of a hand-rolled
+    // copy of the rule (dogma row #193).
+    return isCompatibleWith(server, client);
   }
 
   static parseRunResult(data: Record<string, unknown>): RunResult {
@@ -4001,7 +3993,7 @@ export class MeerkatClient {
 
   static parseWorkItem(data: Record<string, unknown>): WorkItem {
     const status = MeerkatClient.requireStringField(data, "status", "Invalid workgraph item");
-    if (!["open", "in_progress", "blocked", "completed", "cancelled", "failed"].includes(status)) {
+    if (!(WORK_GRAPH_STATUSES as readonly string[]).includes(status)) {
       throw new MeerkatError("INVALID_RESPONSE", "Invalid workgraph item: invalid status");
     }
     const priority = MeerkatClient.requireStringField(
@@ -4009,7 +4001,7 @@ export class MeerkatClient {
       "priority",
       "Invalid workgraph item",
     );
-    if (!["low", "medium", "high"].includes(priority)) {
+    if (!(WORK_GRAPH_PRIORITIES as readonly string[]).includes(priority)) {
       throw new MeerkatError("INVALID_RESPONSE", "Invalid workgraph item: invalid priority");
     }
     return {

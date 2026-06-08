@@ -27,6 +27,8 @@
  */
 
 import type { ContentBlock, ContentInput, SchemaWarning, SkillKey } from "./types.js";
+import { KNOWN_AGENT_EVENT_TYPES } from "./generated/events.js";
+import { MeerkatError } from "./generated/errors.js";
 
 // ---------------------------------------------------------------------------
 // Shared value types
@@ -995,8 +997,12 @@ function parseSkillResolutionFailureReason(
 /**
  * Parse a raw wire event dict into a typed {@link StreamEvent}.
  *
- * Unknown event types are returned as {@link UnknownEvent} for
- * forward-compatibility.
+ * Fails CLOSED: a `type` that is not in the generated
+ * {@link KNOWN_AGENT_EVENT_TYPES} inventory (including an empty/absent `type`)
+ * throws a typed {@link MeerkatError}. A `type` that is in the inventory but
+ * has no parser case in this SDK version is surfaced as an {@link UnknownEvent}
+ * for forward-compatibility; a known type with a malformed payload is preserved
+ * as a `malformed_event` {@link MalformedEvent}.
  */
 export function parseEvent(raw: Record<string, unknown>): StreamEvent {
   const normalizeScopePath = (value: unknown): StreamScopeFrame[] => {
@@ -1040,9 +1046,28 @@ export function parseEvent(raw: Record<string, unknown>): StreamEvent {
   return parseCoreEvent(raw);
 }
 
+const KNOWN_AGENT_EVENT_TYPE_SET: ReadonlySet<string> = new Set(KNOWN_AGENT_EVENT_TYPES);
+
 /** Parse a raw wire event as a core (non-wrapper) agent event. */
 export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
   const type = String(raw.type ?? "");
+
+  // Row #283: a frame with no `type` discriminant is malformed, not a typed
+  // event — preserve it as a `malformed_event` frame (never fabricate a typed
+  // event from a missing discriminant, and never crash a streaming consumer on
+  // a control/keepalive frame).
+  if (type === "") {
+    return malformedEvent(raw, type, "event is missing a `type` discriminant");
+  }
+  // Fail CLOSED on a present-but-unknown discriminant: a `type` absent from the
+  // schema-derived KNOWN_AGENT_EVENT_TYPES inventory is a contract violation for
+  // a version-matched client. (Version skew is handled separately by the
+  // contract-version check.) A type that IS in the inventory but has no parser
+  // case below falls through to `default` and is surfaced as a forward-compatible
+  // UnknownEvent. This guard is OUTSIDE the try/catch so it is not laundered.
+  if (!KNOWN_AGENT_EVENT_TYPE_SET.has(type)) {
+    throw new MeerkatError("UNKNOWN_EVENT_TYPE", `unknown agent event type "${type}"`, raw);
+  }
 
   try {
   switch (type) {
@@ -1248,15 +1273,11 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
       };
     }
 
-    // Unknown — forward-compat
+    // Forward-compat: `type` is in the schema-known inventory (guaranteed by
+    // the fail-closed guard above) but this SDK version has no parser case for
+    // it yet. Surface it as an UnknownEvent rather than rejecting — it is a
+    // genuine, contract-valid future event, not a violation.
     default:
-      // Fail closed on a frame with no `type` discriminant: an empty type is a
-      // malformed wire shape, not a forward-compatible future event, so it must
-      // not be laundered into a fabricated UnknownEvent. A genuinely-unknown but
-      // present type is still surfaced as UnknownEvent for forward-compat.
-      if (type === "") {
-        throw new Error("event is missing a `type` discriminant");
-      }
       return { type, ...raw } as UnknownEvent;
   }
   } catch (error) {

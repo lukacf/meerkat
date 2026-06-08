@@ -11,10 +11,11 @@ use std::borrow::Cow;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::image_generation::ToolCallId;
 use crate::provider::Provider;
 use crate::realtime_transcript::RealtimeTranscriptEvent;
 use crate::session::PendingSystemContextAppend;
-use crate::types::{ContentBlock, Message, SessionId, StopReason, ToolDef, Usage};
+use crate::types::{ContentBlock, Message, SessionId, StopReason, ToolDef, ToolName, Usage};
 
 // ---------------------------------------------------------------------------
 // Adapter status — typed lifecycle, not Option<T> hiding five states
@@ -319,9 +320,15 @@ pub enum LiveAdapterObservation {
     RealtimeTranscript {
         event: RealtimeTranscriptEvent,
     },
+    /// #270: the provider-native call id and tool name are parsed into typed
+    /// newtypes at the provider boundary (`event_to_observation`) so the raw
+    /// provider string is never the identity owner past this seam. Downstream
+    /// the host re-projects them to the meerkat-core `ToolCall` / wire-edge
+    /// `String` shapes via `.0` / `Display` only where the foreign API still
+    /// demands a bare string.
     ToolCallRequested {
-        provider_call_id: String,
-        tool_name: String,
+        provider_call_id: ToolCallId,
+        tool_name: ToolName,
         arguments: serde_json::Value,
     },
     /// Barge-in: the user interrupted the assistant mid-turn.
@@ -1186,8 +1193,8 @@ mod tests {
     #[test]
     fn observation_tool_call_requested_round_trips() {
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_456".into(),
-            tool_name: "web_search".into(),
+            provider_call_id: ToolCallId::new("call_456"),
+            tool_name: ToolName::new("web_search"),
             arguments: serde_json::json!({"query": "meerkat habitat"}),
         };
         let json = serde_json::to_string(&obs).unwrap();
@@ -1198,15 +1205,15 @@ mod tests {
     #[test]
     fn observation_tool_call_uses_provider_call_id_not_domain_handle() {
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_789".into(),
-            tool_name: "calculator".into(),
+            provider_call_id: ToolCallId::new("call_789"),
+            tool_name: ToolName::new("calculator"),
             arguments: serde_json::json!({}),
         };
         if let LiveAdapterObservation::ToolCallRequested {
             provider_call_id, ..
         } = &obs
         {
-            assert!(provider_call_id.starts_with("call_"));
+            assert!(provider_call_id.0.starts_with("call_"));
         } else {
             panic!("wrong variant");
         }

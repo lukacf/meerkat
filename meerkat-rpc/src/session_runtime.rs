@@ -12293,7 +12293,7 @@ mod tests {
             owner: meerkat_core::ApprovalOwnerRef::Runtime,
             resource: meerkat_core::ApprovalResourceRef {
                 kind: meerkat_core::ApprovalResourceKind::Runtime,
-                id: "local".to_string(),
+                id: meerkat_core::ApprovalResourceId::new("local"),
             },
             proposed_action: meerkat_core::ApprovalProposedAction {
                 kind: meerkat_core::ApprovalActionKind::Other,

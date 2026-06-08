@@ -121,8 +121,8 @@ mod tests {
     use chrono::Utc;
     use meerkat_core::{
         ApprovalActionKind, ApprovalDecision, ApprovalOwnerRef, ApprovalPrincipalId,
-        ApprovalProposedAction, ApprovalRequest, ApprovalResourceKind, ApprovalResourceRef,
-        ApprovalRisk, ApprovalService, ApprovalStore, SurfaceMetadata,
+        ApprovalProposedAction, ApprovalRequest, ApprovalResourceId, ApprovalResourceKind,
+        ApprovalResourceRef, ApprovalRisk, ApprovalService, ApprovalStore, SurfaceMetadata,
     };
     use std::collections::BTreeSet;
     use std::sync::Arc;
@@ -133,7 +133,7 @@ mod tests {
             owner: ApprovalOwnerRef::Runtime,
             resource: ApprovalResourceRef {
                 kind: ApprovalResourceKind::Runtime,
-                id: "local".to_string(),
+                id: ApprovalResourceId::new("local"),
             },
             proposed_action: ApprovalProposedAction {
                 kind: ApprovalActionKind::Other,

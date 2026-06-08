@@ -130,6 +130,14 @@
         ],
         "type": "string"
       },
+      "ApprovalMemberRef": {
+        "description": "Typed reference to a mob member owning an approval.",
+        "type": "string"
+      },
+      "ApprovalMobRef": {
+        "description": "Typed reference to a mob owning an approval.",
+        "type": "string"
+      },
       "ApprovalOwnerRef": {
         "description": "Typed owner for an approval request.",
         "oneOf": [
@@ -152,7 +160,7 @@
                 "type": "string"
               },
               "session_id": {
-                "type": "string"
+                "$ref": "#/$defs/SessionId"
               }
             },
             "required": [
@@ -164,7 +172,7 @@
           {
             "properties": {
               "mob_id": {
-                "type": "string"
+                "$ref": "#/$defs/ApprovalMobRef"
               },
               "owner_type": {
                 "const": "mob",
@@ -184,7 +192,7 @@
                 "type": "string"
               },
               "run_id": {
-                "type": "string"
+                "$ref": "#/$defs/RunId"
               }
             },
             "required": [
@@ -212,10 +220,10 @@
           {
             "properties": {
               "member_ref": {
-                "type": "string"
+                "$ref": "#/$defs/ApprovalMemberRef"
               },
               "mob_id": {
-                "type": "string"
+                "$ref": "#/$defs/ApprovalMobRef"
               },
               "owner_type": {
                 "const": "external_member",
@@ -252,6 +260,10 @@
         ],
         "type": "object"
       },
+      "ApprovalResourceId": {
+        "description": "Typed identifier for the resource affected by an approval.",
+        "type": "string"
+      },
       "ApprovalResourceKind": {
         "description": "Typed resource kind affected by an approval.",
         "enum": [
@@ -269,7 +281,7 @@
         "description": "Resource affected by an approval.",
         "properties": {
           "id": {
-            "type": "string"
+            "$ref": "#/$defs/ApprovalResourceId"
           },
           "kind": {
             "$ref": "#/$defs/ApprovalResourceKind"
@@ -289,6 +301,14 @@
           "high",
           "critical"
         ],
+        "type": "string"
+      },
+      "RunId": {
+        "description": "Unique identifier for a run (a single execution of the agent loop).\n\nCore emits this in `RunEvent` and tracks it across the run lifecycle.",
+        "type": "string"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
         "type": "string"
       },
       "SurfaceMetadata": {

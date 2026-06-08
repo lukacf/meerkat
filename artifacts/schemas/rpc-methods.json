@@ -424,25 +424,25 @@
       "description": "Send an input chunk (audio/text) to a live channel",
       "name": "live/send_input",
       "params_type": "LiveSendInputParams",
-      "result_type": "Value"
+      "result_type": "LiveSendInputResult"
     },
     {
       "description": "Commit any buffered input on a live channel",
       "name": "live/commit_input",
       "params_type": "LiveCommitInputParams",
-      "result_type": "Value"
+      "result_type": "LiveCommitInputResult"
     },
     {
       "description": "Interrupt the in-progress assistant turn on a live channel",
       "name": "live/interrupt",
       "params_type": "LiveChannelParams",
-      "result_type": "Value"
+      "result_type": "LiveInterruptResult"
     },
     {
       "description": "Truncate the assistant output on a live channel at the client-tracked playback cursor",
       "name": "live/truncate",
       "params_type": "LiveTruncateParams",
-      "result_type": "Value"
+      "result_type": "LiveTruncateResult"
     },
     {
       "description": "Apply mutable session config (instructions/tools/audio) to an open live channel via a single session.update; does NOT replay history. Identity swaps (model/provider) require close + reopen.",

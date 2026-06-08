@@ -1061,13 +1061,22 @@ impl AgentMobToolSurface {
         let mob_id = MobId::from(args.mob_id);
         self.ensure_mob_scope_authority(call.name, &mob_id).await?;
 
+        let identity = AgentIdentity::from(args.member_id);
         let snapshot = self
             .state
-            .mob_member_status(&mob_id, &AgentIdentity::from(args.member_id))
+            .mob_member_status(&mob_id, &identity)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
-        Self::encode_result(call, json!(snapshot))
+        let member_ref =
+            meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), identity.as_str());
+        let result = snapshot.to_member_status_result(member_ref).map_err(|e| {
+            ToolError::invalid_arguments(
+                call.name,
+                format!("failed to project mob member status: {e}"),
+            )
+        })?;
+        Self::encode_result(call, json!(result))
     }
 
     async fn dispatch_mob_list_members(
@@ -1189,7 +1198,10 @@ impl AgentMobToolSurface {
             .realm_profile_create(&args.name, &args.profile)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
-        Self::encode_result(call, json!(stored))
+        Self::encode_result(
+            call,
+            json!(meerkat_mob::stored_realm_profile_to_wire(&stored)),
+        )
     }
 
     async fn dispatch_mob_profile_get(
@@ -1205,8 +1217,21 @@ impl AgentMobToolSurface {
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
         match stored {
-            Some(profile) => Self::encode_result(call, json!(profile)),
-            None => Self::encode_result(call, json!({"not_found": true, "name": args.name})),
+            Some(profile) => Self::encode_result(
+                call,
+                json!(meerkat_mob::stored_realm_profile_to_wire(&profile)),
+            ),
+            None => Self::encode_result(
+                call,
+                json!(meerkat_contracts::MobProfileLookupResult {
+                    not_found: true,
+                    name: args.name,
+                    profile: None,
+                    revision: None,
+                    created_at: None,
+                    updated_at: None,
+                }),
+            ),
         }
     }
 
@@ -1219,7 +1244,14 @@ impl AgentMobToolSurface {
             .realm_profile_list()
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
-        Self::encode_result(call, json!({"profiles": profiles}))
+        let profiles = profiles
+            .iter()
+            .map(meerkat_mob::stored_realm_profile_to_wire)
+            .collect();
+        Self::encode_result(
+            call,
+            json!(meerkat_contracts::MobProfileListResult { profiles }),
+        )
     }
 
     async fn dispatch_mob_profile_update(
@@ -1235,7 +1267,10 @@ impl AgentMobToolSurface {
             .realm_profile_update(&args.name, &args.profile, args.expected_revision)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
-        Self::encode_result(call, json!(stored))
+        Self::encode_result(
+            call,
+            json!(meerkat_mob::stored_realm_profile_to_wire(&stored)),
+        )
     }
 
     async fn dispatch_mob_profile_delete(

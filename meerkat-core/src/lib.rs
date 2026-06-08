@@ -96,9 +96,10 @@ pub use agent::{
 };
 pub use approval::{
     ApprovalActionKind, ApprovalDecision, ApprovalDecisionRecord, ApprovalError, ApprovalId,
-    ApprovalListFilter, ApprovalOwnerRef, ApprovalPrincipalId, ApprovalProposedAction,
-    ApprovalRecord, ApprovalRequest, ApprovalResourceKind, ApprovalResourceRef, ApprovalRisk,
-    ApprovalService, ApprovalStatus, ApprovalStore, ApprovalStoreError, InMemoryApprovalStore,
+    ApprovalListFilter, ApprovalMemberRef, ApprovalMobRef, ApprovalOwnerRef, ApprovalPrincipalId,
+    ApprovalProposedAction, ApprovalRecord, ApprovalRequest, ApprovalResourceId,
+    ApprovalResourceKind, ApprovalResourceRef, ApprovalRisk, ApprovalService, ApprovalStatus,
+    ApprovalStore, ApprovalStoreError, InMemoryApprovalStore,
 };
 pub use artifact::{
     ArtifactContentHandle, ArtifactError, ArtifactHandle, ArtifactId, ArtifactListFilter,

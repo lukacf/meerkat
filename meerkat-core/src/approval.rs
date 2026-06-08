@@ -4,11 +4,12 @@
 //! Public surfaces may request, list, read, and decide approvals; the service
 //! stores and projects the generated lifecycle decisions.
 
-use crate::SurfaceMetadata;
 use crate::generated::approval_lifecycle::{
     ApprovalLifecycleDecision, ApprovalLifecycleMachineAuthority, ApprovalLifecycleOutcome,
     ApprovalLifecycleRejectionReason, ApprovalLifecycleStatus,
 };
+use crate::lifecycle::identifiers::RunId;
+use crate::{SessionId, SurfaceMetadata, ToolCallId};
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -78,17 +79,97 @@ impl fmt::Display for ApprovalPrincipalId {
     }
 }
 
+/// Typed reference to a mob owning an approval.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(transparent)]
+pub struct ApprovalMobRef(String);
+
+impl ApprovalMobRef {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ApprovalMobRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Typed reference to a mob member owning an approval.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(transparent)]
+pub struct ApprovalMemberRef(String);
+
+impl ApprovalMemberRef {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ApprovalMemberRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Typed identifier for the resource affected by an approval.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(transparent)]
+pub struct ApprovalResourceId(String);
+
+impl ApprovalResourceId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ApprovalResourceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// Typed owner for an approval request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "owner_type", rename_all = "snake_case")]
 pub enum ApprovalOwnerRef {
     Runtime,
-    Session { session_id: String },
-    Mob { mob_id: String },
-    Run { run_id: String },
-    ToolCall { tool_call_id: String },
-    ExternalMember { mob_id: String, member_ref: String },
+    Session {
+        session_id: SessionId,
+    },
+    Mob {
+        mob_id: ApprovalMobRef,
+    },
+    Run {
+        run_id: RunId,
+    },
+    ToolCall {
+        tool_call_id: ToolCallId,
+    },
+    ExternalMember {
+        mob_id: ApprovalMobRef,
+        member_ref: ApprovalMemberRef,
+    },
 }
 
 /// Typed resource kind affected by an approval.
@@ -110,7 +191,7 @@ pub enum ApprovalResourceKind {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ApprovalResourceRef {
     pub kind: ApprovalResourceKind,
-    pub id: String,
+    pub id: ApprovalResourceId,
 }
 
 /// Typed action kind for the proposed action.
@@ -771,11 +852,11 @@ mod tests {
         ApprovalRequest {
             requester: principal("human:alice"),
             owner: ApprovalOwnerRef::Session {
-                session_id: "session-1".to_string(),
+                session_id: SessionId::new(),
             },
             resource: ApprovalResourceRef {
                 kind: ApprovalResourceKind::ShellCommand,
-                id: "shell:rm".to_string(),
+                id: ApprovalResourceId::new("shell:rm"),
             },
             proposed_action: ApprovalProposedAction {
                 kind: ApprovalActionKind::ShellCommand,

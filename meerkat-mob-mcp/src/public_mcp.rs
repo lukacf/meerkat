@@ -798,7 +798,8 @@ pub async fn handle_public_tools_call(
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
             let run = meerkat_mob::MobRun::public_flow_status_run_value(run.as_ref())
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            Ok(json!({ "run": run }))
+            serde_json::to_value(meerkat_contracts::MobFlowStatusResult { run })
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))
         }
         "meerkat_mob_flow_cancel" => {
             let input: MeerkatMobRunIdInput = parse_args(arguments)?;
@@ -856,13 +857,25 @@ pub async fn handle_public_tools_call(
                 .realm_profile_create(&input.name, &input.profile)
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            Ok(json!(stored))
+            serde_json::to_value(meerkat_mob::stored_realm_profile_to_wire(&stored))
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))
         }
         "meerkat_mob_profile_get" => {
             let input: MeerkatMobProfileNameInput = parse_args(arguments)?;
             match state.realm_profile_get(&input.name).await {
-                Ok(Some(stored)) => Ok(json!(stored)),
-                Ok(None) => Ok(json!({"not_found": true, "name": input.name})),
+                Ok(Some(stored)) => {
+                    serde_json::to_value(meerkat_mob::stored_realm_profile_to_wire(&stored))
+                        .map_err(|err| McpToolError::invalid_params(err.to_string()))
+                }
+                Ok(None) => serde_json::to_value(meerkat_contracts::MobProfileLookupResult {
+                    not_found: true,
+                    name: input.name,
+                    profile: None,
+                    revision: None,
+                    created_at: None,
+                    updated_at: None,
+                })
+                .map_err(|err| McpToolError::invalid_params(err.to_string())),
                 Err(err) => Err(McpToolError::invalid_params(err.to_string())),
             }
         }
@@ -871,7 +884,12 @@ pub async fn handle_public_tools_call(
                 .realm_profile_list()
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            Ok(json!({"profiles": profiles}))
+            let profiles = profiles
+                .iter()
+                .map(meerkat_mob::stored_realm_profile_to_wire)
+                .collect();
+            serde_json::to_value(meerkat_contracts::MobProfileListResult { profiles })
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))
         }
         "meerkat_mob_profile_update" => {
             let input: MeerkatMobProfileUpdateInput = parse_args(arguments)?;
@@ -879,7 +897,8 @@ pub async fn handle_public_tools_call(
                 .realm_profile_update(&input.name, &input.profile, input.expected_revision)
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            Ok(json!(stored))
+            serde_json::to_value(meerkat_mob::stored_realm_profile_to_wire(&stored))
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))
         }
         "meerkat_mob_profile_delete" => {
             let input: MeerkatMobProfileDeleteInput = parse_args(arguments)?;

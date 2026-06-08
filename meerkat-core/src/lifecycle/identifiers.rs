@@ -10,7 +10,8 @@ use uuid::Uuid;
 ///
 /// Core emits this in `RunEvent` and tracks it across the run lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct RunId(pub Uuid);
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RunId(#[cfg_attr(feature = "schema", schemars(with = "String"))] pub Uuid);
 
 impl RunId {
     /// Create a new run ID using UUID v7 (time-ordered).

@@ -2615,7 +2615,11 @@ async fn mob_member_status(
         .mob_member_status(&mob_id, &identity)
         .await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    Ok(Json(json!(snapshot)))
+    let member_ref = meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), identity.as_str());
+    let result = snapshot
+        .to_member_status_result(member_ref)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!(result)))
 }
 
 /// POST /mob/{id}/members/{agent_identity}/cancel — force-cancel in-flight turn.

@@ -1648,7 +1648,7 @@ pub async fn get_auth_status(
     let phase = meerkat_core::AuthStatusPhase::from_lease_snapshot(now, &snapshot);
     let mut stored = None;
     if source_uses_store {
-        if phase == meerkat_core::AuthStatusPhase::Unknown
+        if phase.is_no_live_lease()
             && let Some(expected_mode) = expected_mode
             && let Ok(Some(rehydrated)) = meerkat_core::rehydrate_marked_tokens_for_status(
                 state.token_store.as_ref(),
@@ -1661,7 +1661,7 @@ pub async fn get_auth_status(
         {
             stored = Some(rehydrated);
             snapshot = state.auth_lease.snapshot(&lease_key);
-        } else if phase != meerkat_core::AuthStatusPhase::Unknown {
+        } else if !phase.is_no_live_lease() {
             stored = state
                 .token_store
                 .load(&TokenKey::from_auth_binding(&auth_binding))
@@ -3221,7 +3221,10 @@ mod tests {
             Some(&stored),
             &snapshot,
         );
-        assert_eq!(projection.phase, meerkat_core::AuthStatusPhase::Unknown);
+        assert_eq!(
+            projection.phase,
+            meerkat_core::AuthStatusPhase::MissingCredential
+        );
         assert!(projection.tokens.is_none());
     }
 
@@ -3285,7 +3288,10 @@ mod tests {
             Some(&stored),
             &snapshot,
         );
-        assert_eq!(projection.phase, meerkat_core::AuthStatusPhase::Unknown);
+        assert_eq!(
+            projection.phase,
+            meerkat_core::AuthStatusPhase::MissingCredential
+        );
         assert!(projection.tokens.is_none());
     }
 
@@ -3357,7 +3363,10 @@ mod tests {
             Some(&stored),
             &snapshot,
         );
-        assert_eq!(projection.phase, meerkat_core::AuthStatusPhase::Unknown);
+        assert_eq!(
+            projection.phase,
+            meerkat_core::AuthStatusPhase::MissingCredential
+        );
         assert!(projection.tokens.is_none());
     }
 
@@ -3584,7 +3593,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Unknown);
+        assert_eq!(
+            detail.state,
+            meerkat_core::AuthStatusPhase::MissingCredential
+        );
         assert_eq!(detail.expires_at, None);
         assert_eq!(detail.last_refresh_at, None);
         assert_eq!(detail.account_id, None);

@@ -20,6 +20,9 @@ import type {
   MemberDeliveryReceipt,
   MobRespawnResult,
   MobMemberSnapshot,
+  MobPeerConnectivity,
+  MobPeerConnectivitySnapshot,
+  MobUnreachablePeer,
   ResolvedModelCapabilities,
   MobHelperResult,
   EventEnvelope,
@@ -315,6 +318,89 @@ function parseWireHandlingMode(raw: unknown, message: string): HandlingMode {
     return raw as HandlingMode;
   }
   throw new Error(message);
+}
+
+function parseMobUnreachablePeer(raw: unknown): MobUnreachablePeer {
+  const record = requireRecord(
+    raw,
+    'Invalid mob member_status response: peer_connectivity.unreachable_peers entry must be object',
+  );
+  const peer = requireStringField(
+    record,
+    'peer',
+    'Invalid mob member_status response: peer_connectivity.unreachable_peers entry missing peer',
+  );
+  const reason = optionalStringField(
+    record,
+    'reason',
+    'Invalid mob member_status response: peer_connectivity.unreachable_peers entry reason must be string',
+  );
+  return reason === undefined ? { peer } : { peer, reason };
+}
+
+function parseMobPeerConnectivitySnapshot(raw: unknown): MobPeerConnectivitySnapshot {
+  const record = requireRecord(
+    raw,
+    'Invalid mob member_status response: peer_connectivity.snapshot must be object',
+  );
+  const unreachableRaw = record.unreachable_peers;
+  const unreachable_peers =
+    unreachableRaw === undefined
+      ? []
+      : Array.isArray(unreachableRaw)
+        ? unreachableRaw.map(parseMobUnreachablePeer)
+        : (() => {
+            throw new Error(
+              'Invalid mob member_status response: peer_connectivity.snapshot.unreachable_peers must be array',
+            );
+          })();
+  return {
+    reachable_peer_count: requireNonNegativeIntegerField(
+      record,
+      'reachable_peer_count',
+      'Invalid mob member_status response: peer_connectivity.snapshot.reachable_peer_count must be number',
+    ),
+    unknown_peer_count: requireNonNegativeIntegerField(
+      record,
+      'unknown_peer_count',
+      'Invalid mob member_status response: peer_connectivity.snapshot.unknown_peer_count must be number',
+    ),
+    unreachable_peers,
+  };
+}
+
+/**
+ * Fail-closed parser for the tri-state `peer_connectivity` projection. Mirrors
+ * `parseWireHandlingMode`: switch on the variant `status` tag and THROW on any
+ * unknown tag rather than coalescing it into a permissive default. Absent
+ * connectivity (the field was omitted) returns `undefined`.
+ */
+function parseMobPeerConnectivity(raw: unknown): MobPeerConnectivity | undefined {
+  if (raw == null) {
+    return undefined;
+  }
+  const record = requireRecord(
+    raw,
+    'Invalid mob member_status response: peer_connectivity must be object',
+  );
+  const status = record.status;
+  switch (status) {
+    case 'not_applicable':
+      return { status: 'not_applicable' };
+    case 'probe_timed_out':
+      return { status: 'probe_timed_out' };
+    case 'known':
+      return {
+        status: 'known',
+        snapshot: parseMobPeerConnectivitySnapshot(record.snapshot),
+      };
+    default:
+      throw new Error(
+        `Invalid mob member_status response: unknown peer_connectivity status ${JSON.stringify(
+          status,
+        )}`,
+      );
+  }
 }
 
 export function parseMobStatusResult(
@@ -647,14 +733,13 @@ function parseMobMemberSnapshot(raw: unknown): MobMemberSnapshot {
       'kickoff',
       'Invalid mob member_status response: kickoff must be object',
     ),
-    peer_connectivity: optionalRecordField(
-      snapshot,
-      'peer_connectivity',
-      'Invalid mob member_status response: peer_connectivity must be object',
-    ) as MobMemberSnapshot['peer_connectivity'],
   };
   if (currentSessionId !== undefined) {
     result.current_session_id = currentSessionId;
+  }
+  const peerConnectivity = parseMobPeerConnectivity(snapshot.peer_connectivity);
+  if (peerConnectivity !== undefined) {
+    result.peer_connectivity = peerConnectivity;
   }
   const resolvedCapabilities = parseResolvedModelCapabilities(
     snapshot.resolved_capabilities,

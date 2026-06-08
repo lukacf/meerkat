@@ -13,10 +13,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use meerkat_client::realtime_session::RealtimeSessionFactory;
 use meerkat_client::realtime_session::RealtimeSessionOpenConfig;
 use meerkat_contracts::{
-    LiveChannelParams, LiveCloseResult, LiveCommitInputParams, LiveInputChunkWire, LiveOpenParams,
-    LiveOpenResult, LiveOpenTransport, LiveRefreshResult, LiveSendInputParams, LiveStatusResult,
-    LiveTruncateParams, LiveWebrtcAnswerParams, LiveWebrtcAnswerResult, RealtimeCapabilities,
-    RealtimeTurningMode, WireLiveAdapterStatus, WireLiveDegradationReason,
+    LiveChannelParams, LiveCloseResult, LiveCommitInputParams, LiveCommitInputResult,
+    LiveInputChunkWire, LiveInterruptResult, LiveOpenParams, LiveOpenResult, LiveOpenTransport,
+    LiveRefreshResult, LiveSendInputParams, LiveSendInputResult, LiveStatusResult,
+    LiveTruncateParams, LiveTruncateResult, LiveWebrtcAnswerParams, LiveWebrtcAnswerResult,
+    RealtimeCapabilities, RealtimeTurningMode, WireLiveAdapterStatus, WireLiveDegradationReason,
 };
 use meerkat_core::SessionLlmIdentity;
 use meerkat_core::live_adapter::{
@@ -95,12 +96,26 @@ fn live_command_result_from_machine_authority(
         ));
     }
 
+    // #234: return typed result shapes (mirroring the `LiveCloseResult`
+    // precedent) instead of ad-hoc `json!` blobs. The typed struct carries a
+    // typed `status` discriminator plus the legacy boolean as a back-compat
+    // sibling, so SDK codegen sees a named shape rather than `Value` / `Any`.
+    // Serde failures surface as `String` to match the sibling
+    // `live_close_result_from_machine_authority` helper's error channel.
     match expected {
-        LiveCommandPublicKind::SendInput => Ok(serde_json::json!({"sent": true})),
-        LiveCommandPublicKind::CommitInput => Ok(serde_json::json!({"committed": true})),
-        LiveCommandPublicKind::Interrupt => Ok(serde_json::json!({"interrupted": true})),
+        LiveCommandPublicKind::SendInput => serde_json::to_value(LiveSendInputResult::sent())
+            .map_err(|err| format!("failed to serialize LiveSendInputResult: {err}")),
+        LiveCommandPublicKind::CommitInput => {
+            serde_json::to_value(LiveCommitInputResult::committed())
+                .map_err(|err| format!("failed to serialize LiveCommitInputResult: {err}"))
+        }
+        LiveCommandPublicKind::Interrupt => {
+            serde_json::to_value(LiveInterruptResult::interrupted())
+                .map_err(|err| format!("failed to serialize LiveInterruptResult: {err}"))
+        }
         LiveCommandPublicKind::TruncateAssistantOutput => {
-            Ok(serde_json::json!({"truncated": true}))
+            serde_json::to_value(LiveTruncateResult::truncated())
+                .map_err(|err| format!("failed to serialize LiveTruncateResult: {err}"))
         }
     }
 }

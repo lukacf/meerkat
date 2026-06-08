@@ -4436,16 +4436,32 @@ pub struct MobRun {
 }
 
 impl MobRun {
-    pub fn public_flow_status_run_value(run: Option<&Self>) -> Result<serde_json::Value, MobError> {
-        match run {
-            Some(run) => run.public_status_value(),
-            None => Ok(serde_json::Value::Null),
+    /// Typed wire status for the run lifecycle.
+    fn wire_status(&self) -> meerkat_contracts::WireMobRunStatus {
+        match self.status {
+            MobRunStatus::Pending => meerkat_contracts::WireMobRunStatus::Pending,
+            MobRunStatus::Running => meerkat_contracts::WireMobRunStatus::Running,
+            MobRunStatus::Completed => meerkat_contracts::WireMobRunStatus::Completed,
+            MobRunStatus::Failed => meerkat_contracts::WireMobRunStatus::Failed,
+            MobRunStatus::Canceled => meerkat_contracts::WireMobRunStatus::Canceled,
         }
     }
 
-    /// Public flow-status projection. Store-local timestamps are deliberately
-    /// omitted because MobMachine does not own them as semantic flow facts.
-    pub fn public_status_value(&self) -> Result<serde_json::Value, MobError> {
+    pub fn public_flow_status_run_value(
+        run: Option<&Self>,
+    ) -> Result<Option<meerkat_contracts::WireMobRun>, MobError> {
+        match run {
+            Some(run) => run.public_status_value().map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Public typed flow-status projection. The canonical identity/lifecycle
+    /// fields are lifted into the typed [`meerkat_contracts::WireMobRun`]; the
+    /// remaining kernel-owned step/loop projection rides along in `kernel`.
+    /// Store-local timestamps are deliberately omitted because MobMachine does
+    /// not own them as semantic flow facts.
+    pub fn public_status_value(&self) -> Result<meerkat_contracts::WireMobRun, MobError> {
         let mut value = serde_json::to_value(self).map_err(|error| {
             MobError::Internal(format!(
                 "public flow status projection failed to encode run '{}': {error}",
@@ -4483,7 +4499,28 @@ impl MobRun {
             }
         }
 
-        Ok(value)
+        // Lift the typed identity/lifecycle fields out of the kernel map so the
+        // wire shape carries them as closed typed fields rather than re-derived
+        // free-form values. The remaining object becomes the kernel projection.
+        object.remove("run_id");
+        object.remove("mob_id");
+        object.remove("flow_id");
+        object.remove("status");
+
+        let Some(kernel) = value.as_object().cloned() else {
+            return Err(MobError::Internal(format!(
+                "public flow status projection for run '{}' did not encode as an object",
+                self.run_id
+            )));
+        };
+
+        Ok(meerkat_contracts::WireMobRun {
+            run_id: self.run_id.to_string(),
+            mob_id: self.mob_id.to_string(),
+            flow_id: self.flow_id.to_string(),
+            status: self.wire_status(),
+            kernel,
+        })
     }
 
     /// Read-only access to the run's current status.
@@ -6757,11 +6794,19 @@ mod tests {
             flow_authority_inputs: Vec::new(),
         };
 
-        let value = run.public_status_value().expect("public projection");
-        let object = value.as_object().expect("run projection is object");
+        let wire = run.public_status_value().expect("public projection");
+        // Typed identity/lifecycle fields are lifted out of the kernel map.
+        assert_eq!(wire.flow_id, "flow-a");
+        assert_eq!(wire.mob_id, "mob");
+        assert_eq!(wire.status, meerkat_contracts::WireMobRunStatus::Completed);
+        let object = &wire.kernel;
         assert!(!object.contains_key("created_at"));
         assert!(!object.contains_key("completed_at"));
-        assert_eq!(object.get("status"), Some(&serde_json::json!("completed")));
+        // The typed fields are no longer present as free-form kernel entries.
+        assert!(!object.contains_key("status"));
+        assert!(!object.contains_key("run_id"));
+        assert!(!object.contains_key("mob_id"));
+        assert!(!object.contains_key("flow_id"));
         assert!(object.contains_key("flow_state"));
 
         let step_entry = object["step_ledger"]

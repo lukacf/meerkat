@@ -4074,7 +4074,7 @@ mod tests {
             "approval/request",
             serde_json::json!({
                 "requester": "human:alice",
-                "owner": {"owner_type": "session", "session_id": "session-1"},
+                "owner": {"owner_type": "session", "session_id": "00000000-0000-0000-0000-000000000001"},
                 "resource": {"kind": "shell_command", "id": "shell:rm"},
                 "proposed_action": {
                     "kind": "shell_command",

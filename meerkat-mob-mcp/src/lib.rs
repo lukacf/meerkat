@@ -3459,7 +3459,14 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .map_err(|e| map_mob_err(call, e))?;
                 let run = meerkat_mob::MobRun::public_flow_status_run_value(run.as_ref())
                     .map_err(|e| map_mob_err(call, e))?;
-                encode(call, json!({"run": run}))
+                let result = serde_json::to_value(meerkat_contracts::MobFlowStatusResult { run })
+                    .map_err(|e| {
+                    ToolError::invalid_arguments(
+                        call.name,
+                        format!("failed to encode flow status: {e}"),
+                    )
+                })?;
+                encode(call, result)
             }
             "mob_cancel_flow" => {
                 let args: FlowStatusArgs = call
@@ -3626,15 +3633,22 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let args: MeerkatStatusArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                let mob_id = MobId::from(args.mob_id);
+                let identity = AgentIdentity::from(args.agent_identity);
                 let snapshot = self
                     .state
-                    .mob_member_status(
-                        &MobId::from(args.mob_id),
-                        &AgentIdentity::from(args.agent_identity),
-                    )
+                    .mob_member_status(&mob_id, &identity)
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
-                encode(call, json!(snapshot))
+                let member_ref =
+                    meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), identity.as_str());
+                let result = snapshot.to_member_status_result(member_ref).map_err(|e| {
+                    ToolError::invalid_arguments(
+                        call.name,
+                        format!("failed to project mob member status: {e}"),
+                    )
+                })?;
+                encode(call, json!(result))
             }
             "mob_wait_kickoff" => {
                 let args: WaitKickoffArgs = call

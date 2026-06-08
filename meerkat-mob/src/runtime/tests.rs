@@ -16764,9 +16764,14 @@ async fn test_member_status_projects_unknown_peer_connectivity() {
         .member_status(&AgentIdentity::from(left_id.as_str()))
         .await
         .expect("member status should succeed");
-    let connectivity = snapshot
+    let meerkat_contracts::WirePeerConnectivity::Known {
+        snapshot: connectivity,
+    } = snapshot
         .peer_connectivity
-        .expect("live comms runtime should project peer connectivity");
+        .expect("live comms runtime should project peer connectivity")
+    else {
+        panic!("live comms runtime should resolve a Known peer-connectivity snapshot");
+    };
     assert_eq!(connectivity.reachable_peer_count, 0);
     assert_eq!(connectivity.unknown_peer_count, 1);
     assert!(connectivity.unreachable_peers.is_empty());
@@ -16829,9 +16834,14 @@ async fn test_member_status_keeps_connectivity_unknown_when_public_key_differs()
         .member_status(&AgentIdentity::from(left_id.as_str()))
         .await
         .expect("member status should succeed");
-    let connectivity = snapshot
+    let meerkat_contracts::WirePeerConnectivity::Known {
+        snapshot: connectivity,
+    } = snapshot
         .peer_connectivity
-        .expect("live comms runtime should project peer connectivity");
+        .expect("live comms runtime should project peer connectivity")
+    else {
+        panic!("live comms runtime should resolve a Known peer-connectivity snapshot");
+    };
     assert_eq!(connectivity.reachable_peer_count, 0);
     assert_eq!(connectivity.unknown_peer_count, 1);
     assert!(connectivity.unreachable_peers.is_empty());
@@ -16864,8 +16874,12 @@ async fn test_member_status_omits_peer_connectivity_without_live_comms_runtime()
         .await
         .expect("member status should succeed");
     assert!(
-        snapshot.peer_connectivity.is_none(),
-        "member snapshot should omit connectivity when no live comms runtime exists"
+        matches!(
+            snapshot.peer_connectivity,
+            Some(meerkat_contracts::WirePeerConnectivity::NotApplicable)
+        ),
+        "member snapshot should report NotApplicable connectivity when no live comms runtime exists, got {:?}",
+        snapshot.peer_connectivity
     );
 }
 
@@ -18595,9 +18609,14 @@ async fn test_rewire_local_machine_edge_without_roster_projection_repairs_trust_
         .member_status(&AgentIdentity::from(left.as_str()))
         .await
         .expect("left member status");
-    let connectivity = status
+    let meerkat_contracts::WirePeerConnectivity::Known {
+        snapshot: connectivity,
+    } = status
         .peer_connectivity
-        .expect("left member should have live peer connectivity");
+        .expect("left member should have live peer connectivity")
+    else {
+        panic!("left member should resolve a Known peer-connectivity snapshot");
+    };
     assert_eq!(
         connectivity.unknown_peer_count, 1,
         "peer connectivity projection must count machine-owned wiring"
@@ -31207,7 +31226,14 @@ async fn test_member_status_marks_current_missing_bridge_session_broken() {
     assert_eq!(snapshot.status, crate::runtime::MobMemberStatus::Broken);
     assert!(snapshot.is_final);
     assert_eq!(snapshot.current_session_id, Some(bridge_session_id.clone()));
-    assert!(snapshot.peer_connectivity.is_none());
+    assert!(
+        matches!(
+            snapshot.peer_connectivity,
+            Some(meerkat_contracts::WirePeerConnectivity::NotApplicable)
+        ),
+        "broken member without a live bridge-session comms runtime should report NotApplicable connectivity, got {:?}",
+        snapshot.peer_connectivity
+    );
     assert!(
         snapshot
             .error

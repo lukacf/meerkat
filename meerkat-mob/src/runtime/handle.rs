@@ -147,9 +147,13 @@ pub struct MobMemberSnapshot {
     /// Bridge-internal session binding — not part of the public identity contract.
     #[serde(skip)]
     pub(crate) current_bridge_session_id: Option<SessionId>,
-    /// Live comms connectivity for currently wired peers, when available.
+    /// Live comms connectivity for currently wired peers, projected as the
+    /// closed tri-state ([`meerkat_contracts::WirePeerConnectivity`]) so a probe
+    /// timeout is distinguishable from a member that has no bridge session.
+    /// `None` only when the deep-inspection projection has not been computed
+    /// (e.g. lightweight roster projections that skip connectivity fanout).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub peer_connectivity: Option<MobPeerConnectivitySnapshot>,
+    pub peer_connectivity: Option<meerkat_contracts::WirePeerConnectivity>,
     /// Initial autonomous-turn kickoff state, when this member has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kickoff: Option<MobMemberKickoffSnapshot>,
@@ -213,6 +217,119 @@ impl MobMemberSnapshot {
                 self.agent_identity
             ))
         })
+    }
+
+    /// Project this deep-inspection snapshot into the typed public
+    /// `mob/member_status` wire result.
+    ///
+    /// `member_ref` is the server-resolved opaque handle the caller supplies so
+    /// the member identity travels in-band rather than being spliced into the
+    /// JSON out-of-band. The `peer_connectivity` tri-state is carried as-is so
+    /// consumers distinguish a timed-out probe from a not-applicable binding. A
+    /// serialization failure on the typed `kickoff`/`external_member`
+    /// projections is a typed fault, not laundered into a fabricated empty
+    /// object.
+    pub fn to_member_status_result(
+        &self,
+        member_ref: meerkat_contracts::WireMemberRef,
+    ) -> Result<meerkat_contracts::MobMemberStatusResult, MobError> {
+        let kickoff = match &self.kickoff {
+            Some(kickoff) => Some(serde_json::to_value(kickoff).map_err(|error| {
+                MobError::Internal(format!(
+                    "mob member status kickoff projection failed for '{}': {error}",
+                    self.agent_identity
+                ))
+            })?),
+            None => None,
+        };
+        let external_member = match &self.external_member {
+            Some(external) => Some(serde_json::to_value(external).map_err(|error| {
+                MobError::Internal(format!(
+                    "mob member status external-member projection failed for '{}': {error}",
+                    self.agent_identity
+                ))
+            })?),
+            None => None,
+        };
+        Ok(meerkat_contracts::MobMemberStatusResult {
+            status: wire_member_status(self.status),
+            member_ref,
+            output_preview: self.output_preview.clone(),
+            error: self.error.clone(),
+            tokens_used: self.tokens_used,
+            is_final: self.is_final,
+            current_session_id: self.current_session_id.as_ref().map(ToString::to_string),
+            peer_connectivity: self.peer_connectivity.clone(),
+            kickoff,
+            external_member,
+            resolved_capabilities: self.resolved_capabilities.clone(),
+        })
+    }
+}
+
+/// Project a domain `MobMemberStatus` into its closed wire twin.
+fn wire_member_status(status: MobMemberStatus) -> meerkat_contracts::WireMobMemberStatus {
+    match status {
+        MobMemberStatus::Active => meerkat_contracts::WireMobMemberStatus::Active,
+        MobMemberStatus::Retiring => meerkat_contracts::WireMobMemberStatus::Retiring,
+        MobMemberStatus::Broken => meerkat_contracts::WireMobMemberStatus::Broken,
+        MobMemberStatus::Completed => meerkat_contracts::WireMobMemberStatus::Completed,
+        MobMemberStatus::Unknown => meerkat_contracts::WireMobMemberStatus::Unknown,
+    }
+}
+
+/// Project a domain [`crate::Profile`] into the public wire profile contract.
+///
+/// Runtime-owned `rust_bundles` are intentionally not part of the public wire
+/// shape and are dropped from the projection. This is the canonical
+/// `Profile -> WireMobProfile` direction reused by every mob surface.
+#[must_use]
+pub fn profile_to_wire(profile: &crate::Profile) -> meerkat_contracts::WireMobProfile {
+    let tools = &profile.tools;
+    meerkat_contracts::WireMobProfile {
+        model: profile.model.clone(),
+        skills: profile.skills.clone(),
+        tools: meerkat_contracts::WireMobToolConfig {
+            builtins: tools.builtins,
+            shell: tools.shell,
+            comms: tools.comms,
+            memory: tools.memory,
+            workgraph: tools.workgraph,
+            mob: tools.mob,
+            schedule: tools.schedule,
+            image_generation: tools.image_generation,
+            mcp: tools.mcp.clone(),
+        },
+        peer_description: profile.peer_description.clone(),
+        external_addressable: profile.external_addressable,
+        backend: profile.backend.map(|kind| match kind {
+            crate::MobBackendKind::Session => meerkat_contracts::WireMobBackendKind::Session,
+            crate::MobBackendKind::External => meerkat_contracts::WireMobBackendKind::External,
+        }),
+        runtime_mode: match profile.runtime_mode {
+            crate::MobRuntimeMode::AutonomousHost => {
+                meerkat_contracts::WireMobRuntimeMode::AutonomousHost
+            }
+            crate::MobRuntimeMode::TurnDriven => meerkat_contracts::WireMobRuntimeMode::TurnDriven,
+        },
+        max_inline_peer_notifications: profile.max_inline_peer_notifications,
+        output_schema: profile.output_schema.clone(),
+        provider_params: profile.provider_params.clone(),
+    }
+}
+
+/// Project a stored realm profile into the public lookup result contract.
+#[must_use]
+pub fn stored_realm_profile_to_wire(
+    stored: &crate::StoredRealmProfile,
+) -> meerkat_contracts::MobProfileLookupResult {
+    meerkat_contracts::MobProfileLookupResult {
+        not_found: false,
+        name: stored.name.clone(),
+        profile: Some(profile_to_wire(&stored.profile)),
+        revision: Some(stored.revision),
+        created_at: Some(stored.created_at.to_rfc3339()),
+        updated_at: Some(stored.updated_at.to_rfc3339()),
     }
 }
 
@@ -326,6 +443,24 @@ pub struct MobPeerConnectivitySnapshot {
 pub struct MobUnreachablePeer {
     pub peer: String,
     pub reason: Option<String>,
+}
+
+/// Project a domain peer-connectivity snapshot into its typed wire twin.
+fn peer_connectivity_snapshot_to_wire(
+    snapshot: MobPeerConnectivitySnapshot,
+) -> meerkat_contracts::WirePeerConnectivitySnapshot {
+    meerkat_contracts::WirePeerConnectivitySnapshot {
+        reachable_peer_count: snapshot.reachable_peer_count,
+        unknown_peer_count: snapshot.unknown_peer_count,
+        unreachable_peers: snapshot
+            .unreachable_peers
+            .into_iter()
+            .map(|peer| meerkat_contracts::WireUnreachablePeer {
+                peer: peer.peer,
+                reason: peer.reason,
+            })
+            .collect(),
+    }
 }
 
 /// Execution status for a mob member.
@@ -877,6 +1012,39 @@ fn spawn_many_failure_cause_from_dsl(
         mob_dsl::MobSpawnManyFailureCauseKind::Internal => {
             meerkat_contracts::MobSpawnManyFailureCause::Internal
         }
+    }
+}
+
+/// Project a [`MobError`] into its closed public wire failure code.
+///
+/// Reuses the canonical MobMachine-owned classification table: the shell
+/// extracts the raw `MobError -> ObservationKind` observation, drives a
+/// throwaway machine authority to obtain the machine's typed cause ruling, and
+/// lowers that ruling into the public [`meerkat_contracts::MobSpawnManyFailureCause`]
+/// vocabulary. The verdict is the machine's, not the shell's; if the machine
+/// emits no typed cause the projection fails closed to `Internal` rather than
+/// fabricating a more specific class.
+#[must_use]
+pub fn mob_error_wire_code(error: &MobError) -> meerkat_contracts::MobSpawnManyFailureCause {
+    let observation = spawn_many_failure_observation(error);
+    let mut authority = mob_dsl::MobMachineAuthority::new();
+    let cause = mob_dsl::MobMachineMutator::apply(
+        &mut authority,
+        mob_dsl::MobMachineInput::ClassifySpawnManyFailure { observation },
+    )
+    .ok()
+    .and_then(|transition| {
+        transition.effects().iter().find_map(|effect| match effect {
+            mob_dsl::MobMachineEffect::SpawnManyFailureClassified {
+                observation: effect_observation,
+                cause,
+            } if *effect_observation == observation => Some(*cause),
+            _ => None,
+        })
+    });
+    match cause {
+        Some(cause) => spawn_many_failure_cause_from_dsl(cause),
+        None => meerkat_contracts::MobSpawnManyFailureCause::Internal,
     }
 }
 
@@ -5017,13 +5185,16 @@ impl MobHandle {
         )
         .await
         {
-            Ok(connectivity) => connectivity,
+            Ok(connectivity) => Some(connectivity),
             Err(_) => {
                 tracing::warn!(
                     agent_identity = %identity,
                     "mob member status peer-connectivity projection timed out"
                 );
-                None
+                // A timed-out probe is a transient unknown, NOT a structurally
+                // absent binding: surface it as the explicit ProbeTimedOut
+                // tri-state arm rather than collapsing it into None/NotApplicable.
+                Some(meerkat_contracts::WirePeerConnectivity::ProbeTimedOut)
             }
         };
         snapshot.resolved_capabilities = self.project_resolved_capabilities(&snapshot).await;
@@ -5037,17 +5208,29 @@ impl MobHandle {
         &self,
         identity: &AgentIdentity,
         snapshot: &MobMemberSnapshot,
-    ) -> Option<MobPeerConnectivitySnapshot> {
-        let bridge_session_id = snapshot.current_bridge_session_id().cloned()?;
+    ) -> meerkat_contracts::WirePeerConnectivity {
+        // No bridge session backs this member: live peer connectivity is not a
+        // resolvable fact, so the projection is NotApplicable rather than a
+        // None that a consumer could mistake for "resolved, zero peers".
+        let Some(bridge_session_id) = snapshot.current_bridge_session_id().cloned() else {
+            return meerkat_contracts::WirePeerConnectivity::NotApplicable;
+        };
         let (entry, roster_snapshot) = {
             let roster = self.roster.read().await;
-            (
-                roster.get(&MeerkatId::from(identity)).cloned()?,
-                roster.snapshot(),
-            )
+            match roster.get(&MeerkatId::from(identity)).cloned() {
+                Some(entry) => (entry, roster.snapshot()),
+                None => return meerkat_contracts::WirePeerConnectivity::NotApplicable,
+            }
         };
-        self.resolve_peer_connectivity(&entry, &bridge_session_id, &roster_snapshot)
+        match self
+            .resolve_peer_connectivity(&entry, &bridge_session_id, &roster_snapshot)
             .await
+        {
+            Some(snapshot) => meerkat_contracts::WirePeerConnectivity::Known {
+                snapshot: peer_connectivity_snapshot_to_wire(snapshot),
+            },
+            None => meerkat_contracts::WirePeerConnectivity::NotApplicable,
+        }
     }
 
     /// Project the current realtime attachment status for the given member

@@ -2372,20 +2372,15 @@ pub async fn mob_member_status(mob_id: &str, agent_identity: &str) -> Result<JsV
         .mob_member_status(&id, &mid)
         .await
         .map_err(err_mob)?;
-    // Serialize through the domain snapshot, then splice in the server-resolved
-    // `member_ref` so the opaque member handle is runtime-owned, not synthesized
-    // client-side from {mobId, agentIdentity}. Same encoder used by spawn/respawn.
-    let mut value = serde_json::to_value(&snapshot).map_err(|e| err_str("serialize", e))?;
-    let obj = value
-        .as_object_mut()
-        .ok_or_else(|| err_str("serialize", "member status snapshot must be a JSON object"))?;
-    let member_ref = serde_json::to_value(meerkat_contracts::WireMemberRef::encode(
-        id.as_str(),
-        agent_identity,
-    ))
-    .map_err(|e| err_str("serialize", e))?;
-    obj.insert("member_ref".to_string(), member_ref);
-    let json = serde_json::to_string(&value).map_err(|e| err_str("serialize", e))?;
+    // Project through the typed `MobMemberStatusResult` so the server-resolved
+    // `member_ref` and the peer-connectivity tri-state travel in-band as typed
+    // contract fields, rather than splicing `member_ref` into a free-form JSON
+    // object out-of-band. Same opaque handle the spawn/respawn paths mint.
+    let member_ref = meerkat_contracts::WireMemberRef::encode(id.as_str(), agent_identity);
+    let result = snapshot
+        .to_member_status_result(member_ref)
+        .map_err(err_mob)?;
+    let json = serde_json::to_string(&result).map_err(|e| err_str("serialize", e))?;
     Ok(JsValue::from_str(&json))
 }
 

@@ -405,6 +405,19 @@ export interface MobPeerConnectivitySnapshot {
   unreachable_peers: MobUnreachablePeer[];
 }
 
+/**
+ * Tri-state peer-connectivity projection for a mob member snapshot.
+ *
+ * Distinguishes a member with no bridge session (`not_applicable`) from a
+ * transiently-unresolved live probe (`probe_timed_out`) from a resolved
+ * connectivity snapshot (`known`). The legacy projection collapsed the first
+ * two cases into an absent field.
+ */
+export type MobPeerConnectivity =
+  | { status: 'not_applicable' }
+  | { status: 'probe_timed_out' }
+  | { status: 'known'; snapshot: MobPeerConnectivitySnapshot };
+
 export interface ResolvedModelCapabilities {
   vision: boolean;
   image_input: boolean;
@@ -427,7 +440,7 @@ export interface MobMemberSnapshot {
   resolved_capabilities?: ResolvedModelCapabilities;
   external_member?: unknown;
   kickoff?: Record<string, unknown>;
-  peer_connectivity?: MobPeerConnectivitySnapshot;
+  peer_connectivity?: MobPeerConnectivity;
 }
 
 /** Result envelope for helper-style mob flows. */

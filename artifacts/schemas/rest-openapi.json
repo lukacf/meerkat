@@ -83,15 +83,33 @@
       },
       "AuthStatusPhase": {
         "description": "Public auth status phase shared by REST, RPC, CLI, and generated SDK wire\npayloads.\n\nThis is the compatibility projection of typed auth lease truth. Surfaces\nshould map to this enum first and only then emit [`Self::as_public_str`].",
-        "enum": [
-          "valid",
-          "expiring",
-          "expired",
-          "reauth_required",
-          "refresh_failed",
-          "unknown"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "valid",
+              "expiring",
+              "expired",
+              "reauth_required",
+              "refresh_failed"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "released",
+            "description": "The lease was explicitly released (credential lifecycle torn down).",
+            "type": "string"
+          },
+          {
+            "const": "absent",
+            "description": "No lease phase is tracked at all for this binding.",
+            "type": "string"
+          },
+          {
+            "const": "missing_credential",
+            "description": "A lease may exist but holds no live credential material.",
+            "type": "string"
+          }
+        ]
       },
       "BackgroundJobTerminalStatus": {
         "enum": [

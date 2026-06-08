@@ -401,6 +401,66 @@ class WireMobProfile:
 
 
 @dataclass
+class WireMobRun:
+    """Typed public projection of a single flow run for `mob/flow_status`.
+
+The canonical identity and lifecycle fields (`run_id`, `mob_id`, `flow_id`,
+`status`) are typed; the remaining kernel-owned step/loop projection rides
+along as the `kernel` map. Producers project a domain `MobRun` into this
+shape so consumers never re-derive run identity or lifecycle from a free
+`serde_json::Value`."""
+    flow_id: str
+    mob_id: str
+    run_id: str
+    status: Literal['pending', 'running', 'completed', 'failed', 'canceled']
+
+
+@dataclass
+class WireMobRunStatus:
+    """Lifecycle status of a flow run on the wire. Mirrors
+`meerkat_mob::MobRunStatus` so consumers branch on a closed type rather than
+re-deriving meaning from a free-form status string."""
+
+
+@dataclass
+class WirePeerConnectivity:
+    """Tri-state peer-connectivity projection for `mob/member_status`.
+
+Distinguishes "connectivity is not applicable to this member" (no bridge
+session backs the member) from "the live probe timed out" (the answer is
+transiently unknown) from a resolved connectivity snapshot. The legacy
+`Option<MobPeerConnectivitySnapshot>` projection collapsed both the
+not-applicable and timed-out cases into `None`, laundering a transient
+probe fault into the same shape as a structurally-absent binding."""
+
+
+@dataclass
+class WirePeerConnectivitySnapshot:
+    """Live connectivity summary for a member's currently wired peers. Mirrors
+`meerkat_mob::MobPeerConnectivitySnapshot`."""
+    reachable_peer_count: int
+    unknown_peer_count: int
+    unreachable_peers: Optional[list[dict[str, Any]]] = None
+
+
+@dataclass
+class WireUnreachablePeer:
+    """One currently wired peer that is known to be unreachable."""
+    peer: str
+    reason: Optional[str] = None
+
+
+@dataclass
+class WireMobError:
+    """Typed mob error projection for wire surfaces. Carries the closed failure
+class alongside the human-readable message so consumers branch on the typed
+`code` rather than parsing the free-form `message`. Reuses
+[`MobSpawnManyFailureCause`] as the canonical closed mob-error vocabulary."""
+    code: MobSpawnManyFailureCause
+    message: str
+
+
+@dataclass
 class MobEnsureMemberParams:
     """Request payload for `mob/ensure_member`."""
     mob_id: str
@@ -612,8 +672,10 @@ class MobFlowStatusParams:
 
 @dataclass
 class MobFlowStatusResult:
-    """Response payload for `mob/flow_status`."""
-    run: Any
+    """Response payload for `mob/flow_status`.
+
+`run` is `None` when the requested run id has no persisted run."""
+    run: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -698,6 +760,7 @@ payload there."""
 class MobMemberStatusResult:
     """Response payload for `mob/member_status`."""
     is_final: bool
+    member_ref: WireMemberRef
     status: WireMobMemberStatus
     tokens_used: int
     current_session_id: Optional[str] = None
@@ -705,7 +768,7 @@ class MobMemberStatusResult:
     external_member: Optional[Any] = None
     kickoff: Optional[Any] = None
     output_preview: Optional[str] = None
-    peer_connectivity: Optional[Any] = None
+    peer_connectivity: Optional[dict[str, Any]] = None
     resolved_capabilities: Optional[WireResolvedModelCapabilities] = None
 
 
@@ -822,7 +885,7 @@ class MobProfileLookupResult:
     name: str
     created_at: Optional[str] = None
     not_found: Optional[bool] = None
-    profile: Optional[Any] = None
+    profile: Optional[WireMobProfile] = None
     revision: Optional[int] = None
     updated_at: Optional[str] = None
 
@@ -1093,7 +1156,7 @@ class MobReconcileReportWire:
 class MobReconcileFailureWire:
     """Per-identity failure in a `mob/reconcile` pass."""
     agent_identity: str
-    error: str
+    error: WireMobError
     stage: WireMobReconcileStage
 
 
@@ -1933,6 +1996,74 @@ The boolean `closed` field is preserved for back-compat alongside the typed
     status: Literal['closed']
 
 
+# Typed public result class for `live/send_input`.
+#
+# Today generated runtime authority emits only `Sent`. The enum is
+# `#[non_exhaustive]` so future generated contracts can add explicit result
+# classes without changing the object shape.
+LiveSendInputStatus = Literal['sent']
+
+@dataclass
+class LiveSendInputResult:
+    """Response payload for `live/send_input`.
+
+The boolean `sent` field is preserved for back-compat alongside the typed
+`status` discriminator. New code should route on `status`."""
+    sent: bool
+    status: Literal['sent']
+
+
+# Typed public result class for `live/commit_input`.
+#
+# Today generated runtime authority emits only `Committed`. The enum is
+# `#[non_exhaustive]` so future generated contracts can add explicit result
+# classes without changing the object shape.
+LiveCommitInputStatus = Literal['committed']
+
+@dataclass
+class LiveCommitInputResult:
+    """Response payload for `live/commit_input`.
+
+The boolean `committed` field is preserved for back-compat alongside the
+typed `status` discriminator. New code should route on `status`."""
+    committed: bool
+    status: Literal['committed']
+
+
+# Typed public result class for `live/interrupt`.
+#
+# Today generated runtime authority emits only `Interrupted`. The enum is
+# `#[non_exhaustive]` so future generated contracts can add explicit result
+# classes without changing the object shape.
+LiveInterruptStatus = Literal['interrupted']
+
+@dataclass
+class LiveInterruptResult:
+    """Response payload for `live/interrupt`.
+
+The boolean `interrupted` field is preserved for back-compat alongside the
+typed `status` discriminator. New code should route on `status`."""
+    interrupted: bool
+    status: Literal['interrupted']
+
+
+# Typed public result class for `live/truncate`.
+#
+# Today generated runtime authority emits only `Truncated`. The enum is
+# `#[non_exhaustive]` so future generated contracts can add explicit result
+# classes without changing the object shape.
+LiveTruncateStatus = Literal['truncated']
+
+@dataclass
+class LiveTruncateResult:
+    """Response payload for `live/truncate`.
+
+The boolean `truncated` field is preserved for back-compat alongside the
+typed `status` discriminator. New code should route on `status`."""
+    status: Literal['truncated']
+    truncated: bool
+
+
 # A typed, identity-bearing realtime transcript event consumed by the session.
 class RealtimeTranscriptEventItemObserved(TypedDict, total=False):
     item_id: Required[str]
@@ -2667,7 +2798,7 @@ class WireAuthStatus:
     auth_method: str
     profile_id: str
     provider: str
-    state: Literal['valid', 'expiring', 'expired', 'reauth_required', 'refresh_failed', 'unknown']
+    state: Literal['valid', 'expiring', 'expired', 'reauth_required', 'refresh_failed'] | Literal['released'] | Literal['absent'] | Literal['missing_credential']
     account_id: Optional[str] = None
     expires_at: Optional[str] = None
     last_error: Optional[dict[str, Any]] = None
@@ -2687,7 +2818,7 @@ binding directly."""
     profile_id: str
     provider: str
     realm_id: str
-    state: Literal['valid', 'expiring', 'expired', 'reauth_required', 'refresh_failed', 'unknown']
+    state: Literal['valid', 'expiring', 'expired', 'reauth_required', 'refresh_failed'] | Literal['released'] | Literal['absent'] | Literal['missing_credential']
     account_id: Optional[str] = None
     expires_at: Optional[str] = None
     last_refresh_at: Optional[str] = None

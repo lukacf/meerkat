@@ -35,6 +35,12 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobMemberListEntryWire",
     "WireMobToolConfig",
     "WireMobProfile",
+    "WireMobRun",
+    "WireMobRunStatus",
+    "WirePeerConnectivity",
+    "WirePeerConnectivitySnapshot",
+    "WireUnreachablePeer",
+    "WireMobError",
     "MobEnsureMemberParams",
     "MobEnsureMemberResult",
     "MobReconcileParams",
@@ -1123,6 +1129,49 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         "LiveCloseResult",
         wire_schema,
         "Response payload for live/close: typed `status` plus back-compat `closed` boolean.",
+    )
+    # #234: typed live-command results (send_input/commit_input/interrupt/truncate).
+    # Each is a dataclass (typed `status` + back-compat boolean); emit the status
+    # alias first so the result's `status` field references the named union.
+    append_python_alias(
+        "LiveSendInputStatus",
+        wire_schema,
+        "Wire projection of LiveSendInputStatus (today: only `sent`).",
+    )
+    append_python_dataclass(
+        "LiveSendInputResult",
+        wire_schema,
+        "Response payload for live/send_input: typed `status` plus back-compat boolean.",
+    )
+    append_python_alias(
+        "LiveCommitInputStatus",
+        wire_schema,
+        "Wire projection of LiveCommitInputStatus (today: only `committed`).",
+    )
+    append_python_dataclass(
+        "LiveCommitInputResult",
+        wire_schema,
+        "Response payload for live/commit_input: typed `status` plus back-compat boolean.",
+    )
+    append_python_alias(
+        "LiveInterruptStatus",
+        wire_schema,
+        "Wire projection of LiveInterruptStatus (today: only `interrupted`).",
+    )
+    append_python_dataclass(
+        "LiveInterruptResult",
+        wire_schema,
+        "Response payload for live/interrupt: typed `status` plus back-compat boolean.",
+    )
+    append_python_alias(
+        "LiveTruncateStatus",
+        wire_schema,
+        "Wire projection of LiveTruncateStatus (today: only `truncated`).",
+    )
+    append_python_dataclass(
+        "LiveTruncateResult",
+        wire_schema,
+        "Response payload for live/truncate: typed `status` plus back-compat boolean.",
     )
     # FIX-SDK-OBS: typed wire mirrors for adapter observations and their
     # tagged-payload helpers. Aliases (not dataclasses) because each is a

@@ -83,6 +83,13 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "MobFlowsResult": schema_for!(crate::wire::MobFlowsResult),
         "MobFlowRunResult": schema_for!(crate::wire::MobFlowRunResult),
         "MobFlowStatusResult": schema_for!(crate::wire::MobFlowStatusResult),
+        // #54/#159/#235/#313: typed mob run / member-connectivity / error wire types
+        "WireMobRun": schema_for!(crate::wire::WireMobRun),
+        "WireMobRunStatus": schema_for!(crate::wire::WireMobRunStatus),
+        "WirePeerConnectivity": schema_for!(crate::wire::WirePeerConnectivity),
+        "WirePeerConnectivitySnapshot": schema_for!(crate::wire::WirePeerConnectivitySnapshot),
+        "WireUnreachablePeer": schema_for!(crate::wire::WireUnreachablePeer),
+        "WireMobError": schema_for!(crate::wire::WireMobError),
         "MobFlowCancelResult": schema_for!(crate::wire::MobFlowCancelResult),
         "MobHelperResult": schema_for!(crate::wire::MobHelperResult),
         "MobForceCancelResult": schema_for!(crate::wire::MobForceCancelResult),
@@ -149,6 +156,16 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "LiveRefreshStatus": schema_for!(crate::wire::LiveRefreshStatus),
         "LiveCloseResult": schema_for!(crate::wire::LiveCloseResult),
         "LiveCloseStatus": schema_for!(crate::wire::LiveCloseStatus),
+        // #234: typed live-command results (send_input/commit_input/interrupt/truncate)
+        // replace the prior ad-hoc `Value` results from the RPC handler.
+        "LiveSendInputResult": schema_for!(crate::wire::LiveSendInputResult),
+        "LiveSendInputStatus": schema_for!(crate::wire::LiveSendInputStatus),
+        "LiveCommitInputResult": schema_for!(crate::wire::LiveCommitInputResult),
+        "LiveCommitInputStatus": schema_for!(crate::wire::LiveCommitInputStatus),
+        "LiveInterruptResult": schema_for!(crate::wire::LiveInterruptResult),
+        "LiveInterruptStatus": schema_for!(crate::wire::LiveInterruptStatus),
+        "LiveTruncateResult": schema_for!(crate::wire::LiveTruncateResult),
+        "LiveTruncateStatus": schema_for!(crate::wire::LiveTruncateStatus),
         // CC5/CC6: emit the typed wire mirrors at the top level so SDK
         // codegen produces named typed shapes (TypedDict / interface /
         // discriminated union) instead of inlining them as anonymous `Any`
@@ -1668,7 +1685,9 @@ mod tests {
                 "expired",
                 "reauth_required",
                 "refresh_failed",
-                "unknown"
+                "released",
+                "absent",
+                "missing_credential"
             ])
         );
         assert_eq!(

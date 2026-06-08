@@ -126,7 +126,8 @@ pub use handle::{
     PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport, SpawnContinuityIntent,
     SpawnCustomizationContext, SpawnMemberAdmission, SpawnMemberAdmissionObservations,
     SpawnMemberCustomizer, SpawnMemberSpec, SpawnResult, SpawnSource, SpawnSystemPromptOverride,
-    SpawnToolAdmission, SupervisorRotationReport, WorkDeliveryReceipt,
+    SpawnToolAdmission, SupervisorRotationReport, WorkDeliveryReceipt, mob_error_wire_code,
+    profile_to_wire, stored_realm_profile_to_wire,
 };
 use pending_spawn_lineage::{PendingSpawnInsertImpact, PendingSpawnLineage};
 pub use reconcile::{

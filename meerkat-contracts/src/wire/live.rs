@@ -716,6 +716,176 @@ impl LiveCloseResult {
     }
 }
 
+// ---------------------------------------------------------------------------
+// #234 — typed live-command results
+//
+// `live/send_input`, `live/commit_input`, `live/interrupt`, and
+// `live/truncate` previously returned ad-hoc `serde_json::json!({"sent":
+// true})` blobs from the RPC handler — untyped at the SDK boundary and
+// invisible to schema codegen. These typed result shapes mirror the
+// `LiveCloseResult` / `LiveCloseStatus` precedent above: a typed `status`
+// discriminator emitted by generated runtime authority, with the legacy
+// boolean preserved as a sibling back-compat field. Each `status` enum is
+// `#[non_exhaustive]` so future generated contracts can add explicit result
+// classes without reshaping the object.
+// ---------------------------------------------------------------------------
+
+/// Typed public result class for `live/send_input`.
+///
+/// Today generated runtime authority emits only `Sent`. The enum is
+/// `#[non_exhaustive]` so future generated contracts can add explicit result
+/// classes without changing the object shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LiveSendInputStatus {
+    /// The host accepted the input chunk onto the adapter queue.
+    Sent,
+}
+
+/// Response payload for `live/send_input`.
+///
+/// The boolean `sent` field is preserved for back-compat alongside the typed
+/// `status` discriminator. New code should route on `status`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LiveSendInputResult {
+    /// Typed send-input status emitted by generated runtime authority.
+    /// Today: always [`LiveSendInputStatus::Sent`].
+    pub status: LiveSendInputStatus,
+    /// Back-compat mirror of the generated send-input-authority result.
+    /// Always `true` when paired with `status: sent`.
+    pub sent: bool,
+}
+
+impl LiveSendInputResult {
+    /// Project the generated `Sent` authority result to the wire shape.
+    pub fn sent() -> Self {
+        Self {
+            status: LiveSendInputStatus::Sent,
+            sent: true,
+        }
+    }
+}
+
+/// Typed public result class for `live/commit_input`.
+///
+/// Today generated runtime authority emits only `Committed`. The enum is
+/// `#[non_exhaustive]` so future generated contracts can add explicit result
+/// classes without changing the object shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LiveCommitInputStatus {
+    /// The host accepted the commit-input command onto the adapter queue.
+    Committed,
+}
+
+/// Response payload for `live/commit_input`.
+///
+/// The boolean `committed` field is preserved for back-compat alongside the
+/// typed `status` discriminator. New code should route on `status`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LiveCommitInputResult {
+    /// Typed commit-input status emitted by generated runtime authority.
+    /// Today: always [`LiveCommitInputStatus::Committed`].
+    pub status: LiveCommitInputStatus,
+    /// Back-compat mirror of the generated commit-input-authority result.
+    /// Always `true` when paired with `status: committed`.
+    pub committed: bool,
+}
+
+impl LiveCommitInputResult {
+    /// Project the generated `Committed` authority result to the wire shape.
+    pub fn committed() -> Self {
+        Self {
+            status: LiveCommitInputStatus::Committed,
+            committed: true,
+        }
+    }
+}
+
+/// Typed public result class for `live/interrupt`.
+///
+/// Today generated runtime authority emits only `Interrupted`. The enum is
+/// `#[non_exhaustive]` so future generated contracts can add explicit result
+/// classes without changing the object shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LiveInterruptStatus {
+    /// The host accepted the interrupt command onto the adapter queue.
+    Interrupted,
+}
+
+/// Response payload for `live/interrupt`.
+///
+/// The boolean `interrupted` field is preserved for back-compat alongside the
+/// typed `status` discriminator. New code should route on `status`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LiveInterruptResult {
+    /// Typed interrupt status emitted by generated runtime authority.
+    /// Today: always [`LiveInterruptStatus::Interrupted`].
+    pub status: LiveInterruptStatus,
+    /// Back-compat mirror of the generated interrupt-authority result.
+    /// Always `true` when paired with `status: interrupted`.
+    pub interrupted: bool,
+}
+
+impl LiveInterruptResult {
+    /// Project the generated `Interrupted` authority result to the wire shape.
+    pub fn interrupted() -> Self {
+        Self {
+            status: LiveInterruptStatus::Interrupted,
+            interrupted: true,
+        }
+    }
+}
+
+/// Typed public result class for `live/truncate`.
+///
+/// Today generated runtime authority emits only `Truncated`. The enum is
+/// `#[non_exhaustive]` so future generated contracts can add explicit result
+/// classes without changing the object shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LiveTruncateStatus {
+    /// The host accepted the truncate command onto the adapter queue.
+    Truncated,
+}
+
+/// Response payload for `live/truncate`.
+///
+/// The boolean `truncated` field is preserved for back-compat alongside the
+/// typed `status` discriminator. New code should route on `status`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LiveTruncateResult {
+    /// Typed truncate status emitted by generated runtime authority.
+    /// Today: always [`LiveTruncateStatus::Truncated`].
+    pub status: LiveTruncateStatus,
+    /// Back-compat mirror of the generated truncate-authority result.
+    /// Always `true` when paired with `status: truncated`.
+    pub truncated: bool,
+}
+
+impl LiveTruncateResult {
+    /// Project the generated `Truncated` authority result to the wire shape.
+    pub fn truncated() -> Self {
+        Self {
+            status: LiveTruncateStatus::Truncated,
+            truncated: true,
+        }
+    }
+}
+
 /// Modality-tagged input chunk for `live/send_input`.
 ///
 /// Audio / image / video-frame payloads are base64 strings (`data`); the
@@ -1525,8 +1695,11 @@ impl From<LiveAdapterObservation> for WireLiveAdapterObservation {
                 tool_name,
                 arguments,
             } => Self::ToolCallRequested {
-                provider_call_id,
-                tool_name,
+                // #270: the wire mirror carries the provider-native string on
+                // the wire (this IS the string seam); project the typed core
+                // newtypes to their `String` payloads at the boundary.
+                provider_call_id: provider_call_id.0,
+                tool_name: tool_name.into_string(),
                 arguments,
             },
             LiveAdapterObservation::TurnInterrupted { response_id } => {

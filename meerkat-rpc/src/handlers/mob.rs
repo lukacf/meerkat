@@ -5,7 +5,6 @@ use serde_json::Value;
 use serde_json::value::RawValue;
 use std::convert::TryFrom;
 
-use super::skills::reject_retired_skill_references;
 use super::{RpcResponseExt, parse_params};
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
@@ -18,13 +17,9 @@ use meerkat_contracts::{
     MobWireMembersBatchParams, MobWireMembersBatchResult, SupervisorRotationReportWire,
     WireMemberState, WireMobBackendKind, WireMobMemberStatus, WireMobRuntimeMode,
 };
-use meerkat_core::lifecycle::run_primitive::{
-    TurnMetadataOverride, legacy_override_from_split_fields, take_legacy_clear_bool,
-};
+use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
 use meerkat_core::service::{AppendSystemContextRequest, TurnToolOverlay};
-use meerkat_core::skills::SkillRef;
 use meerkat_core::types::ContentInput;
-use meerkat_mob::runtime::MobMemberSnapshot;
 use meerkat_mob::{
     AgentIdentity, FlowId, MemberRespawnReceipt, MemberState, MobBackendKind, MobError, MobId,
     MobMemberStatus, MobRespawnError, MobRuntimeMode, Profile, RunId, SpawnMemberSpec, SpawnResult,
@@ -238,20 +233,6 @@ fn member_list_entry_wire(
         error: entry.error.clone(),
         is_final: entry.is_final,
     })
-}
-
-/// Project the deep member-status snapshot into the app-facing RPC shape.
-/// Runtime incarnation ids and fence tokens are bridge-internal binding atoms;
-/// `MobMemberSnapshot` intentionally keeps them out of generic serde, and this
-/// endpoint must not reinsert them.
-///
-/// A serialization failure is a typed fault on the authoritative status reply:
-/// the caller surfaces it as a JSON-RPC error rather than laundering it into a
-/// fabricated empty `{}` object that a client would read as a valid status.
-fn member_status_payload(
-    snapshot: &MobMemberSnapshot,
-) -> Result<serde_json::Value, serde_json::Error> {
-    serde_json::to_value(snapshot)
 }
 
 pub async fn handle_create(
@@ -1179,7 +1160,7 @@ pub async fn handle_flow_status(
     };
     match state.mob_flow_status(&mob_id, run_id).await {
         Ok(run) => match meerkat_mob::MobRun::public_flow_status_run_value(run.as_ref()) {
-            Ok(run) => RpcResponse::success(id, serde_json::json!({"run": run})),
+            Ok(run) => RpcResponse::success(id, meerkat_contracts::MobFlowStatusResult { run }),
             Err(err) => invalid_params(id, err.to_string()),
         },
         Err(err) => invalid_params(id, err.to_string()),
@@ -1687,21 +1668,20 @@ pub async fn handle_member_status(
         Ok(m) => m,
         Err(resp) => return resp,
     };
-    match state
-        .mob_member_status(
-            &mob_id,
-            &AgentIdentity::from(params.agent_identity.as_str()),
-        )
-        .await
-    {
-        Ok(snapshot) => match member_status_payload(&snapshot) {
-            Ok(value) => RpcResponse::success(id, value),
-            Err(serialize_error) => RpcResponse::error(
-                id,
-                error::INTERNAL_ERROR,
-                format!("failed to serialize mob member status: {serialize_error}"),
-            ),
-        },
+    let agent_identity = AgentIdentity::from(params.agent_identity.as_str());
+    match state.mob_member_status(&mob_id, &agent_identity).await {
+        Ok(snapshot) => {
+            let member_ref =
+                meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), agent_identity.as_str());
+            match snapshot.to_member_status_result(member_ref) {
+                Ok(result) => RpcResponse::success(id, result),
+                Err(projection_error) => RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!("failed to project mob member status: {projection_error}"),
+                ),
+            }
+        }
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -1827,7 +1807,7 @@ pub async fn handle_profile_create(
         .realm_profile_create(&params.name, &params.profile)
         .await
     {
-        Ok(stored) => RpcResponse::success(id, serde_json::json!(stored)),
+        Ok(stored) => RpcResponse::success(id, meerkat_mob::stored_realm_profile_to_wire(&stored)),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -1842,10 +1822,19 @@ pub async fn handle_profile_get(
         Err(resp) => return resp.with_id(id),
     };
     match state.realm_profile_get(&params.name).await {
-        Ok(Some(stored)) => RpcResponse::success(id, serde_json::json!(stored)),
+        Ok(Some(stored)) => {
+            RpcResponse::success(id, meerkat_mob::stored_realm_profile_to_wire(&stored))
+        }
         Ok(None) => RpcResponse::success(
             id,
-            serde_json::json!({"not_found": true, "name": params.name}),
+            meerkat_contracts::MobProfileLookupResult {
+                not_found: true,
+                name: params.name,
+                profile: None,
+                revision: None,
+                created_at: None,
+                updated_at: None,
+            },
         ),
         Err(err) => invalid_params(id, err.to_string()),
     }
@@ -1853,7 +1842,13 @@ pub async fn handle_profile_get(
 
 pub async fn handle_profile_list(id: Option<RpcId>, state: &Arc<MobMcpState>) -> RpcResponse {
     match state.realm_profile_list().await {
-        Ok(profiles) => RpcResponse::success(id, serde_json::json!({"profiles": profiles})),
+        Ok(profiles) => {
+            let profiles = profiles
+                .iter()
+                .map(meerkat_mob::stored_realm_profile_to_wire)
+                .collect();
+            RpcResponse::success(id, meerkat_contracts::MobProfileListResult { profiles })
+        }
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -1871,7 +1866,7 @@ pub async fn handle_profile_update(
         .realm_profile_update(&params.name, &params.profile, params.expected_revision)
         .await
     {
-        Ok(stored) => RpcResponse::success(id, serde_json::json!(stored)),
+        Ok(stored) => RpcResponse::success(id, meerkat_mob::stored_realm_profile_to_wire(&stored)),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -1901,119 +1896,29 @@ pub async fn handle_profile_delete(
 // mob/turn_start — identity-native turn routing
 // ---------------------------------------------------------------------------
 
-/// Parameters for `mob/turn_start`.
+/// Lower a wire turn-metadata override into the canonical domain tri-state.
 ///
-/// Resolves `agent_identity` to the backing bridge session and delegates to
-/// the standard `turn/start` handler. This is the identity-first replacement
-/// for extracting `session_id` from spawn responses.
-/// `provider_params`/`auth_binding` carry the Inherit/Set/Clear tri-state via
-/// [`TurnMetadataOverride`]; the legacy split form (`clear_provider_params:
-/// bool`) is folded at the serde boundary, rejecting `set + clear`.
-#[derive(Debug)]
-pub struct MobTurnStartParams {
-    pub mob_id: String,
-    pub agent_identity: String,
-    pub prompt: ContentInput,
-    pub skill_refs: Option<Vec<SkillRef>>,
-    pub skill_references: Option<Vec<String>>,
-    pub flow_tool_overlay: Option<TurnToolOverlay>,
-    pub additional_instructions: Option<Vec<String>>,
-    pub keep_alive: Option<bool>,
-    pub model: Option<String>,
-    pub provider: Option<String>,
-    pub max_tokens: Option<u32>,
-    pub system_prompt: Option<String>,
-    pub output_schema: Option<serde_json::Value>,
-    pub structured_output_retries: Option<u32>,
-    pub provider_params: Option<TurnMetadataOverride<serde_json::Value>>,
-    pub auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MobTurnStartParamsFields {
-    mob_id: String,
-    agent_identity: String,
-    prompt: ContentInput,
-    #[serde(default)]
-    skill_refs: Option<Vec<SkillRef>>,
-    /// Retired legacy string refs. Kept only to preserve the typed ingress
-    /// error returned by `turn/start` for older clients.
-    #[serde(default, deserialize_with = "reject_retired_skill_references")]
-    skill_references: Option<Vec<String>>,
-    #[serde(default)]
-    flow_tool_overlay: Option<TurnToolOverlay>,
-    #[serde(default)]
-    additional_instructions: Option<Vec<String>>,
-    #[serde(default)]
-    keep_alive: Option<bool>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    provider: Option<String>,
-    #[serde(default)]
-    max_tokens: Option<u32>,
-    #[serde(default)]
-    system_prompt: Option<String>,
-    #[serde(default)]
-    output_schema: Option<serde_json::Value>,
-    #[serde(default)]
-    structured_output_retries: Option<u32>,
-    #[serde(default)]
-    provider_params: Option<TurnMetadataOverride<serde_json::Value>>,
-    #[serde(default)]
-    auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
-}
-
-impl<'de> serde::Deserialize<'de> for MobTurnStartParams {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        use serde::de::Error as _;
-        let mut raw = serde_json::Value::deserialize(deserializer)?;
-        let (clear_provider_params, clear_auth_binding) = if let Some(object) = raw.as_object_mut()
-        {
-            (
-                take_legacy_clear_bool(object, "clear_provider_params", &[])?,
-                take_legacy_clear_bool(object, "clear_auth_binding", &[])?,
-            )
-        } else {
-            (false, false)
-        };
-        let fields: MobTurnStartParamsFields =
-            serde_json::from_value(raw).map_err(D::Error::custom)?;
-        let provider_params = legacy_override_from_split_fields(
-            fields.provider_params,
-            clear_provider_params,
-            "provider_params",
-            "clear_provider_params",
-        )?;
-        let auth_binding = legacy_override_from_split_fields(
-            fields.auth_binding,
-            clear_auth_binding,
-            "auth_binding",
-            "clear_auth_binding",
-        )?;
-        Ok(Self {
-            mob_id: fields.mob_id,
-            agent_identity: fields.agent_identity,
-            prompt: fields.prompt,
-            skill_refs: fields.skill_refs,
-            skill_references: fields.skill_references,
-            flow_tool_overlay: fields.flow_tool_overlay,
-            additional_instructions: fields.additional_instructions,
-            keep_alive: fields.keep_alive,
-            model: fields.model,
-            provider: fields.provider,
-            max_tokens: fields.max_tokens,
-            system_prompt: fields.system_prompt,
-            output_schema: fields.output_schema,
-            structured_output_retries: fields.structured_output_retries,
-            provider_params,
-            auth_binding,
-        })
-    }
+/// `Set(v)` lowers to `TurnMetadataOverride::Set(v.into())` and `Clear` to
+/// `TurnMetadataOverride::Clear`; the absent case stays `None` (Inherit). This
+/// is the only conversion needed because the canonical contract
+/// `meerkat_contracts::MobTurnStartParams` already enforces the
+/// Inherit/Set/Clear shape at the serde boundary (folding the legacy split
+/// `clear_*` form and rejecting `set + clear`), so the handler no longer
+/// maintains a divergent shadow twin.
+fn lower_turn_metadata_override<W, D>(
+    wire: Option<meerkat_contracts::wire::runtime::WireTurnMetadataOverride<W>>,
+) -> Option<TurnMetadataOverride<D>>
+where
+    D: From<W>,
+{
+    wire.map(|wire| match wire {
+        meerkat_contracts::wire::runtime::WireTurnMetadataOverride::Set(value) => {
+            TurnMetadataOverride::Set(value.into())
+        }
+        meerkat_contracts::wire::runtime::WireTurnMetadataOverride::Clear => {
+            TurnMetadataOverride::Clear
+        }
+    })
 }
 
 /// Handle `mob/turn_start` — resolve identity to session and delegate to turn/start.
@@ -2026,7 +1931,7 @@ pub async fn handle_mob_turn_start(
     runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
     request_context: Option<RequestContext>,
 ) -> RpcResponse {
-    let mob_params: MobTurnStartParams = match parse_params(params) {
+    let mob_params: meerkat_contracts::MobTurnStartParams = match parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
     };
@@ -2067,16 +1972,23 @@ pub async fn handle_mob_turn_start(
     };
 
     // Construct the typed `turn/start` params directly with the resolved
-    // session_id and delegate to the shared typed entrypoint. No JSON `Map`
-    // round-trip — the tri-state overrides carry through as the canonical
-    // `Option<TurnMetadataOverride<T>>` so any conversion failure stays a
-    // typed error rather than `Value::Null`/empty-JSON laundering.
+    // session_id and delegate to the shared typed entrypoint. The canonical
+    // contract `MobTurnStartParams` already carries the Inherit/Set/Clear
+    // tri-state; we lower each override into the domain `TurnMetadataOverride`
+    // so any conversion stays typed rather than round-tripping through JSON.
+    let prompt = match ContentInput::try_from(mob_params.prompt) {
+        Ok(prompt) => prompt,
+        Err(err) => return invalid_params(id, format!("invalid prompt: {err}")),
+    };
     let turn_params = super::turn::StartTurnParams {
         session_id: session_id.to_string(),
-        prompt: mob_params.prompt,
+        prompt,
         skill_refs: mob_params.skill_refs,
-        skill_references: mob_params.skill_references,
-        flow_tool_overlay: mob_params.flow_tool_overlay,
+        // The canonical contract retired the legacy string `skill_references`
+        // field; older clients that still send it are rejected at the contract
+        // serde boundary (`deny_unknown_fields`). Nothing to thread here.
+        skill_references: None,
+        flow_tool_overlay: mob_params.flow_tool_overlay.map(TurnToolOverlay::from),
         additional_instructions: mob_params.additional_instructions,
         keep_alive: mob_params.keep_alive,
         model: mob_params.model,
@@ -2085,8 +1997,8 @@ pub async fn handle_mob_turn_start(
         system_prompt: mob_params.system_prompt,
         output_schema: mob_params.output_schema,
         structured_output_retries: mob_params.structured_output_retries,
-        provider_params: mob_params.provider_params,
-        auth_binding: mob_params.auth_binding,
+        provider_params: lower_turn_metadata_override(mob_params.provider_params),
+        auth_binding: lower_turn_metadata_override(mob_params.auth_binding),
     };
 
     super::turn::start_turn_with_params(
@@ -2255,7 +2167,10 @@ pub async fn handle_reconcile(
                                 meerkat_contracts::WireMobReconcileStage::Retire
                             }
                         },
-                        error: f.error.to_string(),
+                        error: meerkat_contracts::WireMobError {
+                            code: meerkat_mob::mob_error_wire_code(&f.error),
+                            message: f.error.to_string(),
+                        },
                     })
                     .collect(),
             };
@@ -2886,10 +2801,13 @@ mod tests {
                 "binding": "default_openai"
             }
         });
-        let params: MobTurnStartParams =
+        let params: meerkat_contracts::MobTurnStartParams =
             serde_json::from_value(value).expect("known turn overrides deserialize");
 
-        assert!(matches!(params.prompt, ContentInput::Blocks(_)));
+        assert!(matches!(
+            params.prompt,
+            meerkat_contracts::WireContentInput::Blocks(_)
+        ));
         assert_eq!(
             params
                 .flow_tool_overlay
@@ -2901,25 +2819,23 @@ mod tests {
         assert_eq!(params.model.as_deref(), Some("gpt-test"));
         assert_eq!(params.max_tokens, Some(128));
         assert_eq!(params.structured_output_retries, Some(2));
+        let Some(meerkat_contracts::wire::runtime::WireTurnMetadataOverride::Set(provider_params)) =
+            params.provider_params.as_ref()
+        else {
+            panic!("provider_params should be a Set override");
+        };
         assert_eq!(
-            params
-                .provider_params
-                .as_ref()
-                .and_then(|o| o.as_set())
-                .and_then(|v| v.get("temperature"))
+            provider_params
+                .get("temperature")
                 .and_then(serde_json::Value::as_f64),
             Some(0.2)
         );
-        assert_eq!(
-            params
-                .auth_binding
-                .as_ref()
-                .and_then(|o| o.as_set())
-                .expect("auth_binding set override")
-                .binding
-                .as_str(),
-            "default_openai"
-        );
+        let Some(meerkat_contracts::wire::runtime::WireTurnMetadataOverride::Set(auth_binding)) =
+            params.auth_binding.as_ref()
+        else {
+            panic!("auth_binding should be a Set override");
+        };
+        assert_eq!(auth_binding.binding.as_str(), "default_openai");
 
         let unknown = serde_json::json!({
             "mob_id": "m1",
@@ -2927,20 +2843,23 @@ mod tests {
             "prompt": "continue",
             "unexpected_override": true
         });
-        let err = serde_json::from_value::<MobTurnStartParams>(unknown)
+        let err = serde_json::from_value::<meerkat_contracts::MobTurnStartParams>(unknown)
             .expect_err("unknown turn override should fail closed");
         assert!(err.to_string().contains("unknown field"));
 
+        // The canonical contract retired the legacy string `skill_references`
+        // field; older clients that still send it fail closed at the serde
+        // boundary via `deny_unknown_fields`.
         let retired = serde_json::json!({
             "mob_id": "m1",
             "agent_identity": "w1",
             "prompt": "continue",
             "skill_references": ["legacy/ref"]
         });
-        let err = serde_json::from_value::<MobTurnStartParams>(retired)
-            .expect_err("retired skill references should preserve compatibility error");
+        let err = serde_json::from_value::<meerkat_contracts::MobTurnStartParams>(retired)
+            .expect_err("retired skill references should fail closed");
         assert!(
-            err.to_string().contains("skill_references is retired"),
+            err.to_string().contains("unknown field"),
             "unexpected error: {err}"
         );
     }
@@ -2965,16 +2884,19 @@ mod tests {
                 "binding": "default_openai"
             }
         });
-        let mob_params: MobTurnStartParams =
+        let mob_params: meerkat_contracts::MobTurnStartParams =
             serde_json::from_value(value).expect("known turn overrides deserialize");
 
-        // Mirror the handler's typed field-move with a resolved session_id.
+        // Mirror the handler's typed field-move with a resolved session_id,
+        // lowering the canonical wire tri-state overrides into the domain
+        // `TurnMetadataOverride` exactly as the handler does.
+        let prompt = ContentInput::try_from(mob_params.prompt).expect("prompt lowers");
         let turn_params = super::super::turn::StartTurnParams {
             session_id: "resolved-session-123".to_string(),
-            prompt: mob_params.prompt,
+            prompt,
             skill_refs: mob_params.skill_refs,
-            skill_references: mob_params.skill_references,
-            flow_tool_overlay: mob_params.flow_tool_overlay,
+            skill_references: None,
+            flow_tool_overlay: mob_params.flow_tool_overlay.map(TurnToolOverlay::from),
             additional_instructions: mob_params.additional_instructions,
             keep_alive: mob_params.keep_alive,
             model: mob_params.model,
@@ -2983,8 +2905,8 @@ mod tests {
             system_prompt: mob_params.system_prompt,
             output_schema: mob_params.output_schema,
             structured_output_retries: mob_params.structured_output_retries,
-            provider_params: mob_params.provider_params,
-            auth_binding: mob_params.auth_binding,
+            provider_params: lower_turn_metadata_override(mob_params.provider_params),
+            auth_binding: lower_turn_metadata_override(mob_params.auth_binding),
         };
 
         assert_eq!(turn_params.session_id, "resolved-session-123");
@@ -2996,25 +2918,21 @@ mod tests {
             Some(serde_json::json!({ "type": "object" }))
         );
         // Tri-state Set override preserved (not laundered through a JSON Map).
+        let Some(TurnMetadataOverride::Set(provider_params)) = turn_params.provider_params.as_ref()
+        else {
+            panic!("provider_params should be a Set override");
+        };
         assert_eq!(
-            turn_params
-                .provider_params
-                .as_ref()
-                .and_then(|o| o.as_set())
-                .and_then(|v| v.get("temperature"))
+            provider_params
+                .get("temperature")
                 .and_then(serde_json::Value::as_f64),
             Some(0.2)
         );
-        assert_eq!(
-            turn_params
-                .auth_binding
-                .as_ref()
-                .and_then(|o| o.as_set())
-                .expect("auth_binding set override")
-                .binding
-                .as_str(),
-            "default_openai"
-        );
+        let Some(TurnMetadataOverride::Set(auth_binding)) = turn_params.auth_binding.as_ref()
+        else {
+            panic!("auth_binding should be a Set override");
+        };
+        assert_eq!(auth_binding.binding.as_str(), "default_openai");
     }
 
     #[test]

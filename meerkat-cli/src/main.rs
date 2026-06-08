@@ -4066,7 +4066,7 @@ async fn handle_auth_command(
             if let Some(expires_at) = projection.expires_at {
                 println!("expires_at:  {}", expires_at.to_rfc3339());
             }
-            if projection.phase == AuthStatusPhase::Unknown {
+            if projection.phase.is_no_live_lease() {
                 println!("note:        no live AuthMachine lease for '{realm}:{binding_id}'.");
             }
         }
@@ -5751,7 +5751,7 @@ async fn project_cli_auth_status(
     let mut stored = None;
     if source_uses_store && let Some(store) = token_store {
         let phase = AuthStatusPhase::from_lease_snapshot(now, &snapshot);
-        if phase == AuthStatusPhase::Unknown
+        if phase.is_no_live_lease()
             && let Some(expected_mode) = expected_mode
             && let Ok(Some(rehydrated)) = meerkat_core::rehydrate_marked_tokens_for_status(
                 store,
@@ -5764,7 +5764,7 @@ async fn project_cli_auth_status(
         {
             stored = Some(rehydrated);
             snapshot = auth_lease.snapshot(&lease_key);
-        } else if phase != AuthStatusPhase::Unknown {
+        } else if !phase.is_no_live_lease() {
             // A store-load fault is a real error, not absent credentials.
             // Propagate the typed TokenStoreError rather than collapsing it
             // to None, which would report a store fault as "no credentials".

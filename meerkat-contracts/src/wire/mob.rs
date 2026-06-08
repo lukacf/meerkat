@@ -1528,14 +1528,25 @@ pub struct MobReconcileParams {
     pub options: MobReconcileOptionsWire,
 }
 
+/// Typed mob error projection for wire surfaces. Carries the closed failure
+/// class alongside the human-readable message so consumers branch on the typed
+/// `code` rather than parsing the free-form `message`. Reuses
+/// [`MobSpawnManyFailureCause`] as the canonical closed mob-error vocabulary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireMobError {
+    pub code: MobSpawnManyFailureCause,
+    pub message: String,
+}
+
 /// Per-identity failure in a `mob/reconcile` pass.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobReconcileFailureWire {
     pub agent_identity: String,
     pub stage: WireMobReconcileStage,
-    /// Stringified mob error.
-    pub error: String,
+    /// Typed mob error: closed failure `code` plus human-readable `message`.
+    pub error: WireMobError,
 }
 
 /// Summary produced by a `mob/reconcile` pass.
@@ -1689,11 +1700,48 @@ pub struct MobFlowStatusParams {
     pub run_id: String,
 }
 
+/// Lifecycle status of a flow run on the wire. Mirrors
+/// `meerkat_mob::MobRunStatus` so consumers branch on a closed type rather than
+/// re-deriving meaning from a free-form status string.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMobRunStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Canceled,
+}
+
+/// Typed public projection of a single flow run for `mob/flow_status`.
+///
+/// The canonical identity and lifecycle fields (`run_id`, `mob_id`, `flow_id`,
+/// `status`) are typed; the remaining kernel-owned step/loop projection rides
+/// along as the `kernel` map. Producers project a domain `MobRun` into this
+/// shape so consumers never re-derive run identity or lifecycle from a free
+/// `serde_json::Value`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireMobRun {
+    pub run_id: String,
+    pub mob_id: String,
+    pub flow_id: String,
+    pub status: WireMobRunStatus,
+    /// Remaining kernel-owned run projection (step ledger, frame/loop outputs,
+    /// flow state) after the typed identity/lifecycle fields are lifted out.
+    #[serde(flatten)]
+    pub kernel: serde_json::Map<String, Value>,
+}
+
 /// Response payload for `mob/flow_status`.
+///
+/// `run` is `None` when the requested run id has no persisted run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobFlowStatusResult {
-    pub run: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<WireMobRun>,
 }
 
 /// Request payload for `mob/flow_cancel`.
@@ -1892,11 +1940,56 @@ impl<'de> Deserialize<'de> for MobTurnStartParams {
     }
 }
 
+/// One currently wired peer that is known to be unreachable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireUnreachablePeer {
+    pub peer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Live connectivity summary for a member's currently wired peers. Mirrors
+/// `meerkat_mob::MobPeerConnectivitySnapshot`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WirePeerConnectivitySnapshot {
+    pub reachable_peer_count: usize,
+    pub unknown_peer_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreachable_peers: Vec<WireUnreachablePeer>,
+}
+
+/// Tri-state peer-connectivity projection for `mob/member_status`.
+///
+/// Distinguishes "connectivity is not applicable to this member" (no bridge
+/// session backs the member) from "the live probe timed out" (the answer is
+/// transiently unknown) from a resolved connectivity snapshot. The legacy
+/// `Option<MobPeerConnectivitySnapshot>` projection collapsed both the
+/// not-applicable and timed-out cases into `None`, laundering a transient
+/// probe fault into the same shape as a structurally-absent binding.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum WirePeerConnectivity {
+    /// The member has no bridge session, so live peer connectivity is not a
+    /// resolvable fact for it.
+    NotApplicable,
+    /// A live connectivity probe was attempted but did not resolve in time.
+    ProbeTimedOut,
+    /// A resolved connectivity snapshot.
+    Known {
+        snapshot: WirePeerConnectivitySnapshot,
+    },
+}
+
 /// Response payload for `mob/member_status`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobMemberStatusResult {
     pub status: WireMobMemberStatus,
+    /// Server-resolved opaque handle for subsequent member-targeted calls.
+    pub member_ref: WireMemberRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_preview: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1906,7 +1999,7 @@ pub struct MobMemberStatusResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub peer_connectivity: Option<Value>,
+    pub peer_connectivity: Option<WirePeerConnectivity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kickoff: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1941,12 +2034,19 @@ mod member_status_capability_tests {
         };
         let result = MobMemberStatusResult {
             status: WireMobMemberStatus::Active,
+            member_ref: WireMemberRef::encode("mob-1", "worker-1"),
             output_preview: None,
             error: None,
             tokens_used: 0,
             is_final: false,
             current_session_id: Some("session-1".to_string()),
-            peer_connectivity: None,
+            peer_connectivity: Some(WirePeerConnectivity::Known {
+                snapshot: WirePeerConnectivitySnapshot {
+                    reachable_peer_count: 1,
+                    unknown_peer_count: 0,
+                    unreachable_peers: Vec::new(),
+                },
+            }),
             kickoff: None,
             external_member: None,
             resolved_capabilities: Some(capabilities.clone()),
@@ -2066,7 +2166,7 @@ pub struct MobProfileLookupResult {
     pub not_found: bool,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<Value>,
+    pub profile: Option<WireMobProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2296,20 +2396,29 @@ mod tests {
         let failure = MobReconcileFailureWire {
             agent_identity: "worker-1".into(),
             stage: WireMobReconcileStage::Spawn,
-            error: "spawn failed".into(),
+            error: WireMobError {
+                code: MobSpawnManyFailureCause::ProfileNotFound,
+                message: "spawn failed".into(),
+            },
         };
 
         let json = serde_json::to_value(&failure).expect("serialize failure");
         assert_eq!(json["stage"], "spawn");
+        assert_eq!(json["error"]["code"], "profile_not_found");
+        assert_eq!(json["error"]["message"], "spawn failed");
 
         let round_trip: MobReconcileFailureWire =
             serde_json::from_value(json).expect("deserialize failure");
         assert_eq!(round_trip.stage, WireMobReconcileStage::Spawn);
+        assert_eq!(
+            round_trip.error.code,
+            MobSpawnManyFailureCause::ProfileNotFound
+        );
 
         let err = serde_json::from_value::<MobReconcileFailureWire>(serde_json::json!({
             "agent_identity": "worker-1",
             "stage": "restart",
-            "error": "bad stage"
+            "error": { "code": "profile_not_found", "message": "bad stage" }
         }))
         .expect_err("unknown reconcile stage must be rejected");
         assert!(err.to_string().contains("unknown variant"));

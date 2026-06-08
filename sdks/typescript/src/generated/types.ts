@@ -291,6 +291,35 @@ export interface WireMobProfile {
   tools?: WireMobToolConfig;
 }
 
+export interface WireMobRun {
+  flow_id: string;
+  mob_id: string;
+  run_id: string;
+  status: "pending" | "running" | "completed" | "failed" | "canceled";
+}
+
+export interface WireMobRunStatus {
+}
+
+export interface WirePeerConnectivity {
+}
+
+export interface WirePeerConnectivitySnapshot {
+  reachable_peer_count: number;
+  unknown_peer_count: number;
+  unreachable_peers?: Record<string, unknown>[];
+}
+
+export interface WireUnreachablePeer {
+  peer: string;
+  reason?: string;
+}
+
+export interface WireMobError {
+  code: MobSpawnManyFailureCause;
+  message: string;
+}
+
 export interface MobEnsureMemberParams {
   mob_id: string;
   spec: MobMemberSpecWire;
@@ -443,7 +472,7 @@ export interface MobFlowStatusParams {
 }
 
 export interface MobFlowStatusResult {
-  run: unknown;
+  run?: Record<string, unknown>;
 }
 
 export interface MobFlowCancelParams {
@@ -510,8 +539,9 @@ export interface MobMemberStatusResult {
   external_member?: unknown;
   is_final: boolean;
   kickoff?: unknown;
+  member_ref: WireMemberRef;
   output_preview?: string;
-  peer_connectivity?: unknown;
+  peer_connectivity?: Record<string, unknown>;
   resolved_capabilities?: WireResolvedModelCapabilities;
   status: WireMobMemberStatus;
   tokens_used: number;
@@ -596,7 +626,7 @@ export interface MobProfileLookupResult {
   created_at?: string;
   name: string;
   not_found?: boolean;
-  profile?: unknown;
+  profile?: WireMobProfile;
   revision?: number;
   updated_at?: string;
 }
@@ -795,7 +825,7 @@ export interface MobReconcileReportWire {
 
 export interface MobReconcileFailureWire {
   agent_identity: string;
-  error: string;
+  error: WireMobError;
   stage: WireMobReconcileStage;
 }
 
@@ -2680,7 +2710,7 @@ export interface WireAuthStatus {
   last_refresh_at?: string;
   profile_id: string;
   provider: string;
-  state: "valid" | "expiring" | "expired" | "reauth_required" | "refresh_failed" | "unknown";
+  state: "valid" | "expiring" | "expired" | "reauth_required" | "refresh_failed" | "released" | "absent" | "missing_credential";
 }
 
 export interface WireAuthStatusDetail {
@@ -2694,7 +2724,7 @@ export interface WireAuthStatusDetail {
   profile_id: string;
   provider: string;
   realm_id: string;
-  state: "valid" | "expiring" | "expired" | "reauth_required" | "refresh_failed" | "unknown";
+  state: "valid" | "expiring" | "expired" | "reauth_required" | "refresh_failed" | "released" | "absent" | "missing_credential";
 }
 
 export interface WireAuthErrorMissingSecret {

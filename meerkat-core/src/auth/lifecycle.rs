@@ -409,7 +409,7 @@ pub fn project_published_auth_status<'a>(
     snapshot: &AuthLeaseSnapshot,
 ) -> PublishedAuthStatus<'a> {
     let phase = AuthStatusPhase::from_lease_snapshot(now, snapshot);
-    if phase == AuthStatusPhase::Unknown {
+    if phase.is_no_live_lease() {
         return PublishedAuthStatus {
             phase,
             expires_at: None,

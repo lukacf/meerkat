@@ -1794,7 +1794,7 @@ pub async fn handle_auth_status_get(
     let token_store = runtime.token_store();
     let mut stored = None;
     if source_uses_store {
-        if phase == meerkat_core::AuthStatusPhase::Unknown
+        if phase.is_no_live_lease()
             && let Some(expected_mode) = expected_mode
             && let Some(store) = token_store.as_ref()
             && let Ok(Some(rehydrated)) = meerkat_core::rehydrate_marked_tokens_for_status(
@@ -1808,7 +1808,7 @@ pub async fn handle_auth_status_get(
         {
             stored = Some(rehydrated);
             snapshot = auth_lease.snapshot(&lease_key);
-        } else if phase != meerkat_core::AuthStatusPhase::Unknown
+        } else if !phase.is_no_live_lease()
             && let Some(store) = token_store.as_ref()
         {
             stored = store
@@ -3209,7 +3209,7 @@ mod tests {
             handle_auth_status_get(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime).await;
 
         let status = auth_status_value(resp);
-        assert_eq!(status["state"], "unknown");
+        assert_eq!(status["state"], "missing_credential");
         assert!(status.get("expires_at").is_none());
         assert!(status.get("last_refresh_at").is_none());
         assert!(status.get("account_id").is_none());
@@ -3798,7 +3798,10 @@ mod tests {
             Some(&stored),
             &snapshot,
         );
-        assert_eq!(projection.phase, meerkat_core::AuthStatusPhase::Unknown);
+        assert_eq!(
+            projection.phase,
+            meerkat_core::AuthStatusPhase::MissingCredential
+        );
         assert!(projection.tokens.is_none());
     }
 
@@ -3865,7 +3868,10 @@ mod tests {
             Some(&stored),
             &snapshot,
         );
-        assert_eq!(projection.phase, meerkat_core::AuthStatusPhase::Unknown);
+        assert_eq!(
+            projection.phase,
+            meerkat_core::AuthStatusPhase::MissingCredential
+        );
         assert!(projection.tokens.is_none());
     }
 
@@ -3940,7 +3946,10 @@ mod tests {
             Some(&stored),
             &snapshot,
         );
-        assert_eq!(projection.phase, meerkat_core::AuthStatusPhase::Unknown);
+        assert_eq!(
+            projection.phase,
+            meerkat_core::AuthStatusPhase::MissingCredential
+        );
         assert!(projection.tokens.is_none());
     }
 

@@ -1,9 +1,7 @@
 use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken};
 use crate::machines::mob_machine as mob_dsl;
 use crate::roster::{MemberState, MobMemberKickoffPhase, MobMemberKickoffSnapshot};
-use crate::runtime::handle::{
-    HelperResult, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot,
-};
+use crate::runtime::handle::{HelperResult, MobMemberSnapshot, MobMemberStatus};
 use meerkat_core::time_compat::UNIX_EPOCH;
 use meerkat_core::types::SessionId;
 
@@ -28,7 +26,7 @@ pub(super) struct CanonicalMemberSnapshotMaterial {
     pub(super) agent_runtime_id: Option<AgentRuntimeId>,
     pub(super) fence_token: Option<FenceToken>,
     pub(super) current_bridge_session_id: Option<SessionId>,
-    pub(super) peer_connectivity: Option<MobPeerConnectivitySnapshot>,
+    pub(super) peer_connectivity: Option<meerkat_contracts::WirePeerConnectivity>,
     pub(super) kickoff: Option<MobMemberKickoffSnapshot>,
 }
 
@@ -93,7 +91,7 @@ pub(super) struct MobMemberLifecycleInput {
     pub(super) agent_runtime_id: Option<AgentRuntimeId>,
     pub(super) fence_token: Option<FenceToken>,
     pub(super) current_bridge_session_id: Option<SessionId>,
-    pub(super) peer_connectivity: Option<MobPeerConnectivitySnapshot>,
+    pub(super) peer_connectivity: Option<meerkat_contracts::WirePeerConnectivity>,
     pub(super) kickoff: Option<MobMemberKickoffSnapshot>,
 }
 

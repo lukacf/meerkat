@@ -12,7 +12,7 @@ use meerkat_contracts::{
 use meerkat_core::realtime_transcript::{AppendRealtimeTranscript, TranscriptLane};
 use meerkat_core::{
     Message, PendingSystemContextAppend, Provider, RealtimeTranscriptEvent, RealtimeTranscriptRole,
-    ToolDef, ToolResult,
+    ToolCallId, ToolDef, ToolName, ToolResult,
 };
 use meerkat_core::{StopReason, types::Usage};
 use meerkat_llm_core::LlmError;
@@ -4375,8 +4375,11 @@ fn translate_realtime_event(event: RealtimeSessionEvent) -> LiveAdapterObservati
             tool_name,
             arguments,
         } => LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: call_id,
-            tool_name,
+            // #270: parse the provider-native strings into typed newtypes
+            // once, here at the provider boundary, so the raw string is
+            // never the identity owner past this seam.
+            provider_call_id: ToolCallId::new(call_id),
+            tool_name: ToolName::new(tool_name),
             arguments,
         },
         RealtimeSessionEvent::AssistantTranscriptTruncated {

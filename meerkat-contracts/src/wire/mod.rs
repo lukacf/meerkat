@@ -29,8 +29,9 @@ mod usage;
 pub use approval::{
     ApprovalActionKind, ApprovalDecideParams, ApprovalDecision, ApprovalDecisionRecord,
     ApprovalGetParams, ApprovalId, ApprovalListFilter, ApprovalListParams, ApprovalListResult,
-    ApprovalOwnerRef, ApprovalPrincipalId, ApprovalProposedAction, ApprovalRecord, ApprovalRequest,
-    ApprovalRequestParams, ApprovalResourceKind, ApprovalResourceRef, ApprovalRisk, ApprovalStatus,
+    ApprovalMemberRef, ApprovalMobRef, ApprovalOwnerRef, ApprovalPrincipalId,
+    ApprovalProposedAction, ApprovalRecord, ApprovalRequest, ApprovalRequestParams,
+    ApprovalResourceId, ApprovalResourceKind, ApprovalResourceRef, ApprovalRisk, ApprovalStatus,
 };
 pub use comms::{
     CommsChecksumTokenParams, CommsChecksumTokenResult, CommsChecksumTokenResultIntent,
@@ -86,13 +87,15 @@ pub use image_generation::{
     WireSwitchTurnControlResult, WireSwitchTurnIntent, WireSwitchTurnPhase,
 };
 pub use live::{
-    LiveChannelParams, LiveCloseResult, LiveCloseStatus, LiveCommitInputParams, LiveInputChunkWire,
-    LiveOpenParams, LiveOpenResult, LiveOpenTransport, LiveRefreshResult, LiveRefreshStatus,
-    LiveSendInputParams, LiveStatusResult, LiveTruncateParams, LiveWebrtcAnswerParams,
-    LiveWebrtcAnswerResult, WireLiveAdapterErrorCode, WireLiveAdapterObservation,
-    WireLiveAdapterStatus, WireLiveChannelCapabilities, WireLiveConfigRejectionReason,
-    WireLiveContinuityMode, WireLiveDegradationReason, WireLiveResponseModality,
-    WireLiveTransportBootstrap, WireProvider,
+    LiveChannelParams, LiveCloseResult, LiveCloseStatus, LiveCommitInputParams,
+    LiveCommitInputResult, LiveCommitInputStatus, LiveInputChunkWire, LiveInterruptResult,
+    LiveInterruptStatus, LiveOpenParams, LiveOpenResult, LiveOpenTransport, LiveRefreshResult,
+    LiveRefreshStatus, LiveSendInputParams, LiveSendInputResult, LiveSendInputStatus,
+    LiveStatusResult, LiveTruncateParams, LiveTruncateResult, LiveTruncateStatus,
+    LiveWebrtcAnswerParams, LiveWebrtcAnswerResult, WireLiveAdapterErrorCode,
+    WireLiveAdapterObservation, WireLiveAdapterStatus, WireLiveChannelCapabilities,
+    WireLiveConfigRejectionReason, WireLiveContinuityMode, WireLiveDegradationReason,
+    WireLiveResponseModality, WireLiveTransportBootstrap, WireProvider,
 };
 pub use mcp_live::{
     McpAddParams, McpLiveOpResponse, McpLiveOpStatus, McpLiveOperation, McpReloadParams,
@@ -131,11 +134,12 @@ pub use mob::{
     MobWiringRulesInput, SupervisorRotationReportWire, WireAgentRuntimeId,
     WireAppendSystemContextStatus, WireBudgetSplitPolicy, WireForkContext, WireHandlingMode,
     WireMemberLaunchMode, WireMemberRef, WireMemberRefError, WireMemberState, WireMobBackendKind,
-    WireMobLifecycleAction, WireMobLifecycleStatus, WireMobMemberStatus, WireMobProfile,
-    WireMobReconcileStage, WireMobRespawnOutcome, WireMobRuntimeMode, WireMobToolConfig,
-    WireMobWireAction, WireRenderClass, WireRenderMetadata, WireRenderSalience, WireRuntimeBinding,
-    WireToolAccessPolicy, WireToolFilter, WireTrustedPeerIdentity, WireTrustedPeerSpec,
-    WireWorkOrigin,
+    WireMobError, WireMobLifecycleAction, WireMobLifecycleStatus, WireMobMemberStatus,
+    WireMobProfile, WireMobReconcileStage, WireMobRespawnOutcome, WireMobRun, WireMobRunStatus,
+    WireMobRuntimeMode, WireMobToolConfig, WireMobWireAction, WirePeerConnectivity,
+    WirePeerConnectivitySnapshot, WireRenderClass, WireRenderMetadata, WireRenderSalience,
+    WireRuntimeBinding, WireToolAccessPolicy, WireToolFilter, WireTrustedPeerIdentity,
+    WireTrustedPeerSpec, WireUnreachablePeer, WireWorkOrigin,
 };
 pub use models::{
     CatalogModelEntry, ModelsCatalogResponse, ProviderCatalog, WireModelBetaHeader,

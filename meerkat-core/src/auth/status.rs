@@ -21,7 +21,12 @@ pub enum AuthStatusPhase {
     Expired,
     ReauthRequired,
     RefreshFailed,
-    Unknown,
+    /// The lease was explicitly released (credential lifecycle torn down).
+    Released,
+    /// No lease phase is tracked at all for this binding.
+    Absent,
+    /// A lease may exist but holds no live credential material.
+    MissingCredential,
 }
 
 impl AuthStatusPhase {
@@ -31,7 +36,9 @@ impl AuthStatusPhase {
         Self::Expired,
         Self::ReauthRequired,
         Self::RefreshFailed,
-        Self::Unknown,
+        Self::Released,
+        Self::Absent,
+        Self::MissingCredential,
     ];
 
     pub const fn as_public_str(self) -> &'static str {
@@ -41,8 +48,22 @@ impl AuthStatusPhase {
             Self::Expired => "expired",
             Self::ReauthRequired => "reauth_required",
             Self::RefreshFailed => "refresh_failed",
-            Self::Unknown => "unknown",
+            Self::Released => "released",
+            Self::Absent => "absent",
+            Self::MissingCredential => "missing_credential",
         }
+    }
+
+    /// True when there is no usable live lease for this binding.
+    ///
+    /// Replaces the old `== AuthStatusPhase::Unknown` check after the catch-all
+    /// `Unknown` variant was split into the three distinct no-live-lease states
+    /// (`Released`, `Absent`, `MissingCredential`).
+    pub const fn is_no_live_lease(self) -> bool {
+        matches!(
+            self,
+            Self::Released | Self::Absent | Self::MissingCredential
+        )
     }
 
     pub const fn from_lease_phase(phase: Option<AuthLeasePhase>) -> Self {
@@ -51,20 +72,22 @@ impl AuthStatusPhase {
             Some(AuthLeasePhase::Expiring | AuthLeasePhase::Refreshing) => Self::Expiring,
             Some(AuthLeasePhase::Expired) => Self::Expired,
             Some(AuthLeasePhase::ReauthRequired) => Self::ReauthRequired,
-            Some(AuthLeasePhase::Released) | None => Self::Unknown,
+            Some(AuthLeasePhase::Released) => Self::Released,
+            None => Self::Absent,
         }
     }
 
     pub fn from_lease_snapshot(_now: DateTime<Utc>, snapshot: &AuthLeaseSnapshot) -> Self {
         if !snapshot.credential_present {
-            return Self::Unknown;
+            return Self::MissingCredential;
         }
         match snapshot.phase {
             Some(AuthLeasePhase::Valid) => Self::Valid,
             Some(AuthLeasePhase::Expiring | AuthLeasePhase::Refreshing) => Self::Expiring,
             Some(AuthLeasePhase::Expired) => Self::Expired,
             Some(AuthLeasePhase::ReauthRequired) => Self::ReauthRequired,
-            Some(AuthLeasePhase::Released) | None => Self::Unknown,
+            Some(AuthLeasePhase::Released) => Self::Released,
+            None => Self::Absent,
         }
     }
 }
@@ -191,7 +214,7 @@ mod tests {
         };
         assert_eq!(
             AuthStatusPhase::from_lease_snapshot(now, &stale_token_without_machine).as_public_str(),
-            "unknown"
+            "missing_credential"
         );
     }
 
@@ -215,8 +238,20 @@ mod tests {
         );
         assert_eq!(
             AuthStatusPhase::from_lease_phase(None).as_public_str(),
-            "unknown"
+            "absent"
         );
+        assert_eq!(
+            AuthStatusPhase::from_lease_phase(Some(AuthLeasePhase::Released)).as_public_str(),
+            "released"
+        );
+    }
+
+    #[test]
+    fn auth_status_phase_is_no_live_lease_classifies_three_states() {
+        assert!(AuthStatusPhase::Released.is_no_live_lease());
+        assert!(AuthStatusPhase::Absent.is_no_live_lease());
+        assert!(AuthStatusPhase::MissingCredential.is_no_live_lease());
+        assert!(!AuthStatusPhase::Valid.is_no_live_lease());
     }
 
     #[cfg(feature = "schema")]

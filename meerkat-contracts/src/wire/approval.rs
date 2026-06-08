@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 
 pub use meerkat_core::{
     ApprovalActionKind, ApprovalDecision, ApprovalDecisionRecord, ApprovalId, ApprovalListFilter,
-    ApprovalOwnerRef, ApprovalPrincipalId, ApprovalProposedAction, ApprovalRecord, ApprovalRequest,
+    ApprovalMemberRef, ApprovalMobRef, ApprovalOwnerRef, ApprovalPrincipalId,
+    ApprovalProposedAction, ApprovalRecord, ApprovalRequest, ApprovalResourceId,
     ApprovalResourceKind, ApprovalResourceRef, ApprovalRisk, ApprovalStatus,
 };
 
@@ -72,11 +73,11 @@ mod tests {
             request: ApprovalRequest {
                 requester: principal("human:alice"),
                 owner: ApprovalOwnerRef::Session {
-                    session_id: "session-1".to_string(),
+                    session_id: meerkat_core::SessionId::new(),
                 },
                 resource: ApprovalResourceRef {
                     kind: ApprovalResourceKind::ShellCommand,
-                    id: "shell:danger".to_string(),
+                    id: meerkat_core::ApprovalResourceId::new("shell:danger"),
                 },
                 proposed_action: ApprovalProposedAction {
                     kind: ApprovalActionKind::ShellCommand,

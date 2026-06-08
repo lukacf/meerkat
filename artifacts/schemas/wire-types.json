@@ -2831,6 +2831,14 @@
         "description": "Durable approval id.",
         "type": "string"
       },
+      "ApprovalMemberRef": {
+        "description": "Typed reference to a mob member owning an approval.",
+        "type": "string"
+      },
+      "ApprovalMobRef": {
+        "description": "Typed reference to a mob owning an approval.",
+        "type": "string"
+      },
       "ApprovalOwnerRef": {
         "description": "Typed owner for an approval request.",
         "oneOf": [
@@ -2853,7 +2861,7 @@
                 "type": "string"
               },
               "session_id": {
-                "type": "string"
+                "$ref": "#/$defs/SessionId"
               }
             },
             "required": [
@@ -2865,7 +2873,7 @@
           {
             "properties": {
               "mob_id": {
-                "type": "string"
+                "$ref": "#/$defs/ApprovalMobRef"
               },
               "owner_type": {
                 "const": "mob",
@@ -2885,7 +2893,7 @@
                 "type": "string"
               },
               "run_id": {
-                "type": "string"
+                "$ref": "#/$defs/RunId"
               }
             },
             "required": [
@@ -2913,10 +2921,10 @@
           {
             "properties": {
               "member_ref": {
-                "type": "string"
+                "$ref": "#/$defs/ApprovalMemberRef"
               },
               "mob_id": {
-                "type": "string"
+                "$ref": "#/$defs/ApprovalMobRef"
               },
               "owner_type": {
                 "const": "external_member",
@@ -3027,6 +3035,10 @@
         ],
         "type": "object"
       },
+      "ApprovalResourceId": {
+        "description": "Typed identifier for the resource affected by an approval.",
+        "type": "string"
+      },
       "ApprovalResourceKind": {
         "description": "Typed resource kind affected by an approval.",
         "enum": [
@@ -3044,7 +3056,7 @@
         "description": "Resource affected by an approval.",
         "properties": {
           "id": {
-            "type": "string"
+            "$ref": "#/$defs/ApprovalResourceId"
           },
           "kind": {
             "$ref": "#/$defs/ApprovalResourceKind"
@@ -3075,6 +3087,14 @@
           "expired",
           "cancelled"
         ],
+        "type": "string"
+      },
+      "RunId": {
+        "description": "Unique identifier for a run (a single execution of the agent loop).\n\nCore emits this in `RunEvent` and tracks it across the run lifecycle.",
+        "type": "string"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
         "type": "string"
       },
       "SurfaceMetadata": {
@@ -3164,6 +3184,14 @@
         "description": "Durable approval id.",
         "type": "string"
       },
+      "ApprovalMemberRef": {
+        "description": "Typed reference to a mob member owning an approval.",
+        "type": "string"
+      },
+      "ApprovalMobRef": {
+        "description": "Typed reference to a mob owning an approval.",
+        "type": "string"
+      },
       "ApprovalOwnerRef": {
         "description": "Typed owner for an approval request.",
         "oneOf": [
@@ -3186,7 +3214,7 @@
                 "type": "string"
               },
               "session_id": {
-                "type": "string"
+                "$ref": "#/$defs/SessionId"
               }
             },
             "required": [
@@ -3198,7 +3226,7 @@
           {
             "properties": {
               "mob_id": {
-                "type": "string"
+                "$ref": "#/$defs/ApprovalMobRef"
               },
               "owner_type": {
                 "const": "mob",
@@ -3218,7 +3246,7 @@
                 "type": "string"
               },
               "run_id": {
-                "type": "string"
+                "$ref": "#/$defs/RunId"
               }
             },
             "required": [
@@ -3246,10 +3274,10 @@
           {
             "properties": {
               "member_ref": {
-                "type": "string"
+                "$ref": "#/$defs/ApprovalMemberRef"
               },
               "mob_id": {
-                "type": "string"
+                "$ref": "#/$defs/ApprovalMobRef"
               },
               "owner_type": {
                 "const": "external_member",
@@ -3286,6 +3314,10 @@
         ],
         "type": "object"
       },
+      "ApprovalResourceId": {
+        "description": "Typed identifier for the resource affected by an approval.",
+        "type": "string"
+      },
       "ApprovalResourceKind": {
         "description": "Typed resource kind affected by an approval.",
         "enum": [
@@ -3303,7 +3335,7 @@
         "description": "Resource affected by an approval.",
         "properties": {
           "id": {
-            "type": "string"
+            "$ref": "#/$defs/ApprovalResourceId"
           },
           "kind": {
             "$ref": "#/$defs/ApprovalResourceKind"
@@ -3334,6 +3366,14 @@
           "expired",
           "cancelled"
         ],
+        "type": "string"
+      },
+      "RunId": {
+        "description": "Unique identifier for a run (a single execution of the agent loop).\n\nCore emits this in `RunEvent` and tracks it across the run lifecycle.",
+        "type": "string"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
         "type": "string"
       },
       "SurfaceMetadata": {
@@ -18561,6 +18601,50 @@
     "title": "LiveCommitInputParams",
     "type": "object"
   },
+  "LiveCommitInputResult": {
+    "$defs": {
+      "LiveCommitInputStatus": {
+        "description": "Typed public result class for `live/commit_input`.\n\nToday generated runtime authority emits only `Committed`. The enum is\n`#[non_exhaustive]` so future generated contracts can add explicit result\nclasses without changing the object shape.",
+        "oneOf": [
+          {
+            "const": "committed",
+            "description": "The host accepted the commit-input command onto the adapter queue.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `live/commit_input`.\n\nThe boolean `committed` field is preserved for back-compat alongside the\ntyped `status` discriminator. New code should route on `status`.",
+    "properties": {
+      "committed": {
+        "description": "Back-compat mirror of the generated commit-input-authority result.\nAlways `true` when paired with `status: committed`.",
+        "type": "boolean"
+      },
+      "status": {
+        "$ref": "#/$defs/LiveCommitInputStatus",
+        "description": "Typed commit-input status emitted by generated runtime authority.\nToday: always [`LiveCommitInputStatus::Committed`]."
+      }
+    },
+    "required": [
+      "status",
+      "committed"
+    ],
+    "title": "LiveCommitInputResult",
+    "type": "object"
+  },
+  "LiveCommitInputStatus": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Typed public result class for `live/commit_input`.\n\nToday generated runtime authority emits only `Committed`. The enum is\n`#[non_exhaustive]` so future generated contracts can add explicit result\nclasses without changing the object shape.",
+    "oneOf": [
+      {
+        "const": "committed",
+        "description": "The host accepted the commit-input command onto the adapter queue.",
+        "type": "string"
+      }
+    ],
+    "title": "LiveCommitInputStatus"
+  },
   "LiveInputChunkWire": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Modality-tagged input chunk for `live/send_input`.\n\nAudio / image / video-frame payloads are base64 strings (`data`); the\nmodality-specific metadata (`sample_rate_hz` / `channels` for audio,\n`mime` for image, `codec` / `timestamp_ms` for video frames) lets the\nadapter validate against the negotiated provider format.\n\nT11: `Image` and `VideoFrame` mirror the typed variants on\n[`meerkat_core::live_adapter::LiveInputChunk`]. Adapters that do not\nimplement a variant must reject with a typed\n`LiveAdapterErrorCode::ConfigRejected` rather than collapsing onto a\nfree-form provider error string.",
@@ -18658,6 +18742,50 @@
       }
     ],
     "title": "LiveInputChunkWire"
+  },
+  "LiveInterruptResult": {
+    "$defs": {
+      "LiveInterruptStatus": {
+        "description": "Typed public result class for `live/interrupt`.\n\nToday generated runtime authority emits only `Interrupted`. The enum is\n`#[non_exhaustive]` so future generated contracts can add explicit result\nclasses without changing the object shape.",
+        "oneOf": [
+          {
+            "const": "interrupted",
+            "description": "The host accepted the interrupt command onto the adapter queue.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `live/interrupt`.\n\nThe boolean `interrupted` field is preserved for back-compat alongside the\ntyped `status` discriminator. New code should route on `status`.",
+    "properties": {
+      "interrupted": {
+        "description": "Back-compat mirror of the generated interrupt-authority result.\nAlways `true` when paired with `status: interrupted`.",
+        "type": "boolean"
+      },
+      "status": {
+        "$ref": "#/$defs/LiveInterruptStatus",
+        "description": "Typed interrupt status emitted by generated runtime authority.\nToday: always [`LiveInterruptStatus::Interrupted`]."
+      }
+    },
+    "required": [
+      "status",
+      "interrupted"
+    ],
+    "title": "LiveInterruptResult",
+    "type": "object"
+  },
+  "LiveInterruptStatus": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Typed public result class for `live/interrupt`.\n\nToday generated runtime authority emits only `Interrupted`. The enum is\n`#[non_exhaustive]` so future generated contracts can add explicit result\nclasses without changing the object shape.",
+    "oneOf": [
+      {
+        "const": "interrupted",
+        "description": "The host accepted the interrupt command onto the adapter queue.",
+        "type": "string"
+      }
+    ],
+    "title": "LiveInterruptStatus"
   },
   "LiveOpenParams": {
     "$defs": {
@@ -19110,6 +19238,50 @@
     "title": "LiveSendInputParams",
     "type": "object"
   },
+  "LiveSendInputResult": {
+    "$defs": {
+      "LiveSendInputStatus": {
+        "description": "Typed public result class for `live/send_input`.\n\nToday generated runtime authority emits only `Sent`. The enum is\n`#[non_exhaustive]` so future generated contracts can add explicit result\nclasses without changing the object shape.",
+        "oneOf": [
+          {
+            "const": "sent",
+            "description": "The host accepted the input chunk onto the adapter queue.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `live/send_input`.\n\nThe boolean `sent` field is preserved for back-compat alongside the typed\n`status` discriminator. New code should route on `status`.",
+    "properties": {
+      "sent": {
+        "description": "Back-compat mirror of the generated send-input-authority result.\nAlways `true` when paired with `status: sent`.",
+        "type": "boolean"
+      },
+      "status": {
+        "$ref": "#/$defs/LiveSendInputStatus",
+        "description": "Typed send-input status emitted by generated runtime authority.\nToday: always [`LiveSendInputStatus::Sent`]."
+      }
+    },
+    "required": [
+      "status",
+      "sent"
+    ],
+    "title": "LiveSendInputResult",
+    "type": "object"
+  },
+  "LiveSendInputStatus": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Typed public result class for `live/send_input`.\n\nToday generated runtime authority emits only `Sent`. The enum is\n`#[non_exhaustive]` so future generated contracts can add explicit result\nclasses without changing the object shape.",
+    "oneOf": [
+      {
+        "const": "sent",
+        "description": "The host accepted the input chunk onto the adapter queue.",
+        "type": "string"
+      }
+    ],
+    "title": "LiveSendInputStatus"
+  },
   "LiveStatusResult": {
     "$defs": {
       "WireLiveAdapterStatus": {
@@ -19330,6 +19502,50 @@
     ],
     "title": "LiveTruncateParams",
     "type": "object"
+  },
+  "LiveTruncateResult": {
+    "$defs": {
+      "LiveTruncateStatus": {
+        "description": "Typed public result class for `live/truncate`.\n\nToday generated runtime authority emits only `Truncated`. The enum is\n`#[non_exhaustive]` so future generated contracts can add explicit result\nclasses without changing the object shape.",
+        "oneOf": [
+          {
+            "const": "truncated",
+            "description": "The host accepted the truncate command onto the adapter queue.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `live/truncate`.\n\nThe boolean `truncated` field is preserved for back-compat alongside the\ntyped `status` discriminator. New code should route on `status`.",
+    "properties": {
+      "status": {
+        "$ref": "#/$defs/LiveTruncateStatus",
+        "description": "Typed truncate status emitted by generated runtime authority.\nToday: always [`LiveTruncateStatus::Truncated`]."
+      },
+      "truncated": {
+        "description": "Back-compat mirror of the generated truncate-authority result.\nAlways `true` when paired with `status: truncated`.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "status",
+      "truncated"
+    ],
+    "title": "LiveTruncateResult",
+    "type": "object"
+  },
+  "LiveTruncateStatus": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Typed public result class for `live/truncate`.\n\nToday generated runtime authority emits only `Truncated`. The enum is\n`#[non_exhaustive]` so future generated contracts can add explicit result\nclasses without changing the object shape.",
+    "oneOf": [
+      {
+        "const": "truncated",
+        "description": "The host accepted the truncate command onto the adapter queue.",
+        "type": "string"
+      }
+    ],
+    "title": "LiveTruncateStatus"
   },
   "LiveWebrtcAnswerParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -21464,14 +21680,58 @@
     "type": "object"
   },
   "MobFlowStatusResult": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `mob/flow_status`.",
-    "properties": {
-      "run": true
+    "$defs": {
+      "WireMobRun": {
+        "additionalProperties": true,
+        "description": "Typed public projection of a single flow run for `mob/flow_status`.\n\nThe canonical identity and lifecycle fields (`run_id`, `mob_id`, `flow_id`,\n`status`) are typed; the remaining kernel-owned step/loop projection rides\nalong as the `kernel` map. Producers project a domain `MobRun` into this\nshape so consumers never re-derive run identity or lifecycle from a free\n`serde_json::Value`.",
+        "properties": {
+          "flow_id": {
+            "type": "string"
+          },
+          "mob_id": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/$defs/WireMobRunStatus"
+          }
+        },
+        "required": [
+          "run_id",
+          "mob_id",
+          "flow_id",
+          "status"
+        ],
+        "type": "object"
+      },
+      "WireMobRunStatus": {
+        "description": "Lifecycle status of a flow run on the wire. Mirrors\n`meerkat_mob::MobRunStatus` so consumers branch on a closed type rather than\nre-deriving meaning from a free-form status string.",
+        "enum": [
+          "pending",
+          "running",
+          "completed",
+          "failed",
+          "canceled"
+        ],
+        "type": "string"
+      }
     },
-    "required": [
-      "run"
-    ],
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `mob/flow_status`.\n\n`run` is `None` when the requested run id has no persisted run.",
+    "properties": {
+      "run": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireMobRun"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
     "title": "MobFlowStatusResult",
     "type": "object"
   },
@@ -22535,6 +22795,10 @@
   },
   "MobMemberStatusResult": {
     "$defs": {
+      "WireMemberRef": {
+        "description": "Server-resolved opaque handle for a mob member.\n\nEncodes `{mob_id, agent_identity}` as a single base64url-encoded token\nthat callers treat as opaque. The server resolves the current\n`AgentRuntimeId` and fence token against the live mob roster on every\ndispatch — clients never reason about `generation` or `fence_token`\ndirectly.\n\nUse [`WireMemberRef::encode`] to produce a token and\n[`WireMemberRef::decode`] inside an RPC handler to recover the\n`(mob_id, agent_identity)` pair before resolving against the runtime.",
+        "type": "string"
+      },
       "WireMobMemberStatus": {
         "description": "Execution status mirroring `meerkat_mob::runtime::MobMemberStatus`.",
         "enum": [
@@ -22545,6 +22809,80 @@
           "unknown"
         ],
         "type": "string"
+      },
+      "WirePeerConnectivity": {
+        "description": "Tri-state peer-connectivity projection for `mob/member_status`.\n\nDistinguishes \"connectivity is not applicable to this member\" (no bridge\nsession backs the member) from \"the live probe timed out\" (the answer is\ntransiently unknown) from a resolved connectivity snapshot. The legacy\n`Option<MobPeerConnectivitySnapshot>` projection collapsed both the\nnot-applicable and timed-out cases into `None`, laundering a transient\nprobe fault into the same shape as a structurally-absent binding.",
+        "oneOf": [
+          {
+            "description": "The member has no bridge session, so live peer connectivity is not a\nresolvable fact for it.",
+            "properties": {
+              "status": {
+                "const": "not_applicable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A live connectivity probe was attempted but did not resolve in time.",
+            "properties": {
+              "status": {
+                "const": "probe_timed_out",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A resolved connectivity snapshot.",
+            "properties": {
+              "snapshot": {
+                "$ref": "#/$defs/WirePeerConnectivitySnapshot"
+              },
+              "status": {
+                "const": "known",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "snapshot"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WirePeerConnectivitySnapshot": {
+        "description": "Live connectivity summary for a member's currently wired peers. Mirrors\n`meerkat_mob::MobPeerConnectivitySnapshot`.",
+        "properties": {
+          "reachable_peer_count": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unknown_peer_count": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unreachable_peers": {
+            "items": {
+              "$ref": "#/$defs/WireUnreachablePeer"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "reachable_peer_count",
+          "unknown_peer_count"
+        ],
+        "type": "object"
       },
       "WireResolvedModelCapabilities": {
         "description": "Stable resolved model/session/member capability projection.\n\nThis is the UI-facing capability shape for already-resolved identities.\nStatic catalog entries can expose the same bits, but callers should read\nthis projection from session/member surfaces when identity can change at\nruntime.",
@@ -22586,6 +22924,24 @@
           }
         },
         "type": "object"
+      },
+      "WireUnreachablePeer": {
+        "description": "One currently wired peer that is known to be unreachable.",
+        "properties": {
+          "peer": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "peer"
+        ],
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -22608,13 +22964,26 @@
         "type": "boolean"
       },
       "kickoff": true,
+      "member_ref": {
+        "$ref": "#/$defs/WireMemberRef",
+        "description": "Server-resolved opaque handle for subsequent member-targeted calls."
+      },
       "output_preview": {
         "type": [
           "string",
           "null"
         ]
       },
-      "peer_connectivity": true,
+      "peer_connectivity": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WirePeerConnectivity"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "resolved_capabilities": {
         "anyOf": [
           {
@@ -22636,6 +23005,7 @@
     },
     "required": [
       "status",
+      "member_ref",
       "tokens_used",
       "is_final"
     ],
@@ -22864,7 +23234,16 @@
             "default": false,
             "type": "boolean"
           },
-          "profile": true,
+          "profile": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireMobProfile"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "revision": {
             "format": "uint64",
             "minimum": 0,
@@ -22883,6 +23262,131 @@
         "required": [
           "name"
         ],
+        "type": "object"
+      },
+      "WireMobBackendKind": {
+        "enum": [
+          "session",
+          "external"
+        ],
+        "type": "string"
+      },
+      "WireMobProfile": {
+        "additionalProperties": false,
+        "description": "Profile override for `mob/spawn`.",
+        "properties": {
+          "backend": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireMobBackendKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "external_addressable": {
+            "default": false,
+            "type": "boolean"
+          },
+          "max_inline_peer_notifications": {
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "output_schema": true,
+          "peer_description": {
+            "default": "",
+            "type": "string"
+          },
+          "provider_params": true,
+          "runtime_mode": {
+            "$ref": "#/$defs/WireMobRuntimeMode",
+            "default": "autonomous_host"
+          },
+          "skills": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "$ref": "#/$defs/WireMobToolConfig",
+            "default": {
+              "builtins": false,
+              "comms": false,
+              "image_generation": false,
+              "mcp": [],
+              "memory": false,
+              "mob": false,
+              "schedule": false,
+              "shell": false,
+              "workgraph": false
+            }
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "type": "object"
+      },
+      "WireMobRuntimeMode": {
+        "enum": [
+          "autonomous_host",
+          "turn_driven"
+        ],
+        "type": "string"
+      },
+      "WireMobToolConfig": {
+        "additionalProperties": false,
+        "description": "Tool configuration embedded in a wire mob profile override.",
+        "properties": {
+          "builtins": {
+            "default": false,
+            "type": "boolean"
+          },
+          "comms": {
+            "default": false,
+            "type": "boolean"
+          },
+          "image_generation": {
+            "default": false,
+            "type": "boolean"
+          },
+          "mcp": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "memory": {
+            "default": false,
+            "type": "boolean"
+          },
+          "mob": {
+            "default": false,
+            "type": "boolean"
+          },
+          "schedule": {
+            "default": false,
+            "type": "boolean"
+          },
+          "shell": {
+            "default": false,
+            "type": "boolean"
+          },
+          "workgraph": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
         "type": "object"
       }
     },
@@ -22903,6 +23407,133 @@
     "type": "object"
   },
   "MobProfileLookupResult": {
+    "$defs": {
+      "WireMobBackendKind": {
+        "enum": [
+          "session",
+          "external"
+        ],
+        "type": "string"
+      },
+      "WireMobProfile": {
+        "additionalProperties": false,
+        "description": "Profile override for `mob/spawn`.",
+        "properties": {
+          "backend": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireMobBackendKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "external_addressable": {
+            "default": false,
+            "type": "boolean"
+          },
+          "max_inline_peer_notifications": {
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "output_schema": true,
+          "peer_description": {
+            "default": "",
+            "type": "string"
+          },
+          "provider_params": true,
+          "runtime_mode": {
+            "$ref": "#/$defs/WireMobRuntimeMode",
+            "default": "autonomous_host"
+          },
+          "skills": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "$ref": "#/$defs/WireMobToolConfig",
+            "default": {
+              "builtins": false,
+              "comms": false,
+              "image_generation": false,
+              "mcp": [],
+              "memory": false,
+              "mob": false,
+              "schedule": false,
+              "shell": false,
+              "workgraph": false
+            }
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "type": "object"
+      },
+      "WireMobRuntimeMode": {
+        "enum": [
+          "autonomous_host",
+          "turn_driven"
+        ],
+        "type": "string"
+      },
+      "WireMobToolConfig": {
+        "additionalProperties": false,
+        "description": "Tool configuration embedded in a wire mob profile override.",
+        "properties": {
+          "builtins": {
+            "default": false,
+            "type": "boolean"
+          },
+          "comms": {
+            "default": false,
+            "type": "boolean"
+          },
+          "image_generation": {
+            "default": false,
+            "type": "boolean"
+          },
+          "mcp": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "memory": {
+            "default": false,
+            "type": "boolean"
+          },
+          "mob": {
+            "default": false,
+            "type": "boolean"
+          },
+          "schedule": {
+            "default": false,
+            "type": "boolean"
+          },
+          "shell": {
+            "default": false,
+            "type": "boolean"
+          },
+          "workgraph": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Stored realm profile projection returned by `mob/profile/*`.",
     "properties": {
@@ -22919,7 +23550,16 @@
         "default": false,
         "type": "boolean"
       },
-      "profile": true,
+      "profile": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireMobProfile"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "revision": {
         "format": "uint64",
         "minimum": 0,
@@ -22950,8 +23590,8 @@
             "type": "string"
           },
           "error": {
-            "description": "Stringified mob error.",
-            "type": "string"
+            "$ref": "#/$defs/WireMobError",
+            "description": "Typed mob error: closed failure `code` plus human-readable `message`."
           },
           "stage": {
             "$ref": "#/$defs/WireMobReconcileStage"
@@ -23000,6 +23640,47 @@
         },
         "type": "object"
       },
+      "MobSpawnManyFailureCause": {
+        "description": "Typed failure cause for one failed `mob/spawn_many` member row.",
+        "enum": [
+          "profile_not_found",
+          "member_not_found",
+          "member_already_exists",
+          "not_externally_addressable",
+          "invalid_transition",
+          "wiring_error",
+          "bridge_command_rejected",
+          "member_restore_failed",
+          "kickoff_wait_timed_out",
+          "ready_wait_timed_out",
+          "definition_error",
+          "flow_not_found",
+          "flow_failed",
+          "run_not_found",
+          "run_canceled",
+          "flow_turn_timed_out",
+          "frame_depth_limit_exceeded",
+          "frame_atomic_persistence_unavailable",
+          "spec_revision_conflict",
+          "schema_validation",
+          "insufficient_targets",
+          "topology_violation",
+          "bridge_delivery_rejected",
+          "supervisor_escalation",
+          "unsupported_for_mode",
+          "missing_member_capability",
+          "reset_barrier",
+          "storage_error",
+          "session_error",
+          "comms_error",
+          "callback_pending",
+          "stale_fence_token",
+          "stale_event_cursor",
+          "work_not_found",
+          "internal"
+        ],
+        "type": "string"
+      },
       "MobSpawnReceiptWire": {
         "description": "Identity-native payload for `EnsureMemberOutcome::Spawned`.",
         "properties": {
@@ -23020,6 +23701,22 @@
       "WireMemberRef": {
         "description": "Server-resolved opaque handle for a mob member.\n\nEncodes `{mob_id, agent_identity}` as a single base64url-encoded token\nthat callers treat as opaque. The server resolves the current\n`AgentRuntimeId` and fence token against the live mob roster on every\ndispatch — clients never reason about `generation` or `fence_token`\ndirectly.\n\nUse [`WireMemberRef::encode`] to produce a token and\n[`WireMemberRef::decode`] inside an RPC handler to recover the\n`(mob_id, agent_identity)` pair before resolving against the runtime.",
         "type": "string"
+      },
+      "WireMobError": {
+        "description": "Typed mob error projection for wire surfaces. Carries the closed failure\nclass alongside the human-readable message so consumers branch on the typed\n`code` rather than parsing the free-form `message`. Reuses\n[`MobSpawnManyFailureCause`] as the canonical closed mob-error vocabulary.",
+        "properties": {
+          "code": {
+            "$ref": "#/$defs/MobSpawnManyFailureCause"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
       },
       "WireMobReconcileStage": {
         "description": "Closed wire stage for a per-identity `mob/reconcile` failure.",
@@ -33083,15 +33780,33 @@
     "$defs": {
       "AuthStatusPhase": {
         "description": "Public auth status phase shared by REST, RPC, CLI, and generated SDK wire\npayloads.\n\nThis is the compatibility projection of typed auth lease truth. Surfaces\nshould map to this enum first and only then emit [`Self::as_public_str`].",
-        "enum": [
-          "valid",
-          "expiring",
-          "expired",
-          "reauth_required",
-          "refresh_failed",
-          "unknown"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "valid",
+              "expiring",
+              "expired",
+              "reauth_required",
+              "refresh_failed"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "released",
+            "description": "The lease was explicitly released (credential lifecycle torn down).",
+            "type": "string"
+          },
+          {
+            "const": "absent",
+            "description": "No lease phase is tracked at all for this binding.",
+            "type": "string"
+          },
+          {
+            "const": "missing_credential",
+            "description": "A lease may exist but holds no live credential material.",
+            "type": "string"
+          }
+        ]
       },
       "WireAuthError": {
         "description": "Stable wire kind for auth errors. Mirrors `meerkat_core::AuthErrorKind`\non the wire as a normalized string.",
@@ -33366,15 +34081,33 @@
     "$defs": {
       "AuthStatusPhase": {
         "description": "Public auth status phase shared by REST, RPC, CLI, and generated SDK wire\npayloads.\n\nThis is the compatibility projection of typed auth lease truth. Surfaces\nshould map to this enum first and only then emit [`Self::as_public_str`].",
-        "enum": [
-          "valid",
-          "expiring",
-          "expired",
-          "reauth_required",
-          "refresh_failed",
-          "unknown"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "valid",
+              "expiring",
+              "expired",
+              "reauth_required",
+              "refresh_failed"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "released",
+            "description": "The lease was explicitly released (credential lifecycle torn down).",
+            "type": "string"
+          },
+          {
+            "const": "absent",
+            "description": "No lease phase is tracked at all for this binding.",
+            "type": "string"
+          },
+          {
+            "const": "missing_credential",
+            "description": "A lease may exist but holds no live credential material.",
+            "type": "string"
+          }
+        ]
       },
       "BindingId": {
         "description": "Opaque slug identifying a binding inside a realm.",
@@ -39020,6 +39753,67 @@
     "title": "WireMobBackendKind",
     "type": "string"
   },
+  "WireMobError": {
+    "$defs": {
+      "MobSpawnManyFailureCause": {
+        "description": "Typed failure cause for one failed `mob/spawn_many` member row.",
+        "enum": [
+          "profile_not_found",
+          "member_not_found",
+          "member_already_exists",
+          "not_externally_addressable",
+          "invalid_transition",
+          "wiring_error",
+          "bridge_command_rejected",
+          "member_restore_failed",
+          "kickoff_wait_timed_out",
+          "ready_wait_timed_out",
+          "definition_error",
+          "flow_not_found",
+          "flow_failed",
+          "run_not_found",
+          "run_canceled",
+          "flow_turn_timed_out",
+          "frame_depth_limit_exceeded",
+          "frame_atomic_persistence_unavailable",
+          "spec_revision_conflict",
+          "schema_validation",
+          "insufficient_targets",
+          "topology_violation",
+          "bridge_delivery_rejected",
+          "supervisor_escalation",
+          "unsupported_for_mode",
+          "missing_member_capability",
+          "reset_barrier",
+          "storage_error",
+          "session_error",
+          "comms_error",
+          "callback_pending",
+          "stale_fence_token",
+          "stale_event_cursor",
+          "work_not_found",
+          "internal"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Typed mob error projection for wire surfaces. Carries the closed failure\nclass alongside the human-readable message so consumers branch on the typed\n`code` rather than parsing the free-form `message`. Reuses\n[`MobSpawnManyFailureCause`] as the canonical closed mob-error vocabulary.",
+    "properties": {
+      "code": {
+        "$ref": "#/$defs/MobSpawnManyFailureCause"
+      },
+      "message": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "code",
+      "message"
+    ],
+    "title": "WireMobError",
+    "type": "object"
+  },
   "WireMobProfile": {
     "$defs": {
       "WireMobBackendKind": {
@@ -39148,6 +39942,59 @@
     ],
     "title": "WireMobProfile",
     "type": "object"
+  },
+  "WireMobRun": {
+    "$defs": {
+      "WireMobRunStatus": {
+        "description": "Lifecycle status of a flow run on the wire. Mirrors\n`meerkat_mob::MobRunStatus` so consumers branch on a closed type rather than\nre-deriving meaning from a free-form status string.",
+        "enum": [
+          "pending",
+          "running",
+          "completed",
+          "failed",
+          "canceled"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": true,
+    "description": "Typed public projection of a single flow run for `mob/flow_status`.\n\nThe canonical identity and lifecycle fields (`run_id`, `mob_id`, `flow_id`,\n`status`) are typed; the remaining kernel-owned step/loop projection rides\nalong as the `kernel` map. Producers project a domain `MobRun` into this\nshape so consumers never re-derive run identity or lifecycle from a free\n`serde_json::Value`.",
+    "properties": {
+      "flow_id": {
+        "type": "string"
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "run_id": {
+        "type": "string"
+      },
+      "status": {
+        "$ref": "#/$defs/WireMobRunStatus"
+      }
+    },
+    "required": [
+      "run_id",
+      "mob_id",
+      "flow_id",
+      "status"
+    ],
+    "title": "WireMobRun",
+    "type": "object"
+  },
+  "WireMobRunStatus": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Lifecycle status of a flow run on the wire. Mirrors\n`meerkat_mob::MobRunStatus` so consumers branch on a closed type rather than\nre-deriving meaning from a free-form status string.",
+    "enum": [
+      "pending",
+      "running",
+      "completed",
+      "failed",
+      "canceled"
+    ],
+    "title": "WireMobRunStatus",
+    "type": "string"
   },
   "WireMobRuntimeMode": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -39337,6 +40184,150 @@
       }
     ],
     "title": "ModelRoutingApprovalRequest"
+  },
+  "WirePeerConnectivity": {
+    "$defs": {
+      "WirePeerConnectivitySnapshot": {
+        "description": "Live connectivity summary for a member's currently wired peers. Mirrors\n`meerkat_mob::MobPeerConnectivitySnapshot`.",
+        "properties": {
+          "reachable_peer_count": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unknown_peer_count": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unreachable_peers": {
+            "items": {
+              "$ref": "#/$defs/WireUnreachablePeer"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "reachable_peer_count",
+          "unknown_peer_count"
+        ],
+        "type": "object"
+      },
+      "WireUnreachablePeer": {
+        "description": "One currently wired peer that is known to be unreachable.",
+        "properties": {
+          "peer": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "peer"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Tri-state peer-connectivity projection for `mob/member_status`.\n\nDistinguishes \"connectivity is not applicable to this member\" (no bridge\nsession backs the member) from \"the live probe timed out\" (the answer is\ntransiently unknown) from a resolved connectivity snapshot. The legacy\n`Option<MobPeerConnectivitySnapshot>` projection collapsed both the\nnot-applicable and timed-out cases into `None`, laundering a transient\nprobe fault into the same shape as a structurally-absent binding.",
+    "oneOf": [
+      {
+        "description": "The member has no bridge session, so live peer connectivity is not a\nresolvable fact for it.",
+        "properties": {
+          "status": {
+            "const": "not_applicable",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "A live connectivity probe was attempted but did not resolve in time.",
+        "properties": {
+          "status": {
+            "const": "probe_timed_out",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "A resolved connectivity snapshot.",
+        "properties": {
+          "snapshot": {
+            "$ref": "#/$defs/WirePeerConnectivitySnapshot"
+          },
+          "status": {
+            "const": "known",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "snapshot"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WirePeerConnectivity"
+  },
+  "WirePeerConnectivitySnapshot": {
+    "$defs": {
+      "WireUnreachablePeer": {
+        "description": "One currently wired peer that is known to be unreachable.",
+        "properties": {
+          "peer": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "peer"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Live connectivity summary for a member's currently wired peers. Mirrors\n`meerkat_mob::MobPeerConnectivitySnapshot`.",
+    "properties": {
+      "reachable_peer_count": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "unknown_peer_count": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "unreachable_peers": {
+        "items": {
+          "$ref": "#/$defs/WireUnreachablePeer"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "reachable_peer_count",
+      "unknown_peer_count"
+    ],
+    "title": "WirePeerConnectivitySnapshot",
+    "type": "object"
   },
   "WireProviderBinding": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -47431,6 +48422,26 @@
       "identity"
     ],
     "title": "WireTrustedPeerSpec",
+    "type": "object"
+  },
+  "WireUnreachablePeer": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One currently wired peer that is known to be unreachable.",
+    "properties": {
+      "peer": {
+        "type": "string"
+      },
+      "reason": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "peer"
+    ],
+    "title": "WireUnreachablePeer",
     "type": "object"
   },
   "WireUsage": {

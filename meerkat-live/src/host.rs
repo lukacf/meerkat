@@ -43,13 +43,14 @@ use std::time::Duration;
 use indexmap::IndexMap;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::RealtimeTranscriptEvent;
+use meerkat_core::ToolCallId;
 use meerkat_core::ToolDispatchOutcome;
 use meerkat_core::ToolError;
 use meerkat_core::live_adapter::{
     LiveAdapter, LiveAdapterCommand, LiveAdapterError, LiveAdapterErrorCode,
     LiveAdapterObservation, LiveAdapterStatus, LiveInputChunk, LiveToolResult,
 };
-use meerkat_core::types::{SessionId, StopReason, ToolCall, ToolResult, Usage};
+use meerkat_core::types::{SessionId, StopReason, ToolCall, ToolName, ToolResult, Usage};
 use serde_json::value::RawValue;
 use tokio::sync::Mutex;
 
@@ -1944,15 +1945,23 @@ impl LiveAdapterHost {
     }
 
     /// Submit a tool error back to the adapter on a channel.
+    ///
+    /// #270: takes the typed [`ToolCallId`] and renders it to the
+    /// provider-native string only at the meerkat-core
+    /// [`LiveAdapterCommand::SubmitToolError`] seam edge, where the wire
+    /// field is owned by core and remains a bare `String`.
     pub async fn submit_tool_error(
         &self,
         channel_id: &LiveChannelId,
-        call_id: String,
+        call_id: ToolCallId,
         error: String,
     ) -> Result<(), LiveAdapterHostError> {
         self.send_command(
             channel_id,
-            LiveAdapterCommand::SubmitToolError { call_id, error },
+            LiveAdapterCommand::SubmitToolError {
+                call_id: call_id.0,
+                error,
+            },
         )
         .await
     }
@@ -1967,7 +1976,7 @@ impl LiveAdapterHost {
     pub async fn submit_tool_dispatch_timeout(
         &self,
         channel_id: &LiveChannelId,
-        call_id: String,
+        call_id: ToolCallId,
         timeout: LiveToolDispatchTimeout,
     ) -> Result<(), LiveAdapterHostError> {
         self.submit_tool_error(channel_id, call_id, timeout.to_string())
@@ -2324,8 +2333,8 @@ impl LiveAdapterHost {
     async fn dispatch_tool_call(
         &self,
         channel_id: &LiveChannelId,
-        provider_call_id: &str,
-        tool_name: &str,
+        provider_call_id: &ToolCallId,
+        tool_name: &ToolName,
         arguments: serde_json::Value,
     ) -> Result<ObservationOutcome, LiveAdapterHostError> {
         let dispatcher = match self.load_dispatcher() {
@@ -2346,12 +2355,12 @@ impl LiveAdapterHost {
                 let _ = self
                     .submit_tool_error(
                         channel_id,
-                        provider_call_id.to_string(),
+                        provider_call_id.clone(),
                         "live tool dispatcher not configured".to_string(),
                     )
                     .await;
                 return Ok(ObservationOutcome::ToolCallSkipped {
-                    provider_call_id: provider_call_id.to_string(),
+                    provider_call_id: provider_call_id.0.clone(),
                     tool_name: tool_name.to_string(),
                     reason: ToolDispatchSkipReason::NoDispatcher,
                 });
@@ -2359,11 +2368,7 @@ impl LiveAdapterHost {
         };
 
         let session_id = self.channel_session(channel_id).await?;
-        let call = ToolCall::new(
-            provider_call_id.to_string(),
-            tool_name.to_string(),
-            arguments,
-        );
+        let call = ToolCall::new(provider_call_id.0.clone(), tool_name.to_string(), arguments);
 
         // Race the dispatcher future against the configured timeout (if any).
         // Without a timeout, fall through to the legacy unbounded await so
@@ -2385,12 +2390,12 @@ impl LiveAdapterHost {
                     // typed from this crate).
                     self.submit_tool_dispatch_timeout(
                         channel_id,
-                        provider_call_id.to_string(),
+                        provider_call_id.clone(),
                         LiveToolDispatchTimeout::new(timeout),
                     )
                     .await?;
                     return Ok(ObservationOutcome::ToolCallTimedOut {
-                        provider_call_id: provider_call_id.to_string(),
+                        provider_call_id: provider_call_id.0.clone(),
                         tool_name: tool_name.to_string(),
                         timeout,
                     });
@@ -2401,17 +2406,17 @@ impl LiveAdapterHost {
         match dispatch_result {
             Ok(outcome) => {
                 let live_result =
-                    tool_result_from_dispatch(provider_call_id.to_string(), outcome.result);
+                    tool_result_from_dispatch(provider_call_id.clone(), outcome.result);
                 self.submit_tool_result(channel_id, live_result).await?;
             }
             Err(err) => {
-                self.submit_tool_error(channel_id, provider_call_id.to_string(), err.to_string())
+                self.submit_tool_error(channel_id, provider_call_id.clone(), err.to_string())
                     .await?;
             }
         }
 
         Ok(ObservationOutcome::ToolCallDispatched {
-            provider_call_id: provider_call_id.to_string(),
+            provider_call_id: provider_call_id.0.clone(),
             tool_name: tool_name.to_string(),
         })
     }
@@ -2883,8 +2888,10 @@ impl LiveAdapterHost {
                 tool_name,
                 ..
             } => ObservationRouting::DispatchToolCall {
-                provider_call_id: provider_call_id.clone(),
-                tool_name: tool_name.clone(),
+                // `ObservationRouting::DispatchToolCall` carries `String`
+                // routing keys; project the typed ids to their wire strings.
+                provider_call_id: provider_call_id.0.clone(),
+                tool_name: tool_name.to_string(),
             },
             LiveAdapterObservation::TurnInterrupted { .. } => ObservationRouting::SignalInterrupt,
             LiveAdapterObservation::TurnCompleted { .. } => ObservationRouting::AppendTranscript,
@@ -2990,9 +2997,11 @@ impl LiveAdapterHost {
 /// the seam-owned [`LiveToolResult`]. The two carry the same structured
 /// content shape (`Vec<ContentBlock>`) so tool-result fidelity (text, image,
 /// video) is preserved across the seam (closes E30 at this layer).
-fn tool_result_from_dispatch(call_id: String, result: ToolResult) -> LiveToolResult {
+fn tool_result_from_dispatch(call_id: ToolCallId, result: ToolResult) -> LiveToolResult {
     LiveToolResult {
-        call_id,
+        // `LiveToolResult.call_id` is the meerkat-core seam edge and remains
+        // a bare `String`; project the typed id to the wire string here.
+        call_id: call_id.0,
         content: result.content,
         is_error: result.is_error,
     }
@@ -3592,8 +3601,8 @@ mod tests {
     #[test]
     fn tool_call_observation_routes_to_dispatch() {
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_1".into(),
-            tool_name: "calculator".into(),
+            provider_call_id: ToolCallId::new("call_1"),
+            tool_name: ToolName::new("calculator"),
             arguments: serde_json::json!({"x": 1}),
         };
         let routing = LiveAdapterHost::classify_observation(&obs);
@@ -4472,8 +4481,8 @@ mod tests {
             .await
             .unwrap();
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_42".into(),
-            tool_name: "calculator".into(),
+            provider_call_id: ToolCallId::new("call_42"),
+            tool_name: ToolName::new("calculator"),
             arguments: serde_json::json!({"a": 2, "b": 3}),
         };
         let outcome = host.apply_observation(&ch, &obs).await.unwrap();
@@ -4507,8 +4516,8 @@ mod tests {
             .await
             .unwrap();
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_99".into(),
-            tool_name: "calculator".into(),
+            provider_call_id: ToolCallId::new("call_99"),
+            tool_name: ToolName::new("calculator"),
             arguments: serde_json::json!({}),
         };
         let outcome = host.apply_observation(&ch, &obs).await.unwrap();
@@ -4555,8 +4564,8 @@ mod tests {
             .unwrap();
 
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_unwired".into(),
-            tool_name: "calculator".into(),
+            provider_call_id: ToolCallId::new("call_unwired"),
+            tool_name: ToolName::new("calculator"),
             arguments: serde_json::json!({}),
         };
         let outcome = host.apply_observation(&ch, &obs).await.unwrap();
@@ -4616,8 +4625,8 @@ mod tests {
             .unwrap();
 
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_pre".into(),
-            tool_name: "calc".into(),
+            provider_call_id: ToolCallId::new("call_pre"),
+            tool_name: ToolName::new("calc"),
             arguments: serde_json::json!({}),
         };
         // Phase 1: no dispatcher → skipped.
@@ -4633,8 +4642,8 @@ mod tests {
         // Phase 2: late install → dispatch flows through.
         host.set_tool_dispatcher(Arc::clone(&dispatcher) as _);
         let obs2 = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_post".into(),
-            tool_name: "calc".into(),
+            provider_call_id: ToolCallId::new("call_post"),
+            tool_name: ToolName::new("calc"),
             arguments: serde_json::json!({"x": 1}),
         };
         match host.apply_observation(&ch, &obs2).await.unwrap() {
@@ -4674,8 +4683,8 @@ mod tests {
 
         host.set_tool_dispatcher(Arc::clone(&second) as _);
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_swap".into(),
-            tool_name: "calc".into(),
+            provider_call_id: ToolCallId::new("call_swap"),
+            tool_name: ToolName::new("calc"),
             arguments: serde_json::json!({}),
         };
         host.apply_observation(&ch, &obs).await.unwrap();
@@ -4702,8 +4711,8 @@ mod tests {
             .await
             .unwrap();
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_err".into(),
-            tool_name: "failing".into(),
+            provider_call_id: ToolCallId::new("call_err"),
+            tool_name: ToolName::new("failing"),
             arguments: serde_json::json!({}),
         };
         host.apply_observation(&ch, &obs).await.unwrap();
@@ -4806,8 +4815,8 @@ mod tests {
             .unwrap();
 
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_slow".into(),
-            tool_name: "slow_tool".into(),
+            provider_call_id: ToolCallId::new("call_slow"),
+            tool_name: ToolName::new("slow_tool"),
             arguments: serde_json::json!({"q": 1}),
         };
 
@@ -4894,8 +4903,8 @@ mod tests {
             .unwrap();
 
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_fast".into(),
-            tool_name: "fast_tool".into(),
+            provider_call_id: ToolCallId::new("call_fast"),
+            tool_name: ToolName::new("fast_tool"),
             arguments: serde_json::json!({}),
         };
         let host_call = async { host.apply_observation(&ch, &obs).await.unwrap() };
@@ -4940,8 +4949,8 @@ mod tests {
             .await
             .unwrap();
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_legacy".into(),
-            tool_name: "calc".into(),
+            provider_call_id: ToolCallId::new("call_legacy"),
+            tool_name: ToolName::new("calc"),
             arguments: serde_json::json!({}),
         };
         match host.apply_observation(&ch, &obs).await.unwrap() {

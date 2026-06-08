@@ -129,7 +129,9 @@ export const WIRE_AUTH_STATUS_STATES = [
   "expired",
   "reauth_required",
   "refresh_failed",
-  "unknown"
+  "released",
+  "absent",
+  "missing_credential"
 ] as const;
 
 export type WireAuthStatusState = typeof WIRE_AUTH_STATUS_STATES[number];

@@ -875,8 +875,8 @@ mod tests {
         LiveAdapterStatus,
     };
     use meerkat_core::ops::ToolDispatchOutcome;
-    use meerkat_core::types::{ContentBlock, ToolCallView, ToolResult};
-    use meerkat_core::{AgentToolDispatcher, ToolDef};
+    use meerkat_core::types::{ContentBlock, ToolCallView, ToolName, ToolResult};
+    use meerkat_core::{AgentToolDispatcher, ToolCallId, ToolDef};
     use meerkat_live::LiveAdapterHost;
     use std::sync::Mutex as StdMutex;
 
@@ -1307,8 +1307,8 @@ mod tests {
             .unwrap();
 
         let obs = LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: "call_42".to_string(),
-            tool_name: "echo".to_string(),
+            provider_call_id: ToolCallId::new("call_42"),
+            tool_name: ToolName::new("echo"),
             arguments: serde_json::json!({"value": 1}),
         };
 

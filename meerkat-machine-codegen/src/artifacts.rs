@@ -7266,6 +7266,37 @@ impl<'a> MachineTlaCompiler<'a> {
     fn render_mob_machine_native_helpers(&self, out: &mut String) {
         let prefix = |name: &str| self.scoped_helper_name(name);
         let local = |name: &str| self.local_binding_name(name);
+        // Row #351: reconcile-membership spawn/retire set helpers. The DSL
+        // ReconcileMembership effect emits calls to these, but they had no TLA+
+        // operator definitions, so TLC reported "Unknown operator" for
+        // MobMachine (and any composition embedding it). Mirror of the Rust
+        // helpers in `catalog::dsl::mob_machine`: spawn = desired identities not
+        // yet bound to a runtime; retire = currently-bound identities that are
+        // no longer desired, gated on `retire_stale` (empty set otherwise).
+        // `identity_to_runtime` is the bound-identity function (DOMAIN = the
+        // currently-bound identities); `desired` is the target identity set.
+        writeln!(
+            out,
+            "{}(arg_identity_to_runtime, arg_desired) ==",
+            prefix("mob_machine_members_to_spawn")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    {{ member \\in arg_desired : member \\notin DOMAIN arg_identity_to_runtime }}"
+        );
+        writeln!(
+            out,
+            "{}(arg_identity_to_runtime, arg_desired, arg_retire_stale) ==",
+            prefix("mob_machine_members_to_retire")
+        )
+        .expect("write to string");
+        pushln!(out, "    IF arg_retire_stale");
+        pushln!(
+            out,
+            "    THEN {{ member \\in DOMAIN arg_identity_to_runtime : member \\notin arg_desired }}"
+        );
+        pushln!(out, "    ELSE {{}}");
         // Mob-coordination temporal predicates (work-intent / resource-claim
         // expiry). The DSL emits calls to these guards but they had no TLA+
         // definitions, so TLC reported "Unknown operator" for MobMachine (and

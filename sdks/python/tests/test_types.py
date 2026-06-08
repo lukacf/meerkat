@@ -191,10 +191,12 @@ def test_generated_mob_contract_types_include_spawn_and_turn_start_shapes():
 
     status = GeneratedMobMemberStatusResult(
         status="active",
+        member_ref="opaque-member-ref",
         tokens_used=0,
         is_final=False,
     )
     assert status.status == "active"
+    assert status.member_ref == "opaque-member-ref"
 
 
 def test_generated_mob_spawn_many_preserves_nested_contract_types():

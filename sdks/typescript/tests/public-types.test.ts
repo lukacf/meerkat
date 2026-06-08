@@ -552,6 +552,7 @@ void generatedMobSpawnResult;
 
 const generatedMobMemberStatus: MobMemberStatusResult = {
   status: "active",
+  member_ref: "opaque-member-ref",
   tokens_used: 0,
   is_final: false,
 };

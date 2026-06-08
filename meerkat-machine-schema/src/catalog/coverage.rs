@@ -208,6 +208,18 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "meerkat-mob-mcp/src/agent_tools.rs",
                     "MobMachine operator-admission authority for the mob tool surface: resolve create mob admission from the create-mobs capability observation and resolve profile mutation admission from the mutate-profiles capability observation, emitting the create-mob and profile-mutation admission resolved verdicts the surface mirrors (denied -> access denied)",
                 ),
+                machine_anchor(
+                    "mob_membership_classifier_authority",
+                    "MobMachine",
+                    "meerkat-mob/src/runtime/actor.rs",
+                    "MobMachine membership and runtime-incarnation classifiers owned by the actor: probe member admission duplicate or admitted from machine-owned binding and pending-spawn state; compute respawn generation successor; reconcile desired members to spawn retain or retire against current bindings emitting member spawn required, member retain required, and member retire required; set and observe external member rebind capability available or unavailable; classify turn timeout disposition detached canceled or retryable; and seed orphan budget once at startup, emitting the member admission probed, respawn generation computed, external member rebind capability, and turn timeout disposition classified effects",
+                ),
+                machine_anchor(
+                    "mob_flow_fault_topology_escalation_authority",
+                    "MobMachine",
+                    "meerkat-mob/src/runtime/flow.rs",
+                    "MobMachine flow-step fault, topology-edge, and supervisor-escalation classifiers owned by the flow engine: classify step output fault retry or terminal malformed json into a step fault disposition; evaluate topology edge rule allow deny or default into a policy decision verdict; and escalate to supervisor target found with a real supervisor identity or no eligible target, emitting the step output fault classified, topology edge verdict resolved, supervisor escalation requested, and supervisor escalation failed effects",
+                ),
             ],
             &[
                 scenario(
@@ -245,6 +257,14 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 scenario(
                     "operator-provenance-and-peer-input",
                     "record operator action provenance, trust operation peer, admit peer input, append failure ledger, surface peer-exposed member inputs, and resolve operator create mob admission and profile mutation admission verdicts the tool surface mirrors",
+                ),
+                scenario(
+                    "membership-admission-respawn-reconcile-rebind-timeout",
+                    "probe member admission duplicate or admitted, compute respawn generation, reconcile desired members to spawn retain or retire emitting member spawn required member retain required and member retire required, set and observe external member rebind capability available or unavailable, classify turn timeout disposition detached canceled or retryable, and seed orphan budget",
+                ),
+                scenario(
+                    "flow-fault-topology-supervisor-escalation",
+                    "classify step output fault retry or terminal malformed json into a step fault disposition, evaluate topology edge rule allow deny or default into a policy decision verdict resolved, and escalate to supervisor target found with eligible supervisor identity or no eligible target emitting supervisor escalation requested or failed",
                 ),
             ],
         ),

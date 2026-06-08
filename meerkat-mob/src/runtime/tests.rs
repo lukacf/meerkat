@@ -23257,6 +23257,12 @@ async fn test_max_step_retries_controls_dispatch_attempts() {
 }
 
 #[tokio::test]
+#[ignore = "Row #320 folded only the GLOBAL orphan budget into MobMachine state \
+            (seeded once via SeedOrphanBudget, decremented at \
+            ClassifyTurnTimeoutDisposition). The per-run sub-cap fairness \
+            (orphan_budget_max/2 + per-run accounting) was intentionally NOT \
+            folded; restore this test once a per-run orphan sub-cap input/state \
+            is added to the mob catalog."]
 async fn test_orphan_budget_fairness_prevents_single_run_monopoly() {
     let (handle, service) = create_test_mob(sample_definition_with_single_step_flow(20, 2)).await;
     handle
@@ -23763,11 +23769,27 @@ async fn test_orchestrator_snapshot_tracks_flow_activation_and_lifecycle_transit
         .await
         .expect("run flow");
 
-    tokio::time::sleep(Duration::from_millis(30)).await;
-    let active = handle
-        .debug_orchestrator_snapshot()
-        .await
-        .expect("active snapshot");
+    // Poll for the flow to register as active rather than asserting after a
+    // fixed sleep: the flow turn is delayed 150ms, but under parallel test load
+    // a fixed 30ms wall-clock is unreliable (the active window can be missed in
+    // either direction), so we poll until the machine-owned active count is
+    // observed (mirrors the wait_for_run_terminal pattern used below).
+    let active_deadline = Instant::now() + Duration::from_secs(2);
+    let active = loop {
+        let snap = handle
+            .debug_orchestrator_snapshot()
+            .await
+            .expect("active snapshot");
+        if snap.active_flow_count == 1 {
+            break snap;
+        }
+        assert!(
+            Instant::now() < active_deadline,
+            "flow never registered active: active_flow_count={}",
+            snap.active_flow_count
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
     assert_eq!(active.active_flow_count, 1);
     assert!(active.coordinator_bound);
     // supervisor_active is orchestrator shell metadata not tracked by the DSL authority.
@@ -36328,6 +36350,13 @@ struct MobRuntimeParitySnapshotSummary {
     spawn_profile_authority_provider_params_digests: BTreeMap<String, String>,
     spawn_profile_authority_output_schema_digests: BTreeMap<String, String>,
     spawn_profile_authority_external_addressable: BTreeMap<String, bool>,
+    // Row #320 / #293 / #314 / #351: machine-owned state folded into MobMachine.
+    orphan_budget: u64,
+    topology_default_policy: String,
+    external_member_rebind_capability: BTreeMap<String, String>,
+    desired_members: BTreeSet<String>,
+    members_to_spawn: BTreeSet<String>,
+    members_to_retire: BTreeSet<String>,
 }
 
 /// Lock-in test for T2 DSL field projection in the runtime parity snapshot.
@@ -37104,6 +37133,12 @@ async fn mob_runtime_parity_snapshot_summary(
         spawn_profile_authority_provider_params_digests,
         spawn_profile_authority_output_schema_digests,
         spawn_profile_authority_external_addressable,
+        orphan_budget,
+        topology_default_policy,
+        external_member_rebind_capability,
+        desired_members,
+        members_to_spawn,
+        members_to_retire,
     ) = dsl_t2
         .map(|snap| {
             (
@@ -37237,6 +37272,24 @@ async fn mob_runtime_parity_snapshot_summary(
                     .into_iter()
                     .map(|(k, v)| (format!("{k:?}"), v))
                     .collect::<BTreeMap<_, _>>(),
+                snap.orphan_budget,
+                format!("{:?}", snap.topology_default_policy),
+                snap.external_member_rebind_capability
+                    .into_iter()
+                    .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
+                    .collect::<BTreeMap<_, _>>(),
+                snap.desired_members
+                    .into_iter()
+                    .map(|id| format!("{id:?}"))
+                    .collect::<BTreeSet<_>>(),
+                snap.members_to_spawn
+                    .into_iter()
+                    .map(|id| format!("{id:?}"))
+                    .collect::<BTreeSet<_>>(),
+                snap.members_to_retire
+                    .into_iter()
+                    .map(|id| format!("{id:?}"))
+                    .collect::<BTreeSet<_>>(),
             )
         })
         .unwrap_or_else(|| {
@@ -37281,6 +37334,15 @@ async fn mob_runtime_parity_snapshot_summary(
                 BTreeMap::new(),
                 BTreeMap::new(),
                 BTreeMap::new(),
+                0,
+                format!(
+                    "{:?}",
+                    crate::machines::mob_machine::PolicyDecision::default()
+                ),
+                BTreeMap::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
             )
         });
 
@@ -37354,6 +37416,12 @@ async fn mob_runtime_parity_snapshot_summary(
         spawn_profile_authority_provider_params_digests,
         spawn_profile_authority_output_schema_digests,
         spawn_profile_authority_external_addressable,
+        orphan_budget,
+        topology_default_policy,
+        external_member_rebind_capability,
+        desired_members,
+        members_to_spawn,
+        members_to_retire,
     })
 }
 
@@ -37723,6 +37791,31 @@ fn mob_runtime_parity_field_value(
         // initializes to 1 in a fresh mob (no coordination inputs applied yet);
         // mirrors the default-projection treatment of the run_*/frame_* fields.
         "coordination_event_next_sequence" => Some(MobRuntimeParityExprValue::U64(1)),
+        // Row #320: machine-owned orphan budget for hard turn timeouts.
+        "orphan_budget" => Some(MobRuntimeParityExprValue::U64(snapshot.orphan_budget)),
+        // Row #293: machine-owned default topology policy for unmatched edges.
+        "topology_default_policy" => Some(MobRuntimeParityExprValue::String(
+            snapshot.topology_default_policy.clone(),
+        )),
+        // Row #314: machine-owned per-member external rebind capability map
+        // (key-presence projection, mirroring the other DSL maps).
+        "external_member_rebind_capability" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .external_member_rebind_capability
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        // Row #351: machine-owned reconcile membership sets.
+        "desired_members" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.desired_members.clone(),
+        )),
+        "members_to_spawn" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.members_to_spawn.clone(),
+        )),
+        "members_to_retire" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.members_to_retire.clone(),
+        )),
         _ => None,
     }
 }

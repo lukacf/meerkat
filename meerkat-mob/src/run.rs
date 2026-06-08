@@ -447,6 +447,15 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::UpdateCoordinationWorkIntentStatus { .. }
             | mob_dsl::MobMachineInput::UpdateCoordinationResourceClaimStatus { .. }
             | mob_dsl::MobMachineInput::ObserveCoordinationResourceClaimOverlap { .. }
+            | mob_dsl::MobMachineInput::ProbeMemberAdmission { .. }
+            | mob_dsl::MobMachineInput::ComputeRespawnGeneration { .. }
+            | mob_dsl::MobMachineInput::ClassifyStepOutputFault { .. }
+            | mob_dsl::MobMachineInput::EscalateToSupervisor { .. }
+            | mob_dsl::MobMachineInput::EscalateToSupervisorNoEligibleTarget { .. }
+            | mob_dsl::MobMachineInput::EvaluateTopologyEdge { .. }
+            | mob_dsl::MobMachineInput::SetExternalMemberRebindCapability { .. }
+            | mob_dsl::MobMachineInput::ClassifyTurnTimeoutDisposition { .. }
+            | mob_dsl::MobMachineInput::SeedOrphanBudget { .. }
     };
 }
 
@@ -1601,7 +1610,16 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::RecordCoordinationResourceClaim { .. }
             | mob_dsl::MobMachineInput::UpdateCoordinationWorkIntentStatus { .. }
             | mob_dsl::MobMachineInput::UpdateCoordinationResourceClaimStatus { .. }
-            | mob_dsl::MobMachineInput::ObserveCoordinationResourceClaimOverlap { .. } => {
+            | mob_dsl::MobMachineInput::ObserveCoordinationResourceClaimOverlap { .. }
+            | mob_dsl::MobMachineInput::ProbeMemberAdmission { .. }
+            | mob_dsl::MobMachineInput::ComputeRespawnGeneration { .. }
+            | mob_dsl::MobMachineInput::ClassifyStepOutputFault { .. }
+            | mob_dsl::MobMachineInput::EscalateToSupervisor { .. }
+            | mob_dsl::MobMachineInput::EscalateToSupervisorNoEligibleTarget { .. }
+            | mob_dsl::MobMachineInput::EvaluateTopologyEdge { .. }
+            | mob_dsl::MobMachineInput::SetExternalMemberRebindCapability { .. }
+            | mob_dsl::MobMachineInput::ClassifyTurnTimeoutDisposition { .. }
+            | mob_dsl::MobMachineInput::SeedOrphanBudget { .. } => {
                 return Err(MobError::Internal(format!(
                     "MobMachine input {input:?} is not a flow authority input"
                 )));

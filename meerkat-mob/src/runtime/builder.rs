@@ -246,6 +246,8 @@ async fn apply_resume_peer_only_rebind_authority(
     rebind_observation: &super::provisioner::PeerOnlyRebindObservation,
     context: &'static str,
 ) -> Result<(MemberRef, super::provisioner::PeerOnlyRebindAuthority), MobError> {
+    use crate::machines::mob_machine as mob_dsl;
+
     let authorized_peer = authorize_seeded_member_peer_rebind(authority, agent_identity, context)?;
     if authorized_peer.name != rebind_observation.observed_peer.name
         || authorized_peer.peer_id != rebind_observation.observed_peer.peer_id
@@ -295,6 +297,23 @@ async fn apply_resume_peer_only_rebind_authority(
             )
             .await?;
     }
+
+    // Row #314: record the machine-owned external-member rebind capability for
+    // the peer-only resume rebind. A non-empty rebind token means the member is
+    // supervisor-reboundable.
+    let rebind_capability = if rebind_observation.bootstrap_token.is_empty() {
+        mob_dsl::ExternalMemberRebindCapability::Unavailable
+    } else {
+        mob_dsl::ExternalMemberRebindCapability::Available
+    };
+    apply_seeded_mob_input(
+        authority,
+        mob_dsl::MobMachineInput::SetExternalMemberRebindCapability {
+            agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+            capability: rebind_capability,
+        },
+        "resume_peer_only_set_external_member_rebind_capability",
+    )?;
 
     roster
         .get_by_identity(agent_identity)
@@ -1265,6 +1284,24 @@ fn seed_mob_authority_sync_from_events(
                         "recover_member_session_binding",
                     )?;
                 }
+                // Row #314: recover the machine-owned external-member rebind
+                // capability from the persisted bridge_member_ref bootstrap
+                // proof (preserved by `sanitized_member_ref`).
+                let rebind_capability = member_spawned
+                    .bridge_member_ref
+                    .as_ref()
+                    .map(super::actor::external_member_rebind_capability_from_member_ref)
+                    .unwrap_or(mob_dsl::ExternalMemberRebindCapability::Unavailable);
+                apply_seeded_mob_input(
+                    authority,
+                    mob_dsl::MobMachineInput::SetExternalMemberRebindCapability {
+                        agent_identity: mob_dsl::AgentIdentity::from_domain(
+                            &member_spawned.agent_identity,
+                        ),
+                        capability: rebind_capability,
+                    },
+                    "recover_member_external_rebind_capability",
+                )?;
             }
             MobEventKind::MemberReset {
                 agent_identity,
@@ -1308,7 +1345,7 @@ fn seed_mob_authority_sync_from_events(
                 apply_seeded_mob_signal(
                     authority,
                     mob_dsl::MobMachineSignal::RecoverMemberKickoff {
-                        member_id: member.as_str().to_owned(),
+                        member_id: mob_dsl::AgentIdentity::from_domain(member),
                         phase: dsl_kickoff_phase(kickoff.phase),
                         error: kickoff.error.clone(),
                     },
@@ -3370,7 +3407,7 @@ impl MobBuilder {
     fn start_runtime(
         definition: Arc<MobDefinition>,
         initial_roster: Roster,
-        dsl_authority: Box<crate::machines::mob_machine::MobMachineAuthority>,
+        mut dsl_authority: Box<crate::machines::mob_machine::MobMachineAuthority>,
         events: Arc<dyn MobEventStore>,
         run_store: Arc<dyn MobRunStore>,
         runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
@@ -3384,6 +3421,21 @@ impl MobBuilder {
         realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
         realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
     ) -> Result<MobHandle, MobError> {
+        // Row #320 seed: the orphan budget is machine state, seeded once from the
+        // definition's `max_orphaned_turns` limit. Covers both the create and
+        // resume runtime-start paths (both route through `start_runtime`).
+        let max_orphaned_turns = definition
+            .limits
+            .as_ref()
+            .and_then(|limits| limits.max_orphaned_turns)
+            .unwrap_or(8) as u64;
+        apply_seeded_mob_input(
+            dsl_authority.as_mut(),
+            crate::machines::mob_machine::MobMachineInput::SeedOrphanBudget {
+                budget: max_orphaned_turns,
+            },
+            "seed_orphan_budget",
+        )?;
         let (machine_state_watch_tx, _machine_state_watch_rx) =
             tokio::sync::watch::channel(dsl_authority.state().clone());
         let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(initial_roster)));
@@ -3474,15 +3526,12 @@ impl MobBuilder {
             )
             .with_binding_persistence(definition.id.clone(), runtime_metadata.clone()),
         );
-        let max_orphaned_turns = definition
-            .limits
-            .as_ref()
-            .and_then(|limits| limits.max_orphaned_turns)
-            .unwrap_or(8) as usize;
+        // Row #320: the orphan budget is MobMachine state (seeded once in
+        // `start_runtime` from `definition.limits.max_orphaned_turns`); the
+        // executor no longer holds a shell-side budget.
         let flow_executor: Arc<dyn FlowTurnExecutor> = Arc::new(ActorFlowTurnExecutor::new(
             handle.clone(),
             provisioner.clone(),
-            max_orphaned_turns,
         ));
         let topology_service = Arc::new(super::topology::MobTopologyService::new(
             definition.topology.clone(),
@@ -3633,11 +3682,8 @@ mod tests {
         seed_mob_authority_sync_from_events(&mut authority, &events, &definition)
             .expect("durable kickoff replay should seed MobMachine");
 
-        assert!(
-            authority
-                .state()
-                .member_kickoff_pending
-                .contains(identity.as_str())
-        );
+        assert!(authority.state().member_kickoff_pending.contains(
+            &crate::machines::mob_machine::AgentIdentity::from_domain(&identity,)
+        ));
     }
 }

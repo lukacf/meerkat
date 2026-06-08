@@ -1859,6 +1859,27 @@ pub fn dsl_mob_machine_production_schema() -> MachineSchema {
 pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
     machine_schema_metadata(
         vec![
+            // WAVE G2 machine folds (#14/#260/#261/#293/#314/#320): typed
+            // verdict/fault/policy/capability/timeout classifiers owned by MobMachine.
+            NamedTypeBinding::string_enum(
+                "MemberAdmissionVerdictKind",
+                &["Admitted", "DuplicateRejected"],
+            ),
+            NamedTypeBinding::string_enum("StepOutputFaultKind", &["MalformedJson"]),
+            NamedTypeBinding::string_enum("StepFaultDispositionKind", &["Retry", "Terminal"]),
+            NamedTypeBinding::string_enum(
+                "SupervisorEscalationFailureCause",
+                &["NoEligibleSupervisor", "TimeoutExceeded"],
+            ),
+            NamedTypeBinding::string_enum("PolicyDecision", &["Allow", "Deny"]),
+            NamedTypeBinding::string_enum(
+                "ExternalMemberRebindCapability",
+                &["Unavailable", "Available"],
+            ),
+            NamedTypeBinding::string_enum(
+                "TurnTimeoutDisposition",
+                &["Detached", "Canceled", "Retryable"],
+            ),
             NamedTypeBinding::string_enum(
                 "CancelAllWorkRejectReasonKind",
                 &["MobNotRunning", "MemberNotFound", "StaleFenceToken"],
@@ -2365,6 +2386,16 @@ runtime_internal_inputs!(
         UpdateCoordinationWorkIntentStatus,
         UpdateCoordinationResourceClaimStatus,
         ObserveCoordinationResourceClaimOverlap,
+        // WAVE G2 machine folds: shell-driven classifier + seed inputs.
+        ProbeMemberAdmission,
+        ComputeRespawnGeneration,
+        ClassifyStepOutputFault,
+        EscalateToSupervisor,
+        EscalateToSupervisorNoEligibleTarget,
+        EvaluateTopologyEdge,
+        SetExternalMemberRebindCapability,
+        ClassifyTurnTimeoutDisposition,
+        SeedOrphanBudget,
     ]
 );
 

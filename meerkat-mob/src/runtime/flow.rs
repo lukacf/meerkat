@@ -325,6 +325,51 @@ impl FlowEngine {
         }
     }
 
+    /// Classify a typed step-output parse fault into the machine-owned
+    /// retry-vs-terminal disposition. The retry-vs-fail decision (attempt vs
+    /// max-retries) is MobMachine-owned; the shell only supplies the typed
+    /// fault and current attempt counters and mirrors the emitted disposition.
+    /// The failure-ledger reason text stays shell-side (rendered from the
+    /// fault `Display`).
+    async fn classify_step_output_fault(
+        &self,
+        run_id: &RunId,
+        step_id: &StepId,
+        target: &MeerkatId,
+        fault: &StepOutputFault,
+        attempt: usize,
+        max_retries: usize,
+    ) -> Result<mob_dsl::StepFaultDispositionKind, MobError> {
+        let fault_kind = match fault {
+            StepOutputFault::MalformedJson { .. } => mob_dsl::StepOutputFaultKind::MalformedJson,
+        };
+        let effects = self
+            .handle
+            .apply_machine_input_effects(mob_dsl::MobMachineInput::ClassifyStepOutputFault {
+                run_id: mob_dsl::RunId::from(run_id.to_string()),
+                step_id: mob_dsl::StepId::from(step_id.as_str()),
+                target_retry_key: format!("{step_id}:{target}"),
+                fault: fault_kind,
+                attempt: attempt as u32,
+                max_retries: max_retries as u32,
+            })
+            .await?;
+        effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::StepOutputFaultClassified { disposition, .. } => {
+                    Some(disposition)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted step-output fault observation but emitted no disposition"
+                        .into(),
+                )
+            })
+    }
+
     /// Resolve the flow-topology delegation-edge admission verdict for a
     /// `from_role -> to_role` edge under the configured enforcement `mode`.
     ///
@@ -336,15 +381,66 @@ impl FlowEngine {
     /// `DeniedAdvisory`); this method returns that machine-emitted verdict so
     /// the caller can mirror it. The shell never computes-and-enforces the
     /// admission itself: it only mirrors what the machine emitted.
+    /// Resolve the topology-edge allow/deny verdict from MobMachine.
+    ///
+    /// The shell supplies the *pure* rule-match projection (`None` when no rule
+    /// matched); MobMachine applies the machine-owned default policy to produce
+    /// the final verdict. The shell never applies an allow-by-default fallback.
+    async fn resolve_topology_edge_verdict(
+        &self,
+        from_role: &ProfileName,
+        to_role: &ProfileName,
+    ) -> Result<mob_dsl::PolicyDecision, MobError> {
+        let rule_match =
+            self.topology
+                .evaluate(from_role, to_role)
+                .map(|decision| match decision {
+                    PolicyDecision::Allow => mob_dsl::PolicyDecision::Allow,
+                    PolicyDecision::Deny => mob_dsl::PolicyDecision::Deny,
+                });
+        let effects = self
+            .handle
+            .apply_machine_input_effects(mob_dsl::MobMachineInput::EvaluateTopologyEdge {
+                from_role: from_role.as_str().to_owned(),
+                to_role: to_role.as_str().to_owned(),
+                rule_match,
+            })
+            .await?;
+        let (effect_from_role, effect_to_role, verdict) = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::TopologyEdgeVerdictResolved {
+                    from_role,
+                    to_role,
+                    verdict,
+                } => Some((from_role, to_role, verdict)),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted topology edge rule-match but emitted no verdict".into(),
+                )
+            })?;
+        if effect_from_role != from_role.as_str() || effect_to_role != to_role.as_str() {
+            return Err(MobError::Internal(format!(
+                "MobMachine topology edge verdict drift: input=({from_role} -> {to_role}), effect=({effect_from_role} -> {effect_to_role})"
+            )));
+        }
+        Ok(verdict)
+    }
+
     async fn resolve_topology_edge_admission(
         &self,
         from_role: &ProfileName,
         to_role: &ProfileName,
         mode: &PolicyMode,
     ) -> Result<mob_dsl::MobFlowDelegationEdgeAdmissionKind, MobError> {
-        let rule_verdict = match self.topology.evaluate(from_role, to_role) {
-            PolicyDecision::Allow => mob_dsl::MobFlowDelegationEdgeRuleVerdictKind::Allow,
-            PolicyDecision::Deny => mob_dsl::MobFlowDelegationEdgeRuleVerdictKind::Deny,
+        let rule_verdict = match self
+            .resolve_topology_edge_verdict(from_role, to_role)
+            .await?
+        {
+            mob_dsl::PolicyDecision::Allow => mob_dsl::MobFlowDelegationEdgeRuleVerdictKind::Allow,
+            mob_dsl::PolicyDecision::Deny => mob_dsl::MobFlowDelegationEdgeRuleVerdictKind::Deny,
         };
         let dsl_mode = match mode {
             PolicyMode::Advisory => mob_dsl::MobFlowDelegationEdgeModeKind::Advisory,
@@ -820,30 +916,43 @@ impl FlowEngine {
                             // The parse boundary produced a typed `StepOutputFault`.
                             // The emitter notice and (still string-shaped)
                             // `StepTargetFailure` reason render it via `Display`;
-                            // the machine-owned terminal classification of the
-                            // typed fault is the remaining cross-boundary step.
+                            // MobMachine owns the retry-vs-terminal disposition.
                             let reason = fault.to_string();
-                            if attempt < max_retries {
-                                attempt += 1;
-                                self.emitter
-                                    .step_target_failed(
-                                        run_id.clone(),
-                                        step_id.clone(),
-                                        target.clone(),
-                                        reason,
-                                    )
-                                    .await?;
-                                continue;
-                            }
-                            self.emitter
-                                .step_target_failed(
-                                    run_id.clone(),
-                                    step_id.clone(),
-                                    target.clone(),
-                                    reason.clone(),
+                            let disposition = self
+                                .classify_step_output_fault(
+                                    run_id,
+                                    step_id,
+                                    target,
+                                    &fault,
+                                    attempt,
+                                    max_retries,
                                 )
                                 .await?;
-                            return Ok(Err(StepTargetFailure::unrecorded(reason)));
+                            match disposition {
+                                mob_dsl::StepFaultDispositionKind::Retry => {
+                                    attempt += 1;
+                                    self.emitter
+                                        .step_target_failed(
+                                            run_id.clone(),
+                                            step_id.clone(),
+                                            target.clone(),
+                                            reason,
+                                        )
+                                        .await?;
+                                    continue;
+                                }
+                                mob_dsl::StepFaultDispositionKind::Terminal => {
+                                    self.emitter
+                                        .step_target_failed(
+                                            run_id.clone(),
+                                            step_id.clone(),
+                                            target.clone(),
+                                            reason.clone(),
+                                        )
+                                        .await?;
+                                    return Ok(Err(StepTargetFailure::unrecorded(reason)));
+                                }
+                            }
                         }
                     }
                 }

@@ -224,7 +224,7 @@ mod tests {
 
         authority
             .apply_signal(mob_dsl::MobMachineSignal::RecoverMemberKickoff {
-                member_id: "worker".to_string(),
+                member_id: mob_dsl::AgentIdentity::from("worker"),
                 phase: mob_dsl::KickoffPhase::Pending,
                 error: None,
             })

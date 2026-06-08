@@ -200,6 +200,19 @@ pub(crate) struct MobDslT2Snapshot {
         std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, Option<String>>,
     pub spawn_profile_authority_external_addressable:
         std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, bool>,
+    // Row #320: machine-owned orphan budget for hard flow-turn timeouts.
+    pub orphan_budget: u64,
+    // Row #293: machine-owned default topology policy applied to unmatched edges.
+    pub topology_default_policy: crate::machines::mob_machine::PolicyDecision,
+    // Row #314: machine-owned per-member external rebind capability.
+    pub external_member_rebind_capability: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::ExternalMemberRebindCapability,
+    >,
+    // Row #351: machine-owned reconcile membership sets.
+    pub desired_members: std::collections::BTreeSet<crate::machines::mob_machine::AgentIdentity>,
+    pub members_to_spawn: std::collections::BTreeSet<crate::machines::mob_machine::AgentIdentity>,
+    pub members_to_retire: std::collections::BTreeSet<crate::machines::mob_machine::AgentIdentity>,
 }
 
 #[derive(Debug, Clone, Default)]

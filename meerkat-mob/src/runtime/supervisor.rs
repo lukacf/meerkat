@@ -2,6 +2,7 @@ use super::events::MobEventEmitter;
 use super::handle::MobHandle;
 use crate::error::MobError;
 use crate::ids::{AgentIdentity, RunId, StepId};
+use crate::machines::mob_machine as mob_dsl;
 use crate::run::FlowRunConfig;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -60,19 +61,89 @@ impl Supervisor {
             .role
             .clone();
 
+        // Pure candidate projection: pick the first runnable member matching the
+        // configured supervisor role. MobMachine — not the shell — owns whether
+        // escalation proceeds or fails closed for "no eligible target".
         let escalation_target = self
             .handle
             .list_runnable_members()
             .await
             .into_iter()
-            .find(|entry| entry.role == supervisor_role)
-            .ok_or_else(|| {
-                MobError::SupervisorEscalation(format!(
-                    "no active supervisor member for role '{supervisor_role}'"
-                ))
-            })?;
+            .find(|entry| entry.role == supervisor_role);
 
-        let escalation_turn_timeout = escalation_turn_timeout();
+        let dsl_run_id = mob_dsl::RunId::from(run_id.to_string());
+        let dsl_step_id = mob_dsl::StepId::from(step_id.as_str());
+
+        let escalation_input = match &escalation_target {
+            Some(target) => mob_dsl::MobMachineInput::EscalateToSupervisor {
+                run_id: dsl_run_id,
+                step_id: dsl_step_id,
+                supervisor_identity: mob_dsl::AgentIdentity::from_domain(&target.agent_identity),
+                turn_timeout_ms: escalation_turn_timeout().as_millis() as u64,
+            },
+            None => mob_dsl::MobMachineInput::EscalateToSupervisorNoEligibleTarget {
+                run_id: dsl_run_id,
+                step_id: dsl_step_id,
+            },
+        };
+
+        let effects = self
+            .handle
+            .apply_machine_input_effects(escalation_input)
+            .await?;
+
+        let mut requested = None;
+        let mut failure_cause = None;
+        for effect in effects {
+            match effect {
+                mob_dsl::MobMachineEffect::SupervisorEscalationRequested {
+                    turn_timeout_ms,
+                    ..
+                } => {
+                    if requested.replace(turn_timeout_ms).is_some() {
+                        return Err(MobError::Internal(
+                            "MobMachine emitted multiple supervisor escalation requests".into(),
+                        ));
+                    }
+                }
+                mob_dsl::MobMachineEffect::SupervisorEscalationFailed { cause, .. } => {
+                    if failure_cause.replace(cause).is_some() {
+                        return Err(MobError::Internal(
+                            "MobMachine emitted multiple supervisor escalation failures".into(),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(cause) = failure_cause {
+            return Err(match cause {
+                mob_dsl::SupervisorEscalationFailureCause::NoEligibleSupervisor => {
+                    MobError::SupervisorEscalation(format!(
+                        "no active supervisor member for role '{supervisor_role}'"
+                    ))
+                }
+                mob_dsl::SupervisorEscalationFailureCause::TimeoutExceeded => {
+                    MobError::SupervisorEscalation(
+                        "supervisor escalation classified TimeoutExceeded before dispatch".into(),
+                    )
+                }
+            });
+        }
+
+        let turn_timeout_ms = requested.ok_or_else(|| {
+            MobError::Internal(
+                "MobMachine accepted supervisor escalation but emitted no request or failure"
+                    .into(),
+            )
+        })?;
+        let escalation_target = escalation_target.ok_or_else(|| {
+            MobError::Internal(
+                "MobMachine requested supervisor escalation without an eligible target".into(),
+            )
+        })?;
+        let escalation_turn_timeout = Duration::from_millis(turn_timeout_ms);
 
         tokio::time::timeout(
             escalation_turn_timeout,

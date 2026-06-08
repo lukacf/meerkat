@@ -40,6 +40,10 @@ const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
     "mob_coordination_resource_claim_unexpired",
     "mob_coordination_resource_claim_active_at",
     "mob_coordination_resource_claim_inactive_at",
+    // WAVE G2 machine folds (#181 respawn generation, #351 membership reconcile).
+    "mob_machine_next_respawn_generation",
+    "mob_machine_members_to_spawn",
+    "mob_machine_members_to_retire",
 ];
 
 /// Validate the parsed machine definition for semantic correctness.

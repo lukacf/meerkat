@@ -398,6 +398,15 @@ pub enum MobMachineCatalogInput {
     UpdateCoordinationWorkIntentStatus,
     UpdateCoordinationResourceClaimStatus,
     ObserveCoordinationResourceClaimOverlap,
+    ProbeMemberAdmission,
+    ComputeRespawnGeneration,
+    ClassifyStepOutputFault,
+    EscalateToSupervisor,
+    EscalateToSupervisorNoEligibleTarget,
+    EvaluateTopologyEdge,
+    SetExternalMemberRebindCapability,
+    ClassifyTurnTimeoutDisposition,
+    SeedOrphanBudget,
 }
 
 impl MobMachineCatalogInput {
@@ -504,6 +513,15 @@ impl MobMachineCatalogInput {
         Self::UpdateCoordinationWorkIntentStatus,
         Self::UpdateCoordinationResourceClaimStatus,
         Self::ObserveCoordinationResourceClaimOverlap,
+        Self::ProbeMemberAdmission,
+        Self::ComputeRespawnGeneration,
+        Self::ClassifyStepOutputFault,
+        Self::EscalateToSupervisor,
+        Self::EscalateToSupervisorNoEligibleTarget,
+        Self::EvaluateTopologyEdge,
+        Self::SetExternalMemberRebindCapability,
+        Self::ClassifyTurnTimeoutDisposition,
+        Self::SeedOrphanBudget,
     ];
 
     #[must_use]
@@ -689,6 +707,21 @@ impl MobMachineCatalogInput {
             Self::ObserveCoordinationResourceClaimOverlap => {
                 MobMachineInputVariant::ObserveCoordinationResourceClaimOverlap
             }
+            Self::ProbeMemberAdmission => MobMachineInputVariant::ProbeMemberAdmission,
+            Self::ComputeRespawnGeneration => MobMachineInputVariant::ComputeRespawnGeneration,
+            Self::ClassifyStepOutputFault => MobMachineInputVariant::ClassifyStepOutputFault,
+            Self::EscalateToSupervisor => MobMachineInputVariant::EscalateToSupervisor,
+            Self::EscalateToSupervisorNoEligibleTarget => {
+                MobMachineInputVariant::EscalateToSupervisorNoEligibleTarget
+            }
+            Self::EvaluateTopologyEdge => MobMachineInputVariant::EvaluateTopologyEdge,
+            Self::SetExternalMemberRebindCapability => {
+                MobMachineInputVariant::SetExternalMemberRebindCapability
+            }
+            Self::ClassifyTurnTimeoutDisposition => {
+                MobMachineInputVariant::ClassifyTurnTimeoutDisposition
+            }
+            Self::SeedOrphanBudget => MobMachineInputVariant::SeedOrphanBudget,
         }
     }
 
@@ -809,6 +842,15 @@ impl MobMachineCatalogInput {
             Self::ObserveCoordinationResourceClaimOverlap => {
                 "ObserveCoordinationResourceClaimOverlap"
             }
+            Self::ProbeMemberAdmission => "ProbeMemberAdmission",
+            Self::ComputeRespawnGeneration => "ComputeRespawnGeneration",
+            Self::ClassifyStepOutputFault => "ClassifyStepOutputFault",
+            Self::EscalateToSupervisor => "EscalateToSupervisor",
+            Self::EscalateToSupervisorNoEligibleTarget => "EscalateToSupervisorNoEligibleTarget",
+            Self::EvaluateTopologyEdge => "EvaluateTopologyEdge",
+            Self::SetExternalMemberRebindCapability => "SetExternalMemberRebindCapability",
+            Self::ClassifyTurnTimeoutDisposition => "ClassifyTurnTimeoutDisposition",
+            Self::SeedOrphanBudget => "SeedOrphanBudget",
         }
     }
 }
@@ -1226,6 +1268,71 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::ObserveCoordinationResourceClaimOverlap,
         reason: MobMachineRuntimeInternalReason::CoordinationBoardAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Duplicate-member admission probe is decided by MobMachine from its own
+        // roster/binding/pending-spawn authority; the actor drives it as a
+        // read-only spawn-profile authority input before staging a spawn.
+        input: MobMachineCatalogInput::ProbeMemberAdmission,
+        reason: MobMachineRuntimeInternalReason::SpawnProfileAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Respawn replacement generation is computed by MobMachine from the
+        // machine-owned per-identity generation counter; the actor drives this
+        // read-only spawn-profile authority input during respawn handling.
+        input: MobMachineCatalogInput::ComputeRespawnGeneration,
+        reason: MobMachineRuntimeInternalReason::SpawnProfileAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Step-output fault retry-vs-terminal disposition is decided by
+        // MobMachine from attempt/max-retries state; the flow engine drives this
+        // runtime-internal flow-projection authority input during step execution.
+        input: MobMachineCatalogInput::ClassifyStepOutputFault,
+        reason: MobMachineRuntimeInternalReason::FlowProjectionAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Supervisor escalation request (with an eligible target) is owned by
+        // MobMachine; the supervisor flow drives this as a supervisor-authority
+        // input from its pure eligible-candidate projection.
+        input: MobMachineCatalogInput::EscalateToSupervisor,
+        reason: MobMachineRuntimeInternalReason::SupervisorAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // No-eligible-target supervisor escalation is owned by MobMachine, which
+        // emits the typed failure; the supervisor flow drives this as a
+        // supervisor-authority input when no eligible candidate exists.
+        input: MobMachineCatalogInput::EscalateToSupervisorNoEligibleTarget,
+        reason: MobMachineRuntimeInternalReason::SupervisorAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Topology edge verdict is decided by MobMachine, which applies the
+        // default-policy fallback to the shell's pure rule-match witness; the
+        // flow engine drives this runtime-internal flow-projection authority
+        // input during delegation-edge resolution.
+        input: MobMachineCatalogInput::EvaluateTopologyEdge,
+        reason: MobMachineRuntimeInternalReason::FlowProjectionAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // External-member rebind capability is recorded by MobMachine at spawn
+        // mint / recovery / peer-only-resume-rebind; the actor/builder drives
+        // this read-only spawn-profile authority input so the external-member
+        // projection reads machine state instead of deriving from a token.
+        input: MobMachineCatalogInput::SetExternalMemberRebindCapability,
+        reason: MobMachineRuntimeInternalReason::SpawnProfileAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Hard turn-timeout detach-vs-cancel disposition is decided by MobMachine
+        // from the machine-owned orphan budget; the turn executor drives this
+        // runtime-internal flow-projection authority input on timeout.
+        input: MobMachineCatalogInput::ClassifyTurnTimeoutDisposition,
+        reason: MobMachineRuntimeInternalReason::FlowProjectionAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Orphan budget is machine state seeded once at build time from the
+        // definition limits; the builder drives this read-only spawn-profile
+        // authority input to seed the budget before any timeout classification.
+        input: MobMachineCatalogInput::SeedOrphanBudget,
+        reason: MobMachineRuntimeInternalReason::SpawnProfileAuthority,
     },
 ];
 

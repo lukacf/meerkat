@@ -3864,16 +3864,32 @@ impl MobHandle {
         spec: SpawnMemberSpec,
     ) -> Result<EnsureMemberOutcome, MobError> {
         let identity = spec.identity.clone();
-        self.project_machine_input(mob_dsl::MobMachineInput::EnsureMember {
-            agent_identity: mob_dsl::AgentIdentity::from_domain(&identity),
-        })
-        .await?;
-        // `Box::pin` breaks the compiler-visible recursion:
-        // handle_ensure_member -> spawn_spec -> execute_machine_command ->
-        // (MobMachineCommand::Spawn arm, which never re-enters this fn).
-        match Box::pin(self.spawn_spec(spec)).await {
-            Ok(spawn_result) => Ok(EnsureMemberOutcome::Spawned(spawn_result)),
-            Err(MobError::MemberAlreadyExists(_)) => {
+        // MobMachine owns the spawn-vs-retain decision: `EnsureMember` emits
+        // `MemberSpawnRequired` (member absent) or `MemberRetainRequired`
+        // (member already present). The handle mirrors the emitted effect.
+        let effects = self
+            .apply_machine_input_effects(mob_dsl::MobMachineInput::EnsureMember {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(&identity),
+            })
+            .await?;
+        let mut spawn_required = false;
+        let mut retain_required = false;
+        for effect in effects {
+            match effect {
+                mob_dsl::MobMachineEffect::MemberSpawnRequired { .. } => spawn_required = true,
+                mob_dsl::MobMachineEffect::MemberRetainRequired { .. } => retain_required = true,
+                _ => {}
+            }
+        }
+        match (spawn_required, retain_required) {
+            (true, false) => {
+                // `Box::pin` breaks the compiler-visible recursion:
+                // handle_ensure_member -> spawn_spec -> execute_machine_command
+                // -> (MobMachineCommand::Spawn arm, which never re-enters here).
+                let spawn_result = Box::pin(self.spawn_spec(spec)).await?;
+                Ok(EnsureMemberOutcome::Spawned(spawn_result))
+            }
+            (false, true) => {
                 let existing = Box::pin(self.list_members())
                     .await
                     .into_iter()
@@ -3885,7 +3901,9 @@ impl MobHandle {
                     })?;
                 Ok(EnsureMemberOutcome::Existed(Box::new(existing)))
             }
-            Err(other) => Err(other),
+            _ => Err(MobError::Internal(format!(
+                "ensure_member: MobMachine emitted no decisive spawn/retain verdict for '{identity}' (spawn_required={spawn_required}, retain_required={retain_required})"
+            ))),
         }
     }
 
@@ -3904,34 +3922,45 @@ impl MobHandle {
         desired: Vec<SpawnMemberSpec>,
         options: ReconcileOptions,
     ) -> Result<ReconcileReport, MobError> {
-        self.project_machine_input(mob_dsl::MobMachineInput::Reconcile {
-            desired: desired
-                .iter()
-                .map(|spec| mob_dsl::AgentIdentity::from_domain(&spec.identity))
-                .collect(),
-            retire_stale: options.retire_stale,
-        })
-        .await?;
+        // MobMachine owns the membership decision: `ReconcileRunning` recomputes
+        // `members_to_spawn`/`members_to_retire`/`desired_members` from its own
+        // roster. The handle reads those machine-owned sets from the returned
+        // snapshot and resolves the full SpawnMemberSpec material per identity
+        // (the machine does not own spawn parameters).
+        let machine_state = self
+            .project_machine_input(mob_dsl::MobMachineInput::Reconcile {
+                desired: desired
+                    .iter()
+                    .map(|spec| mob_dsl::AgentIdentity::from_domain(&spec.identity))
+                    .collect(),
+                retire_stale: options.retire_stale,
+            })
+            .await?;
 
         let mut report = ReconcileReport {
             desired: desired.iter().map(|spec| spec.identity.clone()).collect(),
             ..ReconcileReport::default()
         };
 
-        let current: std::collections::BTreeSet<AgentIdentity> = Box::pin(self.list_members())
-            .await
-            .into_iter()
-            .map(|entry| entry.agent_identity)
-            .collect();
-        let desired_ids: std::collections::BTreeSet<AgentIdentity> =
-            desired.iter().map(|spec| spec.identity.clone()).collect();
+        let mut specs_by_identity: std::collections::BTreeMap<AgentIdentity, SpawnMemberSpec> =
+            desired
+                .into_iter()
+                .map(|spec| (spec.identity.clone(), spec))
+                .collect();
 
-        for spec in desired {
-            let identity = spec.identity.clone();
-            if current.contains(&identity) {
-                report.retained.push(identity);
+        for dsl_identity in &machine_state.members_to_spawn {
+            let identity = AgentIdentity::from(dsl_identity.0.as_str());
+            let Some(spec) = specs_by_identity.remove(&identity) else {
+                report.failures.push(ReconcileFailure {
+                    agent_identity: identity,
+                    error: MobError::Internal(
+                        "reconcile: MobMachine requested a spawn for an identity absent from the desired set"
+                            .to_string(),
+                    ),
+                    stage: ReconcileStage::Spawn,
+                });
                 continue;
-            }
+            };
             match Box::pin(self.spawn_spec(spec)).await {
                 Ok(spawn_result) => report.spawned.push(spawn_result),
                 Err(error) => report.failures.push(ReconcileFailure {
@@ -3942,16 +3971,26 @@ impl MobHandle {
             }
         }
 
-        if options.retire_stale {
-            for identity in current.difference(&desired_ids).cloned() {
-                match Box::pin(self.retire(identity.clone())).await {
-                    Ok(()) => report.retired.push(identity),
-                    Err(error) => report.failures.push(ReconcileFailure {
-                        agent_identity: identity,
-                        error,
-                        stage: ReconcileStage::Retire,
-                    }),
-                }
+        // Desired members the machine did not flag for spawning are already
+        // present and retained.
+        for dsl_identity in &machine_state.desired_members {
+            if machine_state.members_to_spawn.contains(dsl_identity) {
+                continue;
+            }
+            report
+                .retained
+                .push(AgentIdentity::from(dsl_identity.0.as_str()));
+        }
+
+        for dsl_identity in &machine_state.members_to_retire {
+            let identity = AgentIdentity::from(dsl_identity.0.as_str());
+            match Box::pin(self.retire(identity.clone())).await {
+                Ok(()) => report.retired.push(identity),
+                Err(error) => report.failures.push(ReconcileFailure {
+                    agent_identity: identity,
+                    error,
+                    stage: ReconcileStage::Retire,
+                }),
             }
         }
 
@@ -5045,10 +5084,7 @@ impl MobHandle {
             let roster = self.roster.read().await;
             roster.get(identity).cloned()
         }?;
-        let MemberRef::BackendPeer {
-            bootstrap_token, ..
-        } = &entry.member_ref
-        else {
+        let MemberRef::BackendPeer { .. } = &entry.member_ref else {
             return None;
         };
 
@@ -5056,23 +5092,24 @@ impl MobHandle {
             mob_id: self.definition.id.clone(),
             agent_identity: identity.clone(),
         };
-        // Bridge-session presence is a machine-owned fact: read it from
-        // `MobMachineState.member_session_bindings` (the authority), not from
-        // the roster `MemberRef.session_id` compatibility mirror. The mirror
-        // can diverge transiently from the projected machine state, which would
-        // make the `NotRequired`/`binding_mode` derivation lie. The bootstrap
-        // proof, by contrast, is not yet a machine fact (the machine tracks
-        // `member_peer_ids`/`member_peer_endpoints` but not rebind proof), so
-        // `has_bootstrap_token` still reads the roster `MemberRef`; lowering the
-        // `Available`/`Unavailable` distinction into a machine-owned
-        // rebind-capability fact is the cross-boundary residual.
-        let bridge_session_present = {
-            let machine_state = self.machine_state_watch_rx.borrow().clone();
-            Self::machine_bridge_session_id_for_identity(identity, &machine_state).is_some()
-        };
-        let has_bootstrap_token = bootstrap_token
-            .as_ref()
-            .is_some_and(|token| !token.is_empty());
+        // Bridge-session presence AND the rebind capability are both
+        // machine-owned facts. Read both from `MobMachineState`: bridge-session
+        // binding from `member_session_bindings`, and the
+        // `Available`/`Unavailable` rebind capability from
+        // `external_member_rebind_capability` (recorded by
+        // `SetExternalMemberRebindCapability` at spawn-mint / recovery /
+        // peer-only-rebind). The shell no longer derives this from the roster
+        // `MemberRef.bootstrap_token` presence.
+        let machine_state = self.machine_state_watch_rx.borrow().clone();
+        let bridge_session_present =
+            Self::machine_bridge_session_id_for_identity(identity, &machine_state).is_some();
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+        let rebind_available = matches!(
+            machine_state
+                .external_member_rebind_capability
+                .get(&dsl_identity),
+            Some(mob_dsl::ExternalMemberRebindCapability::Available)
+        );
         let binding_mode = if bridge_session_present {
             ExternalMemberBindingMode::BridgeSessionBacked
         } else {
@@ -5095,7 +5132,7 @@ impl MobHandle {
                     .unwrap_or_else(|| "external member restore failed".to_string()),
             },
             _ if bridge_session_present => ExternalMemberRebindStatus::NotRequired,
-            _ if has_bootstrap_token => ExternalMemberRebindStatus::Available,
+            _ if rebind_available => ExternalMemberRebindStatus::Available,
             _ => ExternalMemberRebindStatus::Unavailable {
                 reason: "missing bootstrap_token for supervisor rebind".to_string(),
             },

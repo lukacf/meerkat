@@ -13,6 +13,8 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `mob_owner_bridge_cleanup_authority` (machine `MobMachine`): `meerkat-mob-mcp/src/lib.rs` — MobMachine owner bridge session cleanup authority for owner bridge cleanup requires owner and implicit delegation requires owner invariants
 - `mob_coordination_board_authority` (machine `MobMachine`): `meerkat-mob/src/coordination.rs` — MobMachine coordination board authority: record work intent, record resource claim, update coordination work intent status planned active blocked completed cancelled, update coordination resource claim status active released expired cancelled, observe coordination resource claim overlap, and the recorded/status-changed/overlap-observed coordination effects
 - `mob_operator_admission_authority` (machine `MobMachine`): `meerkat-mob-mcp/src/agent_tools.rs` — MobMachine operator-admission authority for the mob tool surface: resolve create mob admission from the create-mobs capability observation and resolve profile mutation admission from the mutate-profiles capability observation, emitting the create-mob and profile-mutation admission resolved verdicts the surface mirrors (denied -> access denied)
+- `mob_membership_classifier_authority` (machine `MobMachine`): `meerkat-mob/src/runtime/actor.rs` — MobMachine membership and runtime-incarnation classifiers owned by the actor: probe member admission duplicate or admitted from machine-owned binding and pending-spawn state; compute respawn generation successor; reconcile desired members to spawn retain or retire against current bindings emitting member spawn required, member retain required, and member retire required; set and observe external member rebind capability available or unavailable; classify turn timeout disposition detached canceled or retryable; and seed orphan budget once at startup, emitting the member admission probed, respawn generation computed, external member rebind capability, and turn timeout disposition classified effects
+- `mob_flow_fault_topology_escalation_authority` (machine `MobMachine`): `meerkat-mob/src/runtime/flow.rs` — MobMachine flow-step fault, topology-edge, and supervisor-escalation classifiers owned by the flow engine: classify step output fault retry or terminal malformed json into a step fault disposition; evaluate topology edge rule allow deny or default into a policy decision verdict; and escalate to supervisor target found with a real supervisor identity or no eligible target, emitting the step output fault classified, topology edge verdict resolved, supervisor escalation requested, and supervisor escalation failed effects
 
 ### Scenarios
 - `coordination-board-records-and-overlap` — record coordination work intent and resource claim, update coordination work intent and resource claim status across planned active blocked completed cancelled released expired, and observe coordination resource claim overlap with recomputed revision and event sequence
@@ -24,35 +26,37 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `orchestrator-coordinator-cleanup` — initialize, stop, resume, and destroy orchestrator; bind or unbind coordinator; begin and finish cleanup; notify coordinator and escalate supervisor
 - `owner-bridge-cleanup` — bind owner bridge session, owner bridge cleanup requires owner, implicit delegation requires owner, and recover owner bridge session authority for archive cleanup
 - `operator-provenance-and-peer-input` — record operator action provenance, trust operation peer, admit peer input, append failure ledger, surface peer-exposed member inputs, and resolve operator create mob admission and profile mutation admission verdicts the tool surface mirrors
+- `membership-admission-respawn-reconcile-rebind-timeout` — probe member admission duplicate or admitted, compute respawn generation, reconcile desired members to spawn retain or retire emitting member spawn required member retain required and member retire required, set and observe external member rebind capability available or unavailable, classify turn timeout disposition detached canceled or retryable, and seed orphan budget
+- `flow-fault-topology-supervisor-escalation` — classify step output fault retry or terminal malformed json into a step fault disposition, evaluate topology edge rule allow deny or default into a policy decision verdict resolved, and escalate to supervisor target found with eligible supervisor identity or no eligible target emitting supervisor escalation requested or failed
 
 ### Transitions
 - `ClassifyFlowRunTerminalityTerminalRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `ClassifyFlowRunTerminalityNonTerminalRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `ClassifyFlowStepTerminalityTerminalRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `ClassifyFlowStepTerminalityNonTerminalRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `ClassifyFlowFrameTerminalStatusFailedRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `ClassifyFlowFrameTerminalStatusFailedStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `flow-and-run-lifecycle`, `flow-fault-topology-supervisor-escalation`
 - `ClassifyFlowFrameTerminalStatusFailedCompleted`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `ClassifyFlowFrameTerminalStatusCanceledRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `ClassifyFlowFrameTerminalStatusCanceledStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `flow-and-run-lifecycle`, `flow-fault-topology-supervisor-escalation`
 - `ClassifyFlowFrameTerminalStatusCanceledCompleted`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
@@ -66,82 +70,82 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `ClassifyFlowFrameTerminalStatusUnavailableRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `ClassifyFlowFrameTerminalStatusUnavailableStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `flow-and-run-lifecycle`, `flow-fault-topology-supervisor-escalation`
 - `ClassifyFlowFrameTerminalStatusUnavailableCompleted`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `ClassifyFlowRunPublicResultSuccessRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_membership_classifier_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `ClassifyFlowRunPublicResultFailureRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `ClassifyMemberWaitRuntimeMaterialPresentRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`
 - `ClassifyMemberWaitRuntimeMaterialPresentStopped`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`
 - `ClassifyMemberWaitRuntimeMaterialPresentCompleted`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifyMemberWaitRuntimeMaterialPresentDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifyMemberWaitMissingRuntimeMaterialRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`
 - `ClassifyMemberWaitMissingRuntimeMaterialStopped`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`
 - `ClassifyMemberWaitMissingRuntimeMaterialCompleted`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifyMemberWaitMissingRuntimeMaterialDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ResolveFlowDelegationEdgeAdmissionAllowedRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`, `flow-fault-topology-supervisor-escalation`
 - `ResolveFlowDelegationEdgeAdmissionAllowedStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `operator-provenance-and-peer-input`
+  - scenarios: `operator-provenance-and-peer-input`, `flow-fault-topology-supervisor-escalation`
 - `ResolveFlowDelegationEdgeAdmissionAllowedCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`, `flow-fault-topology-supervisor-escalation`
 - `ResolveFlowDelegationEdgeAdmissionAllowedDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `operator-provenance-and-peer-input`, `flow-fault-topology-supervisor-escalation`
 - `ResolveFlowDelegationEdgeAdmissionDeniedStrictRunning`
-  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
-  - scenarios: `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`, `flow-fault-topology-supervisor-escalation`
 - `ResolveFlowDelegationEdgeAdmissionDeniedStrictStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `operator-provenance-and-peer-input`
+  - scenarios: `operator-provenance-and-peer-input`, `flow-fault-topology-supervisor-escalation`
 - `ResolveFlowDelegationEdgeAdmissionDeniedStrictCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`, `flow-fault-topology-supervisor-escalation`
 - `ResolveFlowDelegationEdgeAdmissionDeniedStrictDestroyed`
-  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
-  - scenarios: `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `operator-provenance-and-peer-input`, `flow-fault-topology-supervisor-escalation`
 - `ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryRunning`
-  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
-  - scenarios: `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`, `flow-fault-topology-supervisor-escalation`
 - `ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `operator-provenance-and-peer-input`
+  - scenarios: `operator-provenance-and-peer-input`, `flow-fault-topology-supervisor-escalation`
 - `ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`, `flow-fault-topology-supervisor-escalation`
 - `ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryDestroyed`
-  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
-  - scenarios: `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `operator-provenance-and-peer-input`, `flow-fault-topology-supervisor-escalation`
 - `ClassifyRemoteMemberRuntimeObservationTerminalRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `spawn-work-terminal`
 - `ClassifyRemoteMemberRuntimeObservationTerminalStopped`
   - anchors: `mob_actor_authority`
@@ -150,10 +154,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`
 - `ClassifyRemoteMemberRuntimeObservationTerminalDestroyed`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `spawn-work-terminal`
 - `ClassifyRemoteMemberRuntimeObservationNonTerminalRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `spawn-work-terminal`
 - `ClassifyRemoteMemberRuntimeObservationNonTerminalStopped`
   - anchors: `mob_actor_authority`
@@ -162,34 +166,34 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`
 - `ClassifyRemoteMemberRuntimeObservationNonTerminalDestroyed`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `spawn-work-terminal`
 - `ResolveSpawnMemberAdmissionManageScopeRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ResolveSpawnMemberAdmissionManageScopeStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ResolveSpawnMemberAdmissionManageScopeCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `operator-provenance-and-peer-input`
+  - scenarios: `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ResolveSpawnMemberAdmissionManageScopeDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedRunning`
-  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
-  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `operator-provenance-and-peer-input`
+  - scenarios: `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedDestroyed`
-  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
-  - scenarios: `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`, `mob_membership_classifier_authority`
+  - scenarios: `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ResolveSpawnMemberAdmissionProfileScopeRunning`
-  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`, `mob_membership_classifier_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `ResolveSpawnMemberAdmissionProfileScopeStopped`
   - anchors: `mob_actor_authority`
@@ -198,31 +202,31 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `ResolveSpawnMemberAdmissionProfileScopeDestroyed`
-  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`, `mob_membership_classifier_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `ResolveSpawnMemberAdmissionDeniedRunning`
-  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
-  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ResolveSpawnMemberAdmissionDeniedStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ResolveSpawnMemberAdmissionDeniedCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `operator-provenance-and-peer-input`
+  - scenarios: `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ResolveSpawnMemberAdmissionDeniedDestroyed`
-  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
-  - scenarios: `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`, `mob_membership_classifier_authority`
+  - scenarios: `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ResolveCurrentMobAdmissionAllowedRunning`
-  - anchors: `mob_operator_admission_authority`
+  - anchors: `mob_operator_admission_authority`, `mob_membership_classifier_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `ResolveCurrentMobAdmissionAllowedStopped`
-  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`, `mob_membership_classifier_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `ResolveCurrentMobAdmissionAllowedCompleted`
-  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`, `mob_membership_classifier_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `ResolveCurrentMobAdmissionAllowedDestroyed`
-  - anchors: `mob_operator_admission_authority`
+  - anchors: `mob_operator_admission_authority`, `mob_membership_classifier_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `ResolveCurrentMobAdmissionDeniedRunning`
   - anchors: `mob_operator_admission_authority`
@@ -309,236 +313,236 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_operator_admission_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `ClassifyMemberOperationEligibilityAdmittedRunning`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifyMemberOperationEligibilityRunningDestroyDeniedRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`
 - `ClassifyMemberOperationEligibilityNotRunningStopped`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
 - `ClassifyMemberOperationEligibilityNotRunningCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifyMemberOperationEligibilityNotRunningDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifyBridgeRejectionRecoveryRebindRunning`
-  - anchors: `mob_owner_bridge_cleanup_authority`
-  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifyBridgeRejectionRecoveryRebindStopped`
-  - anchors: `mob_actor_authority`, `mob_owner_bridge_cleanup_authority`
-  - scenarios: `retire-respawn-destroy`, `owner-bridge-cleanup`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifyBridgeRejectionRecoveryRebindCompleted`
-  - anchors: `mob_actor_authority`, `mob_owner_bridge_cleanup_authority`, `mob_coordination_board_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifyBridgeRejectionRecoveryRebindDestroyed`
-  - anchors: `mob_owner_bridge_cleanup_authority`
-  - scenarios: `owner-bridge-cleanup`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifyBridgeRejectionRecoveryFatalRunning`
-  - anchors: `mob_owner_bridge_cleanup_authority`
-  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`
+  - anchors: `mob_owner_bridge_cleanup_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`, `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ClassifyBridgeRejectionRecoveryFatalStopped`
-  - anchors: `mob_actor_authority`, `mob_owner_bridge_cleanup_authority`
-  - scenarios: `retire-respawn-destroy`, `owner-bridge-cleanup`
+  - anchors: `mob_actor_authority`, `mob_owner_bridge_cleanup_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `retire-respawn-destroy`, `owner-bridge-cleanup`, `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ClassifyBridgeRejectionRecoveryFatalCompleted`
-  - anchors: `mob_actor_authority`, `mob_owner_bridge_cleanup_authority`, `mob_coordination_board_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`
+  - anchors: `mob_actor_authority`, `mob_owner_bridge_cleanup_authority`, `mob_coordination_board_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `coordination-board-records-and-overlap`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`, `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ClassifyBridgeRejectionRecoveryFatalDestroyed`
-  - anchors: `mob_owner_bridge_cleanup_authority`
-  - scenarios: `owner-bridge-cleanup`
+  - anchors: `mob_owner_bridge_cleanup_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `owner-bridge-cleanup`, `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ClassifyPendingSupervisorAcceptanceNotConfirmedRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`
+  - scenarios: `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`, `flow-fault-topology-supervisor-escalation`
 - `ClassifyPendingSupervisorAcceptanceNotConfirmedStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`
+  - scenarios: `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`, `flow-fault-topology-supervisor-escalation`
 - `ClassifyPendingSupervisorAcceptanceNotConfirmedCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`
+  - scenarios: `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`, `flow-fault-topology-supervisor-escalation`
 - `ClassifyPendingSupervisorAcceptanceNotConfirmedDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`
+  - scenarios: `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`, `flow-fault-topology-supervisor-escalation`
 - `ClassifyPendingSupervisorAcceptanceStaleRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `ClassifyPendingSupervisorAcceptanceStaleStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `ClassifyPendingSupervisorAcceptanceStaleCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `ClassifyPendingSupervisorAcceptanceStaleDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `ClassifyPendingSupervisorAcceptanceFatalRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `ClassifyPendingSupervisorAcceptanceFatalStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `ClassifyPendingSupervisorAcceptanceFatalCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `ClassifyPendingSupervisorAcceptanceFatalDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureProfileNotFoundRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureProfileNotFoundStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureProfileNotFoundCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - scenarios: `wiring-and-session-binding`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureProfileNotFoundDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - scenarios: `wiring-and-session-binding`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureMemberNotFoundRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureMemberNotFoundStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureMemberNotFoundCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`
+  - scenarios: `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureMemberNotFoundDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`
+  - scenarios: `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureMemberAlreadyExistsRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureMemberAlreadyExistsStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureMemberAlreadyExistsCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureMemberAlreadyExistsDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureNotExternallyAddressableRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureNotExternallyAddressableStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureNotExternallyAddressableCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`
+  - scenarios: `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureNotExternallyAddressableDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`
+  - scenarios: `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureInvalidTransitionRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureInvalidTransitionStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureInvalidTransitionCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureInvalidTransitionDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureWiringErrorRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureWiringErrorStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureWiringErrorCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`
+  - scenarios: `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureWiringErrorDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`
+  - scenarios: `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureBridgeCommandRejectedRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureBridgeCommandRejectedStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureBridgeCommandRejectedCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureBridgeCommandRejectedDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureMemberRestoreFailedRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureMemberRestoreFailedStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureMemberRestoreFailedCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureMemberRestoreFailedDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureKickoffWaitTimedOutRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureKickoffWaitTimedOutStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureKickoffWaitTimedOutCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureKickoffWaitTimedOutDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureReadyWaitTimedOutRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureReadyWaitTimedOutStopped`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureReadyWaitTimedOutCompleted`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureReadyWaitTimedOutDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureDefinitionErrorRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureDefinitionErrorStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureDefinitionErrorCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureDefinitionErrorDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureFlowNotFoundRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureFlowNotFoundStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureFlowNotFoundCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureFlowNotFoundDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureFlowFailedRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `flow-and-run-lifecycle`, `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureFlowFailedStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureFlowFailedCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `flow-and-run-lifecycle`, `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureFlowFailedDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureRunNotFoundRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
@@ -547,154 +551,154 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`
 - `ClassifySpawnManyFailureRunNotFoundCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureRunNotFoundDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureRunCanceledRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureRunCanceledStopped`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureRunCanceledCompleted`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `flow-and-run-lifecycle`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureRunCanceledDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureFlowTurnTimedOutRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureFlowTurnTimedOutStopped`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureFlowTurnTimedOutCompleted`
-  - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureFlowTurnTimedOutDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureFrameDepthLimitExceededRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`
+  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureFrameDepthLimitExceededStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureFrameDepthLimitExceededCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `flow-and-run-lifecycle`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureFrameDepthLimitExceededDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureSpecRevisionConflictRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureSpecRevisionConflictStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureSpecRevisionConflictCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`
+  - scenarios: `coordination-board-records-and-overlap`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureSpecRevisionConflictDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureSchemaValidationRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureSchemaValidationStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureSchemaValidationCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureSchemaValidationDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureInsufficientTargetsRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureInsufficientTargetsStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureInsufficientTargetsCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureInsufficientTargetsDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureTopologyViolationRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureTopologyViolationStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureTopologyViolationCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureTopologyViolationDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureBridgeDeliveryRejectedRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureBridgeDeliveryRejectedStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureBridgeDeliveryRejectedCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureBridgeDeliveryRejectedDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureSupervisorEscalationRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureSupervisorEscalationStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureSupervisorEscalationCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureSupervisorEscalationDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureUnsupportedForModeRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureUnsupportedForModeStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureUnsupportedForModeCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`, `flow-and-run-lifecycle`
+  - scenarios: `wiring-and-session-binding`, `flow-and-run-lifecycle`, `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureUnsupportedForModeDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`
+  - scenarios: `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureMissingMemberCapabilityRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureMissingMemberCapabilityStopped`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureMissingMemberCapabilityCompleted`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureMissingMemberCapabilityDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureResetBarrierRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
@@ -703,117 +707,117 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`
 - `ClassifySpawnManyFailureResetBarrierCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureResetBarrierDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureStorageErrorRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureStorageErrorStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureStorageErrorCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureStorageErrorDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureSessionErrorRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureSessionErrorStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureSessionErrorCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`
+  - scenarios: `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureSessionErrorDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`
+  - scenarios: `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureCommsErrorRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureCommsErrorStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureCommsErrorCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureCommsErrorDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureCallbackPendingRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureCallbackPendingStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureCallbackPendingCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`
+  - scenarios: `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureCallbackPendingDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`
+  - scenarios: `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureStaleFenceTokenRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureStaleFenceTokenStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureStaleFenceTokenCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureStaleFenceTokenDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureStaleEventCursorRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureStaleEventCursorStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureStaleEventCursorCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`
+  - scenarios: `coordination-board-records-and-overlap`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureStaleEventCursorDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureWorkNotFoundRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureWorkNotFoundStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureWorkNotFoundCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureWorkNotFoundDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `wiring-and-session-binding`
+  - scenarios: `spawn-work-terminal`, `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ClassifySpawnManyFailureInternalRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureInternalStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureInternalCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ClassifySpawnManyFailureInternalDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `SpawnRunningFresh`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`
 - `SpawnRunningFreshPeerOnly`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
 - `SpawnRunningReplacing`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`
 - `AuthorizeSpawnProfileRunning`
-  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`
 - `EnsureMemberRunningExisting`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
@@ -822,10 +826,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `RecoverRosterMemberRunning`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`
 - `RecoverRosterMemberAddressabilityRunning`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`
 - `RecoverMemberSessionBindingFreshRunning`
   - anchors: `mob_actor_authority`
@@ -834,23 +838,23 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`
 - `RecoverMemberSessionBindingAlreadyCurrentRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `wiring-and-session-binding`
 - `RecoverRosterMemberResetRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
 - `RecoverRosterMemberRetiredRunning`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`
 - `RecoverRosterMemberRetiredAlreadyAbsent`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `RecoverMemberKickoffPending`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`
 - `RecoverMemberKickoffStarting`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `RecoverMemberKickoffCallbackPending`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`
@@ -862,21 +866,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `flow-and-run-lifecycle`
 - `RecoverMemberKickoffCancelled`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ReconcileRunning`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `flow-and-run-lifecycle`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `flow-and-run-lifecycle`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ReconcileStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ReconcileCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `flow-and-run-lifecycle`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `flow-and-run-lifecycle`, `membership-admission-respawn-reconcile-rebind-timeout`
+- `ReconcileDestroyed`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `spawn-work-terminal`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ObserveRuntimeReady`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `spawn-work-terminal`
 - `StartupMarkReadyRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `StartupMarkReadyStopped`
   - anchors: `mob_actor_authority`
@@ -947,6 +954,198 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `KickoffClearCompleted`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
+- `ProbeMemberAdmissionDuplicateRunning`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ProbeMemberAdmissionDuplicateStopped`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ProbeMemberAdmissionDuplicateCompleted`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ProbeMemberAdmissionDuplicateDestroyed`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ProbeMemberAdmissionAdmittedRunning`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ProbeMemberAdmissionAdmittedStopped`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ProbeMemberAdmissionAdmittedCompleted`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ProbeMemberAdmissionAdmittedDestroyed`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ComputeRespawnGenerationRunning`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ComputeRespawnGenerationStopped`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ComputeRespawnGenerationCompleted`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ComputeRespawnGenerationDestroyed`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ClassifyStepOutputFaultRetryRunning`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `ClassifyStepOutputFaultRetryStopped`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `ClassifyStepOutputFaultRetryCompleted`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `ClassifyStepOutputFaultRetryDestroyed`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `ClassifyStepOutputFaultTerminalRunning`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `ClassifyStepOutputFaultTerminalStopped`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `ClassifyStepOutputFaultTerminalCompleted`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `ClassifyStepOutputFaultTerminalDestroyed`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EscalateToSupervisorTargetFoundRunning`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EscalateToSupervisorTargetFoundStopped`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EscalateToSupervisorTargetFoundCompleted`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EscalateToSupervisorTargetFoundDestroyed`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EscalateToSupervisorTargetMissingRunning`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EscalateToSupervisorTargetMissingStopped`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EscalateToSupervisorTargetMissingCompleted`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EscalateToSupervisorTargetMissingDestroyed`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EvaluateTopologyEdgeRuleAllowRunning`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EvaluateTopologyEdgeRuleAllowStopped`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EvaluateTopologyEdgeRuleAllowCompleted`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EvaluateTopologyEdgeRuleAllowDestroyed`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EvaluateTopologyEdgeRuleDenyRunning`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EvaluateTopologyEdgeRuleDenyStopped`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EvaluateTopologyEdgeRuleDenyCompleted`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EvaluateTopologyEdgeRuleDenyDestroyed`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EvaluateTopologyEdgeDefaultAllowRunning`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EvaluateTopologyEdgeDefaultAllowStopped`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EvaluateTopologyEdgeDefaultAllowCompleted`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EvaluateTopologyEdgeDefaultAllowDestroyed`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EvaluateTopologyEdgeDefaultDenyRunning`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EvaluateTopologyEdgeDefaultDenyStopped`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EvaluateTopologyEdgeDefaultDenyCompleted`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `EvaluateTopologyEdgeDefaultDenyDestroyed`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `SetExternalMemberRebindCapabilityRunning`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `SetExternalMemberRebindCapabilityStopped`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `SetExternalMemberRebindCapabilityCompleted`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `SetExternalMemberRebindCapabilityDestroyed`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `SeedOrphanBudgetRunning`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `SeedOrphanBudgetStopped`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `SeedOrphanBudgetCompleted`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `SeedOrphanBudgetDestroyed`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ClassifyTurnTimeoutDispositionRetryableRunning`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ClassifyTurnTimeoutDispositionRetryableStopped`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ClassifyTurnTimeoutDispositionRetryableCompleted`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ClassifyTurnTimeoutDispositionRetryableDestroyed`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ClassifyTurnTimeoutDispositionDetachedRunning`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ClassifyTurnTimeoutDispositionDetachedStopped`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ClassifyTurnTimeoutDispositionDetachedCompleted`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ClassifyTurnTimeoutDispositionDetachedDestroyed`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ClassifyTurnTimeoutDispositionCanceledRunning`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ClassifyTurnTimeoutDispositionCanceledStopped`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ClassifyTurnTimeoutDispositionCanceledCompleted`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `ClassifyTurnTimeoutDispositionCanceledDestroyed`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `SubmitWorkRunningExternal`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
@@ -970,7 +1169,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `flow-and-run-lifecycle`
 - `ResolveSubmitWorkRejectionMemberNotFound`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+  - scenarios: `spawn-work-terminal`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`, `flow-fault-topology-supervisor-escalation`
 - `ResolveSubmitWorkRejectionCurrentRuntimeNotLive`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `flow-and-run-lifecycle`
@@ -979,7 +1178,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `flow-and-run-lifecycle`
 - `ResolveSubmitWorkRejectionRetiringAsMemberNotFound`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `flow-and-run-lifecycle`, `flow-fault-topology-supervisor-escalation`
 - `ResolveSubmitWorkRejectionNotExternallyAddressable`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
@@ -987,13 +1186,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
 - `RetireMember`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `RetireMemberPeerOnly`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `AdmitDestroyMemberRetireLiveRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`
 - `AdmitDestroyMemberRetireLiveStopped`
   - anchors: `mob_actor_authority`
@@ -1005,38 +1204,38 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
 - `AdmitDestroyMemberRetireAlreadyRetiringRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`
 - `AdmitDestroyMemberRetireAlreadyRetiringStopped`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
 - `ObserveRuntimeRetired`
-  - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ObserveMemberRetirementArchivedLive`
-  - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ObserveMemberRetirementArchivedLiveStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ObserveMemberRetirementArchivedRetired`
-  - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ObserveMemberRetirementArchivedRetiredStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ObserveMemberRetirementArchivedStaleRuntime`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ObserveMemberRetirementArchivedStaleRuntimeStopped`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
 - `ObserveMemberRetirementArchivedAlreadyCleared`
-  - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `ObserveMemberRetirementArchivedAlreadyClearedStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ObserveDestroyMemberRetirementArchivedLiveRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
@@ -1053,14 +1252,14 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
 - `RespawnMember`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ResolveRespawnTopologyRestoreCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `flow-and-run-lifecycle`, `flow-fault-topology-supervisor-escalation`
 - `ResolveRespawnTopologyRestoreFailed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `RecoverMemberRestoreFailureRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
@@ -1068,8 +1267,8 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `orchestrator-coordinator-cleanup`
 - `AdmitDestroyStorageFinalizing`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `MarkCompleted`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
@@ -1077,8 +1276,8 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `event-subscriptions-and-notices`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`
 - `ObserveRuntimeDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `RecordOperatorActionProvenanceRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `operator-provenance-and-peer-input`
@@ -1092,23 +1291,23 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `SetSpawnPolicyRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`
 - `SetSpawnPolicyStopped`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
 - `SetSpawnPolicyCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `SetSpawnPolicyDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ResolveSpawnPolicyAdmitted`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `ResolveSpawnPolicyNoMatch`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `BindOwnerBridgeSessionRunning`
   - anchors: `mob_owner_bridge_cleanup_authority`
   - scenarios: `owner-bridge-cleanup`
@@ -1131,16 +1330,16 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
 - `WireMembersRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `wiring-and-session-binding`
 - `WireMembersWithTrustRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
   - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
 - `WireMembersWithTrustAlreadyWired`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
   - scenarios: `wiring-and-session-binding`
 - `WireMembersAlreadyWired`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `wiring-and-session-binding`
 - `RecoverRosterWiringRunning`
   - anchors: `mob_actor_authority`
@@ -1155,23 +1354,23 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `owner-bridge-cleanup`
 - `UnwireMembersRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `wiring-and-session-binding`
 - `UnwireMembersAlreadyAbsent`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `wiring-and-session-binding`
 - `WireExternalPeerRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `WireExternalPeerAlreadyWired`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - scenarios: `wiring-and-session-binding`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `RegisterMemberPeerRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
 - `AuthorizeMemberPeerRebindRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `AuthorizeMemberPeerOverlayRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
@@ -1179,7 +1378,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
 - `AuthorizeMemberTrustUnwiringRunning`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
 - `AuthorizeMemberTrustCleanupRunning`
   - anchors: `mob_actor_authority`
@@ -1188,40 +1387,40 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
 - `AuthorizeExternalPeerReciprocalTrustRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `RecoverExternalPeerWiringRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `RecoverExternalPeerWiringAlreadyRecovered`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+  - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `RecoverExternalPeerUnwireRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `RecoverExternalPeerUnwireAlreadyAbsent`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+  - scenarios: `wiring-and-session-binding`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `UnwireExternalPeerRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `UnwireExternalPeerAlreadyAbsent`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - scenarios: `wiring-and-session-binding`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ProvisionSupervisorAuthorityRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`, `flow-fault-topology-supervisor-escalation`
 - `ProvisionSupervisorAuthorityStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
+  - scenarios: `retire-respawn-destroy`, `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`, `flow-fault-topology-supervisor-escalation`
 - `ProvisionSupervisorAuthorityCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
+  - scenarios: `coordination-board-records-and-overlap`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`, `flow-fault-topology-supervisor-escalation`
 - `ProvisionSupervisorAuthorityDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`, `flow-fault-topology-supervisor-escalation`
 - `RecoverSupervisorAuthorityRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
   - scenarios: `owner-bridge-cleanup`
 - `RecoverSupervisorAuthorityStopped`
   - anchors: `mob_actor_authority`
@@ -1230,38 +1429,38 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `owner-bridge-cleanup`
 - `RecoverSupervisorAuthorityDestroyed`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
   - scenarios: `owner-bridge-cleanup`
 - `ClearSupervisorPendingRotationRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `ClearSupervisorPendingRotationStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `flow-fault-topology-supervisor-escalation`
 - `ClearSupervisorPendingRotationCompleted`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `RecordSupervisorPendingRotationRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`, `flow-fault-topology-supervisor-escalation`
 - `RecordSupervisorPendingRotationStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `retire-respawn-destroy`, `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `retire-respawn-destroy`, `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`, `flow-fault-topology-supervisor-escalation`
 - `RecordSupervisorPendingRotationCompleted`
   - anchors: `mob_actor_authority`
   - scenarios: `coordination-board-records-and-overlap`
 - `CommitSupervisorRotationRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `flow-fault-topology-supervisor-escalation`
 - `CommitSupervisorRotationStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `orchestrator-coordinator-cleanup`
+  - scenarios: `retire-respawn-destroy`, `orchestrator-coordinator-cleanup`, `flow-fault-topology-supervisor-escalation`
 - `CommitSupervisorRotationCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`
+  - scenarios: `coordination-board-records-and-overlap`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `flow-fault-topology-supervisor-escalation`
 - `ClearSupervisorAuthorityForDestroy`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
+  - scenarios: `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`, `flow-fault-topology-supervisor-escalation`
 - `RestoreSupervisorAuthorityAfterDestroyRollback`
   - anchors: `mob_actor_authority`
   - scenarios: `orchestrator-coordinator-cleanup`
@@ -1470,7 +1669,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `orchestrator-coordinator-cleanup`
 - `StageSpawnRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`
 - `StopOrchestratorRunning`
   - anchors: `mob_actor_authority`
@@ -1512,7 +1711,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `PeerInputAdmittedRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `BeginCleanupStopped`
   - anchors: `mob_actor_authority`
@@ -1567,13 +1766,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `flow-and-run-lifecycle`
 - `AuthorizeFlowRunReducerCommandDispatchStep`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `flow-fault-topology-supervisor-escalation`
 - `AuthorizeFlowRunReducerCommandCompleteStep`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `AuthorizeFlowRunReducerCommandRecordStepOutput`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `AuthorizeFlowRunReducerCommandConditionPassed`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
@@ -1582,13 +1781,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
 - `AuthorizeFlowRunReducerCommandFailStep`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `flow-and-run-lifecycle`, `flow-fault-topology-supervisor-escalation`
 - `AuthorizeFlowRunReducerCommandFailStepEscalating`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `flow-and-run-lifecycle`, `flow-fault-topology-supervisor-escalation`
 - `AuthorizeFlowRunReducerCommandSkipStep`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `flow-fault-topology-supervisor-escalation`
 - `AuthorizeFlowRunReducerCommandProjectFrameStepStatus`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
@@ -1606,16 +1805,16 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
 - `AuthorizeFlowRunReducerCommandRecordTargetSuccess`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `flow-fault-topology-supervisor-escalation`
 - `AuthorizeFlowRunReducerCommandRecordTargetTerminalFailure`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `flow-fault-topology-supervisor-escalation`
 - `AuthorizeFlowRunReducerCommandRecordTargetCanceled`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `flow-fault-topology-supervisor-escalation`
 - `AuthorizeFlowRunReducerCommandRecordTargetFailure`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`, `flow-fault-topology-supervisor-escalation`
 - `AuthorizeFlowRunReducerCommandRegisterReadyFrame`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
@@ -1657,7 +1856,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `flow-and-run-lifecycle`
 - `AuthorizeFlowFrameReducerCommandRecordNodeOutput`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `flow-and-run-lifecycle`, `flow-fault-topology-supervisor-escalation`
 - `AuthorizeFlowFrameReducerCommandFailNode`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
@@ -1701,7 +1900,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `StartRunRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `CompleteFlowRunning`
   - anchors: `mob_actor_authority`
@@ -1710,19 +1909,19 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `FinishRunRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `FinishRunRunningZero`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `RetireRunningReleasing`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`
 - `RetireRunningPreservingBinding`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`
 - `RetireRunningNoBinding`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`
 - `RetireStoppedReleasing`
   - anchors: `mob_actor_authority`
@@ -1744,7 +1943,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `flow-and-run-lifecycle`
 - `SessionIngressDetachFailedForMobDestroyStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`, `flow-fault-topology-supervisor-escalation`
 - `RetireStoppedPreservingBinding`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
@@ -1752,7 +1951,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
 - `RetireAbsentRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`
 - `RetireAbsentStopped`
   - anchors: `mob_actor_authority`
@@ -1765,15 +1964,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`
 - `RetireAllCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `coordination-board-records-and-overlap`, `retire-respawn-destroy`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+  - scenarios: `coordination-board-records-and-overlap`, `retire-respawn-destroy`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `CompleteSpawnRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`
 - `DestroyFromAny`
-  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`, `orchestrator-coordinator-cleanup`
 - `RespawnRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`
 - `CancelAllWorkRunning`
   - anchors: `mob_actor_authority`
@@ -1789,7 +1988,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `flow-and-run-lifecycle`
 - `ResolveCancelAllWorkRejectionMemberNotFound`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `flow-fault-topology-supervisor-escalation`
 - `ResolveCancelAllWorkRejectionCurrentRuntimeNotLive`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
@@ -1835,17 +2034,17 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 
 ### Effects
 - `RequestRuntimeBinding`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-fault-topology-supervisor-escalation`
 - `SpawnProfileAuthorized`
-  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`, `mob_membership_classifier_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `RequestRuntimeIngress`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `flow-fault-topology-supervisor-escalation`
 - `RequestPeerRuntimeIngress`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `operator-provenance-and-peer-input`, `flow-fault-topology-supervisor-escalation`
 - `SubmitWorkRejected`
   - anchors: `mob_actor_authority`
   - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `flow-and-run-lifecycle`
@@ -1853,17 +2052,17 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `coordination-board-records-and-overlap`, `flow-and-run-lifecycle`
 - `RequestRuntimeRetire`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`
 - `RequestRuntimeDestroy`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
 - `PendingSpawnOperationOwnerAuthorized`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `wiring-and-session-binding`
 - `RequestSessionIngressDetachForMobDestroy`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`, `owner-bridge-cleanup`
+  - scenarios: `wiring-and-session-binding`, `owner-bridge-cleanup`, `flow-fault-topology-supervisor-escalation`
 - `AppendLifecycleJournal`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
@@ -1871,10 +2070,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `EmitMemberLifecycleNotice`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`
 - `EmitRunLifecycleNotice`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `event-subscriptions-and-notices`
 - `EmitFlowRunNotice`
   - anchors: `mob_actor_authority`
@@ -1892,37 +2091,37 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
 - `FlowStepTerminal`
-  - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `FlowStepNonTerminal`
-  - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `FlowFrameTerminalStatusClassified`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `FlowFrameTerminalStatusUnavailable`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `FlowRunPublicResultClassified`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
   - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
 - `EscalateSupervisor`
-  - anchors: `mob_actor_authority`
-  - scenarios: `orchestrator-coordinator-cleanup`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `orchestrator-coordinator-cleanup`, `flow-fault-topology-supervisor-escalation`
 - `NotifyCoordinator`
   - anchors: `mob_actor_authority`
   - scenarios: `orchestrator-coordinator-cleanup`
 - `ExposePendingSpawn`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `wiring-and-session-binding`
 - `EmitMemberTerminalNotice`
   - anchors: `mob_actor_authority`
   - scenarios: `event-subscriptions-and-notices`
 - `AdmitPeerInput`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `EmitProgressNote`
-  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
   - scenarios: `event-subscriptions-and-notices`
 - `PersistKickoffUpdate`
   - anchors: `mob_actor_authority`, `mob_coordination_board_authority`
@@ -1933,36 +2132,66 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `EmitKickoffLifecycleNotice`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `MemberAdmissionProbed`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
+- `RespawnGenerationComputed`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `StepOutputFaultClassified`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `SupervisorEscalationRequested`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `SupervisorEscalationFailed`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `TopologyEdgeVerdictResolved`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
+- `TurnTimeoutDispositionClassified`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `MemberSpawnRequired`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `MemberRetainRequired`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
+- `MemberRetireRequired`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `SpawnPolicyResolutionRecorded`
-  - anchors: `mob_actor_authority`, `mob_coordination_board_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+  - anchors: `mob_actor_authority`, `mob_coordination_board_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `membership-admission-respawn-reconcile-rebind-timeout`, `flow-fault-topology-supervisor-escalation`
 - `OwnerBridgeSessionBound`
   - anchors: `mob_owner_bridge_cleanup_authority`
   - scenarios: `owner-bridge-cleanup`
 - `RespawnTopologyRestoreResolved`
-  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `SpawnManyFailureClassified`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `MemberWaitClassified`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `FlowDelegationEdgeAdmissionResolved`
-  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
-  - scenarios: `operator-provenance-and-peer-input`
+  - anchors: `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `flow-fault-topology-supervisor-escalation`
 - `RemoteMemberRuntimeTerminalityClassified`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_membership_classifier_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `SpawnMemberAdmissionResolved`
-  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - anchors: `mob_membership_classifier_authority`
+  - scenarios: `membership-admission-respawn-reconcile-rebind-timeout`
 - `CurrentMobAdmissionResolved`
-  - anchors: `mob_operator_admission_authority`
+  - anchors: `mob_operator_admission_authority`, `mob_membership_classifier_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `SpawnToolAdmissionResolved`
   - anchors: `mob_operator_admission_authority`
-  - scenarios: `operator-provenance-and-peer-input`
+  - scenarios: `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `CreateMobAdmissionResolved`
   - anchors: `mob_operator_admission_authority`
   - scenarios: `operator-provenance-and-peer-input`
@@ -1970,14 +2199,14 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_operator_admission_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `MemberOperationEligibilityResolved`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`, `mob_operator_admission_authority`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`, `mob_operator_admission_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `BridgeRejectionRecoveryClassified`
-  - anchors: `mob_owner_bridge_cleanup_authority`
+  - anchors: `mob_owner_bridge_cleanup_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
   - scenarios: `owner-bridge-cleanup`
 - `PendingSupervisorAcceptanceClassified`
-  - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`, `flow-fault-topology-supervisor-escalation`
 - `FrameSeedConfirmed`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
@@ -1994,38 +2223,38 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
 - `MemberTrustUnwiringRequested`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `WiringTrustRepairRequested`
-  - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`, `flow-fault-topology-supervisor-escalation`
 - `ExternalPeerTrustWiringRequested`
   - anchors: `mob_actor_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `ExternalPeerTrustUnwiringRequested`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `ExternalPeerTrustRepairRequested`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `MemberPeerRegistered`
   - anchors: `mob_actor_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `MemberPeerRebindAuthorized`
-  - anchors: `mob_actor_authority`
-  - scenarios: `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `MemberPeerOverlayAuthorized`
   - anchors: `mob_actor_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `ExternalPeerReciprocalTrustRequested`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`, `mob_flow_fault_topology_escalation_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `PersistSupervisorAuthority`
-  - anchors: `mob_actor_authority`
-  - scenarios: `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`, `flow-fault-topology-supervisor-escalation`
 - `DeleteSupervisorAuthority`
-  - anchors: `mob_actor_authority`
-  - scenarios: `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`, `flow-fault-topology-supervisor-escalation`
 - `EmitWiringLifecycleNotice`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`
@@ -2083,25 +2312,25 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 
 ### Invariants
 - `bindings_require_known_identity`
-  - anchors: `mob_handle_surface`, `mob_owner_bridge_cleanup_authority`
+  - anchors: `mob_membership_classifier_authority`
   - scenarios: `wiring-and-session-binding`
 - `identity_runtime_material_matches_runtime_binding`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
 - `member_spawn_material_matches_runtime_binding`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
 - `external_peer_edges_are_keyed_coherently`
-  - anchors: `mob_actor_authority`
-  - scenarios: `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `operator-provenance-and-peer-input`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `supervisor_authority_tuple_consistent`
-  - anchors: `mob_actor_authority`
-  - scenarios: `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
+  - anchors: `mob_actor_authority`, `mob_flow_fault_topology_escalation_authority`
+  - scenarios: `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`, `flow-fault-topology-supervisor-escalation`
 - `supervisor_pending_authority_tuple_consistent`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
+  - scenarios: `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`, `flow-fault-topology-supervisor-escalation`
 - `supervisor_pending_authority_requires_current`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `owner-bridge-cleanup`
 - `owner_bridge_cleanup_requires_owner`
   - anchors: `mob_owner_bridge_cleanup_authority`

@@ -30,27 +30,38 @@ impl MobTopologyService {
         Self { spec }
     }
 
-    pub fn evaluate(&self, from_role: &ProfileName, to_role: &ProfileName) -> PolicyDecision {
-        self.spec.as_ref().map_or(PolicyDecision::Allow, |spec| {
-            evaluate_topology(&spec.rules, from_role, to_role)
-        })
+    /// Pure rule-match projection for a role edge.
+    ///
+    /// Returns `Some(PolicyDecision)` only when the spec is present AND a rule
+    /// matches the edge. `None` (no spec, or no matching rule) means "no rule
+    /// projection" — the default-policy fallback is MobMachine-owned, not a
+    /// shell allow-by-default.
+    pub fn evaluate(
+        &self,
+        from_role: &ProfileName,
+        to_role: &ProfileName,
+    ) -> Option<PolicyDecision> {
+        self.spec
+            .as_ref()
+            .and_then(|spec| evaluate_topology(&spec.rules, from_role, to_role))
     }
 }
 
-/// Evaluate topology allow/deny decision for a role edge.
+/// Evaluate the pure topology allow/deny rule-match for a role edge.
 ///
-/// Later matching rules win. If no rule matches, edge is allowed.
+/// Later matching rules win. Returns `None` when no rule matches; the
+/// machine — not the shell — applies the default policy for unmatched edges.
 pub fn evaluate_topology(
     rules: &[TopologyRule],
     from_role: &ProfileName,
     to_role: &ProfileName,
-) -> PolicyDecision {
+) -> Option<PolicyDecision> {
     rules
         .iter()
         .rfind(|rule| {
             role_matches(&rule.from_role, from_role) && role_matches(&rule.to_role, to_role)
         })
-        .map_or(PolicyDecision::Allow, |rule| {
+        .map(|rule| {
             if rule.allowed {
                 PolicyDecision::Allow
             } else {
@@ -68,19 +79,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_topology_defaults_to_allow() {
+    fn test_topology_unmatched_edge_has_no_rule_projection() {
         let rules = vec![TopologyRule {
             from_role: ProfileName::from("lead"),
             to_role: ProfileName::from("worker"),
             allowed: true,
         }];
+        // No rule matches this edge — the shell projects `None` and leaves the
+        // default-policy fallback to MobMachine.
         assert_eq!(
             evaluate_topology(
                 &rules,
                 &ProfileName::from("worker"),
                 &ProfileName::from("reviewer")
             ),
-            PolicyDecision::Allow
+            None
         );
     }
 
@@ -97,7 +110,7 @@ mod tests {
                 &ProfileName::from("lead"),
                 &ProfileName::from("worker")
             ),
-            PolicyDecision::Deny
+            Some(PolicyDecision::Deny)
         );
     }
 
@@ -121,7 +134,7 @@ mod tests {
                 &ProfileName::from("lead"),
                 &ProfileName::from("worker")
             ),
-            PolicyDecision::Allow
+            Some(PolicyDecision::Allow)
         );
     }
 
@@ -138,7 +151,7 @@ mod tests {
                 &ProfileName::from("lead"),
                 &ProfileName::from("worker")
             ),
-            PolicyDecision::Deny
+            Some(PolicyDecision::Deny)
         );
         assert_eq!(
             evaluate_topology(
@@ -146,15 +159,16 @@ mod tests {
                 &ProfileName::from("reviewer"),
                 &ProfileName::from("worker")
             ),
-            PolicyDecision::Deny
+            Some(PolicyDecision::Deny)
         );
+        // No rule matches this edge — no shell projection.
         assert_eq!(
             evaluate_topology(
                 &rules,
                 &ProfileName::from("reviewer"),
                 &ProfileName::from("lead")
             ),
-            PolicyDecision::Allow
+            None
         );
     }
 
@@ -171,7 +185,7 @@ mod tests {
                 &ProfileName::from("lead"),
                 &ProfileName::from("worker")
             ),
-            PolicyDecision::Deny
+            Some(PolicyDecision::Deny)
         );
         assert_eq!(
             evaluate_topology(
@@ -179,15 +193,16 @@ mod tests {
                 &ProfileName::from("lead"),
                 &ProfileName::from("reviewer")
             ),
-            PolicyDecision::Deny
+            Some(PolicyDecision::Deny)
         );
+        // No rule matches this edge — no shell projection.
         assert_eq!(
             evaluate_topology(
                 &rules,
                 &ProfileName::from("worker"),
                 &ProfileName::from("reviewer")
             ),
-            PolicyDecision::Allow
+            None
         );
     }
 }

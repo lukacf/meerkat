@@ -812,6 +812,26 @@ fn project_dsl_phase(phase: mob_dsl::MobPhase) -> MobState {
     }
 }
 
+/// Row #314: derive the machine-owned external-member rebind capability from a
+/// member's `MemberRef` bootstrap proof. A backend peer with a non-empty
+/// bootstrap token can be supervisor-rebound; session-backed members and peers
+/// without a usable token cannot.
+pub(super) fn external_member_rebind_capability_from_member_ref(
+    member_ref: &MemberRef,
+) -> mob_dsl::ExternalMemberRebindCapability {
+    match member_ref {
+        MemberRef::BackendPeer {
+            bootstrap_token, ..
+        } if bootstrap_token
+            .as_ref()
+            .is_some_and(|token| !token.is_empty()) =>
+        {
+            mob_dsl::ExternalMemberRebindCapability::Available
+        }
+        _ => mob_dsl::ExternalMemberRebindCapability::Unavailable,
+    }
+}
+
 /// Extract the pure wire runtime-state observation for MobMachine terminality
 /// classification. This is a faithful 1:1 projection of the observed
 /// `BridgeMemberRuntimeState`; the terminal/non-terminal verdict is decided by
@@ -1000,8 +1020,6 @@ struct RespawnSnapshot {
     labels: std::collections::BTreeMap<String, String>,
     old_runtime_id: crate::ids::AgentRuntimeId,
     old_fence_token: crate::ids::FenceToken,
-    /// Generation of the member being respawned.
-    generation: crate::ids::Generation,
     restore_wiring: RestoreWiringPlan,
     /// Runtime binding extracted from the old roster entry's member_ref.
     /// Preserves real external identity across respawns.
@@ -4210,7 +4228,7 @@ impl MobActor {
                     .member_kickoff_callback_pending
                     .iter(),
             )
-            .cloned()
+            .map(|id| id.0.clone())
             .collect()
     }
 
@@ -4589,7 +4607,7 @@ impl MobActor {
             .apply_kickoff_input(
                 agent_identity,
                 mob_dsl::MobMachineInput::KickoffClear {
-                    member_id: agent_identity.to_string(),
+                    member_id: mob_dsl::AgentIdentity::from_domain(agent_identity),
                 },
             )
             .await
@@ -5278,8 +5296,76 @@ impl MobActor {
     }
 
     fn preview_spawn_command_admission(&self, agent_identity: &MeerkatId) -> Result<(), MobError> {
-        let _ = agent_identity;
-        self.require_member_operation_eligible()
+        self.require_member_operation_eligible()?;
+        self.probe_member_admission(agent_identity)
+    }
+
+    /// Read-only MobMachine probe for member-admission duplication. The machine
+    /// guard covers live runtime bindings, session bindings, and in-flight
+    /// pending spawns, so this fully replaces the former shell-side
+    /// `pending_spawns.contains_member` prechecks.
+    fn probe_member_admission(&self, agent_identity: &MeerkatId) -> Result<(), MobError> {
+        let prepared = self.prepare_dsl_input(
+            mob_dsl::MobMachineInput::ProbeMemberAdmission {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+            },
+            "probe_member_admission",
+        )?;
+        let mut verdict = None;
+        for effect in &prepared.effects {
+            if let mob_dsl::MobMachineEffect::MemberAdmissionProbed { verdict: kind, .. } = effect {
+                if verdict.replace(*kind).is_some() {
+                    return Err(MobError::Internal(
+                        "MobMachine emitted multiple member-admission verdicts".into(),
+                    ));
+                }
+            }
+        }
+        match verdict {
+            Some(mob_dsl::MemberAdmissionVerdictKind::Admitted) => Ok(()),
+            Some(mob_dsl::MemberAdmissionVerdictKind::DuplicateRejected) => {
+                Err(MobError::MemberAlreadyExists(agent_identity.clone()))
+            }
+            None => Err(MobError::Internal(
+                "MobMachine emitted no member-admission verdict".into(),
+            )),
+        }
+    }
+
+    /// Read-only MobMachine probe for the next monotone respawn generation. The
+    /// machine owns the per-identity generation counter (seeded by Spawn/Reset),
+    /// so this fully replaces the former shell-side `snapshot.generation.next()`
+    /// increment.
+    fn compute_respawn_generation(
+        &self,
+        agent_identity: &MeerkatId,
+    ) -> Result<crate::ids::Generation, MobError> {
+        let prepared = self.prepare_dsl_input(
+            mob_dsl::MobMachineInput::ComputeRespawnGeneration {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+            },
+            "compute_respawn_generation",
+        )?;
+        let mut next_generation = None;
+        for effect in &prepared.effects {
+            if let mob_dsl::MobMachineEffect::RespawnGenerationComputed {
+                next_generation: next,
+                ..
+            } = effect
+            {
+                if next_generation.replace(next.0).is_some() {
+                    return Err(MobError::Internal(
+                        "MobMachine emitted multiple respawn generations".into(),
+                    ));
+                }
+            }
+        }
+        match next_generation {
+            Some(next) => Ok(crate::ids::Generation::new(next)),
+            None => Err(MobError::Internal(
+                "MobMachine emitted no respawn generation".into(),
+            )),
+        }
     }
 
     fn authorize_spawn_profile_material(
@@ -6051,7 +6137,7 @@ impl MobActor {
                     .apply_kickoff_input(
                         agent_identity,
                         mob_dsl::MobMachineInput::KickoffResolveFailed {
-                            member_id: agent_identity.to_string(),
+                            member_id: mob_dsl::AgentIdentity::from_domain(agent_identity),
                             error: format!("runtime completion waiter failed: {error}"),
                         },
                     )
@@ -6081,17 +6167,17 @@ impl MobActor {
                     }
                     | meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
                         mob_dsl::MobMachineInput::KickoffResolveStarted {
-                            member_id: agent_identity.to_string(),
+                            member_id: mob_dsl::AgentIdentity::from_domain(agent_identity),
                         }
                     }
                     meerkat_runtime::completion::CompletionOutcome::CallbackPending { .. } => {
                         mob_dsl::MobMachineInput::KickoffResolveCallbackPending {
-                            member_id: agent_identity.to_string(),
+                            member_id: mob_dsl::AgentIdentity::from_domain(agent_identity),
                         }
                     }
                     meerkat_runtime::completion::CompletionOutcome::Cancelled => {
                         mob_dsl::MobMachineInput::KickoffCancelRequested {
-                            member_id: agent_identity.to_string(),
+                            member_id: mob_dsl::AgentIdentity::from_domain(agent_identity),
                         }
                     }
                     meerkat_runtime::completion::CompletionOutcome::Abandoned {
@@ -6107,7 +6193,7 @@ impl MobActor {
                         ..
                     } => {
                         mob_dsl::MobMachineInput::KickoffResolveFailed {
-                            member_id: agent_identity.to_string(),
+                            member_id: mob_dsl::AgentIdentity::from_domain(agent_identity),
                             error,
                         }
                     }
@@ -6122,7 +6208,7 @@ impl MobActor {
             .apply_kickoff_input(
                 agent_identity,
                 mob_dsl::MobMachineInput::KickoffCancelRequested {
-                    member_id: agent_identity.to_string(),
+                    member_id: mob_dsl::AgentIdentity::from_domain(agent_identity),
                 },
             )
             .await
@@ -6842,6 +6928,14 @@ impl MobActor {
                         spawn_profile_authority_external_addressable: dsl
                             .spawn_profile_authority_external_addressable
                             .clone(),
+                        orphan_budget: dsl.orphan_budget,
+                        topology_default_policy: dsl.topology_default_policy,
+                        external_member_rebind_capability: dsl
+                            .external_member_rebind_capability
+                            .clone(),
+                        desired_members: dsl.desired_members.clone(),
+                        members_to_spawn: dsl.members_to_spawn.clone(),
+                        members_to_retire: dsl.members_to_retire.clone(),
                     });
                 }
                 MobCommand::StartupKickoffSnapshot { reply_tx } => {
@@ -7858,10 +7952,6 @@ impl MobActor {
                 "MobActor::enqueue_spawn start"
             );
 
-            if self.pending_spawns.contains_member(&agent_identity) {
-                return Err(MobError::MemberAlreadyExists(agent_identity.clone()));
-            }
-
             {
                 let roster = self.roster.read().await;
                 if roster.get(&agent_identity).is_some() {
@@ -8697,9 +8787,7 @@ impl MobActor {
                 "meerkat id '{agent_identity}' uses reserved system identifier namespace"
             )));
         }
-        if self.pending_spawns.contains_member(agent_identity) {
-            return Err(MobError::MemberAlreadyExists(agent_identity.clone()));
-        }
+        self.probe_member_admission(agent_identity)?;
         {
             let roster = self.roster.read().await;
             if roster.get(agent_identity).is_some() {
@@ -9222,12 +9310,24 @@ impl MobActor {
             });
         }
 
+        // Row #314: record the machine-owned external-member rebind capability
+        // from the spawn's member_ref bootstrap proof so the external-member
+        // projection reads it from machine state instead of re-deriving from the
+        // roster bootstrap_token.
+        self.apply_dsl_input(
+            mob_dsl::MobMachineInput::SetExternalMemberRebindCapability {
+                agent_identity: dsl_identity.clone(),
+                capability: external_member_rebind_capability_from_member_ref(&member_ref),
+            },
+            "finalize_spawn_set_external_member_rebind_capability",
+        )?;
+
         if runtime_mode == crate::MobRuntimeMode::AutonomousHost {
             let _ = self
                 .apply_kickoff_input(
                     agent_identity,
                     mob_dsl::MobMachineInput::KickoffMarkPending {
-                        member_id: agent_identity.to_string(),
+                        member_id: mob_dsl::AgentIdentity::from_domain(agent_identity),
                     },
                 )
                 .await?;
@@ -9304,7 +9404,7 @@ impl MobActor {
                 .apply_kickoff_input(
                     agent_identity,
                     mob_dsl::MobMachineInput::KickoffMarkStarting {
-                        member_id: agent_identity.to_string(),
+                        member_id: mob_dsl::AgentIdentity::from_domain(agent_identity),
                     },
                 )
                 .await?;
@@ -12874,7 +12974,6 @@ impl MobActor {
                 labels: entry.labels.clone(),
                 old_runtime_id: entry.agent_runtime_id.clone(),
                 old_fence_token: entry.fence_token,
-                generation: entry.generation,
                 restore_wiring,
                 binding,
                 effective_profile_override: entry.effective_profile_override,
@@ -12986,7 +13085,9 @@ impl MobActor {
             Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
         )> = None;
 
-        let replacement_generation = snapshot.generation.next();
+        let replacement_generation = self
+            .compute_respawn_generation(&agent_identity)
+            .map_err(MobRespawnError::from)?;
 
         // 2. Retire the existing member (archives the session, removes from roster).
         tracing::debug!(

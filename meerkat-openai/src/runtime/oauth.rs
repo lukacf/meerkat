@@ -25,7 +25,10 @@ use meerkat_auth_core::auth_store::{
     InMemoryCoordinator, PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
     RefreshFn, TokenKey, TokenStore,
 };
-use meerkat_auth_core::oauth_flow::{OAuthProviderDeclaration, OAuthProviderIdentity};
+use meerkat_auth_core::oauth_flow::{
+    OAuthProviderDeclaration, OAuthProviderIdentity, oauth_provider_declaration,
+    oauth_provider_endpoints,
+};
 
 // ---------------------------------------------------------------------
 // Constants (verified against codex-rs/login/src/{auth/manager,server}.rs)
@@ -41,7 +44,7 @@ pub const CHATGPT_REVOKE_URL: &str = "https://auth.openai.com/oauth/revoke";
 
 /// The canonical ChatGPT OAuth provider declaration, owned by auth-core.
 pub fn chatgpt_declaration() -> OAuthProviderDeclaration {
-    OAuthProviderIdentity::OpenAiChatGpt.declaration()
+    oauth_provider_declaration(OAuthProviderIdentity::OpenAiChatGpt)
 }
 
 // Wire header constants are defined in `auth.rs` (unconditional module) so
@@ -61,7 +64,7 @@ pub type TokenCommitFn = Box<
 pub fn chatgpt_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints {
     // Built from the single auth-core declaration for the ChatGPT provider;
     // the test-fixture endpoint override is applied inside `endpoints()`.
-    OAuthProviderIdentity::OpenAiChatGpt.endpoints(redirect_uri)
+    oauth_provider_endpoints(OAuthProviderIdentity::OpenAiChatGpt, redirect_uri)
 }
 
 // ---------------------------------------------------------------------

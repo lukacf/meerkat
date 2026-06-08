@@ -63,6 +63,32 @@ impl NormalizedBackendKind {
     }
 }
 
+/// The typed [`NormalizedBackendKind`] these OAuth login credentials target.
+///
+/// Lives here as a free function (not an inherent method on
+/// [`meerkat_core::OAuthProviderIdentity`]) because the identity is owned by
+/// `meerkat-core` while [`NormalizedBackendKind`] is owned here in
+/// `meerkat-llm-core`: this is the lowest crate that can see both. Auth-core's
+/// `oauth_provider_declaration` reads it from here rather than re-deriving the
+/// mapping.
+pub fn oauth_provider_backend_kind(
+    id: meerkat_core::OAuthProviderIdentity,
+) -> NormalizedBackendKind {
+    use meerkat_core::OAuthProviderIdentity;
+    match id {
+        OAuthProviderIdentity::AnthropicClaudeAi
+        | OAuthProviderIdentity::AnthropicConsoleApiKey => {
+            NormalizedBackendKind::Anthropic(AnthropicBackendKind::AnthropicApi)
+        }
+        OAuthProviderIdentity::OpenAiChatGpt => {
+            NormalizedBackendKind::OpenAi(OpenAiBackendKind::ChatGptBackend)
+        }
+        OAuthProviderIdentity::GoogleCodeAssist => {
+            NormalizedBackendKind::Google(GoogleBackendKind::GoogleCodeAssist)
+        }
+    }
+}
+
 /// Provider-tagged normalized auth method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NormalizedAuthMethod {

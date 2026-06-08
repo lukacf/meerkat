@@ -27,7 +27,7 @@ use meerkat_auth_core::auth_store::{
     InMemoryCoordinator, PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
     RefreshFn, TokenKey, TokenStore,
 };
-use meerkat_auth_core::oauth_flow::OAuthProviderIdentity;
+use meerkat_auth_core::oauth_flow::{OAuthProviderIdentity, oauth_provider_endpoints};
 
 pub type TokenCommitFn = Box<
     dyn FnOnce(PersistedTokens) -> BoxFuture<'static, Result<PersistedTokens, RefreshError>>
@@ -60,10 +60,10 @@ fn code_assist_client_secret() -> Option<&'static str> {
 // ---------------------------------------------------------------------
 
 /// Project the Google Code Assist OAuth endpoints from the auth-core owner.
-/// Delegates to `OAuthProviderIdentity::GoogleCodeAssist.endpoints`, which
-/// also applies the test endpoint override.
+/// Delegates to `oauth_provider_endpoints(OAuthProviderIdentity::GoogleCodeAssist, ..)`,
+/// which also applies the test endpoint override.
 pub fn code_assist_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints {
-    OAuthProviderIdentity::GoogleCodeAssist.endpoints(redirect_uri)
+    oauth_provider_endpoints(OAuthProviderIdentity::GoogleCodeAssist, redirect_uri)
 }
 
 // ---------------------------------------------------------------------

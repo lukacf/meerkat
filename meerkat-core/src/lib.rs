@@ -48,6 +48,7 @@ pub mod memory;
 pub mod model_defaults;
 pub mod model_profile;
 pub mod model_registry;
+pub mod oauth_identity;
 pub mod ops;
 pub mod ops_lifecycle;
 pub mod peer_correlation;
@@ -221,6 +222,7 @@ pub use lifecycle::{
 };
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
 pub use model_defaults::ModelOperationalDefaultsResolver;
+pub use oauth_identity::OAuthProviderIdentity;
 pub use ops::{
     AsyncOpRef, ConcurrencyLimits, ContextStrategy, ForkBranch, ForkBudgetPolicy, OpEvent,
     OperationId, OperationPolicy, OperationResult, OperationSpec, ResultShape, SessionEffect,

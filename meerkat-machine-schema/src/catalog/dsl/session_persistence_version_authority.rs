@@ -59,8 +59,8 @@ machine! {
             },
         }
 
-        disposition VersionStampAuthorized => local,
-        disposition VersionRestoreAuthorized => local,
+        disposition VersionStampAuthorized => local seam NoOwnerRealization,
+        disposition VersionRestoreAuthorized => local seam NoOwnerRealization,
 
         transition AuthorizeSessionEnvelopeVersionStamp {
             on input AuthorizeSessionEnvelopeVersionStamp

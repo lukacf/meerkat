@@ -3,6 +3,7 @@ use crate::identity::{
     NamedTypeBinding, NamedTypeId, PhaseId, ProtocolId, RustTypeAtom, SignalVariantId,
     TransitionId,
 };
+use crate::seam::SeamClassification;
 use indexmap::{IndexMap, IndexSet};
 use std::fmt;
 
@@ -371,6 +372,10 @@ pub struct EffectDispositionRule {
     /// in every composition that includes this machine.
     /// Only meaningful for `Local` or `External` dispositions.
     pub handoff_protocol: Option<ProtocolId>,
+    /// Schema-owned classification of this effect's ownership boundary.
+    /// Declared on the catalog DSL via the `seam <Classification>` clause and
+    /// read by the seam-inventory audit straight off the generated schema.
+    pub seam_classification: SeamClassification,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

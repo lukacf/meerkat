@@ -409,9 +409,25 @@ pub enum DispositionKind {
     Routed(Vec<Ident>),
 }
 
+/// Schema-owned classification of an effect's ownership boundary, declared on
+/// the disposition via the required `seam <Classification>` clause.
+///
+/// Mirrors `meerkat_machine_schema::SeamClassification`. Held as a dsl-core-local
+/// enum (like [`DispositionKind`]) because dsl-core is a dependency *of* the
+/// schema crate and cannot depend back on it; `gen_schema` emits the matching
+/// `SeamClassification::<Variant>` tokens into the generated schema.
+#[derive(Debug, Clone, Copy)]
+pub enum SeamClass {
+    NoOwnerRealization,
+    OwnerRealizationOnly,
+    OwnerRealizationPlusFeedback,
+    SurfaceResultAlignment,
+}
+
 #[derive(Debug)]
 pub struct DispositionDef {
     pub effect: Ident,
     pub kind: DispositionKind,
     pub handoff_protocol: Option<Ident>,
+    pub seam_classification: SeamClass,
 }

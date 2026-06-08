@@ -2,6 +2,7 @@ pub mod catalog;
 mod composition;
 pub mod identity;
 mod machine;
+mod seam;
 pub mod types;
 
 pub use identity::{
@@ -37,6 +38,7 @@ pub use machine::{
     MachineSchemaError, Quantifier, RustBinding, StateSchema, TransitionSchema, TriggerKind,
     TriggerMatch, TypeRef, Update, VariantSchema,
 };
+pub use seam::SeamClassification;
 
 #[cfg(test)]
 mod tests {

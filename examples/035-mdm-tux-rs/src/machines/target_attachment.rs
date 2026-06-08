@@ -131,14 +131,14 @@ machine! {
             ) == false
         }
 
-        disposition EnsureTuxPeer => local,
-        disposition PersistAttachmentHint => local,
-        disposition ClearAttachmentHint => local,
-        disposition SendAttachRequest => local,
-        disposition StartDirectHeartbeat => local,
-        disposition StopDirectHeartbeat => local,
-        disposition ReturnToRegisterClean => local,
-        disposition ReturnToRegisterWithHint => local,
+        disposition EnsureTuxPeer => local seam NoOwnerRealization,
+        disposition PersistAttachmentHint => local seam NoOwnerRealization,
+        disposition ClearAttachmentHint => local seam NoOwnerRealization,
+        disposition SendAttachRequest => local seam NoOwnerRealization,
+        disposition StartDirectHeartbeat => local seam NoOwnerRealization,
+        disposition StopDirectHeartbeat => local seam NoOwnerRealization,
+        disposition ReturnToRegisterClean => local seam NoOwnerRealization,
+        disposition ReturnToRegisterWithHint => local seam NoOwnerRealization,
 
         transition AdoptedIdle {
             on input Adopted { target_id, lease_id, tux_id, tux_pubkey, tux_direct_addr }

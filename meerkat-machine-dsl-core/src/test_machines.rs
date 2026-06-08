@@ -33,7 +33,7 @@ machine TrafficLight {
         Switched,
     }
 
-    disposition Switched => local,
+    disposition Switched => local seam NoOwnerRealization,
 
     transition ToggleGreen {
         on input Toggle
@@ -134,12 +134,12 @@ machine OrderLifecycle {
         RetryAttempted { attempt: u64 },
     }
 
-    disposition OrderSubmitted => local,
-    disposition OrderAssigned => local,
-    disposition OrderPaid => local,
-    disposition OrderCompleted => external handoff order_completion,
-    disposition OrderCancelled => external,
-    disposition RetryAttempted => local,
+    disposition OrderSubmitted => local seam NoOwnerRealization,
+    disposition OrderAssigned => local seam NoOwnerRealization,
+    disposition OrderPaid => local seam NoOwnerRealization,
+    disposition OrderCompleted => external handoff order_completion seam OwnerRealizationOnly,
+    disposition OrderCancelled => external seam OwnerRealizationOnly,
+    disposition RetryAttempted => local seam NoOwnerRealization,
 
     helper is_active_phase(p: OrderPhase) -> bool {
         p == Phase::Draft || p == Phase::Submitted || p == Phase::Assigned || p == Phase::Paid

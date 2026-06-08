@@ -139,13 +139,13 @@ machine! {
             self.lifecycle_phase != Phase::ShuttingDown || is_active_phase(self.lifecycle_phase) == false
         }
 
-        disposition TurnAdmissionProjected => local,
-        disposition TurnInterruptRequested => local,
-        disposition StartTurnDispatchResolved => local,
-        disposition CancelAfterBoundaryAuthorized => local,
-        disposition StartTurnDispositionResolved => local,
-        disposition StartTurnPublicTerminalResolved => local,
-        disposition RuntimeKeepAliveResolved => local,
+        disposition TurnAdmissionProjected => local seam NoOwnerRealization,
+        disposition TurnInterruptRequested => local seam NoOwnerRealization,
+        disposition StartTurnDispatchResolved => local seam NoOwnerRealization,
+        disposition CancelAfterBoundaryAuthorized => local seam NoOwnerRealization,
+        disposition StartTurnDispositionResolved => local seam NoOwnerRealization,
+        disposition StartTurnPublicTerminalResolved => local seam NoOwnerRealization,
+        disposition RuntimeKeepAliveResolved => local seam NoOwnerRealization,
 
         transition ProjectTurnAdmission {
             per_phase [Idle, Admitted, Running, Completing, ShuttingDown]

@@ -246,12 +246,12 @@ machine! {
             self.lifecycle_phase != Phase::Superseded || self.superseded_by_binding_key != None
         }
 
-        disposition AttentionPaused => local,
-        disposition AttentionResumed => local,
-        disposition AttentionSuperseded => local,
-        disposition AttentionStopped => local,
-        disposition AttentionEligibilityClassified => local,
-        disposition AttentionAuthorityClassified => local,
+        disposition AttentionPaused => local seam NoOwnerRealization,
+        disposition AttentionResumed => local seam NoOwnerRealization,
+        disposition AttentionSuperseded => local seam NoOwnerRealization,
+        disposition AttentionStopped => local seam NoOwnerRealization,
+        disposition AttentionEligibilityClassified => local seam SurfaceResultAlignment,
+        disposition AttentionAuthorityClassified => local seam SurfaceResultAlignment,
 
         transition PauseActive {
             on input Pause { expected_revision, until_utc_ms }

@@ -99,8 +99,8 @@ machine! {
                 || status == ApprovalLifecycleStatus::Cancelled
         }
 
-        disposition ApprovalStatusResolved => local,
-        disposition ApprovalLifecycleRejected => local,
+        disposition ApprovalStatusResolved => local seam SurfaceResultAlignment,
+        disposition ApprovalLifecycleRejected => local seam SurfaceResultAlignment,
 
         transition CreateRejectedEmptyAllowedDecisions {
             on input CreateApproval {

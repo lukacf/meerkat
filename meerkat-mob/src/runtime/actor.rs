@@ -6094,12 +6094,18 @@ impl MobActor {
                             member_id: agent_identity.to_string(),
                         }
                     }
-                    meerkat_runtime::completion::CompletionOutcome::Abandoned(error)
+                    meerkat_runtime::completion::CompletionOutcome::Abandoned {
+                        reason: error,
+                        ..
+                    }
                     | meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
                         reason: error,
                         ..
                     }
-                    | meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(error) => {
+                    | meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated {
+                        reason: error,
+                        ..
+                    } => {
                         mob_dsl::MobMachineInput::KickoffResolveFailed {
                             member_id: agent_identity.to_string(),
                             error,

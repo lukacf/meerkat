@@ -48,7 +48,7 @@ use meerkat_core::{
 use meerkat_core::{CommsCapabilityError, Provider};
 use meerkat_core::{
     Session, SessionLlmIdentity, SessionMetadata, SessionSystemContextState, SessionTooling,
-    ToolCategoryOverride,
+    SystemContextStateError, ToolCategoryOverride,
 };
 use meerkat_machine_schema::catalog::dsl::{
     dsl_mob_machine as schema_mob_machine,
@@ -3882,7 +3882,7 @@ async fn spawn_spec_with_test_ops_owner(
     handle
         .spawn_spec_receipt_with_owner_context(spec, owner_context)
         .await?;
-    let entry = handle.get_member(&identity).await.ok_or_else(|| {
+    let entry = handle.get_member(&identity).await?.ok_or_else(|| {
         MobError::Internal(format!(
             "spawn succeeded but roster entry missing for '{identity}'"
         ))
@@ -5220,8 +5220,8 @@ impl SessionAgent for PersistentMockAgent {
         }
     }
 
-    fn session_clone(&self) -> Session {
-        Session::with_id(self.session_id.clone())
+    fn session_clone(&self) -> Result<Session, SystemContextStateError> {
+        Ok(Session::with_id(self.session_id.clone()))
     }
 
     fn durable_llm_identity(&self) -> Option<SessionLlmIdentity> {
@@ -5829,8 +5829,8 @@ impl SessionAgent for OverlayProbeSessionAgent {
         }
     }
 
-    fn session_clone(&self) -> Session {
-        self.session.clone()
+    fn session_clone(&self) -> Result<Session, SystemContextStateError> {
+        Ok(self.session.clone())
     }
 
     fn durable_llm_identity(&self) -> Option<SessionLlmIdentity> {
@@ -6441,6 +6441,7 @@ async fn test_mob_builder_accepts_persistent_session_service() {
         handle
             .get_member(&AgentIdentity::from("w-1"))
             .await
+            .unwrap()
             .is_some(),
         "spawn should succeed when mob is built with PersistentSessionService"
     );
@@ -10273,6 +10274,7 @@ async fn test_stopped_runtime_commands_are_rejected_by_machine_admission() {
     let entry = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("member exists");
 
     handle.stop().await.expect("stop");
@@ -10529,6 +10531,7 @@ async fn test_cancel_all_work_after_respawn_preserves_stale_fence_error() {
     let original = handle
         .get_member(&member_id)
         .await
+        .unwrap()
         .expect("original member exists");
     let old_runtime_id = original.agent_runtime_id.clone();
     let old_fence_token = original.fence_token;
@@ -10540,6 +10543,7 @@ async fn test_cancel_all_work_after_respawn_preserves_stale_fence_error() {
     let replacement = handle
         .get_member(&member_id)
         .await
+        .unwrap()
         .expect("replacement member exists");
     assert_eq!(replacement.agent_runtime_id, receipt.agent_runtime_id);
     assert_ne!(
@@ -10608,7 +10612,7 @@ async fn test_stopped_submit_work_auto_spawn_rejects_before_policy_provisioning(
         "stopped auto-spawn SubmitWork must surface MobMachine phase admission: {result:?}"
     );
     assert!(
-        handle.get_member(&target).await.is_none(),
+        handle.get_member(&target).await.unwrap().is_none(),
         "stopped SubmitWork must not auto-spawn the absent target"
     );
     assert_eq!(
@@ -10649,7 +10653,7 @@ async fn test_running_submit_work_auto_spawn_non_addressable_rejects_before_poli
         "running external auto-spawn SubmitWork must surface MobMachine addressability admission: {result:?}"
     );
     assert!(
-        handle.get_member(&target).await.is_none(),
+        handle.get_member(&target).await.unwrap().is_none(),
         "non-addressable auto-spawn SubmitWork must not insert the rejected target"
     );
     assert_eq!(
@@ -10823,6 +10827,7 @@ async fn test_default_mob_authority_can_spawn_definition_profiles_only() {
         handle
             .get_member(&AgentIdentity::from("blocked"))
             .await
+            .unwrap()
             .is_none(),
         "scope-denied profile spawn must not mutate roster state"
     );
@@ -11408,7 +11413,11 @@ async fn test_spawn_helper_contract_aligns_with_retired_terminal_state() {
 
     assert_eq!(result.agent_identity, helper_id);
     assert!(
-        handle.get_member(&result.agent_identity).await.is_none(),
+        handle
+            .get_member(&result.agent_identity)
+            .await
+            .unwrap()
+            .is_none(),
         "spawn_helper must remove the helper from the active roster once it returns"
     );
 }
@@ -11450,7 +11459,11 @@ async fn test_fork_helper_contract_aligns_with_retired_terminal_state() {
 
     assert_eq!(result.agent_identity, helper_id);
     assert!(
-        handle.get_member(&result.agent_identity).await.is_none(),
+        handle
+            .get_member(&result.agent_identity)
+            .await
+            .unwrap()
+            .is_none(),
         "fork_helper must remove the helper from the active roster once it returns"
     );
     assert_eq!(
@@ -11458,6 +11471,7 @@ async fn test_fork_helper_contract_aligns_with_retired_terminal_state() {
         handle
             .get_member(&AgentIdentity::from(source_id.as_str()))
             .await
+            .unwrap()
             .and_then(|entry| entry.member_ref.bridge_session_id().cloned()),
         "fork_helper must not perturb the source member's canonical session binding"
     );
@@ -11630,10 +11644,12 @@ async fn test_respawn_success_restores_existing_peer_wiring() {
     let left_entry = handle
         .get_member(&AgentIdentity::from(left.as_str()))
         .await
+        .unwrap()
         .expect("left remains active");
     let right_entry = handle
         .get_member(&AgentIdentity::from(right.as_str()))
         .await
+        .unwrap()
         .expect("right remains active");
     assert!(
         left_entry
@@ -11694,6 +11710,7 @@ async fn test_respawn_repairs_local_machine_edge_without_roster_projection() {
     let left_before = handle
         .get_member(&AgentIdentity::from(left.as_str()))
         .await
+        .unwrap()
         .expect("left before respawn");
     assert!(
         left_before
@@ -11713,10 +11730,12 @@ async fn test_respawn_repairs_local_machine_edge_without_roster_projection() {
     let left_after = handle
         .get_member(&AgentIdentity::from(left.as_str()))
         .await
+        .unwrap()
         .expect("left after respawn");
     let right_after = handle
         .get_member(&AgentIdentity::from(right.as_str()))
         .await
+        .unwrap()
         .expect("right after respawn");
     assert!(
         left_after
@@ -11766,6 +11785,7 @@ async fn test_respawn_reports_machine_local_edge_to_retired_peer() {
         handle
             .get_member(&AgentIdentity::from(right.as_str()))
             .await
+            .unwrap()
             .is_none(),
         "test setup should remove the old peer from the live roster"
     );
@@ -11842,6 +11862,7 @@ async fn test_respawn_archive_failure_removes_stale_anchor_and_respawns() {
     let retained = handle
         .get_member(&AgentIdentity::from(member_id.as_str()))
         .await
+        .unwrap()
         .expect("archive failure should retain retiring member for retry");
     let (original_runtime_id, original_fence_token) = original_snapshot
         .runtime_identity_fields()
@@ -12265,6 +12286,7 @@ async fn test_wait_for_kickoff_complete_returns_broken_snapshot_without_hanging(
     let old_sid = handle
         .get_member(&AgentIdentity::from(broken.as_str()))
         .await
+        .unwrap()
         .expect("roster entry")
         .bridge_session_id()
         .cloned()
@@ -12572,6 +12594,7 @@ async fn test_spawn_member_tool_dispatches_backend_selection() {
         handle
             .get_member(&AgentIdentity::from("w-ext"))
             .await
+            .unwrap()
             .is_none(),
         "scope-denied operator spawn tool must not provision a backend peer"
     );
@@ -12605,6 +12628,7 @@ async fn test_spawn_member_profile_scope_allows_auto_wire_parent() {
         handle
             .get_member(&AgentIdentity::from("w-auto-wire"))
             .await
+            .unwrap()
             .is_some(),
         "profile-scoped auto-wired spawn should provision the requested member"
     );
@@ -12677,10 +12701,12 @@ async fn test_for_resume_rebuilds_definition_and_roster() {
     let entry_1 = resumed
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .unwrap();
     let entry_2 = resumed
         .get_member(&AgentIdentity::from("w-2"))
         .await
+        .unwrap()
         .unwrap();
     assert!(entry_1.wired_to.contains(&AgentIdentity::from("w-2")));
     assert!(entry_2.wired_to.contains(&AgentIdentity::from("w-1")));
@@ -12902,6 +12928,7 @@ async fn test_resume_restores_missing_sessions_with_same_session_and_history() {
     let old_sid = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("roster entry")
         .bridge_session_id()
         .cloned()
@@ -12932,6 +12959,7 @@ async fn test_resume_restores_missing_sessions_with_same_session_and_history() {
     let restored_sid = resumed
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("restored entry")
         .bridge_session_id()
         .cloned()
@@ -12987,6 +13015,7 @@ async fn test_resume_restores_missing_sessions_with_tool_wiring() {
     let old_sid = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("roster entry")
         .bridge_session_id()
         .cloned()
@@ -13009,6 +13038,7 @@ async fn test_resume_restores_missing_sessions_with_tool_wiring() {
     let restored_sid = resumed
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("restored entry")
         .bridge_session_id()
         .cloned()
@@ -13050,6 +13080,7 @@ async fn test_resume_marks_missing_persisted_session_as_broken() {
     let old_sid = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("roster entry")
         .bridge_session_id()
         .cloned()
@@ -13277,6 +13308,7 @@ async fn test_resume_skips_broken_orchestrator_notification_and_keeps_partial_re
     let orchestrator_sid = handle
         .get_member(&AgentIdentity::from("lead-1"))
         .await
+        .unwrap()
         .expect("orchestrator entry")
         .bridge_session_id()
         .cloned()
@@ -13336,6 +13368,7 @@ async fn test_broken_member_turn_returns_restore_failed_error() {
     let old_sid = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("roster entry")
         .bridge_session_id()
         .cloned()
@@ -13417,6 +13450,7 @@ async fn test_wire_broken_member_returns_restore_failed_error() {
     let old_sid = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("roster entry")
         .bridge_session_id()
         .cloned()
@@ -13490,6 +13524,7 @@ async fn test_retire_broken_member_succeeds_and_removes_it() {
     let old_sid = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("roster entry")
         .bridge_session_id()
         .cloned()
@@ -13518,6 +13553,7 @@ async fn test_retire_broken_member_succeeds_and_removes_it() {
         resumed
             .get_member(&AgentIdentity::from("w-1"))
             .await
+            .unwrap()
             .is_none(),
         "retire should remove the broken member from the roster"
     );
@@ -13552,6 +13588,7 @@ async fn test_respawn_broken_member_clears_restore_diagnostic() {
     let old_sid = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("roster entry")
         .bridge_session_id()
         .cloned()
@@ -13745,6 +13782,7 @@ async fn test_resume_restores_persisted_behavior_metadata() {
     let old_sid = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("roster entry")
         .bridge_session_id()
         .cloned()
@@ -13795,6 +13833,7 @@ async fn test_resume_restores_persisted_behavior_metadata() {
     let restored_sid = resumed
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("restored entry")
         .bridge_session_id()
         .cloned()
@@ -13849,6 +13888,7 @@ async fn test_resume_marks_comms_name_mismatch_as_broken() {
     let old_sid = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("roster entry")
         .bridge_session_id()
         .cloned()
@@ -14143,6 +14183,7 @@ async fn test_resume_recreates_missing_external_bridge_preserving_backend_identi
     let old_entry = handle
         .get_member(&AgentIdentity::from("w-ext"))
         .await
+        .unwrap()
         .expect("external roster entry");
     let (old_peer_id, old_address, old_sid) = match old_entry.member_ref {
         MemberRef::BackendPeer {
@@ -14171,6 +14212,7 @@ async fn test_resume_recreates_missing_external_bridge_preserving_backend_identi
     let resumed_entry = resumed
         .get_member(&AgentIdentity::from("w-ext"))
         .await
+        .unwrap()
         .expect("resumed external entry");
     match resumed_entry.member_ref {
         MemberRef::BackendPeer {
@@ -14264,6 +14306,7 @@ async fn test_resume_treats_normalized_external_binding_overlay_as_projection_on
     let resumed_entry = resumed
         .get_member(&AgentIdentity::from("w-ext"))
         .await
+        .unwrap()
         .expect("resumed external entry");
     match resumed_entry.member_ref {
         MemberRef::BackendPeer {
@@ -14415,6 +14458,7 @@ async fn test_resume_treats_failed_external_binding_overlay_as_projection_only()
     let resumed_entry = resumed
         .get_member(&AgentIdentity::from("w-ext"))
         .await
+        .unwrap()
         .expect("resumed external entry");
     match resumed_entry.member_ref {
         MemberRef::BackendPeer { session_id, .. } => {
@@ -14557,6 +14601,7 @@ async fn test_resume_ignores_stale_normalized_external_binding_overlay_for_membe
     let entry = resumed
         .get_member(&AgentIdentity::from("w-ext"))
         .await
+        .unwrap()
         .expect("replayed member must remain visible");
     assert!(
         entry.member_ref.bridge_session_id().is_some(),
@@ -14684,6 +14729,7 @@ async fn test_reconcile_spawns_member_despite_stale_overlay_only_record() {
         resumed
             .get_member(&AgentIdentity::from("ghost"))
             .await
+            .unwrap()
             .is_none(),
         "overlay-only records must not materialize members on restart"
     );
@@ -15087,6 +15133,7 @@ async fn test_resume_reconciles_mixed_topology_without_losing_external_member_re
     let old_ext_entry = handle
         .get_member(&AgentIdentity::from("w-ext"))
         .await
+        .unwrap()
         .expect("external entry before resume");
     let (old_ext_peer_id, old_ext_addr, old_ext_sid) = match old_ext_entry.member_ref {
         MemberRef::BackendPeer {
@@ -15134,6 +15181,7 @@ async fn test_resume_reconciles_mixed_topology_without_losing_external_member_re
     let resumed_sub = resumed
         .get_member(&AgentIdentity::from("w-sub"))
         .await
+        .unwrap()
         .expect("resumed session-backed member entry");
     let resumed_sub_sid = match resumed_sub.member_ref {
         MemberRef::Session { ref session_id } => session_id.clone(),
@@ -15147,6 +15195,7 @@ async fn test_resume_reconciles_mixed_topology_without_losing_external_member_re
     let resumed_ext = resumed
         .get_member(&AgentIdentity::from("w-ext"))
         .await
+        .unwrap()
         .expect("resumed external entry");
     match resumed_ext.member_ref {
         MemberRef::BackendPeer {
@@ -15232,6 +15281,7 @@ async fn test_resume_fails_closed_when_live_owner_blocks_trust_repair() {
     let ext_entry = handle
         .get_member(&AgentIdentity::from("w-ext"))
         .await
+        .unwrap()
         .expect("external entry before resume");
     let ext_peer_id = match ext_entry.member_ref {
         MemberRef::BackendPeer { ref peer_id, .. } => peer_id.clone(),
@@ -15337,6 +15387,7 @@ async fn test_resume_trust_repair_preflights_before_any_projection_mutation() {
     let ext_entry = handle
         .get_member(&AgentIdentity::from("w-ext"))
         .await
+        .unwrap()
         .expect("external entry before resume");
     let ext_peer_id = match ext_entry.member_ref {
         MemberRef::BackendPeer { ref peer_id, .. } => peer_id.clone(),
@@ -15557,6 +15608,7 @@ async fn test_resume_reestablishes_missing_trust() {
     let resumed_sid_1 = resumed
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("w-1")
         .bridge_session_id()
         .cloned()
@@ -15564,6 +15616,7 @@ async fn test_resume_reestablishes_missing_trust() {
     let resumed_sid_2 = resumed
         .get_member(&AgentIdentity::from("w-2"))
         .await
+        .unwrap()
         .expect("w-2")
         .bridge_session_id()
         .cloned()
@@ -15624,6 +15677,7 @@ async fn test_resume_leaves_stale_trust_without_machine_revoke_authority() {
     let resumed_sid_1 = resumed
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("w-1")
         .bridge_session_id()
         .cloned()
@@ -15675,6 +15729,7 @@ async fn test_resume_restores_external_wiring_from_event_log() {
     let resumed_sid = resumed
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .expect("resumed member")
         .bridge_session_id()
         .cloned()
@@ -15687,6 +15742,7 @@ async fn test_resume_restores_external_wiring_from_event_log() {
     let entry = resumed
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .expect("resumed member");
     assert_eq!(
         entry
@@ -16256,6 +16312,7 @@ async fn test_spawn_fails_when_profile_comms_disabled() {
         handle
             .get_member(&AgentIdentity::from("w-1"))
             .await
+            .unwrap()
             .is_none()
     );
 }
@@ -16277,6 +16334,7 @@ async fn test_spawn_append_failure_rolls_back_runtime_state() {
         handle
             .get_member(&AgentIdentity::from("w-1"))
             .await
+            .unwrap()
             .is_none(),
         "spawn append failure must leave roster untouched"
     );
@@ -16384,6 +16442,7 @@ async fn test_retire_removes_wiring_from_peers() {
     let entry = handle
         .get_member(&AgentIdentity::from("w-2"))
         .await
+        .unwrap()
         .unwrap();
     assert!(entry.wired_to.contains(&AgentIdentity::from("w-1")));
 
@@ -16397,6 +16456,7 @@ async fn test_retire_removes_wiring_from_peers() {
     let entry = handle
         .get_member(&AgentIdentity::from("w-2"))
         .await
+        .unwrap()
         .unwrap();
     assert!(!entry.wired_to.contains(&AgentIdentity::from("w-1")));
 }
@@ -16426,6 +16486,7 @@ async fn test_retire_archive_failure_is_not_silent() {
         handle
             .get_member(&AgentIdentity::from("w-1"))
             .await
+            .unwrap()
             .is_none(),
         "archive failure must remove the stale roster anchor"
     );
@@ -16476,6 +16537,7 @@ async fn test_retire_trust_removal_failure_is_not_silent() {
         handle
             .get_member(&AgentIdentity::from("w-1"))
             .await
+            .unwrap()
             .is_none(),
         "retire must remove roster entry even when trust removal fails"
     );
@@ -16523,12 +16585,14 @@ async fn test_retire_fails_when_peer_retired_notification_fails_without_side_eff
         handle
             .get_member(&AgentIdentity::from("w-1"))
             .await
+            .unwrap()
             .is_none(),
         "retired meerkat should be removed from roster"
     );
     let entry_w2 = handle
         .get_member(&AgentIdentity::from("w-2"))
         .await
+        .unwrap()
         .expect("w-2 should stay in roster");
     assert!(
         !entry_w2.wired_to.contains(&AgentIdentity::from("w-1")),
@@ -16572,12 +16636,14 @@ async fn test_retire_append_failure_is_retryable_without_side_effects() {
         handle
             .get_member(&AgentIdentity::from("w-1"))
             .await
+            .unwrap()
             .is_some(),
         "retire append failure must keep roster state retryable"
     );
     let entry_w2 = handle
         .get_member(&AgentIdentity::from("w-2"))
         .await
+        .unwrap()
         .expect("w-2 should remain in roster");
     assert!(
         entry_w2.wired_to.contains(&AgentIdentity::from("w-1")),
@@ -16623,12 +16689,14 @@ async fn test_wire_establishes_bidirectional() {
     let entry_l = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .unwrap();
     assert!(entry_l.wired_to.contains(&AgentIdentity::from("w-1")));
 
     let entry_w = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .unwrap();
     assert!(entry_w.wired_to.contains(&AgentIdentity::from("l-1")));
 }
@@ -16657,6 +16725,7 @@ async fn test_member_roster_surfaces_peer_id() {
     let entry = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .expect("member should exist");
     assert_eq!(entry.peer_id, Some(expected_peer_id));
     assert_eq!(
@@ -16827,6 +16896,7 @@ async fn test_wire_external_adds_trusted_peer_and_tracks_projection() {
     let entry_l = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .expect("member should exist");
     assert!(
         entry_l
@@ -16908,6 +16978,7 @@ async fn test_wire_external_rejects_same_name_descriptor_replacement() {
     let entry_l = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .expect("member should exist");
     assert_eq!(
         entry_l
@@ -17075,6 +17146,7 @@ async fn test_rewire_external_machine_edge_without_roster_projection_repairs_tru
     let entry = handle
         .get_member(&AgentIdentity::from("l-machine-repair"))
         .await
+        .unwrap()
         .expect("member should exist");
     assert!(
         !entry
@@ -17123,6 +17195,7 @@ async fn test_respawn_repairs_external_roster_spec_trust_without_projection() {
     let entry = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .expect("member should exist");
     let new_sid = entry
         .member_ref
@@ -17187,6 +17260,7 @@ async fn test_respawn_repairs_external_machine_edge_without_roster_projection() 
     let entry_before = handle
         .get_member(&AgentIdentity::from("l-machine"))
         .await
+        .unwrap()
         .expect("member before respawn");
     assert!(
         !entry_before
@@ -17202,6 +17276,7 @@ async fn test_respawn_repairs_external_machine_edge_without_roster_projection() 
     let entry = handle
         .get_member(&AgentIdentity::from("l-machine"))
         .await
+        .unwrap()
         .expect("member should exist");
     let new_sid = entry
         .member_ref
@@ -17258,6 +17333,7 @@ async fn test_unwire_external_removes_trust_and_projection() {
     let entry = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .expect("member should exist");
     assert!(
         !entry
@@ -17406,6 +17482,7 @@ async fn test_retire_external_unwire_append_failure_does_not_persist_member_reti
         handle
             .get_member(&AgentIdentity::from("l-1"))
             .await
+            .unwrap()
             .is_some(),
         "failed pre-retire external cleanup must leave member retryable"
     );
@@ -17463,6 +17540,7 @@ async fn test_wire_external_binding_resolves_inside_mob_authority() {
     let entry = handle
         .get_member(&AgentIdentity::from("l-binding"))
         .await
+        .unwrap()
         .expect("member should exist");
     let descriptor = entry
         .external_peer_specs
@@ -17509,6 +17587,7 @@ async fn test_wire_external_binding_rejects_zero_pubkey_before_trust_install() {
     let entry = handle
         .get_member(&AgentIdentity::from("l-zero"))
         .await
+        .unwrap()
         .expect("member should exist");
     assert!(
         !entry
@@ -17658,6 +17737,7 @@ async fn test_wire_members_batch_materializes_dense_topology_once() {
     let lead = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .expect("lead projected");
     assert_eq!(lead.wired_to.len(), 2);
     assert!(lead.wired_to.contains(&AgentIdentity::from("w-1")));
@@ -17665,6 +17745,7 @@ async fn test_wire_members_batch_materializes_dense_topology_once() {
     let worker = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("worker projected");
     assert!(worker.wired_to.contains(&AgentIdentity::from("l-1")));
 
@@ -17760,10 +17841,12 @@ async fn test_wire_members_batch_append_failure_does_not_publish_machine_topolog
     let entry_l = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .expect("lead projected");
     let entry_w = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("worker projected");
     assert!(
         entry_l.wired_to.is_empty() && entry_w.wired_to.is_empty(),
@@ -18017,6 +18100,7 @@ async fn test_wire_members_batch_materializes_300_by_150_dense_topology_in_secon
         let member = handle
             .get_member(identity)
             .await
+            .unwrap()
             .expect("dense topology member projected");
         assert_eq!(
             member.wired_to.len(),
@@ -18138,6 +18222,7 @@ async fn test_retire_fanout_notifies_150_peers_with_bounded_parallelism() {
         let member = handle
             .get_member(identity)
             .await
+            .unwrap()
             .expect("peer should remain active");
         assert!(
             !member.wired_to.contains(&retiring),
@@ -18183,10 +18268,12 @@ async fn test_wire_is_idempotent_and_emits_single_pair_event() {
     let entry_l = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .unwrap();
     let entry_w = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(
         entry_l.wired_to.len(),
@@ -18485,10 +18572,12 @@ async fn test_rewire_local_machine_edge_without_roster_projection_repairs_trust_
     let left_entry = handle
         .get_member(&AgentIdentity::from(left.as_str()))
         .await
+        .unwrap()
         .expect("left member");
     let right_entry = handle
         .get_member(&AgentIdentity::from(right.as_str()))
         .await
+        .unwrap()
         .expect("right member");
     assert!(
         left_entry
@@ -18644,10 +18733,12 @@ async fn test_wire_fails_when_comms_runtime_missing_without_side_effects() {
     let entry_l = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .unwrap();
     let entry_w = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .unwrap();
     assert!(
         entry_l.wired_to.is_empty(),
@@ -18696,10 +18787,12 @@ async fn test_wire_fails_when_public_key_missing_without_side_effects() {
     let entry_l = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .unwrap();
     let entry_w = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .unwrap();
     assert!(
         entry_l.wired_to.is_empty(),
@@ -18758,10 +18851,12 @@ async fn test_wire_fails_when_peer_added_notification_fails_without_side_effects
     let entry_l = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .unwrap();
     let entry_w = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .unwrap();
     assert!(
         entry_l.wired_to.is_empty(),
@@ -18872,10 +18967,12 @@ async fn test_wire_append_failure_rolls_back_runtime_state() {
     let entry_l = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .unwrap();
     let entry_w = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .unwrap();
     assert!(
         entry_l.wired_to.is_empty(),
@@ -18935,12 +19032,14 @@ async fn test_unwire_removes_bidirectional() {
     let entry_l = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .unwrap();
     assert!(entry_l.wired_to.is_empty());
 
     let entry_w = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .unwrap();
     assert!(entry_w.wired_to.is_empty());
 }
@@ -19001,10 +19100,12 @@ async fn test_unwire_is_idempotent_and_emits_single_pair_event() {
     let entry_l = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .unwrap();
     let entry_w = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .unwrap();
     assert!(
         entry_l.wired_to.is_empty() && entry_w.wired_to.is_empty(),
@@ -19057,10 +19158,12 @@ async fn test_unwire_fails_when_comms_runtime_missing_without_side_effects() {
     let entry_l = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .unwrap();
     let entry_w = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .unwrap();
     assert!(
         entry_l.wired_to.contains(&AgentIdentity::from("w-1")),
@@ -19108,10 +19211,12 @@ async fn test_unwire_fails_when_public_key_missing_without_side_effects() {
     let entry_l = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .unwrap();
     let entry_w = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .unwrap();
     assert!(
         entry_l.wired_to.contains(&AgentIdentity::from("w-1")),
@@ -19174,10 +19279,12 @@ async fn test_unwire_second_trust_removal_failure_restores_first_side() {
     let entry_l = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .unwrap();
     let entry_w = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .unwrap();
     assert!(
         entry_l.wired_to.contains(&AgentIdentity::from("w-1")),
@@ -19237,10 +19344,12 @@ async fn test_unwire_fails_when_peer_unwired_notification_fails_without_side_eff
     let entry_l = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .unwrap();
     let entry_w = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .unwrap();
     assert!(
         entry_l.wired_to.contains(&AgentIdentity::from("w-1")),
@@ -19324,10 +19433,12 @@ async fn test_unwire_second_notification_failure_compensates_and_preserves_state
     let entry_l = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .unwrap();
     let entry_w = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .unwrap();
     assert!(
         entry_l.wired_to.contains(&AgentIdentity::from("w-1")),
@@ -19423,10 +19534,12 @@ async fn test_unwire_first_trust_removal_failure_compensates_and_preserves_state
     let entry_l = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .unwrap();
     let entry_w = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .unwrap();
     assert!(
         entry_l.wired_to.contains(&AgentIdentity::from("w-1")),
@@ -19493,10 +19606,12 @@ async fn test_unwire_append_failure_restores_runtime_state() {
     let entry_l = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .unwrap();
     let entry_w = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .unwrap();
     assert!(
         entry_l.wired_to.contains(&AgentIdentity::from("w-1")),
@@ -19551,6 +19666,7 @@ async fn test_auto_wire_orchestrator() {
     let entry_l = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .unwrap();
     assert!(
         entry_l.wired_to.contains(&AgentIdentity::from("w-1")),
@@ -19560,6 +19676,7 @@ async fn test_auto_wire_orchestrator() {
     let entry_w = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .unwrap();
     assert!(
         entry_w.wired_to.contains(&AgentIdentity::from("l-1")),
@@ -19620,6 +19737,7 @@ async fn test_auto_wire_orchestrator_not_wired_to_self() {
     let entry_l = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .unwrap();
     assert!(
         entry_l.wired_to.is_empty(),
@@ -19810,6 +19928,7 @@ async fn test_spawn_skips_broken_orchestrator_in_auto_wire_selection() {
     let worker = resumed
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("spawned worker entry");
     assert!(
         worker.wired_to.is_empty(),
@@ -19852,12 +19971,14 @@ async fn test_auto_wire_failure_is_returned_to_spawn_caller() {
         handle
             .get_member(&AgentIdentity::from("w-1"))
             .await
+            .unwrap()
             .is_none(),
         "failed spawn should rollback roster entry"
     );
     let lead_entry = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .expect("lead should remain in roster");
     assert!(
         lead_entry.wired_to.is_empty(),
@@ -19899,12 +20020,14 @@ async fn test_auto_wire_failure_after_partial_wire_cleans_peer_trust_via_spawn_r
         handle
             .get_member(&AgentIdentity::from("w-1"))
             .await
+            .unwrap()
             .is_none(),
         "failed spawn should rollback worker roster entry"
     );
     let lead_entry = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .expect("lead should remain in roster");
     assert!(
         lead_entry.wired_to.is_empty(),
@@ -19951,6 +20074,7 @@ async fn test_spawn_rollback_ignores_missing_comms_for_non_wired_planned_targets
         handle
             .get_member(&AgentIdentity::from("w-1"))
             .await
+            .unwrap()
             .is_none(),
         "rollback should still remove failed worker entry"
     );
@@ -19998,6 +20122,7 @@ async fn test_spawn_rollback_ignores_missing_comms_for_non_wired_planned_targets
         handle
             .get_member(&AgentIdentity::from("w-3"))
             .await
+            .unwrap()
             .is_none(),
         "failed spawn should not keep w-3 in roster"
     );
@@ -20098,6 +20223,7 @@ async fn test_fault_injected_lifecycle_operations_preserve_transactional_invaria
         spawn_handle
             .get_member(&AgentIdentity::from("w-1"))
             .await
+            .unwrap()
             .is_none(),
         "spawn rollback should keep failed member out of roster"
     );
@@ -20137,12 +20263,14 @@ async fn test_fault_injected_lifecycle_operations_preserve_transactional_invaria
         retire_handle
             .get_member(&AgentIdentity::from("r-1"))
             .await
+            .unwrap()
             .is_none(),
         "archive failure must remove roster entry"
     );
     let r2 = retire_handle
         .get_member(&AgentIdentity::from("r-2"))
         .await
+        .unwrap()
         .expect("r-2 should remain");
     assert!(
         !r2.wired_to.contains(&AgentIdentity::from("r-1")),
@@ -20179,14 +20307,17 @@ async fn test_role_wiring_fan_out() {
     let entry_1 = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .unwrap();
     let entry_2 = handle
         .get_member(&AgentIdentity::from("w-2"))
         .await
+        .unwrap()
         .unwrap();
     let entry_3 = handle
         .get_member(&AgentIdentity::from("w-3"))
         .await
+        .unwrap()
         .unwrap();
 
     // w-2 should be wired to w-1 (and vice versa)
@@ -20202,6 +20333,7 @@ async fn test_role_wiring_fan_out() {
     let entry_1 = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .unwrap();
     assert!(entry_1.wired_to.contains(&AgentIdentity::from("w-3")));
 }
@@ -20276,6 +20408,7 @@ async fn test_spawn_skips_broken_role_peers_in_role_wiring_selection() {
     let worker = resumed
         .get_member(&AgentIdentity::from("w-2"))
         .await
+        .unwrap()
         .expect("spawned worker");
     assert!(
         !worker.wired_to.contains(&AgentIdentity::from("w-1")),
@@ -20311,6 +20444,7 @@ async fn test_role_wiring_cross_role_fans_out_to_three_existing_targets() {
     let lead = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .expect("lead should be in roster");
     assert_eq!(
         lead.wired_to.len(),
@@ -20325,6 +20459,7 @@ async fn test_role_wiring_cross_role_fans_out_to_three_existing_targets() {
         let worker = handle
             .get_member(&AgentIdentity::from(worker_id))
             .await
+            .unwrap()
             .expect("worker should remain in roster");
         assert!(
             worker.wired_to.contains(&AgentIdentity::from("l-1")),
@@ -20350,6 +20485,7 @@ async fn test_spawn_wiring_deduplicates_overlapping_orchestrator_and_role_edges(
     let lead = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .expect("lead should exist");
     assert_eq!(
         lead.wired_to.len(),
@@ -20389,12 +20525,14 @@ async fn test_role_wiring_failure_is_returned_to_spawn_caller() {
         handle
             .get_member(&AgentIdentity::from("w-2"))
             .await
+            .unwrap()
             .is_none(),
         "failed spawn should rollback roster entry"
     );
     let entry_w1 = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("w-1 should remain in roster");
     assert!(
         !entry_w1.wired_to.contains(&AgentIdentity::from("w-2")),
@@ -21285,6 +21423,7 @@ async fn test_force_cancel_member_routes_boundary_cancel_without_retiring_member
     let entry = handle
         .get_member(&AgentIdentity::from(member_id.as_str()))
         .await
+        .unwrap()
         .expect("member remains");
     assert_eq!(
         entry.member_ref.bridge_session_id().cloned(),
@@ -21319,6 +21458,7 @@ async fn test_runtime_adapter_cancel_all_work_rejects_unsupported_boundary_cance
     let entry = handle
         .get_member(&AgentIdentity::from(member_id.as_str()))
         .await
+        .unwrap()
         .expect("member exists");
     service.set_cancel_after_boundary_supported(false);
     let baseline_boundary = service.cancel_after_boundary_call_count();
@@ -21864,6 +22004,7 @@ async fn test_external_backend_lifecycle_and_turn_policy() {
         handle
             .get_member(&AgentIdentity::from("w-ext"))
             .await
+            .unwrap()
             .is_none(),
         "retire should remove external backend member"
     );
@@ -22132,10 +22273,12 @@ async fn test_spawn_many_parallel_finalize_deduplicates_worker_pair_wiring() {
     let a = handle
         .get_member(&AgentIdentity::from("w-a"))
         .await
+        .unwrap()
         .expect("w-a should exist");
     let b = handle
         .get_member(&AgentIdentity::from("w-b"))
         .await
+        .unwrap()
         .expect("w-b should exist");
     assert_eq!(
         a.wired_to.len(),
@@ -22173,10 +22316,12 @@ async fn test_spawn_many_parallel_finalize_tolerates_overlapping_role_wiring_tar
     let lead = handle
         .get_member(&AgentIdentity::from("l-a"))
         .await
+        .unwrap()
         .expect("lead should exist");
     let worker = handle
         .get_member(&AgentIdentity::from("w-a"))
         .await
+        .unwrap()
         .expect("worker should exist");
     assert_eq!(
         lead.wired_to.len(),
@@ -22280,6 +22425,7 @@ async fn test_retiring_member_is_not_routable_before_disposal_completes() {
         handle
             .get_member(&AgentIdentity::from("w-1"))
             .await
+            .unwrap()
             .is_none(),
         "member should be removed once retirement completes"
     );
@@ -22556,6 +22702,7 @@ async fn test_stop_clears_pending_spawn_count_and_failed_member_projection() {
         handle
             .get_member(&AgentIdentity::from("w-stop-lineage"))
             .await
+            .unwrap()
             .is_none(),
         "stop must not leave a canonical roster projection for a canceled pending spawn"
     );
@@ -22686,6 +22833,7 @@ async fn test_failed_spawn_clears_pending_spawn_count_and_failed_roster_entry() 
         handle
             .get_member(&AgentIdentity::from("w-pending"))
             .await
+            .unwrap()
             .is_none(),
         "failed spawn must not leave a canonical roster entry behind"
     );
@@ -22726,16 +22874,19 @@ async fn test_failed_role_wiring_spawn_preserves_survivor_wiring_symmetry() {
         handle
             .get_member(&AgentIdentity::from("w-3"))
             .await
+            .unwrap()
             .is_none(),
         "failed spawn must not leave the new member in the canonical roster"
     );
     let w1 = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("w-1 remains active");
     let w2 = handle
         .get_member(&AgentIdentity::from("w-2"))
         .await
+        .unwrap()
         .expect("w-2 remains active");
     assert!(
         w1.wired_to.contains(&AgentIdentity::from("w-2")),
@@ -26204,6 +26355,7 @@ async fn test_retire_interrupts_autonomous_host_loop() {
         handle
             .get_member(&AgentIdentity::from("w-1"))
             .await
+            .unwrap()
             .is_none(),
         "retire must remove the member from the roster"
     );
@@ -28705,6 +28857,7 @@ async fn test_active_internal_submit_work_steer_live_injects_for_identity_bridge
     let entry = handle
         .get_member(&AgentIdentity::from("w-internal-steer"))
         .await
+        .unwrap()
         .expect("member entry");
     handle
         .submit_work_with_mode(
@@ -28776,6 +28929,7 @@ async fn test_turn_driven_submit_work_steer_admits_while_active_runtime_apply_bl
     let entry = handle
         .get_member(&AgentIdentity::from("w-turn-driven-active-steer"))
         .await
+        .unwrap()
         .expect("member entry");
 
     service.set_block_runtime_turns(true);
@@ -30002,6 +30156,7 @@ async fn test_internal_queued_submit_work_drains_after_running_turn() {
     let entry = handle
         .get_member(&AgentIdentity::from(member_id.as_str()))
         .await
+        .unwrap()
         .expect("member exists");
     service.set_start_turn_delay_ms(500);
 
@@ -30100,10 +30255,12 @@ async fn test_wire_enables_peer_request_delivery() {
     let entry_a = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .expect("l-1 should be in roster");
     let entry_b = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("w-1 should be in roster");
     let comms_name_a = format!(
         "{}/{}/{}",
@@ -30623,12 +30780,14 @@ async fn test_retire_updates_peers_and_sends_retired_notifications() {
         handle
             .get_member(&AgentIdentity::from("w-1"))
             .await
+            .unwrap()
             .is_none(),
         "retired meerkat should leave roster"
     );
     let entry_w2 = handle
         .get_member(&AgentIdentity::from("w-2"))
         .await
+        .unwrap()
         .expect("w-2 remains active");
     assert!(
         !entry_w2.wired_to.contains(&AgentIdentity::from("w-1")),
@@ -30765,6 +30924,7 @@ async fn test_dispose_member_retains_roster_when_archive_fails() {
         .get_member(&AgentIdentity::from("w-1"))
         .await
         .unwrap()
+        .unwrap()
         .bridge_session_id()
         .cloned()
         .unwrap();
@@ -30782,6 +30942,7 @@ async fn test_dispose_member_retains_roster_when_archive_fails() {
         handle
             .get_member(&AgentIdentity::from("w-1"))
             .await
+            .unwrap()
             .is_none(),
         "critical archive failure must still remove the stale roster anchor"
     );
@@ -30817,12 +30978,14 @@ async fn test_disposal_report_ordering_is_deterministic() {
         handle
             .get_member(&AgentIdentity::from("w-1"))
             .await
+            .unwrap()
             .is_none()
     );
     assert!(
         handle
             .get_member(&AgentIdentity::from("w-2"))
             .await
+            .unwrap()
             .is_none()
     );
 
@@ -30960,6 +31123,7 @@ async fn test_structural_roster_reads_round_trip_through_machine_command_surface
     let entry = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("member exists");
     assert_eq!(entry.agent_identity, MeerkatId::from("w-1"));
 
@@ -30971,6 +31135,7 @@ async fn test_structural_roster_reads_round_trip_through_machine_command_surface
         handle
             .get_member(&AgentIdentity::from("w-1"))
             .await
+            .unwrap()
             .is_none(),
         "machine-routed get_member should reflect retirement"
     );
@@ -31700,6 +31865,7 @@ async fn test_retire_returns_err_when_archive_fails() {
         handle
             .get_member(&AgentIdentity::from("w-1"))
             .await
+            .unwrap()
             .is_none(),
         "archive failure must still remove the stale roster anchor (unconditional finally block)"
     );
@@ -31786,6 +31952,7 @@ async fn test_retire_comms_failures_remain_best_effort() {
         handle
             .get_member(&AgentIdentity::from("w-1"))
             .await
+            .unwrap()
             .is_none(),
         "roster entry must be removed after best-effort comms failures"
     );
@@ -33267,6 +33434,7 @@ async fn test_spawn_member_with_initial_turn_returns_before_child_turn_completio
     )
     .await
     .expect("actor must stay responsive while child initial turn is still running")
+    .expect("get_member command")
     .expect("child should be visible in roster");
     assert_eq!(
         child.agent_identity,
@@ -33506,6 +33674,7 @@ async fn test_spawn_member_customizer_fires_with_source_and_spawner_provenance()
     let root_labels = handle
         .get_member(&AgentIdentity::from("lead-1"))
         .await
+        .unwrap()
         .expect("lead roster entry")
         .labels;
     assert_eq!(
@@ -33743,7 +33912,7 @@ async fn test_definition_spawn_policy_lowers_to_machine_authority_on_create() {
         .await
         .expect("definition policy auto-spawn should admit through machine authority");
     assert!(
-        handle.get_member(&target).await.is_some(),
+        handle.get_member(&target).await.unwrap().is_some(),
         "definition policy should seed the runtime observation source after authority"
     );
 }
@@ -33805,7 +33974,7 @@ async fn test_definition_spawn_policy_lowers_to_machine_authority_on_resume() {
         )
         .await
         .expect("resumed definition policy auto-spawn should use machine authority");
-    assert!(resumed.get_member(&target).await.is_some());
+    assert!(resumed.get_member(&target).await.unwrap().is_some());
 }
 
 #[derive(Clone)]
@@ -33873,7 +34042,7 @@ async fn test_policy_auto_spawn_ignores_customized_effective_profile_after_autho
         "policy auto-spawn must not let a customizer mutate post-authority effective profile: {result:?}"
     );
     assert!(
-        handle.get_member(&target).await.is_none(),
+        handle.get_member(&target).await.unwrap().is_none(),
         "rejected policy auto-spawn must not create the target member"
     );
     assert_eq!(
@@ -34105,6 +34274,7 @@ async fn test_restored_member_gets_external_tools() {
     let old_sid = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("roster entry")
         .bridge_session_id()
         .cloned()
@@ -35541,6 +35711,7 @@ async fn test_submit_work_internal_origin_succeeds() {
     let entry = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("member exists");
     let runtime_id = entry.agent_runtime_id.clone();
     let fence = entry.fence_token;
@@ -35568,6 +35739,7 @@ async fn test_submit_work_external_origin_succeeds() {
     let entry = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
+        .unwrap()
         .expect("member exists");
 
     let receipt = handle
@@ -35600,6 +35772,7 @@ async fn test_wire_external_peer_not_blocked_by_delayed_turn_driven_submit_work(
     let entry = handle
         .get_member(&AgentIdentity::from(member_id.as_str()))
         .await
+        .unwrap()
         .expect("member exists");
     service.set_start_turn_delay_ms(600_000);
 
@@ -35733,6 +35906,7 @@ async fn test_submit_work_stale_fence_token_rejected() {
     let entry = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("member exists");
     let runtime_id = entry.agent_runtime_id.clone();
     let stale_fence = FenceToken::new(entry.fence_token.get() + 999);
@@ -35840,6 +36014,7 @@ async fn test_cancel_all_work_validates_fence_token() {
     let entry = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("member exists");
 
     let stale_fence = FenceToken::new(entry.fence_token.get() + 1);
@@ -35863,6 +36038,7 @@ async fn test_cancel_all_work_valid_fence_succeeds() {
     let entry = handle
         .get_member(&AgentIdentity::from("w-1"))
         .await
+        .unwrap()
         .expect("member exists");
 
     let result = handle
@@ -35915,6 +36091,7 @@ async fn test_identity_first_spawn_with_role_wiring_creates_valid_roster_and_ses
     let lead_entry = handle
         .get_member(&AgentIdentity::from("lead-1"))
         .await
+        .unwrap()
         .expect("lead roster entry should exist");
     assert_eq!(lead_entry.agent_identity, AgentIdentity::from("lead-1"));
     assert_eq!(lead_entry.role, ProfileName::from("lead"));
@@ -35922,6 +36099,7 @@ async fn test_identity_first_spawn_with_role_wiring_creates_valid_roster_and_ses
     let worker_entry = handle
         .get_member(&AgentIdentity::from("worker-1"))
         .await
+        .unwrap()
         .expect("worker roster entry should exist");
     assert_eq!(worker_entry.agent_identity, AgentIdentity::from("worker-1"));
     assert_eq!(worker_entry.role, ProfileName::from("worker"));
@@ -35961,6 +36139,7 @@ async fn test_identity_first_spawn_with_role_wiring_creates_valid_roster_and_ses
     let lead_entry = handle
         .get_member(&AgentIdentity::from("lead-1"))
         .await
+        .unwrap()
         .expect("lead roster entry should still exist");
     assert!(
         lead_entry
@@ -36451,6 +36630,7 @@ impl MobRuntimeParityFixture {
             .handle
             .get_member(&self.worker_identity)
             .await
+            .unwrap()
             .is_none()
         {
             self.handle
@@ -36462,7 +36642,13 @@ impl MobRuntimeParityFixture {
     }
 
     async fn ensure_lead(&self) -> Result<(), String> {
-        if self.handle.get_member(&self.lead_identity).await.is_none() {
+        if self
+            .handle
+            .get_member(&self.lead_identity)
+            .await
+            .unwrap()
+            .is_none()
+        {
             self.handle
                 .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
                 .await
@@ -36497,6 +36683,7 @@ impl MobRuntimeParityFixture {
             .handle
             .get_member(&self.cancel_identity)
             .await
+            .unwrap()
             .is_none()
         {
             self.handle
@@ -36518,6 +36705,7 @@ impl MobRuntimeParityFixture {
         self.handle
             .get_member(&self.worker_identity)
             .await
+            .unwrap()
             .ok_or_else(|| "worker member missing after spawn".to_string())
     }
 
@@ -39894,12 +40082,15 @@ async fn test_list_members_matching_filters_by_label_and_role() {
     filter
         .labels
         .insert("faction".to_string(), "north".to_string());
-    let matches = handle.list_members_matching(filter).await;
+    let matches = handle.list_members_matching(filter).await.unwrap();
     assert_eq!(matches.len(), 1, "only one member matches faction=north");
     assert_eq!(matches[0].agent_identity, AgentIdentity::from("w-north"));
 
     // Empty filter matches every member.
-    let all = handle.list_members_matching(MemberFilter::default()).await;
+    let all = handle
+        .list_members_matching(MemberFilter::default())
+        .await
+        .unwrap();
     assert_eq!(all.len(), 2, "empty filter returns both members");
 }
 

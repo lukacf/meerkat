@@ -450,11 +450,17 @@ async fn public_agentbuilder_matches_factory_session_runtime_invariants() {
     );
 
     assert!(
-        factory_agent.execution_snapshot().is_some(),
+        factory_agent
+            .execution_snapshot()
+            .expect("snapshot projects")
+            .is_some(),
         "factory path wires runtime turn-state"
     );
     assert!(
-        public_agent.execution_snapshot().is_some(),
+        public_agent
+            .execution_snapshot()
+            .expect("snapshot projects")
+            .is_some(),
         "public AgentBuilder must wire the same runtime turn-state default"
     );
 }

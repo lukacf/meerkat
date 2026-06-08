@@ -19,6 +19,7 @@ use meerkat_core::service::{
 use meerkat_core::types::{
     HandlingMode, RenderClass, RenderMetadata, RenderSalience, RunResult, SessionId, Usage,
 };
+use meerkat_core::{SnapshotProjectionError, SystemContextStateError};
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 use meerkat_session::PersistentSessionService;
 use meerkat_session::ephemeral::SessionSnapshot;
@@ -180,12 +181,12 @@ impl SessionAgent for MockAgent {
         }
     }
 
-    fn session_clone(&self) -> meerkat_core::Session {
+    fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
         let mut session = meerkat_core::Session::with_id(self.session_id.clone());
         session
             .set_system_context_state(self.system_context_state.snapshot())
             .expect("serialize system-context state");
-        session
+        Ok(session)
     }
 
     fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
@@ -193,14 +194,20 @@ impl SessionAgent for MockAgent {
     }
 
     fn observed_session_tail(&self) -> meerkat_core::pending_continuation::ObservedSessionTailKind {
-        meerkat_core::pending_continuation::observe_session_tail(self.session_clone().messages())
+        meerkat_core::pending_continuation::observe_session_tail(
+            self.session_clone()
+                .expect("test session clone should succeed")
+                .messages(),
+        )
     }
 
     fn apply_runtime_system_context(
         &mut self,
         appends: &[meerkat_core::PendingSystemContextAppend],
     ) {
-        let mut session = self.session_clone();
+        let mut session = self
+            .session_clone()
+            .expect("test session clone should succeed");
         session.append_system_context_blocks(appends);
         self.message_count = session.messages().len();
         self.system_context_state
@@ -269,8 +276,10 @@ impl SessionAgent for SnapshotAgent {
         }
     }
 
-    fn execution_snapshot(&self) -> Option<AgentExecutionSnapshot> {
-        Some(self.execution_snapshot.clone())
+    fn execution_snapshot(
+        &self,
+    ) -> Result<Option<AgentExecutionSnapshot>, SnapshotProjectionError> {
+        Ok(Some(self.execution_snapshot.clone()))
     }
 
     fn tool_scope_snapshot(&self) -> Option<meerkat_core::ToolScopeSnapshot> {
@@ -281,12 +290,12 @@ impl SessionAgent for SnapshotAgent {
         self.external_tool_surface_snapshot.clone()
     }
 
-    fn session_clone(&self) -> meerkat_core::Session {
+    fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
         let mut session = meerkat_core::Session::with_id(self.session_id.clone());
         session
             .set_system_context_state(self.system_context_state.snapshot())
             .expect("serialize system-context state");
-        session
+        Ok(session)
     }
 
     fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
@@ -294,7 +303,11 @@ impl SessionAgent for SnapshotAgent {
     }
 
     fn observed_session_tail(&self) -> meerkat_core::pending_continuation::ObservedSessionTailKind {
-        meerkat_core::pending_continuation::observe_session_tail(self.session_clone().messages())
+        meerkat_core::pending_continuation::observe_session_tail(
+            self.session_clone()
+                .expect("test session clone should succeed")
+                .messages(),
+        )
     }
 
     fn apply_runtime_system_context(
@@ -517,12 +530,12 @@ impl SessionAgent for RecordingTurnAgent {
         }
     }
 
-    fn session_clone(&self) -> meerkat_core::Session {
+    fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
         let mut session = meerkat_core::Session::with_id(self.session_id.clone());
         session
             .set_system_context_state(self.system_context_state.snapshot())
             .expect("serialize system-context state");
-        session
+        Ok(session)
     }
 
     fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
@@ -530,7 +543,11 @@ impl SessionAgent for RecordingTurnAgent {
     }
 
     fn observed_session_tail(&self) -> meerkat_core::pending_continuation::ObservedSessionTailKind {
-        meerkat_core::pending_continuation::observe_session_tail(self.session_clone().messages())
+        meerkat_core::pending_continuation::observe_session_tail(
+            self.session_clone()
+                .expect("test session clone should succeed")
+                .messages(),
+        )
     }
 
     fn apply_runtime_system_context(

@@ -1204,7 +1204,7 @@ fn runtime_completion_to_mob_result(
         meerkat_runtime::completion::CompletionOutcome::Cancelled => {
             Err(MobError::Internal("turn cancelled".to_string()))
         }
-        meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
+        meerkat_runtime::completion::CompletionOutcome::Abandoned { reason, .. } => {
             Err(MobError::Internal(format!("turn abandoned: {reason}")))
         }
         meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { reason, error } => {
@@ -1222,7 +1222,7 @@ fn runtime_completion_to_mob_result(
                 .as_deref()
                 .unwrap_or("turn finalization failed"),
         ))),
-        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated { reason, .. } => {
             Err(MobError::Internal(format!("runtime terminated: {reason}")))
         }
     }

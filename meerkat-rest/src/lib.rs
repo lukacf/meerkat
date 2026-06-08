@@ -3631,7 +3631,7 @@ fn completion_outcome_to_api_result(
         meerkat_runtime::completion::CompletionOutcome::Cancelled => {
             Err(ApiError::RequestCancelled { details: None })
         }
-        meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
+        meerkat_runtime::completion::CompletionOutcome::Abandoned { reason, .. } => {
             let message = format!("turn abandoned: {reason}");
             if session_created {
                 Err(session_created_with_turn_failure_api_error(
@@ -3679,7 +3679,7 @@ fn completion_outcome_to_api_result(
                 }),
             })
         }
-        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated { reason, .. } => {
             Err(ApiError::Internal(format!("runtime terminated: {reason}")))
         }
     }
@@ -11320,7 +11320,7 @@ mod tests {
         assert!(
             matches!(
                 outcome,
-                meerkat_runtime::CompletionOutcome::RuntimeTerminated(_)
+                meerkat_runtime::CompletionOutcome::RuntimeTerminated { .. }
             ),
             "cleanup failure must not synthesize a runtime terminal outcome: {outcome:?}"
         );

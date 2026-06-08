@@ -6213,7 +6213,9 @@ mod tests {
         AssistantBlock, ContentBlock, ContentInput, ImageData, Message, StopReason, ToolCall,
         ToolResult, Usage, UserMessage,
     };
-    use meerkat_core::{RunId, lifecycle::run_primitive::RunApplyBoundary};
+    use meerkat_core::{
+        RunId, SystemContextStateError, lifecycle::run_primitive::RunApplyBoundary,
+    };
     use meerkat_runtime::{InMemoryRuntimeStore, RuntimeStore};
     use meerkat_store::{MemoryBlobStore, MemoryStore, SessionStoreError};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -7364,10 +7366,10 @@ mod tests {
             }
         }
 
-        fn session_clone(&self) -> Session {
+        fn session_clone(&self) -> Result<Session, SystemContextStateError> {
             match self.session.lock() {
-                Ok(guard) => guard.clone(),
-                Err(poisoned) => poisoned.into_inner().clone(),
+                Ok(guard) => Ok(guard.clone()),
+                Err(poisoned) => Ok(poisoned.into_inner().clone()),
             }
         }
 
@@ -7566,7 +7568,7 @@ mod tests {
             self.inner.snapshot()
         }
 
-        fn session_clone(&self) -> Session {
+        fn session_clone(&self) -> Result<Session, SystemContextStateError> {
             self.inner.session_clone()
         }
 
@@ -7739,7 +7741,7 @@ mod tests {
             self.inner.snapshot()
         }
 
-        fn session_clone(&self) -> Session {
+        fn session_clone(&self) -> Result<Session, SystemContextStateError> {
             self.inner.session_clone()
         }
 
@@ -8145,7 +8147,7 @@ mod tests {
             self.inner.snapshot()
         }
 
-        fn session_clone(&self) -> Session {
+        fn session_clone(&self) -> Result<Session, SystemContextStateError> {
             self.inner.session_clone()
         }
 
@@ -8390,10 +8392,10 @@ mod tests {
             }
         }
 
-        fn session_clone(&self) -> Session {
+        fn session_clone(&self) -> Result<Session, SystemContextStateError> {
             match self.session.lock() {
-                Ok(guard) => guard.clone(),
-                Err(poisoned) => poisoned.into_inner().clone(),
+                Ok(guard) => Ok(guard.clone()),
+                Err(poisoned) => Ok(poisoned.into_inner().clone()),
             }
         }
 
@@ -8689,10 +8691,10 @@ mod tests {
             }
         }
 
-        fn session_clone(&self) -> Session {
+        fn session_clone(&self) -> Result<Session, SystemContextStateError> {
             match self.session.lock() {
-                Ok(guard) => guard.clone(),
-                Err(poisoned) => poisoned.into_inner().clone(),
+                Ok(guard) => Ok(guard.clone()),
+                Err(poisoned) => Ok(poisoned.into_inner().clone()),
             }
         }
 

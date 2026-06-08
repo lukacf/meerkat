@@ -486,6 +486,8 @@ async fn member_peer_id(handle: &MobHandle, member: &str) -> Option<String> {
     handle
         .get_member(&AgentIdentity::from(member))
         .await
+        .ok()
+        .flatten()
         .and_then(|entry| entry.peer_id().map(|peer_id| peer_id.to_string()))
 }
 

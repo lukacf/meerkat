@@ -317,7 +317,7 @@ fn completion_outcome_to_cli_runtime_turn_result(
         meerkat_runtime::completion::CompletionOutcome::Cancelled => {
             Err(anyhow::anyhow!("request cancelled"))
         }
-        meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
+        meerkat_runtime::completion::CompletionOutcome::Abandoned { reason, .. } => {
             Err(anyhow::anyhow!("turn abandoned: {reason}"))
         }
         meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { reason, error } => {
@@ -340,7 +340,7 @@ fn completion_outcome_to_cli_runtime_turn_result(
                     .unwrap_or("turn finalization failed")
             ))
         }
-        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated { reason, .. } => {
             Err(anyhow::anyhow!("runtime terminated: {reason}"))
         }
     }

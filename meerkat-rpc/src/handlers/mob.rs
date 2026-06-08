@@ -2298,7 +2298,10 @@ pub async fn handle_list_members_matching(
             meerkat_contracts::WireMemberState::Retiring => meerkat_mob::MemberState::Retiring,
         }),
     };
-    let entries = handle.list_members_matching(filter).await;
+    let entries = match handle.list_members_matching(filter).await {
+        Ok(entries) => entries,
+        Err(err) => return invalid_params(id, err.to_string()),
+    };
     let members: Result<Vec<Value>, String> = entries
         .iter()
         .map(|entry| {

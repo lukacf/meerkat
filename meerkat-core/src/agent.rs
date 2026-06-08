@@ -55,7 +55,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 pub use builder::{AgentBuildPolicyError, AgentBuilder, DefaultSystemPromptPolicy};
-pub use runner::AgentRunner;
+pub use runner::{AgentRunner, SnapshotProjectionError, SystemContextStateError};
 
 /// Trait for LLM clients that can be used with the agent
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -182,6 +182,25 @@ pub struct ExternalToolUpdate {
     /// Names of servers still connecting in the background.
     pub pending: Vec<String>,
 }
+
+/// Typed command requesting cancellation at the next turn boundary.
+///
+/// Carried over the cancel-after-boundary command channel from the surface
+/// that authorized the request (e.g. `SessionService::cancel_after_boundary`)
+/// to the agent loop, which observes it at the next boundary. The agent
+/// resolves the request against its own live active run, so the command
+/// carries no run id; it is a typed edge signal, replacing the previous raw
+/// `AtomicBool` carrier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CancelAfterBoundaryCommand;
+
+/// Producer end of the cancel-after-boundary command channel.
+///
+/// Cloned and handed to the requesting surface via
+/// [`Agent::cancel_after_boundary_handle`]; mirrors the cloneable-handle shape
+/// of the session-side `interrupt_notify` so a surface can request boundary
+/// cancellation without holding a reference to the agent.
+pub type CancelAfterBoundarySender = tokio::sync::mpsc::UnboundedSender<CancelAfterBoundaryCommand>;
 
 /// Typed context supplied by the agent loop when dispatching a tool call.
 ///
@@ -1211,8 +1230,22 @@ where
     /// to decide whether to emit the `[MCP_PENDING]` system notice.
     pub(crate) mcp_server_lifecycle_handle:
         Option<Arc<dyn crate::handles::McpServerLifecycleHandle>>,
-    /// Shared live flag for cancellation at the next turn boundary.
-    pub(crate) cancel_after_boundary_requested: Arc<std::sync::atomic::AtomicBool>,
+    /// Producer end of the typed cancel-after-boundary command channel.
+    ///
+    /// Retained so [`Agent::cancel_after_boundary_handle`] can hand cloned
+    /// senders to the surface that requests boundary-only cancellation. The
+    /// agent never sends on this end itself; it only drains the matching
+    /// receiver at turn boundaries.
+    pub(crate) cancel_after_boundary_tx: CancelAfterBoundarySender,
+    /// Consumer end of the typed cancel-after-boundary command channel.
+    ///
+    /// Drained (non-blocking) at each turn boundary by
+    /// `observe_cancel_after_boundary_request`, replacing the previous
+    /// `.swap`-polled `AtomicBool`. A delivered [`CancelAfterBoundaryCommand`]
+    /// is observed at most once per boundary, mirroring the prior edge
+    /// semantics.
+    pub(crate) cancel_after_boundary_rx:
+        tokio::sync::mpsc::UnboundedReceiver<CancelAfterBoundaryCommand>,
     /// Optional resolver for model-specific operational defaults (e.g., call timeout).
     /// Consulted at each LLM call for hot-swap-aware profile default resolution.
     pub(crate) model_defaults_resolver:

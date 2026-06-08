@@ -853,10 +853,14 @@ impl<'a> PeerResponseTerminalShellVisitor<'a> {
                 .as_ref()
                 .is_some_and(|ident| ident == "peer_name");
             if is_pub && is_peer_name && type_is_named(&field.ty, "PeerName") {
+                // Token mirrors the prior text-scan contract (`pub peer_name:
+                // PeerName`); the `pub` is what makes this the terminal shell
+                // identity bus the rule bans (enum-variant carriers are exempt),
+                // so it belongs in the reported token.
                 self.push(
                     field.span(),
                     "terminal shell peer_name identity bus",
-                    "peer_name: PeerName",
+                    "pub peer_name: PeerName",
                 );
             }
         }
@@ -898,10 +902,23 @@ fn expr_references_peer_name(expr: &syn::Expr) -> bool {
     match expr {
         syn::Expr::Reference(reference) => expr_references_peer_name(&reference.expr),
         syn::Expr::Path(path) => path_tail_ident(&path.path).as_deref() == Some("peer_name"),
-        syn::Expr::Field(field) => matches!(
-            &field.member,
-            syn::Member::Named(ident) if ident == "peer_name"
-        ),
+        syn::Expr::Field(field) => {
+            expr_references_peer_name(&field.base)
+                || matches!(
+                    &field.member,
+                    syn::Member::Named(ident) if ident == "peer_name"
+                )
+        }
+        // Peel the common wrapping forms so a projection fed `peer_name` through
+        // a conversion chain (`peer_name.as_str().to_string()`,
+        // `(&peer_name).clone()`, `peer_name.into()`) is still recognized — the
+        // prior text-scan matched `peer_name` anywhere in the call argument.
+        syn::Expr::MethodCall(call) => expr_references_peer_name(&call.receiver),
+        syn::Expr::Paren(inner) => expr_references_peer_name(&inner.expr),
+        syn::Expr::Group(inner) => expr_references_peer_name(&inner.expr),
+        syn::Expr::Cast(cast) => expr_references_peer_name(&cast.expr),
+        syn::Expr::Try(inner) => expr_references_peer_name(&inner.expr),
+        syn::Expr::Await(inner) => expr_references_peer_name(&inner.base),
         _ => false,
     }
 }

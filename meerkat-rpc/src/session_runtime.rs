@@ -8076,12 +8076,15 @@ fn completion_outcome_to_rpc_result(
             message: "request cancelled".to_string(),
             data: None,
         }),
-        CompletionOutcome::Abandoned(reason) => Err(RpcError {
+        CompletionOutcome::Abandoned {
+            reason,
+            error: turn_error,
+        } => Err(RpcError {
             code: error::INTERNAL_ERROR,
             message: format!("turn abandoned: {reason}"),
-            // Carry the terminal reason as structured data (not only in the
-            // human message) so SDK consumers receive a typed payload.
-            data: Some(serde_json::json!({ "reason": reason })),
+            data: Some(serde_json::json!({
+                "error": turn_error,
+            })),
         }),
         CompletionOutcome::AbandonedWithError {
             reason,
@@ -8108,12 +8111,15 @@ fn completion_outcome_to_rpc_result(
                 })),
             })
         }
-        CompletionOutcome::RuntimeTerminated(reason) => Err(RpcError {
+        CompletionOutcome::RuntimeTerminated {
+            reason,
+            error: turn_error,
+        } => Err(RpcError {
             code: error::INTERNAL_ERROR,
             message: format!("runtime terminated: {reason}"),
-            // Carry the terminal reason as structured data (not only in the
-            // human message) so SDK consumers receive a typed payload.
-            data: Some(serde_json::json!({ "reason": reason })),
+            data: Some(serde_json::json!({
+                "error": turn_error,
+            })),
         }),
     }
 }
@@ -14806,7 +14812,7 @@ mod tests {
         assert!(
             matches!(
                 outcome,
-                meerkat_runtime::CompletionOutcome::RuntimeTerminated(_)
+                meerkat_runtime::CompletionOutcome::RuntimeTerminated { .. }
             ),
             "test completion should be a runtime termination: {outcome:?}"
         );
@@ -21417,29 +21423,41 @@ mod tests {
 
     #[test]
     fn completion_outcome_to_rpc_result_terminal_reasons_carry_structured_data() {
-        // Row #105 gate: Abandoned / RuntimeTerminated must carry the terminal
-        // reason as structured `data` for SDK consumers, not only in the human
-        // message string.
+        // Row #105 gate: Abandoned / RuntimeTerminated must carry the typed
+        // turn error as structured `data` for SDK consumers, not only in the
+        // human message string.
         let session_id = SessionId::new();
         let abandoned = completion_outcome_to_rpc_result(
-            meerkat_runtime::completion::CompletionOutcome::Abandoned("budget exhausted".into()),
+            meerkat_runtime::completion::CompletionOutcome::Abandoned {
+                reason: "budget exhausted".into(),
+                error: meerkat_core::TurnErrorMetadata::terminal(
+                    meerkat_core::TurnTerminalCauseKind::BudgetExhausted,
+                    meerkat_core::TurnTerminalOutcome::BudgetExhausted,
+                    "budget exhausted",
+                ),
+            },
             &session_id,
         )
         .expect_err("abandoned should map to an RPC error");
         assert_eq!(
-            abandoned.data.expect("abandoned data")["reason"],
+            abandoned.data.expect("abandoned data")["error"]["detail"],
             serde_json::json!("budget exhausted")
         );
 
         let terminated = completion_outcome_to_rpc_result(
-            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(
-                "runtime stopped".into(),
-            ),
+            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated {
+                reason: "runtime stopped".into(),
+                error: meerkat_core::TurnErrorMetadata::terminal(
+                    meerkat_core::TurnTerminalCauseKind::FatalFailure,
+                    meerkat_core::TurnTerminalOutcome::Failed,
+                    "runtime stopped",
+                ),
+            },
             &session_id,
         )
         .expect_err("runtime-terminated should map to an RPC error");
         assert_eq!(
-            terminated.data.expect("terminated data")["reason"],
+            terminated.data.expect("terminated data")["error"]["detail"],
             serde_json::json!("runtime stopped")
         );
     }

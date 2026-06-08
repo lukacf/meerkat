@@ -88,8 +88,9 @@ pub mod web_search;
 pub use agent::{
     Agent, AgentBuildPolicyError, AgentBuilder, AgentExecutionSnapshot, AgentLlmClient,
     AgentLlmClientDecorator, AgentRunner, AgentSessionStore, AgentToolDispatcher, BindOutcome,
-    CommsCapabilityError, CommsRuntime, CurrentTurnContent, DefaultSystemPromptPolicy,
-    DispatcherCapabilities, ExternalToolUpdate, FilteredToolDispatcher, LlmStreamResult,
+    CancelAfterBoundaryCommand, CancelAfterBoundarySender, CommsCapabilityError, CommsRuntime,
+    CurrentTurnContent, DefaultSystemPromptPolicy, DispatcherCapabilities, ExternalToolUpdate,
+    FilteredToolDispatcher, LlmStreamResult, SnapshotProjectionError, SystemContextStateError,
     ToolDispatchContext, select_tool_catalog_mode, should_compose_tool_catalog_control_plane,
 };
 pub use approval::{

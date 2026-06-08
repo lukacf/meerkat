@@ -521,6 +521,7 @@ async fn pre_tool_deny_blocks_dispatch() {
 
     let snapshot = agent
         .execution_snapshot()
+        .expect("snapshot projects")
         .expect("test turn-state handle should expose a snapshot");
     assert_eq!(snapshot.turn_phase, TurnPhase::Failed);
     assert_eq!(snapshot.terminal_outcome, TurnTerminalOutcome::Failed);

@@ -1426,7 +1426,7 @@ async fn machine_terminal_failure_without_generated_state_fails_closed_through_r
     .expect("completion waiter should resolve")
     .expect("runtime stop authority should resolve the waiter");
     match completion {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime stopped");
         }
         other => panic!("expected runtime-terminated completion, got {other:?}"),
@@ -1516,7 +1516,7 @@ async fn machine_terminal_failure_without_generated_outcome_does_not_mint_termin
     .expect("runtime stop authority should resolve the waiter");
     assert!(matches!(
         completion,
-        CompletionOutcome::RuntimeTerminated(reason) if reason == "runtime stopped"
+        CompletionOutcome::RuntimeTerminated { reason, .. } if reason == "runtime stopped"
     ));
 
     let (terminal_outcome, terminal_cause_kind) = {
@@ -3243,7 +3243,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recyc
         .await
         .expect("reset should terminate preserved waiter at test end");
     match handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => panic!("expected runtime reset termination, got {other:?}"),
@@ -3329,7 +3329,7 @@ async fn meerkat_machine_spine_snapshot_recycle_reconciles_stale_completion_wait
     );
 
     match stale_handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "recycled input no longer pending");
         }
         other => panic!("expected recycled stale waiter termination, got {other:?}"),
@@ -3339,7 +3339,7 @@ async fn meerkat_machine_spine_snapshot_recycle_reconciles_stale_completion_wait
         .await
         .expect("reset should terminate preserved waiter at test end");
     match active_handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => panic!("expected runtime reset termination, got {other:?}"),
@@ -3449,7 +3449,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recov
         .await
         .expect("reset should terminate preserved waiter at test end");
     match handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => panic!("expected runtime reset termination, got {other:?}"),
@@ -3615,7 +3615,7 @@ async fn meerkat_machine_spine_snapshot_recover_reconciles_stale_completion_wait
     );
 
     match stale_handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "recovered input no longer pending");
         }
         other => panic!("expected recovered stale waiter termination, got {other:?}"),
@@ -3625,7 +3625,7 @@ async fn meerkat_machine_spine_snapshot_recover_reconciles_stale_completion_wait
         .await
         .expect("reset should terminate preserved waiter at test end");
     match active_handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => panic!("expected runtime reset termination, got {other:?}"),
@@ -3694,7 +3694,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy(
     );
 
     match handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime destroyed");
         }
         other => panic!("expected runtime destroyed termination, got {other:?}"),
@@ -4074,7 +4074,7 @@ async fn meerkat_machine_spine_snapshot_destroy_clears_steered_waiter_and_queue_
     assert_eq!(report.inputs_abandoned, 1);
 
     match completion_handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime destroyed");
         }
         other => {
@@ -4293,7 +4293,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy_
     );
 
     match handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime destroyed");
         }
         other => panic!("expected runtime destroyed termination, got {other:?}"),
@@ -5169,7 +5169,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_c
         .expect("destroy should split attached steered completion and wait_all lifetimes");
 
     match completion_handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime destroyed");
         }
         other => panic!(
@@ -7976,7 +7976,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_reset_wi
     );
 
     match handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => panic!("expected runtime reset termination, got {other:?}"),
@@ -8040,7 +8040,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_run
     );
 
     match handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime stopped");
         }
         other => panic!("expected runtime stopped termination, got {other:?}"),
@@ -8154,7 +8154,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_run
         .expect("stop should terminate queued completion waiters through the live control seam");
 
     match handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime stopped");
         }
         other => panic!("expected runtime stopped termination, got {other:?}"),
@@ -8243,7 +8243,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_retire_w
     );
 
     match handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "retired without runtime loop");
         }
         other => panic!("expected retired-without-runtime-loop termination, got {other:?}"),
@@ -9255,7 +9255,7 @@ async fn meerkat_machine_spine_snapshot_recover_splits_completion_and_wait_all_l
         .await
         .expect("reset should terminate the preserved completion waiter at test end");
     match completion_handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => panic!("expected runtime reset termination, got {other:?}"),
@@ -9423,7 +9423,7 @@ async fn meerkat_machine_spine_snapshot_recover_preserves_steered_input_and_wait
         .await
         .expect("reset should terminate the preserved steered completion waiter at test end");
     match completion_handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => panic!("expected runtime reset termination, got {other:?}"),
@@ -9591,7 +9591,7 @@ async fn meerkat_machine_spine_snapshot_recycle_preserves_steered_input_and_wait
         .await
         .expect("reset should terminate the preserved steered completion waiter at test end");
     match completion_handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => panic!("expected runtime reset termination, got {other:?}"),
@@ -9860,7 +9860,7 @@ async fn meerkat_machine_spine_snapshot_recycle_splits_completion_and_wait_all_l
         .await
         .expect("reset should terminate the preserved completion waiter at test end");
     match completion_handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => panic!("expected runtime reset termination, got {other:?}"),
@@ -11187,7 +11187,7 @@ async fn meerkat_machine_spine_snapshot_reset_clears_steered_waiter_and_queue_bu
     assert_eq!(report.inputs_abandoned, 1);
 
     match completion_handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => {
@@ -11342,7 +11342,7 @@ async fn meerkat_machine_spine_snapshot_reset_splits_completion_and_wait_all_lif
     assert_eq!(report.inputs_abandoned, 1);
 
     match completion_handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => panic!("expected runtime reset termination, got {other:?}"),
@@ -11827,7 +11827,7 @@ async fn meerkat_machine_spine_snapshot_reset_with_runtime_loop_splits_completio
     );
 
     match completion_handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => {
@@ -12067,7 +12067,7 @@ async fn meerkat_machine_spine_snapshot_destroy_splits_completion_and_wait_all_l
     assert_eq!(report.inputs_abandoned, 1);
 
     match completion_handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime destroyed");
         }
         other => panic!("expected runtime destroyed termination, got {other:?}"),
@@ -12481,7 +12481,7 @@ async fn meerkat_machine_spine_snapshot_destroy_with_runtime_loop_splits_complet
     assert_eq!(report.inputs_abandoned, 1);
 
     match completion_handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime destroyed");
         }
         other => panic!("expected runtime destroyed termination, got {other:?}"),
@@ -12775,7 +12775,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_clears_steered_wai
         .expect("stop should clear steered completion waiters while preserving wait_all");
 
     match completion_handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime stopped");
         }
         other => {
@@ -12931,7 +12931,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_splits_completion_
         .expect("stop should split completion and wait_all lifetimes");
 
     match completion_handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime stopped");
         }
         other => panic!("expected runtime stopped termination, got {other:?}"),
@@ -13356,7 +13356,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_with_runtime_loop_
         .expect("stop should split completion and wait_all lifetimes on attached runtimes");
 
     match completion_handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime stopped");
         }
         other => panic!("expected runtime stopped termination, got {other:?}"),
@@ -13651,7 +13651,7 @@ async fn meerkat_machine_spine_snapshot_retire_splits_completion_and_wait_all_li
     assert_eq!(report.inputs_pending_drain, 0);
 
     match completion_handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "retired without runtime loop");
         }
         other => panic!("expected retire termination, got {other:?}"),
@@ -13813,7 +13813,7 @@ async fn meerkat_machine_spine_snapshot_retire_clears_steered_waiter_and_steer_q
     assert_eq!(report.inputs_pending_drain, 0);
 
     match completion_handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "retired without runtime loop");
         }
         other => panic!("expected retire termination for steered input, got {other:?}"),
@@ -22152,7 +22152,7 @@ async fn modeled_meerkat_accept_with_completion_idle_queue_signal_matches_runtim
     .await
     .expect("idle queue test should destroy runtime cleanly");
     match completion_handle.wait_authorized().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime destroyed");
         }
         other => panic!("expected runtime destroyed termination, got {other:?}"),

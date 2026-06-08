@@ -101,10 +101,48 @@ where
     Err(ToolError::not_found(name))
 }
 
+/// Typed failure projecting a runtime turn-state handle into an
+/// [`crate::AgentExecutionSnapshot`].
+///
+/// The handle stores wide (`u64`) counters; the snapshot exposes them as
+/// `u32`. A counter that does not fit is a genuine projection fault, never a
+/// reason to fabricate a missing snapshot (`None`) or a default running state.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum SnapshotProjectionError {
+    /// A wide turn-state counter overflowed the snapshot's `u32` field.
+    #[error("turn-state counter `{field}` ({value}) does not fit the snapshot u32 projection")]
+    CounterOverflow {
+        /// Name of the snapshot field whose source counter overflowed.
+        field: &'static str,
+        /// The source counter value that failed to project.
+        value: u64,
+    },
+}
+
+fn project_counter(field: &'static str, value: u64) -> Result<u32, SnapshotProjectionError> {
+    u32::try_from(value).map_err(|_| SnapshotProjectionError::CounterOverflow { field, value })
+}
+
+/// Typed failure serializing shared runtime control state into session metadata.
+///
+/// Projecting the system-context control state or the authorized tool-visibility
+/// state into the canonical session metadata map can fail to serialize. That
+/// failure must surface as a typed fault, never be laundered into a silent
+/// partial snapshot that drops the state while reporting success.
+#[derive(Debug, thiserror::Error)]
+pub enum SystemContextStateError {
+    /// Serializing the system-context control state into session metadata failed.
+    #[error("failed to serialize system-context state into session: {0}")]
+    SystemContext(#[source] serde_json::Error),
+    /// Serializing the authorized tool-visibility state into session metadata failed.
+    #[error("failed to serialize tool visibility state into session: {0}")]
+    ToolVisibility(#[source] serde_json::Error),
+}
+
 fn runtime_execution_snapshot(
     handle: &dyn crate::TurnStateHandle,
     applied_cursor: crate::completion_feed::CompletionSeq,
-) -> Option<crate::AgentExecutionSnapshot> {
+) -> Result<crate::AgentExecutionSnapshot, SnapshotProjectionError> {
     let snapshot = handle.snapshot();
     let turn_phase = snapshot.turn_phase;
     // Typed handle contract: primitive_kind / terminal_outcome are
@@ -129,7 +167,7 @@ fn runtime_execution_snapshot(
     };
     let barrier_operation_ids = snapshot.barrier_operation_ids.iter().cloned().collect();
 
-    Some(crate::AgentExecutionSnapshot {
+    Ok(crate::AgentExecutionSnapshot {
         loop_state: snapshot.loop_state,
         turn_phase,
         turn_terminal: snapshot.turn_terminal,
@@ -138,17 +176,20 @@ fn runtime_execution_snapshot(
         admitted_content_shape: snapshot.admitted_content_shape,
         vision_enabled: snapshot.vision_enabled,
         image_tool_results_enabled: snapshot.image_tool_results_enabled,
-        tool_calls_pending: u32::try_from(snapshot.tool_calls_pending).ok()?,
+        tool_calls_pending: project_counter("tool_calls_pending", snapshot.tool_calls_pending)?,
         pending_operation_ids,
         barrier_operation_ids,
         has_barrier_ops: snapshot.has_barrier_ops,
         barrier_satisfied: snapshot.barrier_satisfied,
-        boundary_count: u32::try_from(snapshot.boundary_count).ok()?,
+        boundary_count: project_counter("boundary_count", snapshot.boundary_count)?,
         cancel_after_boundary: snapshot.cancel_after_boundary,
         terminal_outcome,
         terminal_cause_kind: snapshot.terminal_cause_kind,
-        extraction_attempts: u32::try_from(snapshot.extraction_attempts).ok()?,
-        max_extraction_retries: u32::try_from(snapshot.max_extraction_retries).ok()?,
+        extraction_attempts: project_counter("extraction_attempts", snapshot.extraction_attempts)?,
+        max_extraction_retries: project_counter(
+            "max_extraction_retries",
+            snapshot.max_extraction_retries,
+        )?,
         applied_cursor,
     })
 }
@@ -460,9 +501,13 @@ where
         Ok(())
     }
 
-    /// Shared live control flag for boundary-only cancellation requests.
-    pub fn cancel_after_boundary_handle(&self) -> Arc<std::sync::atomic::AtomicBool> {
-        Arc::clone(&self.cancel_after_boundary_requested)
+    /// Cloneable producer handle for boundary-only cancellation requests.
+    ///
+    /// Returns a sender on the typed cancel-after-boundary command channel.
+    /// The requesting surface sends a [`CancelAfterBoundaryCommand`]; the agent
+    /// loop observes it at the next turn boundary.
+    pub fn cancel_after_boundary_handle(&self) -> super::CancelAfterBoundarySender {
+        self.cancel_after_boundary_tx.clone()
     }
 
     /// Get the runtime-backed turn-state handle, when this agent was built with one.
@@ -619,20 +664,37 @@ where
         &self.budget
     }
 
-    /// Get the current state
-    pub fn state(&self) -> LoopState {
-        self.execution_snapshot()
-            .map(|snapshot| snapshot.loop_state)
-            .unwrap_or(LoopState::CallingLlm)
+    /// Get the current loop state.
+    ///
+    /// Returns the snapshotted [`LoopState`] when a runtime-backed turn-state
+    /// handle is attached, `Ok(LoopState::CallingLlm)` when the agent runs
+    /// standalone (no handle, so no machine-owned loop state to project), and a
+    /// typed [`SnapshotProjectionError`] when the handle is present but its
+    /// counters cannot be projected. A projection fault is never laundered into
+    /// a fabricated running state.
+    pub fn state(&self) -> Result<LoopState, SnapshotProjectionError> {
+        match self.execution_snapshot()? {
+            Some(snapshot) => Ok(snapshot.loop_state),
+            // No runtime handle attached: standalone/ephemeral execution has no
+            // machine-owned loop state, so report the default entry state. This
+            // is a genuine "no handle" case, distinct from a projection failure.
+            None => Ok(LoopState::CallingLlm),
+        }
     }
 
     /// Snapshot the agent's live execution state for diagnostics and mapping.
     ///
-    /// Returns `None` when the agent has no runtime-backed turn-state
-    /// handle attached (standalone/ephemeral execution paths).
-    pub fn execution_snapshot(&self) -> Option<crate::AgentExecutionSnapshot> {
-        let handle = self.turn_state_handle.as_deref()?;
-        runtime_execution_snapshot(handle, self.applied_cursor)
+    /// Returns `Ok(None)` when the agent has no runtime-backed turn-state
+    /// handle attached (standalone/ephemeral execution paths), and a typed
+    /// [`SnapshotProjectionError`] when the handle is present but a turn-state
+    /// counter overflows the snapshot projection.
+    pub fn execution_snapshot(
+        &self,
+    ) -> Result<Option<crate::AgentExecutionSnapshot>, SnapshotProjectionError> {
+        let Some(handle) = self.turn_state_handle.as_deref() else {
+            return Ok(None);
+        };
+        runtime_execution_snapshot(handle, self.applied_cursor).map(Some)
     }
 
     /// Snapshot the agent's live tool-scope state for diagnostics and mapping.
@@ -681,27 +743,38 @@ where
     }
 
     /// Clone the current session with the latest shared system-context state merged into metadata.
-    pub fn session_with_system_context_state(&self) -> Session {
+    ///
+    /// A serialize failure projecting either the system-context control state or
+    /// the authorized tool-visibility state into session metadata is a typed
+    /// fault, not a silent partial snapshot: it propagates as
+    /// [`SystemContextStateError`] rather than being laundered through a
+    /// `tracing::warn!` that would hand back a session missing the state.
+    pub fn session_with_system_context_state(&self) -> Result<Session, SystemContextStateError> {
         let mut session = self.session.clone();
         let state = self.system_context_state().snapshot();
-        if let Err(err) = session.set_system_context_state(state) {
-            tracing::warn!(error = %err, "failed to serialize system-context state into session");
-        }
-        if let Ok(visibility_state) = self.tool_scope.authorized_visibility_state()
-            && let Err(err) = session.set_tool_visibility_state(visibility_state)
-        {
-            tracing::warn!(error = %err, "failed to serialize tool visibility state into session");
-        }
         session
+            .set_system_context_state(state)
+            .map_err(SystemContextStateError::SystemContext)?;
+        if let Ok(visibility_state) = self.tool_scope.authorized_visibility_state() {
+            session
+                .set_tool_visibility_state(visibility_state)
+                .map_err(SystemContextStateError::ToolVisibility)?;
+        }
+        Ok(session)
     }
 
     /// Synchronize the shared system-context state into the in-memory session metadata.
+    ///
+    /// A serialize failure is a typed fault, not a silent partial sync: it
+    /// propagates as [`SystemContextStateError`] rather than being laundered
+    /// through a `tracing::warn!` that would leave canonical session metadata
+    /// stale while reporting success to the caller.
     #[doc(hidden)]
-    pub fn sync_system_context_state_to_session(&mut self) {
+    pub fn sync_system_context_state_to_session(&mut self) -> Result<(), SystemContextStateError> {
         let state = self.system_context_state().snapshot();
-        if let Err(err) = self.session.set_system_context_state(state) {
-            tracing::warn!(error = %err, "failed to serialize system-context state into session");
-        }
+        self.session
+            .set_system_context_state(state)
+            .map_err(SystemContextStateError::SystemContext)
     }
 
     /// Consume all pending system-context appends for the next LLM boundary.
@@ -710,7 +783,7 @@ where
     /// they must not be written back into the canonical session prompt.
     pub(crate) fn take_pending_system_context_boundary(
         &mut self,
-    ) -> Vec<PendingSystemContextAppend> {
+    ) -> Result<Vec<PendingSystemContextAppend>, SystemContextStateError> {
         let pending = {
             let mut state = match self.system_context_state.lock() {
                 Ok(guard) => guard,
@@ -720,7 +793,7 @@ where
                 }
             };
             if state.pending().is_empty() {
-                return Vec::new();
+                return Ok(Vec::new());
             }
             let pending = state.pending().to_vec();
             state.mark_pending_applied();
@@ -733,8 +806,8 @@ where
                 "applying pending runtime system context at model boundary"
             );
         }
-        self.sync_system_context_state_to_session();
-        pending
+        self.sync_system_context_state_to_session()?;
+        Ok(pending)
     }
 
     pub(crate) fn llm_messages_with_runtime_system_context(
@@ -751,12 +824,19 @@ where
     }
 
     /// Persist the current session through the configured checkpointer after syncing control state.
+    ///
+    /// A serialize failure syncing system-context state surfaces as a typed
+    /// [`AgentError::InternalError`] rather than being swallowed, so the
+    /// checkpoint never persists a session whose control-state projection
+    /// silently failed.
     #[doc(hidden)]
-    pub async fn checkpoint_current_session(&mut self) {
-        self.sync_system_context_state_to_session();
+    pub async fn checkpoint_current_session(&mut self) -> Result<(), AgentError> {
+        self.sync_system_context_state_to_session()
+            .map_err(|err| AgentError::InternalError(err.to_string()))?;
         if let Some(ref cp) = self.checkpointer {
             cp.checkpoint(&self.session).await;
         }
+        Ok(())
     }
 
     async fn run_started_hooks(
@@ -882,10 +962,23 @@ where
             {
                 Some(*cause_kind)
             }
-            _ => self
-                .execution_snapshot()
-                .and_then(|snapshot| snapshot.terminal_cause_kind)
-                .filter(|cause_kind| *cause_kind != TurnTerminalCauseKind::Unknown),
+            _ => match self.execution_snapshot() {
+                Ok(snapshot) => snapshot
+                    .and_then(|snapshot| snapshot.terminal_cause_kind)
+                    .filter(|cause_kind| *cause_kind != TurnTerminalCauseKind::Unknown),
+                Err(err) => {
+                    // The run is already terminalizing into a failure event; a
+                    // snapshot projection fault here only means we cannot
+                    // recover a more specific terminal cause kind. Surface the
+                    // typed fault rather than laundering it, but still emit the
+                    // failure event with no derived cause kind.
+                    tracing::warn!(
+                        error = %err,
+                        "failed to project execution snapshot while emitting run-failed event"
+                    );
+                    None
+                }
+            },
         };
         let _ = crate::event_tap::tap_emit(
             &self.event_tap,
@@ -1142,7 +1235,11 @@ where
                         .await;
                     self.run_completed_event_emitted = true;
                 }
-                self.checkpoint_current_session().await;
+                if let Err(err) = self.checkpoint_current_session().await {
+                    self.handle_run_failure(&err, event_tx.as_ref()).await;
+                    self.clear_runtime_execution_kind();
+                    return Err(err);
+                }
                 self.clear_runtime_execution_kind();
                 Ok(result)
             }
@@ -1242,7 +1339,11 @@ where
                         .await;
                     self.run_completed_event_emitted = true;
                 }
-                self.checkpoint_current_session().await;
+                if let Err(err) = self.checkpoint_current_session().await {
+                    self.handle_run_failure(&err, event_tx.as_ref()).await;
+                    self.clear_runtime_execution_kind();
+                    return Err(err);
+                }
                 self.clear_runtime_execution_kind();
                 Ok(result)
             }
@@ -1808,5 +1909,276 @@ mod skill_activation_effect_tests {
             resolved.1, 34,
             "typed activation record must carry the injection byte size"
         );
+    }
+}
+
+/// Gate tests for typed execution-snapshot projection (row #309).
+///
+/// A wide (`u64`) turn-state counter that overflows the snapshot's `u32`
+/// projection must surface a typed [`SnapshotProjectionError`] — never a
+/// fabricated missing snapshot (`None`) or a default running `LoopState`.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod snapshot_projection_tests {
+    use super::*;
+    use crate::handles::{DslTransitionError, TurnStateHandle, TurnStateSnapshot};
+    use crate::lifecycle::RunId;
+    use crate::ops::{AsyncOpRef, OperationId};
+    use crate::retry::LlmRetrySchedule;
+    use crate::turn_execution_authority::{
+        ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnFailureReason, TurnFailureSource,
+    };
+    use std::collections::BTreeSet;
+
+    /// Minimal `TurnStateHandle` that returns a caller-supplied snapshot.
+    ///
+    /// Only `snapshot()` is exercised by the projection path under test; the
+    /// remaining transition methods are never called and report a transition
+    /// refusal rather than panicking.
+    struct StubTurnStateHandle {
+        snapshot: TurnStateSnapshot,
+    }
+
+    fn refused() -> DslTransitionError {
+        DslTransitionError::new("stub-turn-state-handle", "transition not exercised in test")
+    }
+
+    impl TurnStateHandle for StubTurnStateHandle {
+        fn apply_turn_input(
+            &self,
+            _input: TurnExecutionInput,
+        ) -> Result<Vec<TurnExecutionEffect>, DslTransitionError> {
+            Err(refused())
+        }
+        fn start_conversation_run(
+            &self,
+            _run_id: RunId,
+            _primitive_kind: TurnPrimitiveKind,
+            _admitted_content_shape: ContentShape,
+            _vision_enabled: bool,
+            _image_tool_results_enabled: bool,
+            _max_extraction_retries: u64,
+        ) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn start_immediate_append(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn start_immediate_context(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn primitive_applied(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn llm_returned_tool_calls(
+            &self,
+            _run_id: RunId,
+            _tool_count: u64,
+        ) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn llm_returned_terminal(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn register_pending_ops(
+            &self,
+            _run_id: RunId,
+            _op_refs: BTreeSet<AsyncOpRef>,
+            _barrier_operation_ids: BTreeSet<OperationId>,
+        ) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn tool_calls_resolved(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn ops_barrier_satisfied(
+            &self,
+            _run_id: RunId,
+            _operation_ids: BTreeSet<OperationId>,
+        ) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn boundary_continue(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn boundary_complete(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn enter_extraction(
+            &self,
+            _run_id: RunId,
+            _max_retries: u32,
+        ) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn extraction_start(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn extraction_validation_passed(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn extraction_validation_failed(
+            &self,
+            _run_id: RunId,
+            _error: String,
+        ) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn extraction_failed(
+            &self,
+            _run_id: RunId,
+            _error: String,
+        ) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn recoverable_failure(
+            &self,
+            _run_id: RunId,
+            _retry: LlmRetrySchedule,
+        ) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn fatal_failure(
+            &self,
+            _run_id: RunId,
+            _failure: TurnFailureSource,
+        ) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn retry_requested(
+            &self,
+            _run_id: RunId,
+            _retry_attempt: u32,
+        ) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn cancel_now(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn request_cancel_after_boundary(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn cancellation_observed(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn acknowledge_terminal(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn turn_limit_reached(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn budget_exhausted(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn time_budget_exceeded(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn force_cancel_no_run(&self) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn run_completed(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn run_failed(
+            &self,
+            _run_id: RunId,
+            _reason: TurnFailureReason,
+        ) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn run_cancelled(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+            Err(refused())
+        }
+        fn snapshot(&self) -> TurnStateSnapshot {
+            self.snapshot.clone()
+        }
+    }
+
+    fn base_snapshot() -> TurnStateSnapshot {
+        TurnStateSnapshot {
+            active_run_id: None,
+            loop_state: LoopState::WaitingForOps,
+            turn_phase: crate::TurnPhase::WaitingForOps,
+            turn_terminal: false,
+            primitive_kind: None,
+            admitted_content_shape: None,
+            vision_enabled: false,
+            image_tool_results_enabled: false,
+            tool_calls_pending: 0,
+            pending_op_refs: BTreeSet::new(),
+            barrier_operation_ids: BTreeSet::new(),
+            has_barrier_ops: false,
+            barrier_satisfied: false,
+            boundary_count: 0,
+            cancel_after_boundary: false,
+            terminal_outcome: None,
+            terminal_cause_kind: None,
+            extraction_attempts: 0,
+            max_extraction_retries: 0,
+            llm_retry_attempt: 0,
+            llm_retry_max_retries: 0,
+            llm_retry_selected_delay_ms: 0,
+        }
+    }
+
+    #[test]
+    fn well_formed_counters_project_cleanly() {
+        let mut snapshot = base_snapshot();
+        snapshot.tool_calls_pending = 3;
+        snapshot.boundary_count = 7;
+        let handle = StubTurnStateHandle { snapshot };
+
+        let projected = runtime_execution_snapshot(&handle, 0)
+            .expect("in-range counters must project without error");
+        assert_eq!(projected.tool_calls_pending, 3);
+        assert_eq!(projected.boundary_count, 7);
+        assert_eq!(projected.loop_state, LoopState::WaitingForOps);
+    }
+
+    #[test]
+    fn overflowing_counter_yields_typed_projection_error() {
+        let overflow = u64::from(u32::MAX) + 1;
+        let mut snapshot = base_snapshot();
+        snapshot.tool_calls_pending = overflow;
+        let handle = StubTurnStateHandle { snapshot };
+
+        match runtime_execution_snapshot(&handle, 0) {
+            Ok(snapshot) => panic!(
+                "overflow must not fabricate a snapshot: {:?}",
+                snapshot.loop_state
+            ),
+            Err(SnapshotProjectionError::CounterOverflow { field, value }) => {
+                assert_eq!(field, "tool_calls_pending");
+                assert_eq!(value, overflow);
+            }
+        }
+    }
+
+    #[test]
+    fn each_wide_counter_field_reports_its_own_overflow() {
+        let overflow = u64::from(u32::MAX) + 1;
+        let cases: [(&str, fn(&mut TurnStateSnapshot, u64)); 4] = [
+            ("tool_calls_pending", |s, v| s.tool_calls_pending = v),
+            ("boundary_count", |s, v| s.boundary_count = v),
+            ("extraction_attempts", |s, v| s.extraction_attempts = v),
+            ("max_extraction_retries", |s, v| {
+                s.max_extraction_retries = v;
+            }),
+        ];
+        for (field, set) in cases {
+            let mut snapshot = base_snapshot();
+            set(&mut snapshot, overflow);
+            let handle = StubTurnStateHandle { snapshot };
+            match runtime_execution_snapshot(&handle, 0) {
+                Err(SnapshotProjectionError::CounterOverflow {
+                    field: reported,
+                    value,
+                }) => {
+                    assert_eq!(reported, field);
+                    assert_eq!(value, overflow);
+                }
+                Ok(_) => panic!("{field} overflow must yield a typed projection error"),
+            }
+        }
     }
 }

@@ -1434,7 +1434,7 @@ async fn unregister_session_terminates_pending_completion_waiters() {
     assert!(
         matches!(
             result,
-            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(ref reason)
+            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated { ref reason, .. }
             if reason == "runtime session unregistered"
         ),
         "unregister should explicitly terminate pending waiters, got {result:?}"
@@ -3609,7 +3609,7 @@ async fn reset_runtime_resolves_pending_waiters() {
     assert!(
         matches!(
             result,
-            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(_)
+            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated { .. }
         ),
         "reset should resolve pending waiters as terminated, got {result:?}"
     );
@@ -3646,7 +3646,7 @@ async fn retire_without_loop_resolves_waiters() {
     assert!(
         matches!(
             result,
-            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(_)
+            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated { .. }
         ),
         "retire without loop should resolve pending waiters as terminated, got {result:?}"
     );

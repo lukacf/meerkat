@@ -18,8 +18,9 @@ use meerkat_core::service::{
 };
 use meerkat_core::types::{AssistantBlock, HandlingMode, RunResult, SessionId, StopReason, Usage};
 use meerkat_core::{
-    HookDecision, HookEngine, HookExecutionReport, HookId, HookInvocation, HookOutcome, HookPoint,
-    HookReasonCode, Session, SessionDeferredTurnState,
+    CancelAfterBoundaryCommand, CancelAfterBoundarySender, HookDecision, HookEngine,
+    HookExecutionReport, HookId, HookInvocation, HookOutcome, HookPoint, HookReasonCode, Session,
+    SessionDeferredTurnState, SystemContextStateError,
 };
 use meerkat_session::ephemeral::SessionSnapshot;
 use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};
@@ -150,12 +151,12 @@ impl SessionAgent for MockAgent {
         }
     }
 
-    fn session_clone(&self) -> meerkat_core::Session {
+    fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
         let mut session = meerkat_core::Session::with_id(self.session_id.clone());
         session
             .set_system_context_state(self.system_context_state.snapshot())
             .expect("serialize system-context state");
-        session
+        Ok(session)
     }
 
     fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
@@ -163,14 +164,20 @@ impl SessionAgent for MockAgent {
     }
 
     fn observed_session_tail(&self) -> meerkat_core::pending_continuation::ObservedSessionTailKind {
-        meerkat_core::pending_continuation::observe_session_tail(self.session_clone().messages())
+        meerkat_core::pending_continuation::observe_session_tail(
+            self.session_clone()
+                .expect("test session clone should succeed")
+                .messages(),
+        )
     }
 
     fn apply_runtime_system_context(
         &mut self,
         appends: &[meerkat_core::PendingSystemContextAppend],
     ) {
-        let mut session = self.session_clone();
+        let mut session = self
+            .session_clone()
+            .expect("test session clone should succeed");
         session.append_system_context_blocks(appends);
         self.message_count = session.messages().len();
         self.system_context_state
@@ -445,7 +452,7 @@ struct RealSessionAgent {
     hook_engine: Option<Arc<dyn HookEngine>>,
     flow_tool_overlay: Option<TurnToolOverlay>,
     system_context_state: meerkat_core::SystemContextStateHandle,
-    cancel_after_boundary_requested: Arc<AtomicBool>,
+    cancel_after_boundary_tx: CancelAfterBoundarySender,
 }
 
 impl RealSessionAgent {
@@ -553,12 +560,13 @@ impl SessionAgent for RealSessionAgent {
     }
 
     fn cancel(&mut self) {
-        self.cancel_after_boundary_requested
-            .store(true, Ordering::Release);
+        let _ = self
+            .cancel_after_boundary_tx
+            .send(CancelAfterBoundaryCommand);
     }
 
-    fn cancel_after_boundary_handle(&self) -> Option<Arc<AtomicBool>> {
-        Some(Arc::clone(&self.cancel_after_boundary_requested))
+    fn cancel_after_boundary_handle(&self) -> Option<CancelAfterBoundarySender> {
+        Some(self.cancel_after_boundary_tx.clone())
     }
 
     fn hot_swap_llm_identity(
@@ -578,8 +586,11 @@ impl SessionAgent for RealSessionAgent {
         session_snapshot(&self.session)
     }
 
-    fn session_clone(&self) -> meerkat_core::Session {
-        session_clone_with_system_context(&self.session, &self.system_context_state)
+    fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
+        Ok(session_clone_with_system_context(
+            &self.session,
+            &self.system_context_state,
+        ))
     }
 
     fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
@@ -602,8 +613,9 @@ impl SessionAgent for RealSessionAgent {
         self.system_context_state.clone()
     }
 
-    fn sync_system_context_state(&mut self) {
+    fn sync_system_context_state(&mut self) -> Result<(), SystemContextStateError> {
         sync_session_context_state(&self.session, &self.system_context_state);
+        Ok(())
     }
 }
 
@@ -613,7 +625,7 @@ struct CompactionSessionAgent {
     compactor: Arc<TrackingCompactor>,
     boundary_index: u64,
     system_context_state: meerkat_core::SystemContextStateHandle,
-    cancel_after_boundary_requested: Arc<AtomicBool>,
+    cancel_after_boundary_tx: CancelAfterBoundarySender,
 }
 
 #[async_trait]
@@ -668,12 +680,13 @@ impl SessionAgent for CompactionSessionAgent {
     }
 
     fn cancel(&mut self) {
-        self.cancel_after_boundary_requested
-            .store(true, Ordering::Release);
+        let _ = self
+            .cancel_after_boundary_tx
+            .send(CancelAfterBoundaryCommand);
     }
 
-    fn cancel_after_boundary_handle(&self) -> Option<Arc<AtomicBool>> {
-        Some(Arc::clone(&self.cancel_after_boundary_requested))
+    fn cancel_after_boundary_handle(&self) -> Option<CancelAfterBoundarySender> {
+        Some(self.cancel_after_boundary_tx.clone())
     }
 
     fn hot_swap_llm_identity(
@@ -693,8 +706,11 @@ impl SessionAgent for CompactionSessionAgent {
         session_snapshot(&self.session)
     }
 
-    fn session_clone(&self) -> meerkat_core::Session {
-        session_clone_with_system_context(&self.session, &self.system_context_state)
+    fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
+        Ok(session_clone_with_system_context(
+            &self.session,
+            &self.system_context_state,
+        ))
     }
 
     fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
@@ -717,8 +733,9 @@ impl SessionAgent for CompactionSessionAgent {
         self.system_context_state.clone()
     }
 
-    fn sync_system_context_state(&mut self) {
+    fn sync_system_context_state(&mut self) -> Result<(), SystemContextStateError> {
         sync_session_context_state(&self.session, &self.system_context_state);
+        Ok(())
     }
 }
 
@@ -795,13 +812,15 @@ impl SessionAgentBuilder for CompactionAgentBuilder {
         req: &CreateSessionRequest,
         _event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<CompactionSessionAgent, SessionError> {
+        let (cancel_after_boundary_tx, _cancel_after_boundary_rx) =
+            tokio::sync::mpsc::unbounded_channel();
         Ok(CompactionSessionAgent {
             session: session_for_request(req),
             seen_last_user_messages: Arc::clone(&self.seen_last_user_messages),
             compactor: Arc::clone(&self.compactor),
             boundary_index: 0,
             system_context_state: system_context_handle_for_test(Default::default()),
-            cancel_after_boundary_requested: Arc::new(AtomicBool::new(false)),
+            cancel_after_boundary_tx,
         })
     }
 }
@@ -815,6 +834,8 @@ impl SessionAgentBuilder for RealAgentBuilder {
         req: &CreateSessionRequest,
         _event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RealSessionAgent, SessionError> {
+        let (cancel_after_boundary_tx, _cancel_after_boundary_rx) =
+            tokio::sync::mpsc::unbounded_channel();
         Ok(RealSessionAgent {
             session: session_for_request(req),
             provider_visible_tools: Arc::clone(&self.provider_visible_tools),
@@ -823,7 +844,7 @@ impl SessionAgentBuilder for RealAgentBuilder {
             hook_engine: self.hook_engine.as_ref().map(Arc::clone),
             flow_tool_overlay: None,
             system_context_state: system_context_handle_for_test(Default::default()),
-            cancel_after_boundary_requested: Arc::new(AtomicBool::new(false)),
+            cancel_after_boundary_tx,
         })
     }
 }

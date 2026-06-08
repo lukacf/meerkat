@@ -3021,37 +3021,54 @@ impl MobHandle {
     }
 
     /// Get a specific member entry by identity.
-    pub async fn get_member(&self, identity: &AgentIdentity) -> Option<RosterEntry> {
+    ///
+    /// Returns `Ok(None)` for a genuinely absent member and `Err(MobError)`
+    /// when the underlying machine command itself fails (query/transport
+    /// fault). A transport fault must never be laundered into "not found".
+    pub async fn get_member(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<Option<RosterEntry>, MobError> {
         let meerkat_id = MeerkatId::from(identity);
-        match self
+        let result = self
             .execute_machine_command(MobMachineCommand::GetMember {
                 agent_identity: meerkat_id,
             })
-            .await
-        {
-            Ok(MobMachineCommandResult::GetMember(entry)) => entry,
-            Ok(_) => {
-                tracing::error!("unexpected command result variant");
-                Default::default()
-            }
-            Err(error) => {
-                // A genuine query/transport fault is collapsed to `None` here
-                // only because the public signature predates typed-fault
-                // propagation; surface the fault so it is not silently
-                // indistinguishable from a true absent member. The typed fix
-                // is to return `Result<Option<_>, MobError>` (cross-crate
-                // callsite cascade tracked in the dogma remediation plan).
-                tracing::error!(%error, "get_member machine command failed");
-                None
-            }
+            .await?;
+        Self::project_get_member_result(result)
+    }
+
+    /// Map a `GetMember` command result into the typed member projection.
+    ///
+    /// Split out so the unexpected-variant fault arm (a genuine command-layer
+    /// fault, never "absent member") is testable without laundering it into
+    /// `Ok(None)`.
+    fn project_get_member_result(
+        result: MobMachineCommandResult,
+    ) -> Result<Option<RosterEntry>, MobError> {
+        match result {
+            MobMachineCommandResult::GetMember(entry) => Ok(entry),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
+    }
+
+    /// Test-only probe that drives [`Self::get_member`]'s result mapping with
+    /// an explicit command result, proving a command-layer fault surfaces as
+    /// `Err(MobError)` and is never collapsed to `Ok(None)`.
+    #[cfg(test)]
+    pub(crate) fn project_get_member_result_for_test(
+        result: MobMachineCommandResult,
+    ) -> Result<Option<RosterEntry>, MobError> {
+        Self::project_get_member_result(result)
     }
 
     /// Get a specific member entry by legacy MeerkatId (bridge helper).
     pub(crate) async fn get_member_by_meerkat_id(
         &self,
         agent_identity: &MeerkatId,
-    ) -> Option<RosterEntry> {
+    ) -> Result<Option<RosterEntry>, MobError> {
         self.get_member(&AgentIdentity::from(agent_identity.as_str()))
             .await
     }
@@ -3122,7 +3139,7 @@ impl MobHandle {
             return Err(Self::restore_failure_error(&meerkat_id, diag));
         }
         self.get_member(identity)
-            .await
+            .await?
             .ok_or_else(|| MobError::MemberNotFound(meerkat_id.clone()))?;
         Ok(MemberHandle {
             mob: self.clone(),
@@ -3453,7 +3470,7 @@ impl MobHandle {
         // The roster is updated synchronously during spawn finalization,
         // so the entry is guaranteed to be present by the time the reply
         // arrives.
-        let entry = self.get_member(&identity).await.ok_or_else(|| {
+        let entry = self.get_member(&identity).await?.ok_or_else(|| {
             MobError::Internal(format!(
                 "spawn succeeded but roster entry missing for '{identity}'"
             ))
@@ -3479,7 +3496,7 @@ impl MobHandle {
         let _receipt = self
             .spawn_spec_receipt_with_generated_owner_context(spec, owner_bridge_session_id)
             .await?;
-        let entry = self.get_member(&identity).await.ok_or_else(|| {
+        let entry = self.get_member(&identity).await?.ok_or_else(|| {
             MobError::Internal(format!(
                 "spawn succeeded but roster entry missing for '{identity}'"
             ))
@@ -3730,7 +3747,7 @@ impl MobHandle {
             let identity = spec.identity.clone();
             self.spawn_spec_internal_with_source(spec, SpawnSource::BatchItem)
                 .await?;
-            let entry = self.get_member(&identity).await.ok_or_else(|| {
+            let entry = self.get_member(&identity).await?.ok_or_else(|| {
                 MobError::Internal(format!(
                     "spawn succeeded but roster entry missing for '{identity}'"
                 ))
@@ -4037,29 +4054,46 @@ impl MobHandle {
     /// member. Only the `labels` pairs in `filter` must match (extra labels
     /// on the member are allowed); `role`, `state`, and `has_realtime_intent`
     /// each apply only when set.
-    pub async fn list_members_matching(&self, filter: MemberFilter) -> Vec<MobMemberListEntry> {
-        match self
+    ///
+    /// Returns `Err(MobError)` when the underlying machine command itself
+    /// fails (query/transport fault); a transport fault must never be
+    /// laundered into an empty match.
+    pub async fn list_members_matching(
+        &self,
+        filter: MemberFilter,
+    ) -> Result<Vec<MobMemberListEntry>, MobError> {
+        let result = self
             .execute_machine_command(MobMachineCommand::ListMembersMatching {
                 filter: Box::new(filter),
             })
-            .await
-        {
-            Ok(MobMachineCommandResult::ListMembers(entries)) => entries,
-            Ok(_) => {
-                tracing::error!("unexpected command result variant");
-                Default::default()
-            }
-            Err(error) => {
-                // A genuine query/transport fault is collapsed to an empty
-                // match here only because the public signature predates
-                // typed-fault propagation; surface the fault so it is not
-                // silently indistinguishable from a true empty match. The
-                // typed fix is to return `Result<Vec<_>, MobError>` (cross-crate
-                // callsite cascade tracked in the dogma remediation plan).
-                tracing::error!(%error, "list_members_matching machine command failed");
-                Vec::new()
-            }
+            .await?;
+        Self::project_list_members_matching_result(result)
+    }
+
+    /// Map a `ListMembersMatching` command result into the typed member list.
+    ///
+    /// Split out so the unexpected-variant fault arm (a genuine command-layer
+    /// fault, never an empty match) is testable without laundering it into an
+    /// empty `Vec`.
+    fn project_list_members_matching_result(
+        result: MobMachineCommandResult,
+    ) -> Result<Vec<MobMemberListEntry>, MobError> {
+        match result {
+            MobMachineCommandResult::ListMembers(entries) => Ok(entries),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
+    }
+
+    /// Test-only probe that drives [`Self::list_members_matching`]'s result
+    /// mapping with an explicit command result, proving a command-layer fault
+    /// surfaces as `Err(MobError)` and is never collapsed to an empty `Vec`.
+    #[cfg(test)]
+    pub(crate) fn project_list_members_matching_result_for_test(
+        result: MobMachineCommandResult,
+    ) -> Result<Vec<MobMemberListEntry>, MobError> {
+        Self::project_list_members_matching_result(result)
     }
 
     /// Rotate the persisted mob supervisor authority.
@@ -5784,6 +5818,53 @@ impl MemberHandle {
 mod tests {
     use super::*;
     use crate::ids::Generation;
+
+    // Dogma #282 gate: a command-layer fault must surface as `Err(MobError)`,
+    // never be laundered into a "not found" (`Ok(None)`) or "empty match"
+    // (`Ok(vec![])`) result. We drive each public method's result mapping with
+    // a deliberately-wrong command result variant (the same shape a genuine
+    // query/transport fault would produce) and assert the typed error path.
+    #[test]
+    fn get_member_unexpected_command_result_surfaces_error_not_absent() {
+        // True absence is still distinguishable as `Ok(None)`.
+        let absent =
+            MobHandle::project_get_member_result_for_test(MobMachineCommandResult::GetMember(None))
+                .expect("a `GetMember(None)` result is a genuine absent member, not a fault");
+        assert!(
+            absent.is_none(),
+            "true absence must remain `Ok(None)`, not be reported as a fault"
+        );
+
+        // A command-layer fault (wrong result variant) must NOT collapse to
+        // `Ok(None)`; it must surface as `Err(MobError)`.
+        let faulted = MobHandle::project_get_member_result_for_test(MobMachineCommandResult::Unit);
+        assert!(
+            matches!(faulted, Err(MobError::Internal(_))),
+            "a command-layer fault must surface as Err(MobError), never Ok(None): {faulted:?}"
+        );
+    }
+
+    #[test]
+    fn list_members_matching_unexpected_command_result_surfaces_error_not_empty() {
+        // A genuinely empty match is still distinguishable as `Ok(vec![])`.
+        let empty = MobHandle::project_list_members_matching_result_for_test(
+            MobMachineCommandResult::ListMembers(Vec::new()),
+        )
+        .expect("an empty `ListMembers` result is a genuine empty match, not a fault");
+        assert!(
+            empty.is_empty(),
+            "a genuine empty match must remain `Ok(vec![])`, not be reported as a fault"
+        );
+
+        // A command-layer fault (wrong result variant) must NOT collapse to an
+        // empty `Vec`; it must surface as `Err(MobError)`.
+        let faulted =
+            MobHandle::project_list_members_matching_result_for_test(MobMachineCommandResult::Unit);
+        assert!(
+            matches!(faulted, Err(MobError::Internal(_))),
+            "a command-layer fault must surface as Err(MobError), never Ok(empty): {faulted:?}"
+        );
+    }
 
     #[test]
     fn member_projection_types_omit_bridge_session_fields_in_serialized_output() {

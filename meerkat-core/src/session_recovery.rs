@@ -58,6 +58,53 @@ pub struct SurfaceSessionRecoveryOverrides {
 /// compatibility spelling for existing CLI/RPC callers.
 pub type TurnOverrides = SurfaceSessionRecoveryOverrides;
 
+/// Typed session-store backend pinned by a realm.
+///
+/// This is the one semantic owner of the realm-pinned storage backend value
+/// (the `"sqlite"`/`"jsonl"` literal carried by `SessionMetadata.backend`,
+/// `RealmConfig.backend_hint`, and the config envelopes). It is a pure,
+/// feature-independent value type so it is reachable from `meerkat-core`;
+/// `meerkat_store::RealmBackend` is the downstream, feature-gated store-layer
+/// twin and projects to/from these same wire literals via `as_str`/`parse`.
+///
+/// Recovery exists specifically so a *recovery-environment hint* cannot silently
+/// become durable session identity: the raw realm-context string is parsed into
+/// this typed enum at the [`RealmDefaults::from_recovery_context`] boundary
+/// (fail-closed — an unrecognized hint yields `None` rather than being ferried
+/// through as an opaque string).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RecoveryBackendKind {
+    /// JSONL append-only session store.
+    Jsonl,
+    /// SQLite session store.
+    Sqlite,
+}
+
+impl RecoveryBackendKind {
+    /// Parse a raw realm/config backend string into the typed kind.
+    ///
+    /// Fail-closed: any unrecognized literal returns `None`, so a malformed
+    /// recovery-environment hint is dropped at the boundary instead of becoming
+    /// durable session identity.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "jsonl" => Some(Self::Jsonl),
+            "sqlite" => Some(Self::Sqlite),
+            _ => None,
+        }
+    }
+
+    /// The canonical wire literal for this backend kind.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Jsonl => "jsonl",
+            Self::Sqlite => "sqlite",
+        }
+    }
+}
+
 /// Realm/config defaults that can participate in semantic recovery.
 ///
 /// These values come from the active realm/config context. They only fill fields
@@ -66,7 +113,10 @@ pub type TurnOverrides = SurfaceSessionRecoveryOverrides;
 pub struct RealmDefaults {
     pub realm_id: Option<crate::RealmId>,
     pub instance_id: Option<String>,
-    pub backend: Option<String>,
+    /// Typed realm-pinned storage backend. Parsed (fail-closed) from the raw
+    /// recovery-environment string at [`Self::from_recovery_context`] so a
+    /// hint cannot silently become durable session identity.
+    pub backend: Option<RecoveryBackendKind>,
     pub config_generation: Option<u64>,
 }
 
@@ -76,7 +126,14 @@ impl RealmDefaults {
         Self {
             realm_id: context.realm_id.clone(),
             instance_id: context.instance_id.clone(),
-            backend: context.backend.clone(),
+            // Parse-at-boundary: the realm-context backend hint is a raw string
+            // supplied by the host environment. It is interpreted into the typed
+            // owner here (fail-closed); an unrecognized hint is dropped rather
+            // than ferried through untyped into durable identity.
+            backend: context
+                .backend
+                .as_deref()
+                .and_then(RecoveryBackendKind::parse),
             config_generation: context.config_generation,
         }
     }
@@ -546,7 +603,14 @@ pub fn resolve_effective_turn_config(
             .or_else(|| metadata.tooling.active_skills.clone()),
         realm_id: metadata.realm_id.clone().or(realm_defaults.realm_id),
         instance_id: metadata.instance_id.clone().or(realm_defaults.instance_id),
-        backend: metadata.backend.clone().or(realm_defaults.backend),
+        // Durable `metadata.backend` wins; the realm hint only fills an absent
+        // value, and only after it has round-tripped through the typed
+        // `RecoveryBackendKind` boundary (so an unparseable hint was already
+        // dropped to `None` and cannot reach durable identity).
+        backend: metadata
+            .backend
+            .clone()
+            .or_else(|| realm_defaults.backend.map(|kind| kind.as_str().to_string())),
         config_generation: metadata
             .config_generation
             .or(realm_defaults.config_generation),
@@ -745,7 +809,7 @@ mod tests {
             RealmDefaults {
                 realm_id: Some(crate::RealmId::parse("realm-fallback").unwrap()),
                 instance_id: Some("instance-fallback".to_string()),
-                backend: Some("jsonl".to_string()),
+                backend: Some(RecoveryBackendKind::Jsonl),
                 config_generation: Some(99),
             },
             &TurnOverrides::default(),
@@ -1140,6 +1204,79 @@ mod tests {
         );
         assert_eq!(recovered.build.backend.as_deref(), Some("sqlite"));
         assert_eq!(recovered.build.config_generation, Some(99));
+    }
+
+    #[test]
+    fn recovery_backend_kind_parses_known_literals_and_round_trips() {
+        assert_eq!(
+            RecoveryBackendKind::parse("sqlite"),
+            Some(RecoveryBackendKind::Sqlite)
+        );
+        assert_eq!(
+            RecoveryBackendKind::parse("jsonl"),
+            Some(RecoveryBackendKind::Jsonl)
+        );
+        assert_eq!(RecoveryBackendKind::Sqlite.as_str(), "sqlite");
+        assert_eq!(RecoveryBackendKind::Jsonl.as_str(), "jsonl");
+        for kind in [RecoveryBackendKind::Sqlite, RecoveryBackendKind::Jsonl] {
+            assert_eq!(RecoveryBackendKind::parse(kind.as_str()), Some(kind));
+        }
+    }
+
+    #[test]
+    fn realm_defaults_parses_valid_backend_hint_into_typed_owner() {
+        let realm_defaults = RealmDefaults::from_recovery_context(&SurfaceSessionRecoveryContext {
+            backend: Some("sqlite".to_string()),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            realm_defaults.backend,
+            Some(RecoveryBackendKind::Sqlite),
+            "a valid recovery-environment backend hint must parse into the typed owner"
+        );
+    }
+
+    #[test]
+    fn realm_defaults_drops_malformed_backend_hint_fail_closed() {
+        let realm_defaults = RealmDefaults::from_recovery_context(&SurfaceSessionRecoveryContext {
+            backend: Some("postgres".to_string()),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            realm_defaults.backend, None,
+            "an unrecognized backend hint must be dropped at the parse boundary, not ferried through as an opaque string"
+        );
+    }
+
+    #[test]
+    fn build_recovered_session_does_not_launder_malformed_backend_hint_into_durable_identity() {
+        // A recovery-environment backend hint that does not name a known store
+        // must never reach the durable session-build backend identity. With no
+        // persisted `metadata.backend`, the malformed hint is dropped at the
+        // typed boundary and the recovered build carries no backend.
+        let mut session = sample_session();
+        let mut metadata = session.session_metadata().expect("session metadata");
+        metadata.backend = None;
+        session
+            .set_session_metadata(metadata)
+            .expect("updated session metadata");
+
+        let recovered = build_recovered_session(
+            session,
+            &SurfaceSessionRecoveryOverrides::default(),
+            SurfaceSessionRecoveryContext {
+                backend: Some("not-a-real-backend".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("recovered session with malformed backend hint");
+
+        assert_eq!(
+            recovered.build.backend, None,
+            "a malformed recovery-environment hint must not become durable session identity"
+        );
     }
 
     #[test]

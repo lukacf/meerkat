@@ -86,7 +86,7 @@ impl ScheduleMobRuntime for MobMcpState {
             .handle_for(mob_id)
             .await?
             .get_member(identity)
-            .await
+            .await?
             .is_some())
     }
 

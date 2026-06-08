@@ -558,7 +558,7 @@ fn delivery_terminal_from_completion_outcome(
                 runtime_outcome,
             )
         }
-        CompletionOutcome::Abandoned(reason) => {
+        CompletionOutcome::Abandoned { reason, .. } => {
             let runtime_outcome =
                 meerkat_schedule::RuntimeDeliveryOutcome::CompletionAbandoned { detail: reason };
             terminal_from_runtime_completion_outcome(
@@ -588,7 +588,7 @@ fn delivery_terminal_from_completion_outcome(
                 None,
             )
         }
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             let runtime_outcome =
                 meerkat_schedule::RuntimeDeliveryOutcome::CompletionRuntimeTerminated {
                     detail: reason,

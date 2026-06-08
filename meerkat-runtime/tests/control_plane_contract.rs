@@ -186,7 +186,7 @@ async fn control_plane_contract_reset_terminates_waited_progress_work_without_ru
         .await
         .expect("completion waiter should resolve");
     assert!(
-        matches!(result, CompletionOutcome::RuntimeTerminated(_)),
+        matches!(result, CompletionOutcome::RuntimeTerminated { .. }),
         "reset should terminate queued waiters, got {result:?}"
     );
     assert_eq!(
@@ -263,7 +263,7 @@ async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_w
         .await
         .expect("completion waiter should resolve");
     assert!(
-        matches!(result, CompletionOutcome::RuntimeTerminated(_)),
+        matches!(result, CompletionOutcome::RuntimeTerminated { .. }),
         "stop-runtime-executor should terminate queued waiters, got {result:?}"
     );
     assert_eq!(
@@ -332,7 +332,7 @@ async fn control_plane_contract_stop_runtime_executor_persists_stopped_state_wit
         .await
         .expect("completion waiter should resolve")
     {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime stopped");
         }
         other => panic!("expected runtime stopped termination, got {other:?}"),
@@ -464,7 +464,7 @@ async fn control_plane_contract_retire_without_runtime_loop_abandons_waited_work
         .await
         .expect("completion waiter should resolve");
     assert!(
-        matches!(result, CompletionOutcome::RuntimeTerminated(_)),
+        matches!(result, CompletionOutcome::RuntimeTerminated { .. }),
         "retire without a runtime loop should terminate the waiter, got {result:?}"
     );
     assert_eq!(

@@ -262,7 +262,9 @@ where
     /// persistence outcome, so a best-effort miss here cannot launder into a
     /// false success.
     async fn save_session_best_effort(&mut self) {
-        self.sync_system_context_state_to_session();
+        if let Err(e) = self.sync_system_context_state_to_session() {
+            tracing::warn!("Failed to sync system-context state into session: {}", e);
+        }
         if let Some(ref checkpointer) = self.checkpointer {
             checkpointer.checkpoint(&self.session).await;
             return;
@@ -1109,10 +1111,18 @@ where
     }
 
     fn observe_cancel_after_boundary_request(&mut self, run_id: &RunId) -> Result<(), AgentError> {
-        if !self
-            .cancel_after_boundary_requested
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        // Non-blocking drain of the typed command channel. Coalesce any pending
+        // commands into a single boundary observation, mirroring the prior
+        // `AtomicBool::swap(false)` edge semantics: the request is observed at
+        // most once per boundary regardless of how many commands queued. A
+        // disconnected producer simply means no request is pending.
+        let mut requested = false;
+        while let Ok(crate::agent::CancelAfterBoundaryCommand) =
+            self.cancel_after_boundary_rx.try_recv()
         {
+            requested = true;
+        }
+        if !requested {
             return Ok(());
         }
 
@@ -1264,6 +1274,12 @@ where
         let mut event_stream_open = true;
         let mut run_has_visible_or_actionable_output = false;
         self.extraction_state.reset();
+        // Flush any cancel-after-boundary commands left undrained by a prior
+        // run so a stale request never leaks into this fresh run. The producer
+        // end (the requesting surface) cannot reach the agent-owned receiver, so
+        // the staleness reset lives here at the run-start seam — replacing the
+        // previous surface-side `clear` of the shared `AtomicBool` carrier.
+        while self.cancel_after_boundary_rx.try_recv().is_ok() {}
 
         // --- Authority lifecycle: consume the generated primitive start ---
         let run_id = if let Some(run_id) = self.started_primitive_run_from_authority()? {
@@ -1877,7 +1893,9 @@ where
                         .filter(|params| !params.is_empty());
 
                     // Call LLM with retry — route errors through machine authority
-                    let boundary_system_context = self.take_pending_system_context_boundary();
+                    let boundary_system_context = self
+                        .take_pending_system_context_boundary()
+                        .map_err(|e| AgentError::InternalError(e.to_string()))?;
                     let request_messages =
                         self.llm_messages_with_runtime_system_context(&boundary_system_context);
                     let result = match self
@@ -5278,6 +5296,7 @@ mod tests {
         );
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
         assert_eq!(
@@ -5733,6 +5752,7 @@ mod tests {
 
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
         assert_eq!(
@@ -5802,6 +5822,7 @@ mod tests {
 
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
         assert_eq!(
@@ -6386,6 +6407,7 @@ mod tests {
 
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(
             snapshot.terminal_outcome,
@@ -6517,6 +6539,7 @@ mod tests {
 
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(
             snapshot.terminal_outcome,
@@ -6985,6 +7008,7 @@ mod tests {
         );
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
         assert_eq!(
@@ -7640,6 +7664,7 @@ mod tests {
 
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(snapshot.turn_phase, crate::TurnPhase::Completed);
         assert_eq!(
@@ -7679,6 +7704,7 @@ mod tests {
 
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
         assert_eq!(
@@ -7749,6 +7775,7 @@ mod tests {
 
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(
             snapshot.terminal_cause_kind,
@@ -7781,6 +7808,7 @@ mod tests {
 
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(
             snapshot.terminal_cause_kind,
@@ -7867,6 +7895,7 @@ mod tests {
 
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(
             snapshot.admitted_content_shape,
@@ -7938,6 +7967,7 @@ mod tests {
 
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(
             snapshot.turn_phase,
@@ -7975,13 +8005,13 @@ mod tests {
 
     #[tokio::test]
     async fn post_llm_boundary_cancel_does_not_return_success() {
+        use crate::agent::{CancelAfterBoundaryCommand, CancelAfterBoundarySender};
         use crate::hooks::{
             HookEngine, HookEngineError, HookExecutionReport, HookInvocation, HookPoint,
         };
-        use std::sync::atomic::{AtomicBool, Ordering};
 
         struct RequestBoundaryCancelHook {
-            flag: Arc<AtomicBool>,
+            sender: CancelAfterBoundarySender,
         }
 
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -7993,7 +8023,9 @@ mod tests {
                 _overrides: Option<&crate::config::HookRunOverrides>,
             ) -> Result<HookExecutionReport, HookEngineError> {
                 if invocation.point == HookPoint::PostLlmResponse {
-                    self.flag.store(true, Ordering::SeqCst);
+                    self.sender
+                        .send(CancelAfterBoundaryCommand)
+                        .expect("agent must retain the cancel-after-boundary receiver");
                 }
                 Ok(HookExecutionReport::empty())
             }
@@ -8001,7 +8033,7 @@ mod tests {
 
         let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
         agent.hook_engine = Some(Arc::new(RequestBoundaryCancelHook {
-            flag: agent.cancel_after_boundary_handle(),
+            sender: agent.cancel_after_boundary_handle(),
         }));
 
         let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
@@ -8015,6 +8047,7 @@ mod tests {
 
         let snapshot = agent
             .execution_snapshot()
+            .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(snapshot.turn_phase, crate::TurnPhase::Cancelled);
         assert_eq!(
@@ -8032,6 +8065,64 @@ mod tests {
                 "cancelled boundary must not emit RunCompleted"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn typed_cancel_after_boundary_command_observed_once_at_boundary() {
+        use crate::agent::CancelAfterBoundaryCommand;
+
+        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
+
+        // Drive the turn machine to a live boundary phase (CallingLlm) so the
+        // observe seam is eligible to apply the cancel-after-boundary input.
+        let run_id = {
+            let handle = agent
+                .turn_state_handle
+                .as_deref()
+                .expect("test agent should have a turn-state handle");
+            start_test_conversation_turn(handle)
+        };
+        assert_eq!(
+            agent.turn_phase().expect("turn phase"),
+            crate::turn_execution_authority::TurnPhase::CallingLlm
+        );
+        assert!(
+            !agent
+                .turn_cancel_after_boundary()
+                .expect("cancel-after-boundary flag"),
+            "fixture must start with no boundary-cancel request observed"
+        );
+
+        // A surface requests boundary cancellation by sending the typed command
+        // on a cloned producer handle — the raw AtomicBool carrier is gone.
+        let sender = agent.cancel_after_boundary_handle();
+        sender
+            .send(CancelAfterBoundaryCommand)
+            .expect("agent must retain the cancel-after-boundary receiver");
+
+        agent
+            .observe_cancel_after_boundary_request(&run_id)
+            .expect("observe must apply the typed command at the boundary");
+
+        assert!(
+            agent
+                .turn_cancel_after_boundary()
+                .expect("cancel-after-boundary flag"),
+            "the typed command must be observed once and applied to the machine"
+        );
+
+        // The edge was consumed: the receiver is drained, so a subsequent
+        // observe with no fresh command is a pure no-op (observed at most once).
+        assert!(
+            matches!(
+                agent.cancel_after_boundary_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "the typed command must be drained exactly once, not left re-observable"
+        );
+        agent
+            .observe_cancel_after_boundary_request(&run_id)
+            .expect("a second observe with no fresh command must be a no-op");
     }
 
     #[tokio::test]
@@ -8168,7 +8259,10 @@ mod tests {
             result.terminal_cause_kind,
             Some(crate::TurnTerminalCauseKind::BudgetExhausted)
         );
-        assert_eq!(agent.state(), LoopState::Completed);
+        assert_eq!(
+            agent.state().expect("loop state projects"),
+            LoopState::Completed
+        );
     }
 
     /// Regression test: tool-call budget exhaustion detected anywhere in the
@@ -8191,7 +8285,10 @@ mod tests {
             result.terminal_cause_kind,
             Some(crate::TurnTerminalCauseKind::BudgetExhausted)
         );
-        assert_eq!(agent.state(), LoopState::Completed);
+        assert_eq!(
+            agent.state().expect("loop state projects"),
+            LoopState::Completed
+        );
     }
 
     // -- Retry delay hint tests (PR #156 port) --

@@ -607,6 +607,11 @@ impl AgentBuilder {
             resolved_config.max_turns = Some(crate::config::DEFAULT_MAX_TURNS);
         }
 
+        // Typed cancel-after-boundary command channel. The agent retains both
+        // ends: the receiver is drained at turn boundaries, the sender is
+        // cloned for the requesting surface via `cancel_after_boundary_handle`.
+        let (cancel_after_boundary_tx, cancel_after_boundary_rx) = mpsc::unbounded_channel();
+
         let mut agent = Agent {
             config: resolved_config,
             client,
@@ -649,7 +654,8 @@ impl AgentBuilder {
             external_tool_surface_handle: self.external_tool_surface_handle,
             auth_lease_handle: self.auth_lease_handle,
             mcp_server_lifecycle_handle: self.mcp_server_lifecycle_handle,
-            cancel_after_boundary_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cancel_after_boundary_tx,
+            cancel_after_boundary_rx,
             model_defaults_resolver: self.model_defaults_resolver,
             call_timeout_override: self.call_timeout_override,
             extraction_state: super::extraction::ExtractionState::default(),

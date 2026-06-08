@@ -314,8 +314,8 @@ impl SessionAgent for FactoryAgent {
             .await
     }
 
-    fn sync_system_context_state(&mut self) {
-        self.agent.sync_system_context_state_to_session();
+    fn sync_system_context_state(&mut self) -> Result<(), meerkat_core::SystemContextStateError> {
+        self.agent.sync_system_context_state_to_session()
     }
 
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -384,7 +384,7 @@ impl SessionAgent for FactoryAgent {
         self.agent.cancel();
     }
 
-    fn cancel_after_boundary_handle(&self) -> Option<Arc<std::sync::atomic::AtomicBool>> {
+    fn cancel_after_boundary_handle(&self) -> Option<meerkat_core::CancelAfterBoundarySender> {
         Some(self.agent.cancel_after_boundary_handle())
     }
 
@@ -414,7 +414,10 @@ impl SessionAgent for FactoryAgent {
         }
     }
 
-    fn execution_snapshot(&self) -> Option<meerkat_core::AgentExecutionSnapshot> {
+    fn execution_snapshot(
+        &self,
+    ) -> Result<Option<meerkat_core::AgentExecutionSnapshot>, meerkat_core::SnapshotProjectionError>
+    {
         self.agent.execution_snapshot()
     }
 
@@ -435,7 +438,7 @@ impl SessionAgent for FactoryAgent {
         self.agent.external_tool_surface_snapshot()
     }
 
-    fn session_clone(&self) -> Session {
+    fn session_clone(&self) -> Result<Session, meerkat_core::SystemContextStateError> {
         self.agent.session_with_system_context_state()
     }
 
@@ -1635,6 +1638,7 @@ mod tests {
         .await?;
 
         let snapshot = SessionAgent::execution_snapshot(&agent)
+            .map_err(|err| format!("snapshot should project: {err}"))?
             .ok_or_else(|| "factory agent should expose execution snapshot".to_string())?;
 
         assert_eq!(

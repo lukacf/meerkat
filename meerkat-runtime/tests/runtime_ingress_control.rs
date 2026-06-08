@@ -203,7 +203,7 @@ async fn runtime_ingress_control_red_ok_reset_preempts_queued_input_once() {
         .await
         .expect("completion waiter should resolve");
     assert!(
-        matches!(result, CompletionOutcome::RuntimeTerminated(_)),
+        matches!(result, CompletionOutcome::RuntimeTerminated { .. }),
         "queued ingress should resolve as terminated when control-plane reset wins"
     );
 

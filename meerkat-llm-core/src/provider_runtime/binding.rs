@@ -99,6 +99,27 @@ pub enum NormalizedAuthMethod {
 }
 
 impl NormalizedAuthMethod {
+    /// Build the provider-tagged normalized auth method from a resolved
+    /// [`AuthProfile`](meerkat_core::AuthProfile), parsing the profile's
+    /// declared `auth_method` string through the profile provider's typed
+    /// matrix enum. Returns `None` for `Provider::Other` or an `auth_method`
+    /// that is not a member of that provider's auth matrix.
+    ///
+    /// This is the single typed projection consumed by every surface
+    /// (RPC/REST/CLI) that holds a resolved `AuthProfile`, replacing the
+    /// per-surface inline `provider -> *AuthMethod::parse` copies and the
+    /// provider-agnostic `persisted_auth_mode_for_auth_method` string shim.
+    pub fn from_auth_profile(auth_profile: &meerkat_core::AuthProfile) -> Option<Self> {
+        let raw = auth_profile.auth_method.as_str();
+        match auth_profile.provider {
+            Provider::OpenAI => OpenAiAuthMethod::parse(raw).map(Self::OpenAi),
+            Provider::Anthropic => AnthropicAuthMethod::parse(raw).map(Self::Anthropic),
+            Provider::Gemini => GoogleAuthMethod::parse(raw).map(Self::Google),
+            Provider::SelfHosted => SelfHostedAuthMethod::parse(raw).map(Self::SelfHosted),
+            Provider::Other => None,
+        }
+    }
+
     /// The persisted credential mode this auth method stores in the
     /// `TokenStore`, or `None` for authorizer/ADC/SigV4-backed methods that
     /// hold no persisted secret.

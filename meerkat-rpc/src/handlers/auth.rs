@@ -74,21 +74,7 @@ async fn load_config(runtime: &SessionRuntime) -> Result<meerkat_core::Config, R
 fn normalized_auth_method(
     auth_profile: &meerkat_core::AuthProfile,
 ) -> Option<meerkat_providers::NormalizedAuthMethod> {
-    use meerkat_core::provider_matrix::{
-        AnthropicAuthMethod, GoogleAuthMethod, OpenAiAuthMethod, SelfHostedAuthMethod,
-    };
-    use meerkat_providers::NormalizedAuthMethod;
-
-    let raw = auth_profile.auth_method.as_str();
-    match auth_profile.provider {
-        Provider::OpenAI => OpenAiAuthMethod::parse(raw).map(NormalizedAuthMethod::OpenAi),
-        Provider::Anthropic => AnthropicAuthMethod::parse(raw).map(NormalizedAuthMethod::Anthropic),
-        Provider::Gemini => GoogleAuthMethod::parse(raw).map(NormalizedAuthMethod::Google),
-        Provider::SelfHosted => {
-            SelfHostedAuthMethod::parse(raw).map(NormalizedAuthMethod::SelfHosted)
-        }
-        Provider::Other => None,
-    }
+    meerkat_providers::NormalizedAuthMethod::from_auth_profile(auth_profile)
 }
 
 /// Resolve the persisted credential mode for a resolved auth profile through

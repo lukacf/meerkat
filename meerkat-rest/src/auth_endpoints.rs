@@ -28,14 +28,14 @@ use meerkat_core::handles::LeaseKey;
 use meerkat_core::{
     AuthBindingRef, CredentialSourceSpec, Provider, RealmConnectionSet, ResolvedConnectionTarget,
 };
+use meerkat_providers::NormalizedAuthMethod;
 use meerkat_providers::auth_oauth::{
     DevicePollOutcome, OAuthError, PkcePair, exchange_authorization_code_with_state,
     poll_device_code, request_device_code,
 };
 use meerkat_providers::auth_store::{
     PersistedAuthMode, PersistedTokens, TokenKey, TokenStore,
-    credential_source_uses_persisted_store, persisted_auth_mode_for_auth_method,
-    persisted_auth_mode_is_oauth_login,
+    credential_source_uses_persisted_store, persisted_auth_mode_is_oauth_login,
 };
 use meerkat_providers::oauth_flow::{
     OAuthDevicePollLease, OAuthFlowError, resolve_oauth_provider, validate_oauth_login_binding,
@@ -776,7 +776,9 @@ pub async fn create_auth_profile(
     // predicate are owned by the typed enum (canonical table + createability),
     // not a hand-maintained literal allowlist. OAuth-login-lifecycle modes and
     // authorizer-backed methods (no persisted secret) are rejected here.
-    let auth_mode = match persisted_auth_mode_for_auth_method(&auth_profile.auth_method) {
+    let auth_mode = match NormalizedAuthMethod::from_auth_profile(&auth_profile)
+        .and_then(NormalizedAuthMethod::persisted_auth_mode)
+    {
         Some(mode) if meerkat_core::persisted_auth_mode_is_directly_creatable(mode) => mode,
         _ => {
             return (
@@ -1640,7 +1642,8 @@ pub async fn get_auth_status(
             .into_response();
     }
     let mut snapshot = state.auth_lease.snapshot(&lease_key);
-    let expected_mode = persisted_auth_mode_for_auth_method(&auth_profile.auth_method);
+    let expected_mode = NormalizedAuthMethod::from_auth_profile(&auth_profile)
+        .and_then(NormalizedAuthMethod::persisted_auth_mode);
     let source_uses_store = credential_source_uses_persisted_store(&auth_profile.source);
     let oauth_mode = expected_mode
         .map(persisted_auth_mode_is_oauth_login)

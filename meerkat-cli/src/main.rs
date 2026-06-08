@@ -5740,9 +5740,8 @@ async fn project_cli_auth_status(
         )
         .map_err(|err| anyhow::anyhow!("AuthMachine freshness observation failed: {err}"))?;
     let mut snapshot = auth_lease.snapshot(&lease_key);
-    let expected_mode = meerkat_providers::auth_store::persisted_auth_mode_for_auth_method(
-        &auth_profile.auth_method,
-    );
+    let expected_mode = meerkat_providers::NormalizedAuthMethod::from_auth_profile(auth_profile)
+        .and_then(meerkat_providers::NormalizedAuthMethod::persisted_auth_mode);
     let source_uses_store =
         meerkat_providers::auth_store::credential_source_uses_persisted_store(&auth_profile.source);
     let oauth_mode = expected_mode

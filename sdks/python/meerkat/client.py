@@ -2522,12 +2522,17 @@ class MeerkatClient:
 
     @staticmethod
     def _parse_attributed_mob_event(raw: dict[str, Any]) -> AttributedEvent:
-        envelope = raw.get("envelope", {})
+        context = "Invalid attributed mob event"
         return AttributedEvent(
-            source=str(raw.get("source", "")),
-            role=str(raw.get("role", "")),
+            source=MeerkatClient._require_string_field(raw, "source", context),
+            role=MeerkatClient._require_string_field(raw, "role", context),
             envelope=MeerkatClient._parse_agent_event_envelope(
-                envelope if isinstance(envelope, dict) else {}
+                MeerkatClient._require_dict(
+                    raw.get("envelope"), "envelope", context
+                )
+            ),
+            source_fence_token=MeerkatClient._optional_number_field(
+                raw, "source_fence_token", context
             ),
         )
 
@@ -3470,6 +3475,44 @@ class MeerkatClient:
         return value
 
     @staticmethod
+    def _optional_string_field(
+        raw: dict[str, Any], field: str, context: str
+    ) -> str | None:
+        """Return an optional wire string, failing closed on malformed shapes.
+
+        An absent or ``null`` field yields ``None``; a field that is
+        *present-but-non-string* is a contract violation and raises
+        ``INVALID_RESPONSE`` rather than being silently coerced.
+        """
+        value = raw.get(field)
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: {field} must be string"
+            )
+        return value
+
+    @staticmethod
+    def _optional_number_field(
+        raw: dict[str, Any], field: str, context: str
+    ) -> int | None:
+        """Return an optional wire integer, failing closed on malformed shapes.
+
+        An absent or ``null`` field yields ``None``; a field that is
+        *present-but-non-number* (or a bool) is a contract violation and raises
+        ``INVALID_RESPONSE`` rather than being silently coerced.
+        """
+        value = raw.get(field)
+        if value is None:
+            return None
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: {field} must be number"
+            )
+        return int(value)
+
+    @staticmethod
     def _require_list_field(
         raw: dict[str, Any], field: str, context: str
     ) -> list[Any]:
@@ -3625,16 +3668,25 @@ class MeerkatClient:
 
     @staticmethod
     def _parse_session_history(data: dict[str, Any]) -> SessionHistory:
+        context = "Invalid session history"
         return SessionHistory(
-            session_id=data.get("session_id", ""),
-            session_ref=data.get("session_ref"),
-            message_count=data.get("message_count", 0),
-            offset=data.get("offset", 0),
-            limit=data.get("limit"),
-            has_more=bool(data.get("has_more", False)),
+            session_id=MeerkatClient._require_string_field(
+                data, "session_id", context
+            ),
+            session_ref=MeerkatClient._optional_string_field(
+                data, "session_ref", context
+            ),
+            message_count=int(
+                MeerkatClient._require_number_field(data, "message_count", context)
+            ),
+            offset=int(MeerkatClient._require_number_field(data, "offset", context)),
+            limit=MeerkatClient._optional_number_field(data, "limit", context),
+            has_more=MeerkatClient._require_bool_field(data, "has_more", context),
             messages=[
                 MeerkatClient._parse_session_message(message)
-                for message in data.get("messages", [])
+                for message in MeerkatClient._require_list_field(
+                    data, "messages", context
+                )
             ],
         )
 
@@ -3642,18 +3694,29 @@ class MeerkatClient:
     def _parse_session_transcript_revision(
         data: dict[str, Any],
     ) -> SessionTranscriptRevision:
+        context = "Invalid session transcript revision"
         return SessionTranscriptRevision(
-            session_id=data.get("session_id", ""),
-            session_ref=data.get("session_ref"),
-            revision=str(data.get("revision", "")),
-            head_revision=str(data.get("head_revision", "")),
-            message_count=data.get("message_count", 0),
-            offset=data.get("offset", 0),
-            limit=data.get("limit"),
-            has_more=bool(data.get("has_more", False)),
+            session_id=MeerkatClient._require_string_field(
+                data, "session_id", context
+            ),
+            session_ref=MeerkatClient._optional_string_field(
+                data, "session_ref", context
+            ),
+            revision=MeerkatClient._require_string_field(data, "revision", context),
+            head_revision=MeerkatClient._require_string_field(
+                data, "head_revision", context
+            ),
+            message_count=int(
+                MeerkatClient._require_number_field(data, "message_count", context)
+            ),
+            offset=int(MeerkatClient._require_number_field(data, "offset", context)),
+            limit=MeerkatClient._optional_number_field(data, "limit", context),
+            has_more=MeerkatClient._require_bool_field(data, "has_more", context),
             messages=[
                 MeerkatClient._parse_session_message(message)
-                for message in data.get("messages", [])
+                for message in MeerkatClient._require_list_field(
+                    data, "messages", context
+                )
             ],
         )
 

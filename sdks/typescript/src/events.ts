@@ -1250,6 +1250,13 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
 
     // Unknown — forward-compat
     default:
+      // Fail closed on a frame with no `type` discriminant: an empty type is a
+      // malformed wire shape, not a forward-compatible future event, so it must
+      // not be laundered into a fabricated UnknownEvent. A genuinely-unknown but
+      // present type is still surfaced as UnknownEvent for forward-compat.
+      if (type === "") {
+        throw new Error("event is missing a `type` discriminant");
+      }
       return { type, ...raw } as UnknownEvent;
   }
   } catch (error) {

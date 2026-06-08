@@ -112,7 +112,15 @@ class _StdoutDispatcher:
             try:
                 data = json.loads(line)
             except json.JSONDecodeError:
-                continue
+                # A malformed frame corrupts the JSONL transport framing: we
+                # cannot trust any subsequent bytes on this stream. Fail closed
+                # with a typed protocol error to all pending callers instead of
+                # silently dropping the frame (which would hang awaiters).
+                self._fail_all(
+                    "PROTOCOL_ERROR",
+                    "rkat-rpc stream produced a malformed JSON frame",
+                )
+                return
             # Server→client callback request (has both id and method).
             # Spawn as a separate task to avoid blocking the read loop — if the
             # tool handler makes a nested SDK call, the response needs to flow

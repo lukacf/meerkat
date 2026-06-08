@@ -468,8 +468,16 @@ export class MeerkatClient {
   >();
   private eventQueues = new Map<string, AsyncQueue<Record<string, unknown> | null>>();
   private streamQueues = new Map<string, AsyncQueue<Record<string, unknown> | null>>();
-  private pendingStreamQueue: AsyncQueue<Record<string, unknown> | null> | null = null;
-  private pendingStreamRequestId: number | null = null;
+  // Per-request_id stream subscriptions for createSessionStreaming calls whose
+  // session_id is not yet bound. Keyed by the JSON-RPC request id so concurrent
+  // creates are admitted and correlated independently instead of colliding on a
+  // single client-local slot (which previously threw INVALID_STATE before the
+  // server had any chance to admit or reject the second create).
+  private pendingStreamQueues = new Map<number, AsyncQueue<Record<string, unknown> | null>>();
+  // Pre-binding events keyed by session_id. session_id is globally unique per
+  // session, so buffering by session_id correlates correctly even when several
+  // streams are pending: each event lands under the session it names, and the
+  // response that binds that session_id drains exactly its own buffer.
   private unmatchedStreamBuffer = new Map<string, Record<string, unknown>[]>();
   private unmatchedStandaloneStreamBuffer = new Map<string, Record<string, unknown>[]>();
   private unmatchedStandaloneStreamEnd = new Map<string, Record<string, unknown>>();
@@ -483,6 +491,12 @@ export class MeerkatClient {
       handler: (args: Record<string, unknown>) => Promise<string | ContentBlock[]>;
     }
   >();
+  // Typed faults from post-connect tool registration. `registerTool` is sync and
+  // the server round-trip is detached, so a genuine server rejection cannot be
+  // surfaced to the synchronous caller. Recording it here makes the
+  // silent-never-registers failure programmatically distinguishable instead of
+  // being swallowed by a best-effort `.catch(() => {})`.
+  private toolRegistrationErrors = new Map<string, MeerkatError>();
 
   constructor(rkatPath = "rkat-rpc") {
     this.rkatPath = rkatPath;
@@ -509,14 +523,79 @@ export class MeerkatClient {
     handler: (args: Record<string, unknown>) => Promise<string | ContentBlock[]>,
   ): void {
     this.toolHandlers.set(name, { description, inputSchema, handler });
+    // A fresh declaration supersedes any stale fault from a prior failed attempt.
+    this.toolRegistrationErrors.delete(name);
     // If already connected, register the new tool with the server immediately.
     if (this.process?.stdin) {
-      this.request("tools/register", {
-        tools: [{ name, description, input_schema: inputSchema }],
-      }).catch(() => {
-        // Best-effort: tool registration may fail if connection is closing.
-      });
+      void this.registerToolWithServer(name, description, inputSchema);
     }
+  }
+
+  /**
+   * Send a single post-connect tool registration and resolve its outcome
+   * without swallowing genuine faults.
+   *
+   * Benign disconnect/shutdown faults are tolerated: the local
+   * `toolHandlers` registry still holds the definition and the next
+   * `connect()` re-sends it, so the tool is not lost. A genuine server
+   * rejection or protocol fault is a real failure that cannot reach the
+   * synchronous `registerTool` caller, so we record it as an inspectable
+   * typed fault (queryable via {@link toolRegistrationError}), marking the
+   * tool unconfirmed. This replaces the previous `.catch(() => {})` that
+   * laundered every failure into silence. The recorded fault is the
+   * propagation channel: re-throwing on this detached promise would surface
+   * only as an unhandled rejection (the caller is sync), so the typed record
+   * is the observable signal instead.
+   */
+  private async registerToolWithServer(
+    name: string,
+    description: string,
+    inputSchema: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      await this.request("tools/register", {
+        tools: [{ name, description, input_schema: inputSchema }],
+      });
+    } catch (error) {
+      const fault =
+        error instanceof MeerkatError
+          ? error
+          : new MeerkatError(
+              "TOOL_REGISTRATION_FAILED",
+              `Tool ${name} registration failed: ${String(error)}`,
+            );
+      // Clean shutdown / disconnect is genuinely benign — the registry already
+      // holds the definition and a future connect() will re-send it.
+      const BENIGN_CODES = new Set([
+        "CLIENT_CLOSED",
+        "CONNECTION_CLOSED",
+        "NOT_CONNECTED",
+        "PROCESS_EXITED",
+        "PROCESS_ERROR",
+      ]);
+      if (BENIGN_CODES.has(fault.code)) {
+        return;
+      }
+      // Genuine server rejection / protocol fault: record the typed fault as
+      // caller-inspectable state so the tool is programmatically known to be
+      // unconfirmed. The synchronous `registerTool` caller cannot observe a
+      // rejection on this detached promise, so the recorded fault — not a
+      // re-throw — is the surfaced signal.
+      this.toolRegistrationErrors.set(name, fault);
+      return;
+    }
+    // Success: a prior failed attempt's fault no longer applies.
+    this.toolRegistrationErrors.delete(name);
+  }
+
+  /**
+   * Return the typed fault recorded for a tool whose post-connect registration
+   * was rejected by the server, or `undefined` if the tool's most recent
+   * registration attempt succeeded (or has not completed yet). Lets callers
+   * distinguish a tool that silently never registered from one that is live.
+   */
+  toolRegistrationError(name: string): MeerkatError | undefined {
+    return this.toolRegistrationErrors.get(name);
   }
 
   // -- Connection ---------------------------------------------------------
@@ -624,6 +703,8 @@ export class MeerkatClient {
         }),
       );
       await this.request("tools/register", { tools });
+      // The bulk re-send confirmed every declared tool; drop stale per-tool faults.
+      this.toolRegistrationErrors.clear();
     }
 
     return this;
@@ -682,12 +763,11 @@ export class MeerkatClient {
     }
     this.streamQueues.clear();
     this.streamTerminalOutcomes.clear();
-    if (this.pendingStreamQueue) {
-      this.pendingStreamQueue.put(null);
-      this.pendingStreamQueue = null;
-      this.pendingStreamRequestId = null;
-      this.unmatchedStreamBuffer.clear();
+    for (const [, queue] of this.pendingStreamQueues) {
+      queue.put(null);
     }
+    this.pendingStreamQueues.clear();
+    this.unmatchedStreamBuffer.clear();
   }
 
   // -- Session lifecycle --------------------------------------------------
@@ -730,21 +810,20 @@ export class MeerkatClient {
     this.requestId++;
     const requestId = this.requestId;
 
-    if (this.pendingStreamQueue) {
-      throw new MeerkatError(
-        "INVALID_STATE",
-        "Only one createSessionStreaming request can be pending at a time",
-      );
-    }
+    // Per-request_id subscription: concurrent createSessionStreaming calls each
+    // get their own pending queue keyed by request id, so a second create is no
+    // longer rejected by a client-local singleton invariant. Admission/rejection
+    // is left to the server.
     const queue = new AsyncQueue<Record<string, unknown> | null>();
-    this.pendingStreamQueue = queue;
-    this.pendingStreamRequestId = requestId;
+    this.pendingStreamQueues.set(requestId, queue);
     const responsePromise = this.registerRequest(requestId);
 
-    // When response arrives, bind the queue to the session_id
+    // When response arrives, bind this request's queue to its session_id.
     const wrappedPromise = responsePromise.then((result) => {
       const sid = String(result.session_id ?? "");
       if (sid) {
+        // Drain only this session's pre-binding buffer — events are buffered by
+        // session_id, so concurrent pending streams do not cross-deliver.
         const buffered = this.unmatchedStreamBuffer.get(sid) ?? [];
         for (const evt of buffered) {
           queue.put(evt);
@@ -752,10 +831,15 @@ export class MeerkatClient {
         this.unmatchedStreamBuffer.delete(sid);
         this.eventQueues.set(sid, queue);
       }
-      this.pendingStreamQueue = null;
-      this.pendingStreamRequestId = null;
-      this.unmatchedStreamBuffer.clear();
+      this.pendingStreamQueues.delete(requestId);
       return result;
+    }, (error) => {
+      // The server rejected this create: tear down only this request's pending
+      // subscription so its consumer fails closed, and leave any concurrent
+      // pending streams untouched.
+      this.pendingStreamQueues.delete(requestId);
+      queue.put(null);
+      throw error;
     });
 
     const rpcRequest = { jsonrpc: "2.0", id: requestId, method: "session/create", params };
@@ -2999,7 +3083,10 @@ export class MeerkatClient {
         const queue = this.eventQueues.get(sessionId);
         if (queue) {
           queue.put(event);
-        } else if (this.pendingStreamQueue) {
+        } else if (this.pendingStreamQueues.size > 0) {
+          // A stream is pending but its session_id is not yet bound. Buffer by
+          // session_id; the create response that binds this session_id drains
+          // exactly this buffer into the matching request's queue.
           const buffered = this.unmatchedStreamBuffer.get(sessionId) ?? [];
           buffered.push(event);
           this.unmatchedStreamBuffer.set(sessionId, buffered);

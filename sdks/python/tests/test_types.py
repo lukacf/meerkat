@@ -1449,7 +1449,7 @@ def test_parse_scoped_mob_event_omits_runtime_binding_atoms():
     ]
 
 
-def test_parse_attributed_mob_event_omits_source_fence_token():
+def test_parse_attributed_mob_event_preserves_source_fence_token():
     event = MeerkatClient._parse_attributed_mob_event(
         {
             "source": "writer",
@@ -1462,7 +1462,54 @@ def test_parse_attributed_mob_event_omits_source_fence_token():
     )
 
     assert event.source == "writer"
-    assert not hasattr(event, "source_fence_token")
+    assert event.role == "worker"
+    assert event.source_fence_token == 7
+
+
+def test_parse_attributed_mob_event_omitted_source_fence_token_is_none():
+    event = MeerkatClient._parse_attributed_mob_event(
+        {
+            "source": "writer",
+            "role": "worker",
+            "envelope": {
+                "payload": {"type": "text_delta", "delta": "hi"},
+            },
+        }
+    )
+
+    assert event.source_fence_token is None
+
+
+def test_parse_attributed_mob_event_fails_closed_on_missing_source():
+    with pytest.raises(MeerkatError, match="missing source"):
+        MeerkatClient._parse_attributed_mob_event(
+            {
+                "role": "worker",
+                "envelope": {"payload": {"type": "text_delta", "delta": "hi"}},
+            }
+        )
+
+
+def test_parse_attributed_mob_event_fails_closed_on_missing_envelope():
+    with pytest.raises(MeerkatError, match="missing envelope"):
+        MeerkatClient._parse_attributed_mob_event(
+            {
+                "source": "writer",
+                "role": "worker",
+            }
+        )
+
+
+def test_parse_attributed_mob_event_fails_closed_on_non_number_fence():
+    with pytest.raises(MeerkatError, match="source_fence_token must be number"):
+        MeerkatClient._parse_attributed_mob_event(
+            {
+                "source": "writer",
+                "role": "worker",
+                "source_fence_token": "7",
+                "envelope": {"payload": {"type": "text_delta", "delta": "hi"}},
+            }
+        )
 
 
 def test_parse_event_envelope_uses_typed_source_not_legacy_source_id():

@@ -948,6 +948,7 @@ class AttributedEvent:
     source: str = ""
     role: str = ""
     envelope: EventEnvelope = field(default_factory=EventEnvelope)
+    source_fence_token: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

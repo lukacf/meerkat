@@ -34,6 +34,7 @@ import type {
   MobAppendSystemContextResult as WireMobAppendSystemContextResult,
   MobFlowStatusResult as WireMobFlowStatusResult,
   MobHelperResult as WireMobHelperResult,
+  MobLifecycleResult,
   MobMemberSendResult as WireMobMemberSendResult,
   MobMemberStatusResult as WireMobMemberStatusResult,
   MobRespawnResult as WireMobRespawnResult,
@@ -1165,13 +1166,24 @@ export class Mob {
     return parseMobStatusResult(parseJsonPayload(json, 'Invalid mob/status response'));
   }
 
-  /** Perform a lifecycle action (stop, resume, complete, destroy). */
-  async lifecycle(action: MobLifecycleAction): Promise<void> {
-    // The WASM boundary now returns a canonical MobLifecycleResult JSON (carrying
-    // the typed MobDestroyReport for destroy). Surfacing that typed report
-    // through this method is the generated-consumer refinement tracked in
-    // Wave 2c (#216); the result is consumed here, not silently dropped.
-    await this.bindings.mob_lifecycle(this.mobId, action);
+  /** Perform a lifecycle action (stop, resume, complete, destroy).
+   *
+   *  Returns the typed {@link MobLifecycleResult} from the WASM boundary
+   *  (carrying the typed destroy_report for a destroy action), parsed
+   *  fail-closed — a malformed payload throws instead of being dropped. */
+  async lifecycle(action: MobLifecycleAction): Promise<MobLifecycleResult> {
+    const json = await this.bindings.mob_lifecycle(this.mobId, action);
+    const raw = parseJsonPayload(json, 'Invalid mob/lifecycle response');
+    if (
+      typeof raw !== 'object' ||
+      raw === null ||
+      typeof (raw as { ok?: unknown }).ok !== 'boolean' ||
+      typeof (raw as { mob_id?: unknown }).mob_id !== 'string' ||
+      typeof (raw as { action?: unknown }).action !== 'string'
+    ) {
+      throw new Error('Invalid mob/lifecycle response: missing typed fields');
+    }
+    return raw as MobLifecycleResult;
   }
 
   /** Get mob events after a cursor. The cursor is an opaque u64-backed string

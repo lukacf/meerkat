@@ -71,3 +71,10 @@ export interface MobAppendSystemContextResult {
   mob_id: string;
   status: "applied" | "staged" | "duplicate";
 }
+
+export interface MobLifecycleResult {
+  action: "stop" | "resume" | "complete" | "reset" | "destroy";
+  destroy_report?: unknown;
+  mob_id: string;
+  ok: boolean;
+}

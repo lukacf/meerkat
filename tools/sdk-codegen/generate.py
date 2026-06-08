@@ -2831,6 +2831,7 @@ def generate_web_mob_types(schemas: dict, output_dir: Path) -> None:
     append_interface("WireResolvedModelCapabilities")
     append_interface("MobMemberStatusResult")
     append_interface("MobAppendSystemContextResult")
+    append_interface("MobLifecycleResult")
 
     (output_dir / "mob.ts").write_text("\n".join(lines))
 

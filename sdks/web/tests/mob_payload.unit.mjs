@@ -480,6 +480,34 @@ test('Session direct polling rejects malformed event items', () => {
   assert.throws(() => session.subscribe().poll(), /missing type/);
 });
 
+test('Session direct polling fails closed on an unknown event type instead of casting blindly', () => {
+  const session = makeDirectSession(() =>
+    JSON.stringify([{ type: 'totally_unknown_event', payload: { x: 1 } }]),
+  );
+
+  assert.throws(() => session.pollEvents(), /unknown event type "totally_unknown_event"/);
+  assert.throws(
+    () => session.subscribe().poll(),
+    /unknown event type "totally_unknown_event"/,
+  );
+});
+
+test('Session direct polling preserves the lagged sentinel without event-type validation', () => {
+  const session = makeDirectSession(() => JSON.stringify([{ type: 'lagged', skipped: 3 }]));
+
+  assert.deepEqual(session.pollEvents(), [{ type: 'lagged', skipped: 3 }]);
+});
+
+test('Session direct polling fails closed on a structurally invalid skills_resolved event', () => {
+  // `skills_resolved` is a known discriminant, but the structural skill
+  // guards inside isKnownEvent must still reject a payload missing the typed
+  // `skills` array — proof the full record (not a synthetic `{ type }`) is
+  // validated.
+  const session = makeDirectSession(() => JSON.stringify([{ type: 'skills_resolved' }]));
+
+  assert.throws(() => session.pollEvents(), /unknown event type "skills_resolved"/);
+});
+
 test('Session destroy does not cache lifecycle state in the browser handle', async () => {
   let destroyCalls = 0;
   let stateCalls = 0;

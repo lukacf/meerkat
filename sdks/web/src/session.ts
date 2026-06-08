@@ -1,4 +1,5 @@
 import { EventSubscription } from './events.js';
+import { isKnownEvent } from './types.js';
 import type {
   ContentBlock,
   TurnResult,
@@ -120,6 +121,16 @@ function normalizeSessionEvent(raw: unknown): SessionEvent {
   }
   if (typeof raw.type !== 'string' || raw.type.length === 0) {
     throw new Error('Invalid session event: missing type');
+  }
+  // Fail closed on an unrecognized event type: validate the full record
+  // against the generated `AgentEvent` inventory via `isKnownEvent` rather
+  // than blindly casting an arbitrary record to `SessionEvent`. An unknown
+  // discriminant is a malformed/forward-incompatible wire shape, not a
+  // silently-coercible one. The full record is passed (not a synthetic
+  // `{ type }`) so the structural skill-resolution guards inside
+  // `isKnownEvent` validate against the real payload.
+  if (!isKnownEvent(raw as { type: string })) {
+    throw new Error(`Invalid session event: unknown event type "${raw.type}"`);
   }
   return raw as unknown as SessionEvent;
 }

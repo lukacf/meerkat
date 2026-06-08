@@ -800,9 +800,16 @@ describe("Typed Events", () => {
     assert.equal(event.type, "future_event_v2");
   });
 
-  it("should handle missing type field", () => {
+  it("fails closed on a frame missing the type discriminant", () => {
+    // A frame with no `type` is a malformed wire shape, not a forward-compat
+    // future event, so it must surface as malformed_event rather than being
+    // laundered into a fabricated UnknownEvent with an empty type.
     const event = parseEvent({ delta: "oops" });
-    assert.equal(event.type, "");
+    assert.equal(event.type, "malformed_event");
+    if (event.type === "malformed_event") {
+      assert.equal(event.rawType, "");
+      assert.deepEqual(event.raw, { delta: "oops" });
+    }
   });
 
   it("should parse scoped wrapper events", () => {

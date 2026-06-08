@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { DeferredSession, Session } from "../dist/session.js";
 import { MeerkatClient } from "../dist/client.js";
+import { MeerkatError } from "../dist/index.js";
 
 describe("Skills v2.1", () => {
   it("Session.invokeSkill sends structured skillRefs to _startTurn", async () => {
@@ -305,6 +306,175 @@ describe("Skills v2.1", () => {
     await new Promise((resolve) => setImmediate(resolve));
 
     assert.deepEqual(client.unmatchedStandaloneStreamBuffer.get("stream-1"), [{ event_id: "e1" }]);
+  });
+
+  it("concurrent createSessionStreaming calls are admitted and correlated by request id", async () => {
+    const client = new MeerkatClient();
+    client.process = { stdin: { write() {} } };
+
+    // Each createSessionStreaming call gets its own pending response; capture
+    // both resolvers so we can deliver per-stream session ids out of order.
+    const resolvers = [];
+    client.registerRequest = () =>
+      new Promise((resolve) => {
+        resolvers.push(resolve);
+      });
+
+    // Both creates must be admitted — no client-local singleton invariant throw.
+    const streamA = client.createSessionStreaming("a");
+    const streamB = client.createSessionStreaming("b");
+    assert.equal(client.pendingStreamQueues.size, 2);
+
+    // Pre-binding events for each session arrive before either response binds.
+    client.handleLine(
+      JSON.stringify({
+        method: "session/event",
+        params: { session_id: "s-A", event: { type: "text_delta", delta: "AA" } },
+      }),
+    );
+    client.handleLine(
+      JSON.stringify({
+        method: "session/event",
+        params: { session_id: "s-B", event: { type: "text_delta", delta: "BB" } },
+      }),
+    );
+
+    // Bind responses out of order — B first, then A.
+    resolvers[1]({
+      session_id: "s-B",
+      text: "doneB",
+      turns: 1,
+      tool_calls: 0,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    resolvers[0]({
+      session_id: "s-A",
+      text: "doneA",
+      turns: 1,
+      tool_calls: 0,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+
+    const [textA, resultA] = await streamA.collectText();
+    const [textB, resultB] = await streamB.collectText();
+
+    // No cross-delivery: each stream sees only its own session's buffered event.
+    assert.equal(textA, "AA");
+    assert.equal(resultA.sessionId, "s-A");
+    assert.equal(textB, "BB");
+    assert.equal(resultB.sessionId, "s-B");
+    assert.equal(client.pendingStreamQueues.size, 0);
+  });
+
+  it("createSessionStreaming server rejection tears down only the rejected stream", async () => {
+    const client = new MeerkatClient();
+    client.process = { stdin: { write() {} } };
+
+    const resolvers = [];
+    const rejecters = [];
+    client.registerRequest = () =>
+      new Promise((resolve, reject) => {
+        resolvers.push(resolve);
+        rejecters.push(reject);
+      });
+
+    const streamA = client.createSessionStreaming("a");
+    const streamB = client.createSessionStreaming("b");
+    assert.equal(client.pendingStreamQueues.size, 2);
+
+    // Server rejects the first create with a typed admission fault.
+    rejecters[0](new MeerkatError("INVALID_STATE", "server refused second stream"));
+    // The second create succeeds normally.
+    resolvers[1]({
+      session_id: "s-B",
+      text: "doneB",
+      turns: 1,
+      tool_calls: 0,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+
+    // The rejected stream fails closed with the typed fault, not a hang.
+    await assert.rejects(streamA.collect(), (err) => {
+      assert.ok(err instanceof MeerkatError);
+      assert.equal(err.code, "INVALID_STATE");
+      return true;
+    });
+    // The surviving stream is unaffected.
+    const resultB = await streamB.collect();
+    assert.equal(resultB.sessionId, "s-B");
+    assert.equal(client.pendingStreamQueues.size, 0);
+  });
+
+  it("post-connect registerTool records a typed fault on genuine server rejection", async () => {
+    const client = new MeerkatClient();
+    client.process = { stdin: { write() {} } };
+
+    let rejectRequest;
+    client.request = () =>
+      new Promise((_resolve, reject) => {
+        rejectRequest = reject;
+      });
+
+    client.registerTool("search", "Search", { type: "object" }, async () => "ok");
+    // Handler is retained locally regardless of the in-flight registration.
+    assert.equal(client.toolHandlers.has("search"), true);
+    assert.equal(client.toolRegistrationError("search"), undefined);
+
+    // The server rejects the registration with a genuine (non-benign) fault.
+    rejectRequest(new MeerkatError("METHOD_REJECTED", "tool name reserved"));
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // The silent-never-registers failure is now programmatically inspectable.
+    const fault = client.toolRegistrationError("search");
+    assert.ok(fault instanceof MeerkatError);
+    assert.equal(fault.code, "METHOD_REJECTED");
+  });
+
+  it("post-connect registerTool tolerates benign disconnect faults without recording a fault", async () => {
+    const client = new MeerkatClient();
+    client.process = { stdin: { write() {} } };
+
+    let rejectRequest;
+    client.request = () =>
+      new Promise((_resolve, reject) => {
+        rejectRequest = reject;
+      });
+
+    client.registerTool("search", "Search", { type: "object" }, async () => "ok");
+    rejectRequest(new MeerkatError("CLIENT_CLOSED", "client closed"));
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Benign disconnect: the handler stays for re-send on next connect and no
+    // fault is recorded.
+    assert.equal(client.toolHandlers.has("search"), true);
+    assert.equal(client.toolRegistrationError("search"), undefined);
+  });
+
+  it("re-registering a tool clears a stale registration fault", async () => {
+    const client = new MeerkatClient();
+    client.process = { stdin: { write() {} } };
+
+    let rejectRequest;
+    client.request = () =>
+      new Promise((_resolve, reject) => {
+        rejectRequest = reject;
+      });
+
+    client.registerTool("search", "Search", { type: "object" }, async () => "ok");
+    rejectRequest(new MeerkatError("METHOD_REJECTED", "rejected"));
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(client.toolRegistrationError("search") instanceof MeerkatError);
+
+    // A fresh declaration supersedes the stale fault immediately.
+    client.request = () =>
+      new Promise((_resolve, reject) => {
+        rejectRequest = reject;
+      });
+    client.registerTool("search", "Search v2", { type: "object" }, async () => "ok2");
+    assert.equal(client.toolRegistrationError("search"), undefined);
   });
 
   it("config wrappers preserve config envelope metadata fields", async () => {

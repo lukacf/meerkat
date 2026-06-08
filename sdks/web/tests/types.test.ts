@@ -347,7 +347,7 @@ function handleEvent(event: AgentEvent): string {
     case 'compaction_completed':
       return `compact:${event.summary_tokens}`;
     case 'compaction_failed':
-      return event.error;
+      return JSON.stringify(event.reason);
     case 'budget_warning':
       return `${event.budget_type}:${event.percent}`;
     case 'retrying':
@@ -372,6 +372,16 @@ function handleEvent(event: AgentEvent): string {
       return event.delta;
     case 'reasoning_complete':
       return event.content;
+    case 'extraction_succeeded':
+      return event.session_id;
+    case 'extraction_failed':
+      return event.reason;
+    case 'server_tool_content':
+      return event.name;
+    case 'assistant_image_appended':
+      return event.type;
+    case 'transcript_rewrite_committed':
+      return event.type;
     default: {
       const _exhaustive: never = event;
       return _exhaustive;
@@ -387,12 +397,13 @@ const backgroundJobWithoutLegacyStatus: AgentEvent = {
   detail: 'exit_code: 1',
 };
 
-// @ts-expect-error terminal_status is required; status is only a legacy display mirror.
 const backgroundJobStringOnly: AgentEvent = {
   type: 'background_job_completed',
   job_id: 'j_123',
   display_name: 'sleep 2',
+  // @ts-expect-error `status` was the legacy display mirror and is no longer a field; terminal_status is authoritative.
   status: 'completed',
+  terminal_status: 'failed',
   detail: 'exit_code: 0',
 };
 

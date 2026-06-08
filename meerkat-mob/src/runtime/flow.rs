@@ -4,13 +4,13 @@ use super::handle::MobHandle;
 use super::path::resolve_context_path_opt;
 use super::supervisor::Supervisor;
 use super::terminalization::{
-    FlowTerminalizationAuthority, TerminalizationOutcome, TerminalizationTarget,
+    FlowFailureCause, FlowTerminalizationAuthority, TerminalizationOutcome, TerminalizationTarget,
 };
 use super::topology::{MobTopologyService, PolicyDecision};
 use super::turn_executor::{FlowTurnExecutor, FlowTurnOutcome, TimeoutDisposition};
 use crate::definition::{
-    CollectionPolicy, DispatchMode, FlowNodeSpec, FlowStepSpec, FrameSpec, FrameStepSpec,
-    PolicyMode, StepOutputFormat,
+    CollectionPolicy, DispatchMode, FlowNodeSpec, FlowSchemaRef, FlowStepSpec, FrameSpec,
+    FrameStepSpec, PolicyMode, StepOutputFormat,
 };
 use crate::error::MobError;
 use crate::ids::{
@@ -1061,7 +1061,11 @@ impl FlowEngine {
             supervisor.force_reset().await?;
         }
         let _ = self
-            .terminalize_failed(run_id.clone(), config.flow_id.clone(), reason)
+            .terminalize_failed(
+                run_id.clone(),
+                config.flow_id.clone(),
+                FlowFailureCause::StepError { detail: reason },
+            )
             .await?;
         Ok(())
     }
@@ -1705,9 +1709,9 @@ impl FlowEngine {
         &self,
         run_id: RunId,
         flow_id: FlowId,
-        reason: String,
+        cause: FlowFailureCause,
     ) -> Result<TerminalizationOutcome, MobError> {
-        self.terminalize(run_id, flow_id, TerminalizationTarget::Failed { reason })
+        self.terminalize(run_id, flow_id, TerminalizationTarget::Failed { cause })
             .await
     }
 
@@ -2230,30 +2234,31 @@ fn aggregate_output(
 }
 
 async fn validate_schema_ref(
-    schema_ref: &str,
+    schema_ref: &FlowSchemaRef,
     step_id: &StepId,
     output: &Value,
 ) -> Result<(), MobError> {
-    let schema = match serde_json::from_str::<Value>(schema_ref) {
-        Ok(inline) => inline,
-        Err(_) => {
+    let schema = match schema_ref {
+        FlowSchemaRef::Inline(schema) => schema.as_value().clone(),
+        FlowSchemaRef::Named(name) => {
+            let name = name.as_str();
             #[cfg(not(target_arch = "wasm32"))]
-            let raw = tokio::fs::read_to_string(schema_ref)
-                .await
-                .map_err(|error| MobError::SchemaValidation {
+            let raw = tokio::fs::read_to_string(name).await.map_err(|error| {
+                MobError::SchemaValidation {
                     step_id: step_id.clone(),
-                    message: format!("failed to read schema ref '{schema_ref}': {error}"),
-                })?;
+                    message: format!("failed to read schema ref '{name}': {error}"),
+                }
+            })?;
             #[cfg(target_arch = "wasm32")]
             return Err(MobError::SchemaValidation {
                 step_id: step_id.clone(),
-                message: format!("file-based schema ref '{schema_ref}' is not supported on wasm32"),
+                message: format!("file-based schema ref '{name}' is not supported on wasm32"),
             });
             #[cfg(not(target_arch = "wasm32"))]
             {
                 serde_json::from_str(&raw).map_err(|error| MobError::SchemaValidation {
                     step_id: step_id.clone(),
-                    message: format!("invalid schema JSON at '{schema_ref}': {error}"),
+                    message: format!("invalid schema JSON at '{name}': {error}"),
                 })?
             }
         }

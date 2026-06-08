@@ -6392,7 +6392,9 @@ mod tests {
                     value: serde_json::json!(true),
                 }),
                 timeout_ms: Some(2000),
-                expected_schema_ref: Some("schema.json".to_string()),
+                expected_schema_ref: Some(crate::definition::FlowSchemaRef::Named(
+                    crate::definition::SchemaName::from("schema.json"),
+                )),
                 branch: Some(BranchId::from("branch-a")),
                 depends_on_mode: crate::definition::DependencyMode::All,
                 allowed_tools: None,

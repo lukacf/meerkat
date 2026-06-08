@@ -94,6 +94,24 @@ export type BudgetType = "tokens" | "time" | "tool_calls";
 
 export type CapabilityId = string;
 
+export type CompactionFailureReason = {
+  error_class: AgentErrorClass;
+  kind: "llm_failed";
+  message: string;
+} | {
+  kind: "empty_summary";
+} | {
+  kind: "estimation_failed";
+  message: string;
+} | {
+  attempted_entries: number;
+  kind: "memory_indexing_failed";
+  message: string;
+} | {
+  kind: "transcript_rewrite_failed";
+  message: string;
+};
+
 export type ContentBlock = {
   text: string;
   type: "text";
@@ -509,7 +527,7 @@ export interface CompactionCompletedEvent {
 }
 
 export interface CompactionFailedEvent {
-  error: string;
+  reason: CompactionFailureReason;
   type: "compaction_failed";
 }
 
@@ -578,7 +596,6 @@ export interface BackgroundJobCompletedEvent {
   detail: string;
   display_name: string;
   job_id: string;
-  status?: string | null;
   terminal_status: BackgroundJobTerminalStatus;
   type: "background_job_completed";
 }

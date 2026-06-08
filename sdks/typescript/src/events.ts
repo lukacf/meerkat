@@ -284,7 +284,9 @@ export interface CompactionCompletedEvent {
 
 export interface CompactionFailedEvent {
   readonly type: "compaction_failed";
-  readonly error: string;
+  // Typed failure-reason object ({ kind, ... }); mirrors the Rust
+  // CompactionFailureReason tagged enum (was a bare `error` string).
+  readonly reason: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -471,7 +473,6 @@ export interface BackgroundJobCompletedEvent {
   readonly type: "background_job_completed";
   readonly jobId: string;
   readonly displayName: string;
-  readonly legacyStatus?: string;
   readonly terminalStatus: BackgroundJobTerminalStatus;
   readonly detail: string;
 }
@@ -1150,7 +1151,7 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
     case "compaction_completed":
       return { type, summaryTokens: requireNumberField(raw, "summary_tokens"), messagesBefore: requireNumberField(raw, "messages_before"), messagesAfter: requireNumberField(raw, "messages_after") };
     case "compaction_failed":
-      return { type, error: requireStringField(raw, "error") };
+      return { type, reason: requireRecordField(raw, "reason") };
 
     // Budget
     case "budget_warning":
@@ -1226,12 +1227,10 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
       };
     }
     case "background_job_completed": {
-      const legacyStatus = typeof raw.status === "string" ? raw.status : undefined;
       return {
         type,
         jobId: requireStringField(raw, "job_id"),
         displayName: requireStringField(raw, "display_name"),
-        ...(legacyStatus != null ? { legacyStatus } : {}),
         terminalStatus: requireOneOf(
           requireStringField(raw, "terminal_status"),
           "terminal_status",

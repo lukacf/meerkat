@@ -183,16 +183,6 @@ impl BackgroundJobTerminalStatus {
     }
 }
 
-fn deserialize_legacy_background_job_status<'de, D>(
-    deserializer: D,
-) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = Option::<Value>::deserialize(deserializer)?;
-    Ok(value.and_then(|value| value.as_str().map(str::to_owned)))
-}
-
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(transparent)]
@@ -1439,6 +1429,103 @@ impl ExternalToolDelta {
     }
 }
 
+/// Typed, serializable cause of a non-fatal compaction failure.
+///
+/// Compaction is best-effort: when it fails the agent continues with the
+/// uncompacted history. This enum is the wire-stable projection of the
+/// in-flight [`crate::agent::compact::CompactionError`] plus the post-summary
+/// commit failures (memory indexing, transcript rewrite) surfaced from the
+/// agent loop. Each variant carries the typed cause; the [`Display`] impl
+/// renders the human-facing message consumers used to read off the old
+/// `error: String` field.
+///
+/// [`Display`]: std::fmt::Display
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CompactionFailureReason {
+    /// The LLM call summarizing the history failed.
+    LlmFailed {
+        /// Typed classification of the underlying agent error.
+        error_class: AgentErrorClass,
+        /// Display projection of the underlying agent error.
+        message: String,
+    },
+    /// The LLM returned an empty summary, so there was nothing to commit.
+    EmptySummary,
+    /// Token estimation over the history failed before summarization.
+    EstimationFailed {
+        /// Display projection of the serialization error.
+        message: String,
+    },
+    /// The memory store rejected indexing the discarded history, so the
+    /// original (uncompacted) transcript was preserved.
+    MemoryIndexingFailed {
+        /// Number of discard entries that were attempted.
+        attempted_entries: usize,
+        /// Display projection of the rejection error.
+        message: String,
+    },
+    /// Committing the post-summary transcript rewrite failed, so the original
+    /// history was preserved.
+    TranscriptRewriteFailed {
+        /// Display projection of the commit error.
+        message: String,
+    },
+}
+
+impl CompactionFailureReason {
+    /// Typed LLM failure carrying the agent error's class and display message.
+    #[must_use]
+    pub fn llm_failed(error: &crate::error::AgentError) -> Self {
+        Self::LlmFailed {
+            error_class: AgentErrorClass::from(error),
+            message: error.to_string(),
+        }
+    }
+
+    /// Memory-indexing rejection failure.
+    #[must_use]
+    pub fn memory_indexing_failed(attempted_entries: usize, message: impl Into<String>) -> Self {
+        Self::MemoryIndexingFailed {
+            attempted_entries,
+            message: message.into(),
+        }
+    }
+
+    /// Transcript-rewrite commit failure.
+    #[must_use]
+    pub fn transcript_rewrite_failed(message: impl Into<String>) -> Self {
+        Self::TranscriptRewriteFailed {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for CompactionFailureReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LlmFailed { message, .. } => write!(f, "compaction LLM call failed: {message}"),
+            Self::EmptySummary => write!(f, "LLM returned empty summary"),
+            Self::EstimationFailed { message } => write!(f, "token estimation failed: {message}"),
+            Self::MemoryIndexingFailed {
+                attempted_entries,
+                message,
+            } => write!(
+                f,
+                "memory indexing failed after compaction ({attempted_entries} entries attempted): {message}"
+            ),
+            Self::TranscriptRewriteFailed { message } => {
+                write!(
+                    f,
+                    "failed to commit compaction transcript rewrite: {message}"
+                )
+            }
+        }
+    }
+}
+
 /// Events emitted during agent execution
 ///
 /// These events form the streaming API for consumers.
@@ -1622,7 +1709,7 @@ pub enum AgentEvent {
     },
 
     /// Context compaction failed (non-fatal — agent continues with uncompacted history).
-    CompactionFailed { error: String },
+    CompactionFailed { reason: CompactionFailureReason },
 
     // === Budget ===
     /// Budget warning (approaching limits)
@@ -1703,14 +1790,6 @@ pub enum AgentEvent {
     BackgroundJobCompleted {
         job_id: String,
         display_name: String,
-        /// Legacy display mirror for consumers still rendering string status.
-        #[serde(rename = "status")]
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            deserialize_with = "deserialize_legacy_background_job_status"
-        )]
-        legacy_status: Option<String>,
         terminal_status: BackgroundJobTerminalStatus,
         detail: String,
     },
@@ -1732,7 +1811,6 @@ impl AgentEvent {
         Self::BackgroundJobCompleted {
             job_id: job_id.into(),
             display_name: display_name.into(),
-            legacy_status: Some(terminal_status.as_str().to_string()),
             terminal_status,
             detail: detail.into(),
         }
@@ -1942,8 +2020,8 @@ pub fn format_verbose_event_with_config(
         } => Some(format!(
             "  ✓ Compaction complete: {messages_before} → {messages_after} messages, {summary_tokens} summary tokens"
         )),
-        AgentEvent::CompactionFailed { error } => {
-            Some(format!("  ✗ Compaction failed (continuing): {error}"))
+        AgentEvent::CompactionFailed { reason } => {
+            Some(format!("  ✗ Compaction failed (continuing): {reason}"))
         }
         AgentEvent::BackgroundJobCompleted {
             job_id,
@@ -2491,7 +2569,10 @@ mod tests {
                 messages_after: 8,
             },
             AgentEvent::CompactionFailed {
-                error: "LLM request failed".to_string(),
+                reason: CompactionFailureReason::LlmFailed {
+                    error_class: AgentErrorClass::Llm,
+                    message: "LLM request failed".to_string(),
+                },
             },
             AgentEvent::InteractionComplete {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
@@ -2561,17 +2642,17 @@ mod tests {
 
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "background_job_completed");
-        assert_eq!(json["status"], "failed");
+        assert!(
+            json.get("status").is_none(),
+            "legacy string status mirror must not be serialized"
+        );
         assert_eq!(json["terminal_status"], "failed");
 
         let roundtrip: AgentEvent = serde_json::from_value(json).unwrap();
         match roundtrip {
             AgentEvent::BackgroundJobCompleted {
-                legacy_status,
-                terminal_status,
-                ..
+                terminal_status, ..
             } => {
-                assert_eq!(legacy_status.as_deref(), Some("failed"));
                 assert_eq!(terminal_status, BackgroundJobTerminalStatus::Failed);
             }
             other => unreachable!("unexpected event: {other:?}"),
@@ -2617,32 +2698,32 @@ mod tests {
             "unknown typed terminal status must fail closed"
         );
 
-        let typed_without_legacy_json = serde_json::json!({
+        let typed_json = serde_json::json!({
             "type": "background_job_completed",
             "job_id": "j_123",
             "display_name": "sleep 2",
             "terminal_status": "failed",
             "detail": "exit_code: 1"
         });
-        let event: AgentEvent = serde_json::from_value(typed_without_legacy_json).unwrap();
+        let event: AgentEvent = serde_json::from_value(typed_json).unwrap();
         match event {
             AgentEvent::BackgroundJobCompleted {
                 job_id,
                 display_name,
-                legacy_status,
                 terminal_status,
                 detail,
             } => {
                 assert_eq!(job_id, "j_123");
                 assert_eq!(display_name, "sleep 2");
-                assert_eq!(legacy_status, None);
                 assert_eq!(terminal_status, BackgroundJobTerminalStatus::Failed);
                 assert_eq!(detail, "exit_code: 1");
             }
             other => unreachable!("unexpected event: {other:?}"),
         }
 
-        let stale_legacy_json = serde_json::json!({
+        // A stray legacy `status` mirror is ignored; the typed terminal status
+        // is authoritative and the event no longer carries any string status.
+        let stale_status_mirror_json = serde_json::json!({
             "type": "background_job_completed",
             "job_id": "j_123",
             "display_name": "sleep 2",
@@ -2650,41 +2731,16 @@ mod tests {
             "terminal_status": "failed",
             "detail": "exit_code: 1"
         });
-        let event: AgentEvent = serde_json::from_value(stale_legacy_json).unwrap();
+        let event: AgentEvent = serde_json::from_value(stale_status_mirror_json).unwrap();
         match event {
             AgentEvent::BackgroundJobCompleted {
                 job_id,
                 display_name,
-                legacy_status,
                 terminal_status,
                 detail,
             } => {
                 assert_eq!(job_id, "j_123");
                 assert_eq!(display_name, "sleep 2");
-                assert_eq!(legacy_status.as_deref(), Some("completed"));
-                assert_eq!(terminal_status, BackgroundJobTerminalStatus::Failed);
-                assert_eq!(detail, "exit_code: 1");
-            }
-            other => unreachable!("unexpected event: {other:?}"),
-        }
-
-        let malformed_legacy_json = serde_json::json!({
-            "type": "background_job_completed",
-            "job_id": "j_123",
-            "display_name": "sleep 2",
-            "status": 0,
-            "terminal_status": "failed",
-            "detail": "exit_code: 1"
-        });
-        let event: AgentEvent = serde_json::from_value(malformed_legacy_json).unwrap();
-        match event {
-            AgentEvent::BackgroundJobCompleted {
-                legacy_status,
-                terminal_status,
-                detail,
-                ..
-            } => {
-                assert_eq!(legacy_status, None);
                 assert_eq!(terminal_status, BackgroundJobTerminalStatus::Failed);
                 assert_eq!(detail, "exit_code: 1");
             }
@@ -3067,7 +3123,7 @@ mod tests {
                 messages_after: 1,
             },
             AgentEvent::CompactionFailed {
-                error: "failed".to_string(),
+                reason: CompactionFailureReason::EmptySummary,
             },
             AgentEvent::BudgetWarning {
                 budget_type: BudgetType::Time,

@@ -1016,8 +1016,8 @@
           {
             "description": "Context compaction failed (non-fatal — agent continues with uncompacted history).",
             "properties": {
-              "error": {
-                "type": "string"
+              "reason": {
+                "$ref": "#/$defs/CompactionFailureReason"
               },
               "type": {
                 "const": "compaction_failed",
@@ -1026,7 +1026,7 @@
             },
             "required": [
               "type",
-              "error"
+              "reason"
             ],
             "type": "object"
           },
@@ -1291,13 +1291,6 @@
               "job_id": {
                 "type": "string"
               },
-              "status": {
-                "description": "Legacy display mirror for consumers still rendering string status.",
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
               "terminal_status": {
                 "$ref": "#/$defs/BackgroundJobTerminalStatus"
               },
@@ -1424,6 +1417,108 @@
       "CapabilityId": {
         "description": "Slug-validated capability identifier for skill requirements.\n\nReplaces the legacy `Vec<String>` capability lists with a typed\nnamespace. Parsed at construction, so callers cannot smuggle invalid\nidentifiers into descriptors or requirements.",
         "type": "string"
+      },
+      "CompactionFailureReason": {
+        "description": "Typed, serializable cause of a non-fatal compaction failure.\n\nCompaction is best-effort: when it fails the agent continues with the\nuncompacted history. This enum is the wire-stable projection of the\nin-flight [`crate::agent::compact::CompactionError`] plus the post-summary\ncommit failures (memory indexing, transcript rewrite) surfaced from the\nagent loop. Each variant carries the typed cause; the [`Display`] impl\nrenders the human-facing message consumers used to read off the old\n`error: String` field.\n\n[`Display`]: std::fmt::Display",
+        "oneOf": [
+          {
+            "description": "The LLM call summarizing the history failed.",
+            "properties": {
+              "error_class": {
+                "$ref": "#/$defs/AgentErrorClass",
+                "description": "Typed classification of the underlying agent error."
+              },
+              "kind": {
+                "const": "llm_failed",
+                "type": "string"
+              },
+              "message": {
+                "description": "Display projection of the underlying agent error.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "error_class",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The LLM returned an empty summary, so there was nothing to commit.",
+            "properties": {
+              "kind": {
+                "const": "empty_summary",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Token estimation over the history failed before summarization.",
+            "properties": {
+              "kind": {
+                "const": "estimation_failed",
+                "type": "string"
+              },
+              "message": {
+                "description": "Display projection of the serialization error.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The memory store rejected indexing the discarded history, so the\noriginal (uncompacted) transcript was preserved.",
+            "properties": {
+              "attempted_entries": {
+                "description": "Number of discard entries that were attempted.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "memory_indexing_failed",
+                "type": "string"
+              },
+              "message": {
+                "description": "Display projection of the rejection error.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "attempted_entries",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Committing the post-summary transcript rewrite failed, so the original\nhistory was preserved.",
+            "properties": {
+              "kind": {
+                "const": "transcript_rewrite_failed",
+                "type": "string"
+              },
+              "message": {
+                "description": "Display projection of the commit error.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "message"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "ContentBlock": {
         "oneOf": [
@@ -12922,8 +13017,8 @@
           {
             "description": "Context compaction failed (non-fatal — agent continues with uncompacted history).",
             "properties": {
-              "error": {
-                "type": "string"
+              "reason": {
+                "$ref": "#/$defs/CompactionFailureReason"
               },
               "type": {
                 "const": "compaction_failed",
@@ -12932,7 +13027,7 @@
             },
             "required": [
               "type",
-              "error"
+              "reason"
             ],
             "type": "object"
           },
@@ -13197,13 +13292,6 @@
               "job_id": {
                 "type": "string"
               },
-              "status": {
-                "description": "Legacy display mirror for consumers still rendering string status.",
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
               "terminal_status": {
                 "$ref": "#/$defs/BackgroundJobTerminalStatus"
               },
@@ -13330,6 +13418,108 @@
       "CapabilityId": {
         "description": "Slug-validated capability identifier for skill requirements.\n\nReplaces the legacy `Vec<String>` capability lists with a typed\nnamespace. Parsed at construction, so callers cannot smuggle invalid\nidentifiers into descriptors or requirements.",
         "type": "string"
+      },
+      "CompactionFailureReason": {
+        "description": "Typed, serializable cause of a non-fatal compaction failure.\n\nCompaction is best-effort: when it fails the agent continues with the\nuncompacted history. This enum is the wire-stable projection of the\nin-flight [`crate::agent::compact::CompactionError`] plus the post-summary\ncommit failures (memory indexing, transcript rewrite) surfaced from the\nagent loop. Each variant carries the typed cause; the [`Display`] impl\nrenders the human-facing message consumers used to read off the old\n`error: String` field.\n\n[`Display`]: std::fmt::Display",
+        "oneOf": [
+          {
+            "description": "The LLM call summarizing the history failed.",
+            "properties": {
+              "error_class": {
+                "$ref": "#/$defs/AgentErrorClass",
+                "description": "Typed classification of the underlying agent error."
+              },
+              "kind": {
+                "const": "llm_failed",
+                "type": "string"
+              },
+              "message": {
+                "description": "Display projection of the underlying agent error.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "error_class",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The LLM returned an empty summary, so there was nothing to commit.",
+            "properties": {
+              "kind": {
+                "const": "empty_summary",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Token estimation over the history failed before summarization.",
+            "properties": {
+              "kind": {
+                "const": "estimation_failed",
+                "type": "string"
+              },
+              "message": {
+                "description": "Display projection of the serialization error.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The memory store rejected indexing the discarded history, so the\noriginal (uncompacted) transcript was preserved.",
+            "properties": {
+              "attempted_entries": {
+                "description": "Number of discard entries that were attempted.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "memory_indexing_failed",
+                "type": "string"
+              },
+              "message": {
+                "description": "Display projection of the rejection error.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "attempted_entries",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Committing the post-summary transcript rewrite failed, so the original\nhistory was preserved.",
+            "properties": {
+              "kind": {
+                "const": "transcript_rewrite_failed",
+                "type": "string"
+              },
+              "message": {
+                "description": "Display projection of the commit error.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "message"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "ContentBlock": {
         "oneOf": [

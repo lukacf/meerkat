@@ -1573,7 +1573,6 @@ def test_parse_background_job_completed_uses_typed_terminal_status():
         "type": "background_job_completed",
         "job_id": "j_123",
         "display_name": "sleep 2",
-        "status": "completed",
         "terminal_status": "failed",
         "detail": "exit_code: 1",
     }
@@ -1581,38 +1580,8 @@ def test_parse_background_job_completed_uses_typed_terminal_status():
     assert isinstance(event, BackgroundJobCompleted)
     assert event.job_id == "j_123"
     assert event.display_name == "sleep 2"
-    assert event.legacy_status == "completed"
     assert event.terminal_status == "failed"
     assert event.detail == "exit_code: 1"
-
-
-def test_parse_background_job_completed_allows_absent_legacy_status():
-    raw = {
-        "type": "background_job_completed",
-        "job_id": "j_123",
-        "display_name": "sleep 2",
-        "terminal_status": "failed",
-        "detail": "exit_code: 1",
-    }
-    event = parse_event(raw)
-    assert isinstance(event, BackgroundJobCompleted)
-    assert event.legacy_status is None
-    assert event.terminal_status == "failed"
-
-
-def test_parse_background_job_completed_ignores_malformed_legacy_status():
-    raw = {
-        "type": "background_job_completed",
-        "job_id": "j_123",
-        "display_name": "sleep 2",
-        "status": 0,
-        "terminal_status": "failed",
-        "detail": "exit_code: 1",
-    }
-    event = parse_event(raw)
-    assert isinstance(event, BackgroundJobCompleted)
-    assert event.legacy_status is None
-    assert event.terminal_status == "failed"
 
 
 def test_parse_background_job_completed_requires_typed_terminal_status():

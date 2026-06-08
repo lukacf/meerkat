@@ -947,9 +947,6 @@ where
                                     attempted_entries,
                                     ..
                                 } => {
-                                    let error_message = format!(
-                                        "memory indexing failed after compaction ({attempted_entries} entries attempted): {error}"
-                                    );
                                     tracing::warn!(
                                         error = %error,
                                         attempted_entries,
@@ -959,7 +956,10 @@ where
                                         &self.event_tap,
                                         event_tx.as_ref(),
                                         AgentEvent::CompactionFailed {
-                                            error: error_message,
+                                            reason: crate::event::CompactionFailureReason::memory_indexing_failed(
+                                                attempted_entries,
+                                                error.to_string(),
+                                            ),
                                         },
                                     )
                                     .await
@@ -978,15 +978,14 @@ where
                                 outcome.new_messages,
                                 TranscriptRewriteReason::new("compaction"),
                             ) {
-                                let error_message = format!(
-                                    "failed to commit compaction transcript rewrite: {error}"
-                                );
                                 tracing::warn!(error = %error, "failed to commit compaction transcript rewrite");
                                 if !crate::event_tap::tap_emit(
                                     &self.event_tap,
                                     event_tx.as_ref(),
                                     AgentEvent::CompactionFailed {
-                                        error: error_message,
+                                        reason: crate::event::CompactionFailureReason::transcript_rewrite_failed(
+                                            error.to_string(),
+                                        ),
                                     },
                                 )
                                 .await
@@ -4915,11 +4914,16 @@ mod tests {
 
         let mut saw_compaction_failure = false;
         while let Ok(event) = rx.try_recv() {
-            if let crate::event::AgentEvent::CompactionFailed { error } = event {
-                assert!(
-                    error.contains("stream ended before done"),
-                    "unexpected compaction failure: {error}"
-                );
+            if let crate::event::AgentEvent::CompactionFailed { reason } = event {
+                match reason {
+                    crate::event::CompactionFailureReason::LlmFailed { message, .. } => {
+                        assert!(
+                            message.contains("stream ended before done"),
+                            "unexpected compaction failure message: {message}"
+                        );
+                    }
+                    other => unreachable!("unexpected compaction failure reason: {other:?}"),
+                }
                 saw_compaction_failure = true;
             }
         }
@@ -5081,9 +5085,9 @@ mod tests {
         let mut saw_completed = false;
         while let Ok(event) = rx.try_recv() {
             match event {
-                crate::event::AgentEvent::CompactionFailed { error }
-                    if error.contains("memory indexing failed") =>
-                {
+                crate::event::AgentEvent::CompactionFailed {
+                    reason: crate::event::CompactionFailureReason::MemoryIndexingFailed { .. },
+                } => {
                     saw_memory_failure = true;
                 }
                 crate::event::AgentEvent::CompactionCompleted { .. } => {

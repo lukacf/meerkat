@@ -1087,7 +1087,6 @@ describe("Typed Events", () => {
       type: "background_job_completed",
       job_id: "j_123",
       display_name: "sleep 2",
-      status: "completed",
       terminal_status: "failed",
       detail: "exit_code: 1",
     });
@@ -1096,42 +1095,8 @@ describe("Typed Events", () => {
     if (event.type === "background_job_completed") {
       assert.equal(event.jobId, "j_123");
       assert.equal(event.displayName, "sleep 2");
-      assert.equal(event.legacyStatus, "completed");
       assert.equal(event.terminalStatus, "failed");
       assert.equal(event.detail, "exit_code: 1");
-    }
-  });
-
-  it("should parse background_job_completed without legacy status mirror", () => {
-    const event = parseEvent({
-      type: "background_job_completed",
-      job_id: "j_123",
-      display_name: "sleep 2",
-      terminal_status: "failed",
-      detail: "exit_code: 1",
-    });
-
-    assert.equal(event.type, "background_job_completed");
-    if (event.type === "background_job_completed") {
-      assert.equal(event.legacyStatus, undefined);
-      assert.equal(event.terminalStatus, "failed");
-    }
-  });
-
-  it("should ignore malformed background_job_completed legacy status mirror", () => {
-    const event = parseEvent({
-      type: "background_job_completed",
-      job_id: "j_123",
-      display_name: "sleep 2",
-      status: 0,
-      terminal_status: "failed",
-      detail: "exit_code: 1",
-    });
-
-    assert.equal(event.type, "background_job_completed");
-    if (event.type === "background_job_completed") {
-      assert.equal(event.legacyStatus, undefined);
-      assert.equal(event.terminalStatus, "failed");
     }
   });
 

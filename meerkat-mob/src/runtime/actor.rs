@@ -9,7 +9,7 @@ use super::mob_member_lifecycle_projection::{
 };
 use super::mob_runtime_bridge_authority::{MobRuntimeBridgeAuthority, MobRuntimeBridgeEffect};
 use super::provision_guard::PendingProvision;
-use super::terminalization::{TerminalizationOutcome, TerminalizationTarget};
+use super::terminalization::{FlowFailureCause, TerminalizationOutcome, TerminalizationTarget};
 use super::transaction::LifecycleRollback;
 use super::*;
 use crate::generated::protocol_mob_destroying_session_ingress::MobDestroyingSessionIngressObligation;
@@ -17202,13 +17202,16 @@ impl MobActor {
                     "RunFlow CompleteFlow rollback failed: {rollback_error}"
                 ));
             }
-            let terminalize_reason =
-                format!("lifecycle StartRun transition failed during flow admission: {error}");
+            let terminalize_cause = FlowFailureCause::AdmissionFailed {
+                detail: format!(
+                    "lifecycle StartRun transition failed during flow admission: {error}"
+                ),
+            };
             if let Err(terminalize_error) = self
                 .terminalize_failed_in_actor(
                     run_id.clone(),
                     config.flow_id.clone(),
-                    terminalize_reason,
+                    terminalize_cause,
                     "run_flow_start_signal_terminalize_failed",
                 )
                 .await
@@ -17293,7 +17296,9 @@ impl MobActor {
                                 .terminalize_failed(
                                     flow_run_id.clone(),
                                     flow_id_for_task,
-                                    other.to_string(),
+                                    FlowFailureCause::StepError {
+                                        detail: other.to_string(),
+                                    },
                                 )
                                 .await
                             {
@@ -18051,14 +18056,14 @@ impl MobActor {
         &mut self,
         run_id: RunId,
         flow_id: FlowId,
-        reason: String,
+        cause: FlowFailureCause,
         context: &'static str,
     ) -> Result<(), MobError> {
         let _ = self
             .commit_flow_terminalization_in_actor(
                 run_id,
                 flow_id,
-                TerminalizationTarget::Failed { reason },
+                TerminalizationTarget::Failed { cause },
                 MobMachineFlowRunCommand::TerminalizeFailed(flow_run::inputs::TerminalizeFailed {}),
                 context,
             )

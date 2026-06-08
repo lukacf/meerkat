@@ -339,8 +339,8 @@ fn rkat_auth_status_hides_token_metadata_without_lifecycle() {
 
     let stdout = String::from_utf8_lossy(&status.stdout);
     assert!(
-        stdout.contains("state:       unknown"),
-        "status should report unknown without a live AuthMachine lifecycle; stdout:\n{stdout}"
+        stdout.contains("state:       missing_credential"),
+        "status should report missing_credential without a live AuthMachine lifecycle; stdout:\n{stdout}"
     );
     for forbidden in [
         "auth_mode:",
@@ -399,8 +399,8 @@ fn rkat_auth_status_ignores_malformed_token_storage_without_lifecycle() {
 
     let stdout = String::from_utf8_lossy(&status.stdout);
     assert!(
-        stdout.contains("state:       unknown"),
-        "status should report lease-unknown without token-store truth; stdout:\n{stdout}"
+        stdout.contains("state:       missing_credential"),
+        "status should report missing_credential without token-store truth; stdout:\n{stdout}"
     );
     assert!(
         !stdout.contains("auth_mode:"),
@@ -531,8 +531,8 @@ fn rkat_auth_status_resolves_binding_that_references_auth_profile() {
         "status must report the binding that owns the auth lease key; stdout:\n{stdout}"
     );
     assert!(
-        stdout.contains("state:       unknown"),
-        "status should still be lease-unknown without a live AuthMachine lifecycle; stdout:\n{stdout}"
+        stdout.contains("state:       missing_credential"),
+        "status should still be missing_credential without a live AuthMachine lifecycle; stdout:\n{stdout}"
     );
 }
 

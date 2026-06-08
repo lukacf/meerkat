@@ -382,7 +382,7 @@ fn render_event(
             );
         }
 
-        AgentEvent::CompactionFailed { error } => {
+        AgentEvent::CompactionFailed { reason } => {
             chrome_line(
                 mux,
                 scope_id,
@@ -390,7 +390,7 @@ fn render_event(
                     "{}{}✗ Compaction failed: {}{}",
                     style(ansi, YELLOW),
                     style(ansi, BOLD),
-                    error,
+                    reason,
                     reset(ansi)
                 ),
             );

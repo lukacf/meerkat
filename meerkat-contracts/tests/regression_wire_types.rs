@@ -505,7 +505,10 @@ fn agent_event_all_variants_roundtrip() {
             messages_after: 8,
         },
         AgentEvent::CompactionFailed {
-            error: "LLM failed".to_string(),
+            reason: meerkat_core::CompactionFailureReason::LlmFailed {
+                error_class: meerkat_core::AgentErrorClass::Llm,
+                message: "LLM failed".to_string(),
+            },
         },
         AgentEvent::BudgetWarning {
             budget_type: BudgetType::Tokens,
@@ -733,7 +736,10 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             messages_after: 1,
         },
         AgentEvent::CompactionFailed {
-            error: "failed".to_string(),
+            reason: meerkat_core::CompactionFailureReason::LlmFailed {
+                error_class: meerkat_core::AgentErrorClass::Llm,
+                message: "failed".to_string(),
+            },
         },
         AgentEvent::BudgetWarning {
             budget_type: BudgetType::Time,

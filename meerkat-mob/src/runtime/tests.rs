@@ -3797,7 +3797,8 @@ fn sample_definition_with_schema_ref(schema_ref: &str) -> MobDefinition {
         .steps
         .get_mut(&step_id("start"))
         .expect("start step exists");
-    step.expected_schema_ref = Some(schema_ref.to_string());
+    step.expected_schema_ref =
+        Some(crate::definition::FlowSchemaRef::parse(schema_ref).expect("valid schema ref"));
     def
 }
 

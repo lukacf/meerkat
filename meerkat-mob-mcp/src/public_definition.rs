@@ -13,10 +13,10 @@ use meerkat_mob::{
     Profile, ProfileBinding, ProfileName, StepId, ToolConfig,
     definition::{
         BackendConfig, CollectionPolicy, ConditionExpr, DependencyMode, DispatchMode,
-        EventRouterConfig, ExternalBackendConfig, FlowNodeSpec, FlowSpec, FlowStepSpec, FrameSpec,
-        FrameStepSpec, LimitsSpec, OrchestratorConfig, PolicyMode, RepeatUntilSpec, RoleWiringRule,
-        SkillSource, SpawnPolicyConfig, StepOutputFormat, SupervisorBridgeEndpointConfig,
-        SupervisorSpec, TopologyRule, TopologySpec, WiringRules,
+        EventRouterConfig, ExternalBackendConfig, FlowNodeSpec, FlowSchemaRef, FlowSpec,
+        FlowStepSpec, FrameSpec, FrameStepSpec, LimitsSpec, OrchestratorConfig, PolicyMode,
+        RepeatUntilSpec, RoleWiringRule, SkillSource, SpawnPolicyConfig, StepOutputFormat,
+        SupervisorBridgeEndpointConfig, SupervisorSpec, TopologyRule, TopologySpec, WiringRules,
     },
 };
 use std::convert::TryFrom;
@@ -189,7 +189,11 @@ fn decode_flow_step(
             collection_policy: decode_collection_policy(input.collection_policy),
             condition: input.condition.map(decode_condition).transpose()?,
             timeout_ms: input.timeout_ms,
-            expected_schema_ref: input.expected_schema_ref,
+            expected_schema_ref: input
+                .expected_schema_ref
+                .map(|raw| FlowSchemaRef::parse(&raw))
+                .transpose()
+                .map_err(|error| format!("invalid expected_schema_ref: {error}"))?,
             branch: input.branch.map(BranchId::from),
             depends_on_mode: decode_dependency_mode(input.depends_on_mode),
             allowed_tools: input.allowed_tools,

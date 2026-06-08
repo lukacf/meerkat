@@ -257,7 +257,7 @@ where
                         event_tap,
                         event_tx.as_ref(),
                         AgentEvent::CompactionFailed {
-                            error: "LLM returned empty summary".to_string(),
+                            reason: crate::event::CompactionFailureReason::EmptySummary,
                         },
                     )
                     .await
@@ -276,7 +276,7 @@ where
                     event_tap,
                     event_tx.as_ref(),
                     AgentEvent::CompactionFailed {
-                        error: e.to_string(),
+                        reason: crate::event::CompactionFailureReason::llm_failed(&e),
                     },
                 )
                 .await

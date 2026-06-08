@@ -6,10 +6,41 @@ use crate::store::{MobEventStore, MobRunStore, authority_validating_mob_run_stor
 use serde_json::{Map, Value};
 use std::sync::Arc;
 
+/// Typed categorization of why a flow run terminated in `Failed`.
+///
+/// The wire-persisted `MobEventKind::FlowFailed { reason }` carries only a
+/// display string, so each cause owns the diagnostic detail required to render
+/// that `reason` via [`FlowFailureCause::reason`]. The variant categorizes the
+/// origin of the failure so in-process consumers reason about the failure class
+/// through the type system rather than by re-parsing the display string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum FlowFailureCause {
+    /// A step (single- or multi-target dispatch, collection policy, template
+    /// render, deadline, or escalation) failed and aborted the run. Carries the
+    /// originating error's display text, which already encodes the precise
+    /// failure (e.g. step timeout, schema validation, max flow duration).
+    StepError { detail: String },
+    /// The mob lifecycle rejected the `StartRun` transition during admission.
+    AdmissionFailed { detail: String },
+    /// Repair fallback for a run already persisted as `Failed` whose original
+    /// failure reason is no longer available to reconstruct.
+    AlreadyFailed,
+}
+
+impl FlowFailureCause {
+    /// Render the display string persisted into the wire `FlowFailed` event.
+    pub(super) fn reason(&self) -> String {
+        match self {
+            Self::StepError { detail } | Self::AdmissionFailed { detail } => detail.clone(),
+            Self::AlreadyFailed => "run already failed".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) enum TerminalizationTarget {
     Completed { structured_output: Option<Value> },
-    Failed { reason: String },
+    Failed { cause: FlowFailureCause },
     Canceled,
 }
 
@@ -37,10 +68,10 @@ impl TerminalizationTarget {
                 flow_id,
                 structured_output,
             },
-            Self::Failed { reason } => MobEventKind::FlowFailed {
+            Self::Failed { cause } => MobEventKind::FlowFailed {
                 run_id,
                 flow_id,
-                reason,
+                reason: cause.reason(),
             },
             Self::Canceled => MobEventKind::FlowCanceled { run_id, flow_id },
         }
@@ -156,11 +187,11 @@ impl FlowTerminalizationAuthority {
                 }
             }
             MobRunStatus::Failed => {
-                let reason = match requested {
-                    TerminalizationTarget::Failed { reason } => reason,
-                    _ => "run already failed".to_string(),
+                let cause = match requested {
+                    TerminalizationTarget::Failed { cause } => cause,
+                    _ => FlowFailureCause::AlreadyFailed,
                 };
-                TerminalizationTarget::Failed { reason }
+                TerminalizationTarget::Failed { cause }
             }
             MobRunStatus::Canceled => TerminalizationTarget::Canceled,
             MobRunStatus::Pending | MobRunStatus::Running => requested,
@@ -211,7 +242,10 @@ impl FlowTerminalizationAuthority {
 
 #[cfg(test)]
 mod tests {
-    use super::{FlowTerminalizationAuthority, TerminalizationOutcome, TerminalizationTarget};
+    use super::{
+        FlowFailureCause, FlowTerminalizationAuthority, TerminalizationOutcome,
+        TerminalizationTarget,
+    };
     use crate::event::{MobEvent, MobEventKind, NewMobEvent};
     use crate::ids::{FlowId, LoopId, MobId, RunId, StepId};
     use crate::run::{MobRun, MobRunProvenanceAuthority, MobRunStatus, StepLedgerEntry};
@@ -933,7 +967,9 @@ mod tests {
                 run_id.clone(),
                 FlowId::from("flow"),
                 TerminalizationTarget::Failed {
-                    reason: "fallback failure".to_string(),
+                    cause: FlowFailureCause::StepError {
+                        detail: "fallback failure".to_string(),
+                    },
                 },
             )
             .await
@@ -982,7 +1018,9 @@ mod tests {
                 run_id.clone(),
                 FlowId::from("flow"),
                 TerminalizationTarget::Failed {
-                    reason: "fallback failure".to_string(),
+                    cause: FlowFailureCause::StepError {
+                        detail: "fallback failure".to_string(),
+                    },
                 },
             )
             .await
@@ -1027,7 +1065,9 @@ mod tests {
                 run_id.clone(),
                 FlowId::from("flow"),
                 TerminalizationTarget::Failed {
-                    reason: "boom".to_string(),
+                    cause: FlowFailureCause::StepError {
+                        detail: "boom".to_string(),
+                    },
                 },
             )
             .await

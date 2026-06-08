@@ -318,7 +318,9 @@ class CompactionCompleted(Event):
 class CompactionFailed(Event):
     """Context compaction failed."""
 
-    error: str = ""
+    # Typed failure reason object ({"kind": ..., ...}); mirrors the Rust
+    # CompactionFailureReason tagged enum (was a bare `error` string).
+    reason: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -541,7 +543,6 @@ class BackgroundJobCompleted(Event):
     display_name: str
     terminal_status: BackgroundJobTerminalStatus
     detail: str
-    legacy_status: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1032,7 +1033,7 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         "tool_execution_timed_out": ("id", "name", "timeout_ms"),
         "compaction_started": ("input_tokens", "estimated_history_tokens", "message_count"),
         "compaction_completed": ("summary_tokens", "messages_before", "messages_after"),
-        "compaction_failed": ("error",),
+        "compaction_failed": ("reason",),
         "budget_warning": ("budget_type", "used", "limit", "percent"),
         "retrying": ("attempt", "max_attempts", "error", "delay_ms"),
         "hook_started": ("hook_id", "point"),
@@ -1188,11 +1189,6 @@ def parse_event(raw: dict[str, Any]) -> Event:
                         if isinstance(applied_at_turn_raw, int)
                         else None
                     ),
-                )
-            elif f == "legacy_status" and cls is BackgroundJobCompleted:
-                legacy_status = raw.get("status")
-                kwargs["legacy_status"] = (
-                    legacy_status if isinstance(legacy_status, str) else None
                 )
             elif f == "terminal_status" and cls is BackgroundJobCompleted:
                 kwargs["terminal_status"] = cast(

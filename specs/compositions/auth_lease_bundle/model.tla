@@ -46,19 +46,18 @@ SchedulerRules == {
 
 ActorOfMachine(machine_id) ==
     CASE machine_id = "auth_machine" -> "auth_machine_authority"
-      [] OTHER -> "unknown_actor"
 
 RouteSource(route_name) ==
-    "unknown_machine"
+    "unresolved_route_source_machine"
 
 RouteEffect(route_name) ==
-    "unknown_effect"
+    "unresolved_route_effect"
 
 RouteTargetMachine(route_name) ==
-    "unknown_machine"
+    "unresolved_route_target_machine"
 
 RouteTargetInput(route_name) ==
-    "unknown_input"
+    "unresolved_route_target_input"
 
 RouteTargetKind(route_name) ==
     "Unknown"

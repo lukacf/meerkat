@@ -448,6 +448,20 @@ fn machine_verify_at_root(
                 profile,
                 workers,
             )?;
+            // Structural requirements (expected routes / scheduler rules /
+            // states / transitions) are enforced in EVERY verify profile via the
+            // structural invariants emitted into the composition `ci.cfg`
+            // INVARIANTS block (see render_composition_ci_cfg) — that is the
+            // promotion (#188) that makes the standard CI gate fail closed on a
+            // structurally under-specified composition.
+            //
+            // The per-witness `.cfg` TLC model-checks are TEMPORAL/liveness
+            // checks: they assert that a scripted input sequence drives the
+            // composition through the expected routes. They REQUIRE the Deep
+            // profile's witness-script driving machinery — an un-driven witness
+            // run stutters and vacuously violates its temporal property. Those
+            // (and the coverage-aggregation audit they feed, which also needs
+            // Deep's `-coverage 1` instrumentation) therefore stay Deep-gated.
             if matches!(profile, VerifyProfile::Deep) {
                 let mut aggregated_coverage = main_coverage.unwrap_or_default();
                 let mut witness_covered_routes = BTreeSet::new();

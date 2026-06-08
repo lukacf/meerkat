@@ -1440,9 +1440,34 @@ impl CompositionSchema {
                         }
                     }
                     RouteBindingSource::OwnerProvided => {
-                        // Owner-provided bindings skip type checking — the
-                        // realizing owner actor supplies the value at runtime.
-                        // The handoff protocol enforces the contract instead.
+                        // Owner-provided bindings carry no producer-side value,
+                        // so there is nothing to type-check against the target
+                        // field. The contract is instead enforced by the
+                        // realizing owner under a declared governance bundle:
+                        // either an async effect handoff protocol, or a
+                        // synchronous transaction plan whose store primitive
+                        // realizes the route atomically (the legitimate home for
+                        // an owner-supplied optimistic-concurrency token). Fail
+                        // closed: require one of those rather than silently
+                        // trusting an unconstrained owner binding.
+                        let covered = self.handoff_protocols.iter().any(|protocol| {
+                            protocol.producer_instance == route.from_machine
+                                && protocol.effect_variant == route.effect_variant
+                        }) || self.transaction_plans.iter().any(|plan| {
+                            plan.route_names
+                                .iter()
+                                .any(|covered_route| covered_route.as_str() == route.name.as_str())
+                        });
+                        if !covered {
+                            return Err(CompositionSchemaError::OwnerProvidedTypeMismatch {
+                                route: route.name.as_str().to_owned(),
+                                from_machine: route.from_machine.as_str().to_owned(),
+                                effect_variant: route.effect_variant.as_str().to_owned(),
+                                to_machine: route.to.machine.as_str().to_owned(),
+                                to_field: binding.to_field.as_str().to_owned(),
+                                to_ty: to_field.ty.clone(),
+                            });
+                        }
                     }
                 }
             }
@@ -2415,6 +2440,19 @@ pub enum CompositionSchemaError {
         to_field: String,
         to_ty: TypeRef,
     },
+    /// An `OwnerProvided` route binding is not covered by a declared effect
+    /// handoff protocol. Owner-provided values carry no producer-side type to
+    /// check, so the contract must be anchored by a protocol whose
+    /// `producer_instance`/`effect_variant` match the route. Fail closed
+    /// rather than silently trusting an unconstrained owner binding.
+    OwnerProvidedTypeMismatch {
+        route: String,
+        from_machine: String,
+        effect_variant: String,
+        to_machine: String,
+        to_field: String,
+        to_ty: TypeRef,
+    },
     ConflictingNamedTypeBinding {
         name: String,
         first_machine: String,
@@ -2733,6 +2771,17 @@ impl fmt::Display for CompositionSchemaError {
             } => write!(
                 f,
                 "route `{route}` field type mismatch: {from_machine}.{from_field}:{from_ty:?} -> {to_machine}.{to_field}:{to_ty:?}"
+            ),
+            Self::OwnerProvidedTypeMismatch {
+                route,
+                from_machine,
+                effect_variant,
+                to_machine,
+                to_field,
+                to_ty,
+            } => write!(
+                f,
+                "route `{route}` owner-provided binding {to_machine}.{to_field}:{to_ty:?} is not covered by any declared effect handoff protocol for {from_machine}.{effect_variant}; owner-provided values carry no producer-side type and must be anchored by a protocol contract"
             ),
             Self::ConflictingNamedTypeBinding {
                 name,

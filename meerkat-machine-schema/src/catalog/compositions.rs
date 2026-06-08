@@ -172,12 +172,14 @@ pub fn schedule_bundle_composition() -> CompositionSchema {
                 "claim_due_occurrences",
                 "store-backed claim uses authoritative store time plus durable lease state",
                 "ScheduleStore::claim_due_occurrences",
+                &[],
             ),
             transaction_plan(
                 "revision_supersede_and_replan",
                 "update_schedule_revision",
                 "revision-affecting schedule updates supersede pending future occurrences before replanning",
                 "ScheduleStore::commit_schedule_mutation",
+                &[],
             ),
         ],
         actor_priorities: vec![],
@@ -310,6 +312,7 @@ pub fn schedule_runtime_bundle_composition() -> CompositionSchema {
             "claim_and_runtime_handoff",
             "transactional claim establishes the durable lease before runtime delivery begins",
             "ScheduleStore::claim_due_occurrences",
+            &[],
         )],
         actor_priorities: vec![],
         scheduler_rules: vec![],
@@ -403,6 +406,7 @@ pub fn schedule_mob_bundle_composition() -> CompositionSchema {
             "claim_and_mob_handoff",
             "transactional claim establishes the durable lease before mob delivery begins",
             "ScheduleStore::claim_due_occurrences",
+            &[],
         )],
         actor_priorities: vec![],
         scheduler_rules: vec![],
@@ -711,6 +715,7 @@ pub fn workgraph_attention_bundle_composition() -> CompositionSchema {
             "close_work_item",
             "terminal work item close atomically stops one co-resident live attention binding; production fan-out applies this transaction per binding",
             "WorkGraphStore::update_item_and_attention_cas",
+            &["work_item_close_stops_attention"],
         )],
         actor_priorities: vec![],
         scheduler_rules: vec![],
@@ -962,13 +967,19 @@ fn transaction_plan(
     trigger: &str,
     description: &str,
     store_primitive: &str,
+    route_names: &[&str],
 ) -> CompositionTransactionPlan {
     CompositionTransactionPlan {
         name: tx_plan_id(name),
         trigger: tx_trigger_id(trigger),
         description: description.into(),
         store_primitive: store_primitive_id(store_primitive),
-        route_names: vec![],
+        // Routes this plan's store primitive atomically realizes. An
+        // owner-provided route binding (which carries no producer-side type) is
+        // anchored by declaring its route here, satisfying the composition's
+        // OwnerProvided fail-closed check via an explicit synchronous-transaction
+        // contract rather than silent unconstrained owner trust.
+        route_names: route_names.iter().map(|r| route_id(r)).collect(),
         protocol_names: vec![],
     }
 }

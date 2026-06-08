@@ -121,6 +121,20 @@ pub enum CompositionTlaError {
         effect: String,
         field: String,
     },
+    /// A generated composition `CASE` operator over a route component could
+    /// not resolve a non-empty mapping for a composition that declares the
+    /// corresponding routes/machines. The previous behaviour laundered this
+    /// into an `OTHER -> "unknown_*"` sentinel, so a model that referenced an
+    /// undeclared actor/machine/effect/input still type-checked. Fail closed
+    /// instead: the operator's `OTHER` catch-all is dropped and an empty
+    /// mapping for a populated composition is a hard codegen error.
+    #[error(
+        "composition `{composition}`: route component `{component}` operator has no resolvable mapping despite declared routes/machines"
+    )]
+    UnknownRouteComponent {
+        composition: String,
+        component: &'static str,
+    },
     /// A machine declares a helper-call cycle, so no topological helper order
     /// exists. The previous fallback silently emitted the cyclic helpers in an
     /// arbitrary order, producing a model that references helpers before they
@@ -1055,9 +1069,27 @@ pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> Stri
         .iter()
         .filter(|invariant| invariant.kind.is_behavioral())
         .collect::<Vec<_>>();
-    if !behavioral_invariants.is_empty() || !instance_invariants.is_empty() || deep {
+    // Structural requirements (route/scheduler/priority presence, etc.) are
+    // static, cheap-to-check predicates over the generated topology. They were
+    // previously only validated in the Deep witness lane; emit them into the
+    // standard INVARIANTS block unconditionally so the default (Ci) verify
+    // profile fails closed on a missing structural requirement instead of
+    // deferring the check to a Deep-only run.
+    let structural_invariants = schema
+        .invariants
+        .iter()
+        .filter(|invariant| invariant.kind.is_structural())
+        .collect::<Vec<_>>();
+    if !behavioral_invariants.is_empty()
+        || !structural_invariants.is_empty()
+        || !instance_invariants.is_empty()
+        || deep
+    {
         pushln!(&mut out, "INVARIANTS");
         for invariant in behavioral_invariants {
+            pushln!(&mut out, "  {}", invariant.name);
+        }
+        for invariant in structural_invariants {
             pushln!(&mut out, "  {}", invariant.name);
         }
         for invariant_name in instance_invariants {
@@ -4393,7 +4425,7 @@ impl<'a> CompositionTlaCompiler<'a> {
             "AppendIfMissing(seq, value) == IF value \\in SeqElements(seq) THEN seq ELSE Append(seq, value)"
         )
         .expect("write to string");
-        self.render_static_sets(&mut out);
+        self.render_static_sets(&mut out)?;
 
         let all_vars = {
             let mut v = machine_vars;
@@ -5380,7 +5412,7 @@ impl<'a> CompositionTlaCompiler<'a> {
         Ok(())
     }
 
-    fn render_static_sets(&self, out: &mut String) {
+    fn render_static_sets(&self, out: &mut String) -> std::result::Result<(), CompositionTlaError> {
         pushln!(out, "Machines == {{");
         for (idx, machine) in self.schema.machines.iter().enumerate() {
             let suffix = if idx + 1 == self.schema.machines.len() {
@@ -5456,8 +5488,10 @@ impl<'a> CompositionTlaCompiler<'a> {
         writeln!(out, "}}");
         pushln!(out);
 
+        let composition_name = self.schema.name.as_str();
         render_composition_case_fn(
             out,
+            composition_name,
             "ActorOfMachine",
             "machine_id",
             self.schema
@@ -5465,10 +5499,14 @@ impl<'a> CompositionTlaCompiler<'a> {
                 .iter()
                 .map(|machine| (machine.instance_id.as_str(), tla_string(&machine.actor)))
                 .collect(),
-            tla_string("unknown_actor"),
-        );
+            CaseDefault::FailClosed {
+                component: "actor",
+                require_mapping: true,
+            },
+        )?;
         render_composition_case_fn(
             out,
+            composition_name,
             "RouteSource",
             "route_name",
             self.schema
@@ -5476,10 +5514,14 @@ impl<'a> CompositionTlaCompiler<'a> {
                 .iter()
                 .map(|route| (route.name.as_str(), tla_string(&route.from_machine)))
                 .collect(),
-            tla_string("unknown_machine"),
-        );
+            CaseDefault::FailClosed {
+                component: "route_source_machine",
+                require_mapping: false,
+            },
+        )?;
         render_composition_case_fn(
             out,
+            composition_name,
             "RouteEffect",
             "route_name",
             self.schema
@@ -5487,10 +5529,14 @@ impl<'a> CompositionTlaCompiler<'a> {
                 .iter()
                 .map(|route| (route.name.as_str(), tla_string(&route.effect_variant)))
                 .collect(),
-            tla_string("unknown_effect"),
-        );
+            CaseDefault::FailClosed {
+                component: "route_effect",
+                require_mapping: false,
+            },
+        )?;
         render_composition_case_fn(
             out,
+            composition_name,
             "RouteTargetMachine",
             "route_name",
             self.schema
@@ -5498,10 +5544,14 @@ impl<'a> CompositionTlaCompiler<'a> {
                 .iter()
                 .map(|route| (route.name.as_str(), tla_string(&route.to.machine)))
                 .collect(),
-            tla_string("unknown_machine"),
-        );
+            CaseDefault::FailClosed {
+                component: "route_target_machine",
+                require_mapping: false,
+            },
+        )?;
         render_composition_case_fn(
             out,
+            composition_name,
             "RouteTargetInput",
             "route_name",
             self.schema
@@ -5509,10 +5559,14 @@ impl<'a> CompositionTlaCompiler<'a> {
                 .iter()
                 .map(|route| (route.name.as_str(), tla_string(&route.to.input_variant)))
                 .collect(),
-            tla_string("unknown_input"),
-        );
+            CaseDefault::FailClosed {
+                component: "route_target_input",
+                require_mapping: false,
+            },
+        )?;
         render_composition_case_fn(
             out,
+            composition_name,
             "RouteTargetKind",
             "route_name",
             self.schema
@@ -5528,10 +5582,11 @@ impl<'a> CompositionTlaCompiler<'a> {
                     )
                 })
                 .collect(),
-            tla_string("Unknown"),
-        );
+            CaseDefault::ClosedEnum(tla_string("Unknown")),
+        )?;
         render_composition_case_fn(
             out,
+            composition_name,
             "RouteDeliveryKind",
             "route_name",
             self.schema
@@ -5547,14 +5602,14 @@ impl<'a> CompositionTlaCompiler<'a> {
                     )
                 })
                 .collect(),
-            tla_string("Unknown"),
-        );
+            CaseDefault::ClosedEnum(tla_string("Unknown")),
+        )?;
         writeln!(
             out,
             "RouteTargetActor(route_name) == ActorOfMachine(RouteTargetMachine(route_name))"
-        )
-        .expect("write to string");
+        );
         pushln!(out);
+        Ok(())
     }
 
     fn render_entry_input_actions(&self, out: &mut String) {
@@ -9645,18 +9700,73 @@ fn render_machine_state_constraint(schema: &MachineSchema, deep: bool) -> String
     }
 }
 
+/// Default arm for a generated composition `CASE` operator.
+///
+/// Route-component lookups (`RouteSource`, `RouteEffect`, …) are validated
+/// up-front by [`CompositionTlaCompiler::validate_routes`], so the historical
+/// `OTHER -> "unknown_*"` arm is provably unreachable for any real route name.
+/// Emitting that sentinel was a silent catch-all that could launder an
+/// undeclared route component into a passing model. Such lookups now use
+/// [`CaseDefault::FailClosed`]: the `OTHER` arm is dropped entirely so an
+/// unmatched route name surfaces as a TLC error instead of a fabricated value,
+/// and the renderer fails closed at codegen time if a route component cannot
+/// be resolved.
+///
+/// Genuinely closed enumerations (`RouteTargetKind`, `RouteDeliveryKind`) keep
+/// a total literal fallback via [`CaseDefault::ClosedEnum`]; every input maps
+/// to a finite, exhaustive enum, so the literal is a sound total default rather
+/// than a sentinel standing in for an undeclared component.
+enum CaseDefault {
+    /// Total literal fallback over a closed enumeration domain.
+    ClosedEnum(String),
+    /// Fail-closed route-component lookup: no `OTHER` sentinel is emitted.
+    ///
+    /// `require_mapping` is `true` for operators whose domain must be
+    /// non-empty for a well-formed composition (e.g. `ActorOfMachine`, which
+    /// maps over declared machine instances): an empty mapping is then a hard
+    /// codegen error. It is `false` for operators keyed on routes, since a
+    /// protocol-only composition legitimately declares zero routes — the
+    /// operator is structurally defined but never evaluated.
+    FailClosed {
+        component: &'static str,
+        require_mapping: bool,
+    },
+}
+
 fn render_composition_case_fn(
     out: &mut String,
+    composition: &str,
     fn_name: &str,
     param: &str,
     mappings: Vec<(&str, String)>,
-    default_expr: String,
-) {
+    default: CaseDefault,
+) -> std::result::Result<(), CompositionTlaError> {
     writeln!(out, "{fn_name}({param}) ==");
     if mappings.is_empty() {
-        pushln!(out, "    {}", default_expr);
+        // No keys to map. For a closed-enum operator the literal fallback is
+        // the operator body. For a fail-closed route-component operator the
+        // composition declares no routes, so the operator is structurally
+        // defined but unreachable; emitting the bare error label as a string
+        // makes any accidental evaluation explode in TLC rather than yield a
+        // plausible-looking value.
+        let body = match &default {
+            CaseDefault::ClosedEnum(expr) => expr.clone(),
+            CaseDefault::FailClosed {
+                component,
+                require_mapping,
+            } => {
+                if *require_mapping {
+                    return Err(CompositionTlaError::UnknownRouteComponent {
+                        composition: composition.to_owned(),
+                        component,
+                    });
+                }
+                tla_string(format!("unresolved_{component}"))
+            }
+        };
+        pushln!(out, "    {}", body);
         pushln!(out);
-        return;
+        return Ok(());
     }
 
     let mut first = true;
@@ -9665,12 +9775,23 @@ fn render_composition_case_fn(
             pushln!(out, "    CASE {} = {} -> {}", param, tla_string(key), value);
             first = false;
         } else {
-            writeln!(out, "      [] {} = {} -> {}", param, tla_string(key), value)
-                .expect("write to string");
+            writeln!(out, "      [] {} = {} -> {}", param, tla_string(key), value);
         }
     }
-    writeln!(out, "      [] OTHER -> {}", default_expr);
+    match default {
+        CaseDefault::ClosedEnum(expr) => {
+            writeln!(out, "      [] OTHER -> {}", expr);
+        }
+        CaseDefault::FailClosed { .. } => {
+            // validate_routes() guarantees the CASE arms cover every declared
+            // route, so an OTHER arm here would be a silent catch-all over an
+            // undeclared route component. Drop it: an unmatched route name now
+            // becomes a TLC evaluation error (fail closed) instead of a
+            // fabricated sentinel.
+        }
+    }
     pushln!(out);
+    Ok(())
 }
 
 fn tla_ident(value: impl AsRef<str>) -> String {

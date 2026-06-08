@@ -52,27 +52,22 @@ SchedulerRules == {
 ActorOfMachine(machine_id) ==
     CASE machine_id = "schedule" -> "schedule_authority"
       [] machine_id = "occurrence" -> "occurrence_authority"
-      [] OTHER -> "unknown_actor"
 
 RouteSource(route_name) ==
     CASE route_name = "revision_supersede_enters_occurrence_authority" -> "schedule"
       [] route_name = "occurrence_supersede_ack_returns_to_schedule" -> "occurrence"
-      [] OTHER -> "unknown_machine"
 
 RouteEffect(route_name) ==
     CASE route_name = "revision_supersede_enters_occurrence_authority" -> "SupersedePendingOccurrences"
       [] route_name = "occurrence_supersede_ack_returns_to_schedule" -> "OccurrencesSuperseded"
-      [] OTHER -> "unknown_effect"
 
 RouteTargetMachine(route_name) ==
     CASE route_name = "revision_supersede_enters_occurrence_authority" -> "occurrence"
       [] route_name = "occurrence_supersede_ack_returns_to_schedule" -> "schedule"
-      [] OTHER -> "unknown_machine"
 
 RouteTargetInput(route_name) ==
     CASE route_name = "revision_supersede_enters_occurrence_authority" -> "Supersede"
       [] route_name = "occurrence_supersede_ack_returns_to_schedule" -> "ConfirmOccurrencesSuperseded"
-      [] OTHER -> "unknown_input"
 
 RouteTargetKind(route_name) ==
     CASE route_name = "revision_supersede_enters_occurrence_authority" -> "Input"

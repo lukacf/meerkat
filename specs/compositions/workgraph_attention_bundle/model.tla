@@ -70,23 +70,18 @@ SchedulerRules == {
 ActorOfMachine(machine_id) ==
     CASE machine_id = "workgraph" -> "workgraph_authority"
       [] machine_id = "attention" -> "attention_authority"
-      [] OTHER -> "unknown_actor"
 
 RouteSource(route_name) ==
     CASE route_name = "work_item_close_stops_attention" -> "workgraph"
-      [] OTHER -> "unknown_machine"
 
 RouteEffect(route_name) ==
     CASE route_name = "work_item_close_stops_attention" -> "Closed"
-      [] OTHER -> "unknown_effect"
 
 RouteTargetMachine(route_name) ==
     CASE route_name = "work_item_close_stops_attention" -> "attention"
-      [] OTHER -> "unknown_machine"
 
 RouteTargetInput(route_name) ==
     CASE route_name = "work_item_close_stops_attention" -> "Stop"
-      [] OTHER -> "unknown_input"
 
 RouteTargetKind(route_name) ==
     CASE route_name = "work_item_close_stops_attention" -> "Input"

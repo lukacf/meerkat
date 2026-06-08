@@ -3761,7 +3761,13 @@ fn domain_dependency_depth(ty: &TypeRef) -> usize {
 fn render_type_domain_expr(ty: &TypeRef) -> String {
     match ty {
         TypeRef::Bool => "BOOLEAN".into(),
-        TypeRef::U32 | TypeRef::U64 => "NatValues".into(),
+        // dogma #172 (codegen half): U32 and U64 are distinct bounded domains,
+        // not one collapsed `NatValues`. The domains-map machinery auto-declares
+        // the `U32Values` CONSTANT and emits its .cfg sample assignment, so a
+        // u32 field references its own domain (matching the kernel's u32 width
+        // check) rather than aliasing the unbounded u64 domain.
+        TypeRef::U32 => "U32Values".into(),
+        TypeRef::U64 => "NatValues".into(),
         TypeRef::String => "StringValues".into(),
         TypeRef::Named(_)
         | TypeRef::Enum(_)
@@ -3780,7 +3786,8 @@ fn domain_constant_name(ty: &TypeRef) -> String {
         TypeRef::Set(inner) => format!("SetOf{}Values", tla_ident(type_ref_name(inner))),
         TypeRef::String => "StringValues".into(),
         TypeRef::Bool => "BooleanValues".into(),
-        TypeRef::U32 | TypeRef::U64 => "NatValues".into(),
+        TypeRef::U32 => "U32Values".into(),
+        TypeRef::U64 => "NatValues".into(),
         TypeRef::Option(inner) => format!("Option{}Values", tla_ident(type_ref_name(inner))),
         TypeRef::Map(key, value) => {
             format!(

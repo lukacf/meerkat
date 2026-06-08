@@ -15,6 +15,7 @@ categories.workspace = true
 [dependencies]
 meerkat-core = { workspace = true }
 meerkat-machine-schema = { path = "../meerkat-machine-schema" }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 meerkat-runtime = { path = "../meerkat-runtime" }

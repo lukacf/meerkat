@@ -314,6 +314,18 @@ pub fn validate(def: &MachineDef) -> Result<(), Error> {
         );
     }
 
+    // Fail closed on helper-call cycles. A cyclic helper graph has no
+    // topological order, so downstream codegen (TLA helper emission) cannot
+    // define a helper before the helper it calls. Detect this here, at DSL
+    // validation time, rather than relying on a silent arbitrary-order
+    // fallback during generation. Run only when structural validation is
+    // clean so an unknown-helper error is not double-reported as a cycle.
+    if errors.is_empty()
+        && let Err(cycle_error) = validate_no_helper_cycles(def)
+    {
+        errors.push(cycle_error);
+    }
+
     // Fidelity: schema `from` phase sets must be derivable without the
     // historical silent `all_phases` fallback. Run `derive_from_phases`
     // only if the structural validation above is clean — otherwise every
@@ -337,6 +349,193 @@ pub fn validate(def: &MachineDef) -> Result<(), Error> {
         }
         Err(combined)
     }
+}
+
+/// Collect the names of helpers directly called within an expression.
+///
+/// Only `ExprDef::Call` nodes contribute an edge; the walk recurses through
+/// every compound expression so a helper call nested arbitrarily deep is still
+/// observed.
+fn collect_helper_call_names(expr: &ExprDef, calls: &mut HashSet<String>) {
+    match expr {
+        ExprDef::Call { helper, args } => {
+            calls.insert(helper.to_string());
+            for arg in args {
+                collect_helper_call_names(arg, calls);
+            }
+        }
+        ExprDef::FieldAccess { base, .. }
+        | ExprDef::EnumVariantIs { value: base, .. }
+        | ExprDef::EnumStringSetPayload { value: base, .. } => {
+            collect_helper_call_names(base, calls);
+        }
+        ExprDef::Not(inner)
+        | ExprDef::IsSome(inner)
+        | ExprDef::IsNone(inner)
+        | ExprDef::Len(inner)
+        | ExprDef::MapKeys(inner)
+        | ExprDef::Some(inner) => {
+            collect_helper_call_names(inner, calls);
+        }
+        ExprDef::And(exprs) | ExprDef::Or(exprs) => {
+            for e in exprs {
+                collect_helper_call_names(e, calls);
+            }
+        }
+        ExprDef::Eq(l, r)
+        | ExprDef::Neq(l, r)
+        | ExprDef::Gt(l, r)
+        | ExprDef::Gte(l, r)
+        | ExprDef::Lt(l, r)
+        | ExprDef::Lte(l, r)
+        | ExprDef::Add(l, r)
+        | ExprDef::Sub(l, r) => {
+            collect_helper_call_names(l, calls);
+            collect_helper_call_names(r, calls);
+        }
+        ExprDef::Contains { collection, value } | ExprDef::Count { collection, value } => {
+            collect_helper_call_names(collection, calls);
+            collect_helper_call_names(value, calls);
+        }
+        ExprDef::MapContainsKey { map, key }
+        | ExprDef::MapGet { map, key }
+        | ExprDef::MapGetCopied { map, key }
+        | ExprDef::MapGetCloned { map, key } => {
+            collect_helper_call_names(map, calls);
+            collect_helper_call_names(key, calls);
+        }
+        ExprDef::ForAll { over, body, .. } | ExprDef::Exists { over, body, .. } => {
+            collect_helper_call_names(over, calls);
+            collect_helper_call_names(body, calls);
+        }
+        ExprDef::IfElse {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_helper_call_names(condition, calls);
+            collect_helper_call_names(then_expr, calls);
+            collect_helper_call_names(else_expr, calls);
+        }
+        // Leaves and phase/binding/field refs contribute no helper edges.
+        ExprDef::Field(_)
+        | ExprDef::Binding(_)
+        | ExprDef::Bool(_)
+        | ExprDef::U64(_)
+        | ExprDef::U64Max
+        | ExprDef::StringLit(_)
+        | ExprDef::None
+        | ExprDef::EmptySeq
+        | ExprDef::EmptySet
+        | ExprDef::EmptyMap
+        | ExprDef::CurrentPhase
+        | ExprDef::Phase(_)
+        | ExprDef::NamedVariant { .. } => {}
+    }
+}
+
+/// Fail-closed helper-call cycle detector.
+///
+/// Builds the helper-call dependency graph (helper name -> directly-called
+/// declared helper names) and runs an iterative DFS with a visited set plus an
+/// explicit recursion stack. The first back-edge found yields an error naming
+/// the cycle path; an acyclic graph yields `Ok(())`.
+///
+/// Only edges to helpers declared on this machine are followed; self-calls and
+/// calls to native/undeclared helpers (already reported by the structural pass
+/// when truly unknown) are not ordering edges.
+fn validate_no_helper_cycles(def: &MachineDef) -> Result<(), Error> {
+    use std::collections::BTreeMap;
+
+    let declared: HashSet<String> = def.helpers.iter().map(|h| h.name.to_string()).collect();
+    let deps_of = |helper: &HelperDef| -> Vec<String> {
+        let mut calls = HashSet::new();
+        collect_helper_call_names(&helper.body, &mut calls);
+        let name = helper.name.to_string();
+        let mut edges: Vec<String> = calls
+            .into_iter()
+            .filter(|dep| dep != &name && declared.contains(dep))
+            .collect();
+        // Deterministic edge order keeps the reported cycle path stable.
+        edges.sort();
+        edges
+    };
+    let by_name: BTreeMap<String, &HelperDef> = def
+        .helpers
+        .iter()
+        .map(|h| (h.name.to_string(), h))
+        .collect();
+    let span_of = |name: &str| -> proc_macro2::Span {
+        match by_name.get(name) {
+            Some(helper) => helper.name.span(),
+            None => proc_macro2::Span::call_site(),
+        }
+    };
+
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut on_stack: HashSet<String> = HashSet::new();
+    let mut stack_path: Vec<String> = Vec::new();
+    let mut frames: Vec<(String, Vec<String>, usize)> = Vec::new();
+
+    for root in &def.helpers {
+        let root_name = root.name.to_string();
+        if visited.contains(&root_name) {
+            continue;
+        }
+        frames.push((root_name.clone(), deps_of(root), 0));
+        on_stack.insert(root_name.clone());
+        stack_path.push(root_name);
+
+        while !frames.is_empty() {
+            // Read the next dependency (if any) from the top frame, advancing
+            // its cursor, then release the borrow before mutating `frames`.
+            let next_dep = {
+                let Some((_, deps, idx)) = frames.last_mut() else {
+                    break;
+                };
+                if *idx < deps.len() {
+                    let dep = deps[*idx].clone();
+                    *idx += 1;
+                    Some(dep)
+                } else {
+                    None
+                }
+            };
+
+            match next_dep {
+                Some(dep) => {
+                    if on_stack.contains(&dep) {
+                        let start = stack_path.iter().position(|n| n == &dep).unwrap_or(0);
+                        let mut cycle = stack_path[start..].to_vec();
+                        cycle.push(dep.clone());
+                        return Err(Error::new(
+                            span_of(&dep),
+                            format!("helper-call cycle detected: {}", cycle.join(" -> ")),
+                        ));
+                    }
+                    if visited.contains(&dep) {
+                        continue;
+                    }
+                    let dep_deps = match by_name.get(&dep) {
+                        Some(helper) => deps_of(helper),
+                        None => Vec::new(),
+                    };
+                    on_stack.insert(dep.clone());
+                    stack_path.push(dep.clone());
+                    frames.push((dep, dep_deps, 0));
+                }
+                None => {
+                    if let Some((node, _, _)) = frames.pop() {
+                        on_stack.remove(&node);
+                        visited.insert(node);
+                    }
+                    stack_path.pop();
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_expr(

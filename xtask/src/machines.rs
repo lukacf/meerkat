@@ -295,10 +295,9 @@ pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()>
 
     for machine in &selection.machines {
         remove_legacy_authority_path(&machine_authority_path(root, &machine.slug))?;
-        write_generated(
-            &machine_model_path(root, &machine.slug),
-            &render_machine_semantic_model(&machine.schema),
-        )?;
+        let machine_model = render_machine_semantic_model(&machine.schema)
+            .with_context(|| format!("render machine semantic model for `{}`", machine.slug))?;
+        write_generated(&machine_model_path(root, &machine.slug), &machine_model)?;
         write_generated(
             &machine_ci_path(root, &machine.slug),
             &render_machine_ci_cfg(&machine.schema, false),
@@ -351,9 +350,16 @@ pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()>
 
     for composition in &selection.compositions {
         remove_legacy_authority_path(&composition_authority_path(root, &composition.slug))?;
+        let composition_model = render_composition_semantic_model(&composition.schema)
+            .with_context(|| {
+                format!(
+                    "render composition semantic model for `{}`",
+                    composition.slug
+                )
+            })?;
         write_generated(
             &composition_model_path(root, &composition.slug),
-            &render_composition_semantic_model(&composition.schema),
+            &composition_model,
         )?;
         write_generated(
             &composition_ci_path(root, &composition.slug),
@@ -526,9 +532,11 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
             &machine_authority_path(root, &machine.slug),
             &mut mismatches,
         );
+        let machine_model = render_machine_semantic_model(&machine.schema)
+            .with_context(|| format!("render machine semantic model for `{}`", machine.slug))?;
         compare_generated(
             &machine_model_path(root, &machine.slug),
-            &render_machine_semantic_model(&machine.schema),
+            &machine_model,
             &mut mismatches,
         )?;
         compare_generated(
@@ -581,9 +589,16 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
             &composition_authority_path(root, &composition.slug),
             &mut mismatches,
         );
+        let composition_model = render_composition_semantic_model(&composition.schema)
+            .with_context(|| {
+                format!(
+                    "render composition semantic model for `{}`",
+                    composition.slug
+                )
+            })?;
         compare_generated(
             &composition_model_path(root, &composition.slug),
-            &render_composition_semantic_model(&composition.schema),
+            &composition_model,
             &mut mismatches,
         )?;
         compare_generated(

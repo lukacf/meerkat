@@ -49,6 +49,96 @@ use meerkat_machine_schema::{
     canonical_machine_schemas,
 };
 
+/// Fail-closed error for composition/machine TLA model generation.
+///
+/// The composition CASE builders and helper ordering used to silently emit
+/// sentinel strings (`"unknown_actor"`, `"unknown_machine"`, …) and swallow
+/// compiler construction errors into `String::new()`. That turned a malformed
+/// composition (a route referencing an undeclared machine/effect/input, or a
+/// helper-call cycle) into a broken-but-passing model. Generation now returns
+/// this typed error so `machine-generate` / `machine-check-drift` fail closed
+/// on malformed input. For every currently-valid schema the resolution checks
+/// pass, so generated output is unchanged.
+#[derive(Debug, thiserror::Error)]
+pub enum CompositionTlaError {
+    /// A route's `from_machine` is not a declared machine instance.
+    #[error(
+        "composition `{composition}`: route `{route}` source machine `{machine}` is not a declared machine instance"
+    )]
+    UnknownRouteSourceMachine {
+        composition: String,
+        route: String,
+        machine: String,
+    },
+    /// A route's `to.machine` is not a declared machine instance.
+    #[error(
+        "composition `{composition}`: route `{route}` target machine `{machine}` is not a declared machine instance"
+    )]
+    UnknownRouteTargetMachine {
+        composition: String,
+        route: String,
+        machine: String,
+    },
+    /// A route's `effect_variant` is not a declared effect on its source machine.
+    #[error(
+        "composition `{composition}`: route `{route}` effect `{effect}` is not a declared effect on source machine instance `{machine}`"
+    )]
+    UnknownRouteEffect {
+        composition: String,
+        route: String,
+        machine: String,
+        effect: String,
+    },
+    /// A route's `to.input_variant` is not a declared input on its target machine.
+    #[error(
+        "composition `{composition}`: route `{route}` target input `{input}` is not a declared input on target machine instance `{machine}`"
+    )]
+    UnknownRouteTargetInput {
+        composition: String,
+        route: String,
+        machine: String,
+        input: String,
+    },
+    /// A route's `to.input_variant` is not a declared signal on its target machine.
+    #[error(
+        "composition `{composition}`: route `{route}` target signal `{signal}` is not a declared signal on target machine instance `{machine}`"
+    )]
+    UnknownRouteTargetSignal {
+        composition: String,
+        route: String,
+        machine: String,
+        signal: String,
+    },
+    /// An obligation field on a handoff protocol is absent from the matching
+    /// effect payload (used to be papered over with an `"unknown_<field>"`
+    /// sentinel literal in the generated TLA record).
+    #[error(
+        "composition `{composition}`: handoff protocol `{protocol}` obligation field `{field}` is absent from effect `{effect}` payload"
+    )]
+    UnknownObligationField {
+        composition: String,
+        protocol: String,
+        effect: String,
+        field: String,
+    },
+    /// A machine declares a helper-call cycle, so no topological helper order
+    /// exists. The previous fallback silently emitted the cyclic helpers in an
+    /// arbitrary order, producing a model that references helpers before they
+    /// are defined.
+    #[error("machine `{machine}`: helper-call cycle detected: {cycle}")]
+    HelperCycle { machine: String, cycle: String },
+    /// Lower-level TLA compiler construction/render failure (e.g. an unknown
+    /// machine schema for a composition instance).
+    #[error("composition TLA compilation failed: {0}")]
+    Compile(String),
+}
+
+impl From<String> for CompositionTlaError {
+    fn from(message: String) -> Self {
+        CompositionTlaError::Compile(message)
+    }
+}
+
 fn route_target_variant<'a>(
     machine: &'a MachineSchema,
     target: &RouteTarget,
@@ -307,7 +397,94 @@ fn composition_uses_u64_max(
         })
 }
 
-fn helper_dependency_order(schema: &MachineSchema) -> Vec<&HelperSchema> {
+/// Detect a helper-call cycle via DFS over the helper-call dependency graph,
+/// using a visited set plus an explicit recursion stack to catch back-edges.
+///
+/// Returns the cycle path (in call order) the first time a back-edge is found,
+/// or `None` when the helper graph is acyclic. Only edges to declared helpers
+/// (`known`) are followed; self-references and calls to native/undeclared
+/// helpers are not dependency edges for ordering purposes.
+fn detect_helper_cycle(defs: &[&HelperSchema], known: &BTreeSet<String>) -> Option<Vec<String>> {
+    let deps_of = |helper: &HelperSchema| -> Vec<String> {
+        let mut calls = BTreeSet::new();
+        collect_helper_calls(&helper.body, &mut calls);
+        calls
+            .into_iter()
+            .filter(|dep| dep != &helper.name && known.contains(dep))
+            .collect()
+    };
+    let by_name: BTreeMap<&str, &HelperSchema> =
+        defs.iter().map(|h| (h.name.as_str(), *h)).collect();
+
+    let mut visited: BTreeSet<String> = BTreeSet::new();
+    let mut on_stack: BTreeSet<String> = BTreeSet::new();
+    let mut stack_path: Vec<String> = Vec::new();
+    // Explicit work stack of (node, next-dependency-index) frames so the DFS
+    // does not recurse on the (untrusted) helper graph depth.
+    let mut frames: Vec<(String, Vec<String>, usize)> = Vec::new();
+
+    for root in defs {
+        let root_name = root.name.clone();
+        if visited.contains(&root_name) {
+            continue;
+        }
+        frames.push((root_name.clone(), deps_of(root), 0));
+        on_stack.insert(root_name.clone());
+        stack_path.push(root_name);
+
+        while !frames.is_empty() {
+            // Read the next dependency (if any) from the top frame, advancing
+            // its cursor, then release the borrow before mutating `frames`.
+            let next_dep = {
+                let Some((_, deps, idx)) = frames.last_mut() else {
+                    break;
+                };
+                if *idx < deps.len() {
+                    let dep = deps[*idx].clone();
+                    *idx += 1;
+                    Some(dep)
+                } else {
+                    None
+                }
+            };
+
+            match next_dep {
+                Some(dep) => {
+                    if on_stack.contains(&dep) {
+                        // Back-edge: report the cycle path from `dep` onward,
+                        // closing the loop back to `dep`.
+                        let start = stack_path.iter().position(|n| n == &dep).unwrap_or(0);
+                        let mut cycle = stack_path[start..].to_vec();
+                        cycle.push(dep);
+                        return Some(cycle);
+                    }
+                    if visited.contains(&dep) {
+                        continue;
+                    }
+                    let dep_deps = match by_name.get(dep.as_str()) {
+                        Some(helper) => deps_of(helper),
+                        None => Vec::new(),
+                    };
+                    on_stack.insert(dep.clone());
+                    stack_path.push(dep.clone());
+                    frames.push((dep, dep_deps, 0));
+                }
+                None => {
+                    if let Some((node, _, _)) = frames.pop() {
+                        on_stack.remove(&node);
+                        visited.insert(node);
+                    }
+                    stack_path.pop();
+                }
+            }
+        }
+    }
+    None
+}
+
+fn helper_dependency_order(
+    schema: &MachineSchema,
+) -> std::result::Result<Vec<&HelperSchema>, CompositionTlaError> {
     let defs = schema
         .helpers
         .iter()
@@ -318,6 +495,17 @@ fn helper_dependency_order(schema: &MachineSchema) -> Vec<&HelperSchema> {
         .map(|helper| &helper.name)
         .cloned()
         .collect::<BTreeSet<_>>();
+
+    // Fail closed: a helper-call cycle has no topological order. The previous
+    // fallback silently dumped the cyclic helpers in arbitrary order, emitting
+    // a model that references a helper before it is defined.
+    if let Some(cycle) = detect_helper_cycle(&defs, &known) {
+        return Err(CompositionTlaError::HelperCycle {
+            machine: schema.machine.as_str().to_owned(),
+            cycle: cycle.join(" -> "),
+        });
+    }
+
     let mut remaining = defs;
     let mut ordered = Vec::new();
 
@@ -341,8 +529,19 @@ fn helper_dependency_order(schema: &MachineSchema) -> Vec<&HelperSchema> {
         }
 
         if ready_indices.is_empty() {
-            ordered.extend(remaining.into_iter());
-            break;
+            // Unreachable: `detect_helper_cycle` already failed closed on any
+            // cyclic helper graph above, so an acyclic graph always has at
+            // least one ready helper here. Fail closed defensively rather than
+            // re-introducing the silent arbitrary-order fallback.
+            let cycle = remaining
+                .iter()
+                .map(|helper| helper.name.clone())
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            return Err(CompositionTlaError::HelperCycle {
+                machine: schema.machine.as_str().to_owned(),
+                cycle,
+            });
         }
 
         for index in ready_indices.into_iter().rev() {
@@ -350,7 +549,7 @@ fn helper_dependency_order(schema: &MachineSchema) -> Vec<&HelperSchema> {
         }
     }
 
-    ordered
+    Ok(ordered)
 }
 
 pub fn render_machine_contract_markdown(
@@ -1253,12 +1452,18 @@ fn composition_witness_state_constraint_name(name: impl AsRef<str>) -> String {
     format!("WitnessStateConstraint_{}", tla_ident(name.as_ref()))
 }
 
-pub fn render_composition_semantic_model(schema: &CompositionSchema) -> String {
+pub fn render_composition_semantic_model(
+    schema: &CompositionSchema,
+) -> std::result::Result<String, CompositionTlaError> {
     let machine_catalog = canonical_machine_schemas();
-    match CompositionTlaCompiler::new(schema, &machine_catalog) {
-        Ok(compiler) => compiler.render().unwrap_or_default(),
-        Err(_) => String::new(),
-    }
+    // Fail closed: compiler construction (unknown machine schema, empty
+    // catalog) and rendering (unresolved route component, helper-call cycle,
+    // absent obligation field) used to be swallowed into `String::new()`,
+    // producing a broken-but-passing model. Propagate the typed error so
+    // `machine-generate` / `machine-check-drift` fail on malformed input.
+    let compiler = CompositionTlaCompiler::new(schema, &machine_catalog)
+        .map_err(CompositionTlaError::Compile)?;
+    compiler.render()
 }
 
 /// Renders the generated per-composition Rust module (Track-B wave-b V2).
@@ -1716,7 +1921,9 @@ fn to_snake_case_local(value: &str) -> String {
     out.trim_matches('_').to_owned()
 }
 
-pub fn render_machine_semantic_model(schema: &MachineSchema) -> String {
+pub fn render_machine_semantic_model(
+    schema: &MachineSchema,
+) -> std::result::Result<String, CompositionTlaError> {
     let mut compiler = MachineTlaCompiler::new(schema);
     compiler.render()
 }
@@ -3665,7 +3872,66 @@ mod tests {
     use meerkat_machine_schema::catalog::dsl::{
         dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
     };
-    use meerkat_machine_schema::identity::MachineId;
+    use meerkat_machine_schema::catalog::meerkat_mob_seam_composition;
+    use meerkat_machine_schema::identity::{EffectVariantId, MachineId, MachineInstanceId};
+
+    #[test]
+    #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    fn composition_semantic_model_fails_closed_on_undeclared_route_source_machine() {
+        let mut schema = meerkat_mob_seam_composition();
+        let route = schema
+            .routes
+            .first_mut()
+            .expect("seam composition has at least one route");
+        // Repoint the route source at an instance id that is not declared in
+        // the composition. The CASE builder used to map this to an
+        // `"unknown_machine"` sentinel; generation must now fail closed.
+        route.from_machine =
+            MachineInstanceId::parse("undeclared_source_instance").expect("valid slug");
+
+        let result = render_composition_semantic_model(&schema);
+        assert!(
+            matches!(
+                result,
+                Err(CompositionTlaError::UnknownRouteSourceMachine { .. })
+            ),
+            "expected UnknownRouteSourceMachine, got {result:?}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    fn composition_semantic_model_fails_closed_on_undeclared_route_effect() {
+        let mut schema = meerkat_mob_seam_composition();
+        let route = schema
+            .routes
+            .first_mut()
+            .expect("seam composition has at least one route");
+        // Keep the (declared) source machine but reference an effect variant
+        // that the source machine does not declare.
+        route.effect_variant =
+            EffectVariantId::parse("UndeclaredEffectVariant").expect("valid slug");
+
+        let result = render_composition_semantic_model(&schema);
+        assert!(
+            matches!(result, Err(CompositionTlaError::UnknownRouteEffect { .. })),
+            "expected UnknownRouteEffect, got {result:?}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    fn composition_semantic_model_renders_for_valid_schema() {
+        // Sanity: the fail-closed gate does not reject a currently-valid
+        // composition. (Byte-identity of the output is enforced separately by
+        // `make machine-check-drift`.)
+        let schema = meerkat_mob_seam_composition();
+        let result = render_composition_semantic_model(&schema);
+        assert!(
+            result.is_ok(),
+            "valid composition should render: {result:?}"
+        );
+    }
 
     #[test]
     #[should_panic(
@@ -3879,7 +4145,13 @@ impl<'a> CompositionTlaCompiler<'a> {
         }
     }
 
-    fn render(&self) -> std::result::Result<String, String> {
+    fn render(&self) -> std::result::Result<String, CompositionTlaError> {
+        // Fail-closed gate: every route component must resolve against the
+        // composition schema before any CASE expression is emitted. This makes
+        // the defensive `OTHER -> "unknown_*"` branches in the generated TLA
+        // provably unreachable rather than silent catch-alls.
+        self.validate_routes()?;
+
         let mut out = String::new();
         let constants = self.collect_binding_domains();
         let named_samples =
@@ -4185,7 +4457,7 @@ impl<'a> CompositionTlaCompiler<'a> {
             let mut compiler = MachineTlaCompiler::new_with_helper_prefix(machine, helper_prefix)
                 .with_phase_symbol(self.phase_var(instance.instance_id.as_str()))
                 .with_field_env_override(self.machine_field_env(instance.instance_id.as_str()));
-            for derived in helper_dependency_order(machine) {
+            for derived in helper_dependency_order(machine)? {
                 compiler.render_helper(&mut out, derived);
                 pushln!(&mut out);
             }
@@ -4206,7 +4478,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                     instance.instance_id.as_str(),
                     transition,
                     &mut action,
-                );
+                )?;
                 rendered_actions.push(action);
             }
 
@@ -4245,7 +4517,7 @@ impl<'a> CompositionTlaCompiler<'a> {
             }
         }
 
-        self.render_entry_packet_admissibility_helpers(&mut out);
+        self.render_entry_packet_admissibility_helpers(&mut out)?;
         self.render_entry_input_actions(&mut out);
         self.render_deliver_queued_route_action(&mut out);
         self.render_reject_pending_entry_input_action(&mut out);
@@ -4950,6 +5222,94 @@ impl<'a> CompositionTlaCompiler<'a> {
         pushln!(out);
     }
 
+    /// Fail-closed resolution check for every route in the composition.
+    ///
+    /// Confirms that each route's `from_machine` and `to.machine` is a declared
+    /// machine instance, that `effect_variant` is a declared effect on the
+    /// source machine, and that `to.input_variant` is a declared input/signal
+    /// (per `to.kind`) on the target machine. The composition CASE builders
+    /// (`ActorOfMachine`, `RouteSource`, `RouteEffect`, `RouteTargetMachine`,
+    /// `RouteTargetInput`) used to map an unresolved component to a sentinel
+    /// (`"unknown_*"`) default; with this gate run first, those sentinels are
+    /// unreachable-by-construction for valid input, and malformed input fails
+    /// closed instead of silently emitting a broken model.
+    fn validate_routes(&self) -> std::result::Result<(), CompositionTlaError> {
+        let composition = self.schema.name.as_str();
+        for route in &self.schema.routes {
+            let route_name = route.name.as_str();
+
+            // Source machine instance must be declared.
+            let source = self
+                .machine_by_instance
+                .get(route.from_machine.as_str())
+                .copied()
+                .ok_or_else(|| CompositionTlaError::UnknownRouteSourceMachine {
+                    composition: composition.to_owned(),
+                    route: route_name.to_owned(),
+                    machine: route.from_machine.as_str().to_owned(),
+                })?;
+
+            // Effect variant must be declared on the source machine.
+            if source
+                .effects
+                .variant_named(route.effect_variant.as_str())
+                .is_err()
+            {
+                return Err(CompositionTlaError::UnknownRouteEffect {
+                    composition: composition.to_owned(),
+                    route: route_name.to_owned(),
+                    machine: route.from_machine.as_str().to_owned(),
+                    effect: route.effect_variant.as_str().to_owned(),
+                });
+            }
+
+            // Target machine instance must be declared.
+            let target = self
+                .machine_by_instance
+                .get(route.to.machine.as_str())
+                .copied()
+                .ok_or_else(|| CompositionTlaError::UnknownRouteTargetMachine {
+                    composition: composition.to_owned(),
+                    route: route_name.to_owned(),
+                    machine: route.to.machine.as_str().to_owned(),
+                })?;
+
+            // Target input/signal variant must be declared on the target
+            // machine, dispatching on the route's structural kind.
+            match route.to.kind {
+                RouteTargetKind::Input => {
+                    if target
+                        .inputs
+                        .variant_named(route.to.input_variant.as_str())
+                        .is_err()
+                    {
+                        return Err(CompositionTlaError::UnknownRouteTargetInput {
+                            composition: composition.to_owned(),
+                            route: route_name.to_owned(),
+                            machine: route.to.machine.as_str().to_owned(),
+                            input: route.to.input_variant.as_str().to_owned(),
+                        });
+                    }
+                }
+                RouteTargetKind::Signal => {
+                    if target
+                        .signals
+                        .variant_named(route.to.input_variant.as_str())
+                        .is_err()
+                    {
+                        return Err(CompositionTlaError::UnknownRouteTargetSignal {
+                            composition: composition.to_owned(),
+                            route: route_name.to_owned(),
+                            machine: route.to.machine.as_str().to_owned(),
+                            signal: route.to.input_variant.as_str().to_owned(),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn render_static_sets(&self, out: &mut String) {
         pushln!(out, "Machines == {{");
         for (idx, machine) in self.schema.machines.iter().enumerate() {
@@ -5270,7 +5630,10 @@ impl<'a> CompositionTlaCompiler<'a> {
         format!("EntryPacketAdmissible_{}", tla_ident(instance_id))
     }
 
-    fn render_entry_packet_admissibility_helpers(&self, out: &mut String) {
+    fn render_entry_packet_admissibility_helpers(
+        &self,
+        out: &mut String,
+    ) -> std::result::Result<(), CompositionTlaError> {
         if self.schema.entry_inputs.is_empty()
             && !self
                 .schema
@@ -5278,7 +5641,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                 .iter()
                 .any(|witness| !witness.preload_inputs.is_empty())
         {
-            return;
+            return Ok(());
         }
 
         for instance in &self.schema.machines {
@@ -5288,7 +5651,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                 .with_phase_symbol(self.phase_var(instance.instance_id.as_str()))
                 .with_field_env_override(self.machine_field_env(instance.instance_id.as_str()));
 
-            for derived in helper_dependency_order(machine) {
+            for derived in helper_dependency_order(machine)? {
                 compiler.render_helper(out, derived);
                 pushln!(out);
             }
@@ -5350,6 +5713,7 @@ impl<'a> CompositionTlaCompiler<'a> {
         }
         pushln!(out, "      [] OTHER -> FALSE");
         pushln!(out);
+        Ok(())
     }
 
     fn render_machine_packet_admissibility_branch(
@@ -5840,7 +6204,7 @@ impl<'a> CompositionTlaCompiler<'a> {
         instance_id: &str,
         transition: &TransitionSchema,
         out: &mut String,
-    ) {
+    ) -> std::result::Result<(), CompositionTlaError> {
         let machine = self.machine(instance_id);
         let action_name = self.machine_transition_name(instance_id, transition);
         let binding_types = compiler.binding_type_map(transition);
@@ -6144,18 +6508,24 @@ impl<'a> CompositionTlaCompiler<'a> {
                     && protocol.effect_variant.as_str() == effect_variant.as_str()
                 {
                     let var = format!("obligation_{}", tla_ident(&protocol.name));
-                    let record_fields: Vec<String> = protocol
-                        .obligation_fields
-                        .iter()
-                        .map(|field| {
-                            let tla_field = tla_ident(field);
-                            let value = payload_fields
-                                .get(field.as_str())
-                                .cloned()
-                                .unwrap_or_else(|| format!("\"unknown_{}\"", field));
-                            format!("{} |-> {}", tla_field, value)
-                        })
-                        .collect();
+                    let mut record_fields: Vec<String> =
+                        Vec::with_capacity(protocol.obligation_fields.len());
+                    for field in &protocol.obligation_fields {
+                        let tla_field = tla_ident(field);
+                        // Fail closed: an obligation field that is absent from
+                        // the matching effect's payload used to be papered over
+                        // with an `"unknown_<field>"` sentinel literal.
+                        let value =
+                            payload_fields.get(field.as_str()).cloned().ok_or_else(|| {
+                                CompositionTlaError::UnknownObligationField {
+                                    composition: self.schema.name.as_str().to_owned(),
+                                    protocol: protocol.name.as_str().to_owned(),
+                                    effect: effect_variant.clone(),
+                                    field: field.as_str().to_owned(),
+                                }
+                            })?;
+                        record_fields.push(format!("{} |-> {}", tla_field, value));
+                    }
                     let record = if record_fields.is_empty() {
                         "\"token\"".to_string()
                     } else {
@@ -6227,6 +6597,7 @@ impl<'a> CompositionTlaCompiler<'a> {
             "{route_update_prefix} model_step_count' = model_step_count + 1"
         )
         .expect("write to string");
+        Ok(())
     }
 
     fn target_payload_for_route(
@@ -6384,7 +6755,7 @@ impl<'a> MachineTlaCompiler<'a> {
         self
     }
 
-    fn render(&mut self) -> String {
+    fn render(&mut self) -> std::result::Result<String, CompositionTlaError> {
         let mut out = String::new();
         let constants = collect_binding_domains(self.schema);
         let named_samples = collect_machine_named_type_samples(self.schema);
@@ -6554,7 +6925,7 @@ impl<'a> MachineTlaCompiler<'a> {
         pushln!(&mut out, "vars == << {} >>", vars.join(", "));
         pushln!(&mut out);
 
-        for helper in helper_dependency_order(self.schema) {
+        for helper in helper_dependency_order(self.schema)? {
             self.render_helper(&mut out, helper);
         }
         if self.schema.machine.as_str() == "MobMachine" {
@@ -6649,7 +7020,7 @@ impl<'a> MachineTlaCompiler<'a> {
                 let mut prefix = String::new();
                 for binding in transition.on.bindings() {
                     let Some(ty) = binding_types.get(binding.as_str()) else {
-                        return String::new();
+                        return Ok(String::new());
                     };
                     let domain = self.binding_domain_for_binding(binding.as_str(), ty);
                     let local = binding_env
@@ -6716,7 +7087,7 @@ impl<'a> MachineTlaCompiler<'a> {
         )
         .expect("write to string");
 
-        out
+        Ok(out)
     }
 
     fn render_helper(&self, out: &mut String, helper: &HelperSchema) {

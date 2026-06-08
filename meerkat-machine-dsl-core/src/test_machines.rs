@@ -969,4 +969,64 @@ machine NonPhase {
         let from = crate::gen_schema::derive_from_phases(&def, t).expect("phase set should derive");
         assert_eq!(from, vec!["A".to_string(), "B".to_string()]);
     }
+
+    /// Two helpers that call each other form a helper-call cycle, which has no
+    /// topological order. `validate` must fail closed instead of letting
+    /// codegen fall back to an arbitrary helper order.
+    pub const HELPER_CYCLE: &str = r#"
+machine HelperCycle {
+    version: 1,
+    rust: "test" / "helper_cycle",
+
+    state {
+        phase: HelperCyclePhase,
+    }
+
+    init(A) {
+    }
+
+    terminal []
+
+    phase HelperCyclePhase {
+        A,
+        B,
+    }
+
+    input HelperCycleInput {
+        Ping,
+    }
+
+    effect HelperCycleEffect {
+        Pinged,
+    }
+
+    helper alpha(p: HelperCyclePhase) -> bool {
+        beta(p)
+    }
+
+    helper beta(p: HelperCyclePhase) -> bool {
+        alpha(p)
+    }
+
+    transition PingActive {
+        on input Ping
+        guard { alpha(self.phase) }
+        update {}
+        to A
+    }
+}
+"#;
+
+    #[test]
+    fn helper_call_cycle_fails_closed() {
+        let tokens: proc_macro2::TokenStream = HELPER_CYCLE.parse().expect("tokenize");
+        let def = crate::parse::parse_machine(tokens).expect("parse");
+        let result = crate::validate::validate(&def);
+        let err = result.expect_err("helper-call cycle must fail validation");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("helper-call cycle detected"),
+            "expected helper-call cycle error, got: {msg}"
+        );
+    }
 }

@@ -68,7 +68,8 @@ fn renders_canonical_meerkat_machine_fixture_with_stable_sections() {
 
 #[test]
 fn tla_renderer_abstracts_u64_max_literals_for_tlc() {
-    let model = render_machine_semantic_model(&meerkat_machine());
+    let model =
+        render_machine_semantic_model(&meerkat_machine()).expect("render machine semantic model");
     let cfg = render_machine_ci_cfg(&meerkat_machine(), false);
 
     assert!(
@@ -116,7 +117,8 @@ fn renders_canonical_mob_machine_fixture_with_identity_native_inputs() {
 
 #[test]
 fn mob_native_tla_helpers_escape_state_field_parameter_names() {
-    let rendered = render_machine_semantic_model(&mob_machine());
+    let rendered =
+        render_machine_semantic_model(&mob_machine()).expect("render machine semantic model");
 
     assert!(rendered.contains(
         "mob_machine_identity_has_session_binding(arg_member_session_bindings, agent_identity) =="
@@ -147,7 +149,8 @@ fn mob_native_tla_helpers_escape_state_field_parameter_names() {
 
 #[test]
 fn seam_tla_renders_mob_external_peer_native_projection_helpers() {
-    let rendered = render_composition_semantic_model(&meerkat_mob_seam_composition());
+    let rendered = render_composition_semantic_model(&meerkat_mob_seam_composition())
+        .expect("render composition semantic model");
     let cfg = render_composition_ci_cfg(&meerkat_mob_seam_composition(), false);
 
     assert!(
@@ -177,7 +180,8 @@ fn renders_kernel_seam_composition_with_routes() {
 
 #[test]
 fn renders_kernel_seam_composition_with_namespaced_mob_native_helpers() {
-    let rendered = render_composition_semantic_model(&meerkat_mob_seam_composition());
+    let rendered = render_composition_semantic_model(&meerkat_mob_seam_composition())
+        .expect("render composition semantic model");
 
     for helper in [
         "mob__mob_machine_external_peer_edge_has_matching_key(edges_by_key, edge) ==",
@@ -211,7 +215,8 @@ fn renders_kernel_seam_composition_with_namespaced_mob_native_helpers() {
 
 #[test]
 fn renders_composition_witness_fairness_in_tlc_safe_chunks() {
-    let rendered = render_composition_semantic_model(&meerkat_mob_seam_composition());
+    let rendered = render_composition_semantic_model(&meerkat_mob_seam_composition())
+        .expect("render composition semantic model");
 
     assert!(rendered.contains("WitnessFairness_basic_round_trip_1 =="));
     assert!(rendered.contains("    /\\ WitnessFairness_basic_round_trip_1"));

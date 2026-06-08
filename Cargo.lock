@@ -3156,6 +3156,7 @@ dependencies = [
  "meerkat-runtime",
  "meerkat-schedule",
  "meerkat-workgraph",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

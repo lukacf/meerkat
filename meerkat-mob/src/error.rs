@@ -270,6 +270,25 @@ pub enum MobError {
     #[error("bridge session not found in any live mob authority: {bridge_session_id}")]
     BridgeSessionNotInLiveAuthority { bridge_session_id: String },
 
+    /// A mob-member comms (peer) routing name could not be rendered because a
+    /// component failed the [`meerkat_core::MemberCommsName`] slug rule.
+    ///
+    /// The routing-name shape has exactly one fail-closed owner; rendering
+    /// surfaces the typed component fault here instead of reconstructing a raw
+    /// `mob_id/role/member` join that the owner already rejected.
+    #[error("invalid mob member comms name: {0}")]
+    MemberCommsName(#[from] meerkat_core::MemberCommsNameError),
+
+    /// A flow/loop condition could not be evaluated to a definite boolean
+    /// because it referenced an absent/invalid context path or compared
+    /// non-comparable operands.
+    ///
+    /// Surfaced as a typed fault (`location` names the owning step or loop)
+    /// rather than silently evaluating the condition to `false` and skipping
+    /// the step / mis-deciding the loop-until.
+    #[error("condition evaluation failed for {location}: {reason}")]
+    ConditionEval { location: String, reason: String },
+
     /// An internal error (unexpected state, logic errors).
     #[error("internal error: {0}")]
     Internal(String),

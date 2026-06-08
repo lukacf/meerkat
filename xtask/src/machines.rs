@@ -28,6 +28,7 @@ use meerkat_machine_schema::{
 use quote::ToTokens;
 use serde::Serialize;
 use syn::spanned::Spanned;
+use syn::visit::Visit;
 
 #[derive(Debug, Clone, Args)]
 pub struct SelectionArgs {
@@ -655,20 +656,6 @@ pub fn collect_peer_response_terminal_projection_mismatches(root: &Path) -> Resu
         "meerkat-runtime/src/input.rs",
         "meerkat-runtime/src/runtime_loop.rs",
     ];
-    let banned = [
-        (
-            "PeerConversationProjection::ResponseTerminal",
-            "direct terminal projection construction",
-        ),
-        (
-            "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]",
-            "handwritten terminal render text",
-        ),
-        (
-            "peer_response_terminal_context_key(",
-            "handwritten terminal context key projection",
-        ),
-    ];
 
     for rel in boundary_files {
         let path = root.join(rel);
@@ -681,21 +668,21 @@ pub fn collect_peer_response_terminal_projection_mismatches(root: &Path) -> Resu
                 path.display()
             )
         })?;
+        // AST node kinds, not file text: the banned terminal-projection
+        // *construction* (enum variant path), the handwritten render string
+        // *literal*, and the context-key *call* are detected structurally, so
+        // a token rename that keeps the banned relationship still fails and a
+        // doc/comment mention does not false-positive. Production prefix only
+        // (mirrors the core-fact AST model), so test fixtures don't trip.
         let production = contents
             .split("\n#[cfg(test)]")
             .next()
             .unwrap_or(contents.as_str());
-
-        for (line_idx, line) in production.lines().enumerate() {
-            for (token, reason) in banned {
-                if line.contains(token) {
-                    mismatches.push(format!(
-                        "{rel}:{}: {reason} `{token}` must route through typed core peer-response terminal facts",
-                        line_idx + 1
-                    ));
-                }
-            }
-        }
+        let parsed = syn::parse_file(production)
+            .with_context(|| format!("parse peer-response terminal boundary file {rel}"))?;
+        let mut visitor = PeerResponseTerminalProjectionVisitor::new(rel);
+        visitor.visit_file(&parsed);
+        mismatches.extend(visitor.mismatches);
     }
 
     let core_projection_owner = root.join("meerkat-core/src/handles.rs");
@@ -720,28 +707,6 @@ pub fn collect_peer_response_terminal_projection_mismatches(root: &Path) -> Resu
         "meerkat-rpc/src/handlers/event.rs",
         "meerkat-rpc/src/session_runtime.rs",
     ];
-    let shell_banned = [
-        (
-            "pub peer_name: PeerName",
-            "terminal shell peer_name identity bus",
-        ),
-        (
-            "peer_name: meerkat_core::comms::PeerName",
-            "terminal shell peer_name identity bus",
-        ),
-        (
-            "PeerResponseTerminalRouteIdentity::parse(peer_name",
-            "terminal route identity projected from peer_name",
-        ),
-        (
-            "PeerResponseTerminalDisplayIdentity::parse(peer_name",
-            "terminal display identity projected from peer_name",
-        ),
-        (
-            "peer_response_terminal_input(&peer_name",
-            "terminal input projected from peer_name",
-        ),
-    ];
 
     for rel in shell_boundary_files {
         let path = root.join(rel);
@@ -758,20 +723,220 @@ pub fn collect_peer_response_terminal_projection_mismatches(root: &Path) -> Resu
             .split("\n#[cfg(test)]")
             .next()
             .unwrap_or(contents.as_str());
-
-        for (line_idx, line) in production.lines().enumerate() {
-            for (token, reason) in shell_banned {
-                if line.contains(token) {
-                    mismatches.push(format!(
-                        "{rel}:{}: {reason} `{token}` must transport typed route/display/correlation facts",
-                        line_idx + 1
-                    ));
-                }
-            }
-        }
+        let parsed = syn::parse_file(production)
+            .with_context(|| format!("parse peer-response terminal shell boundary file {rel}"))?;
+        let mut visitor = PeerResponseTerminalShellVisitor::new(rel);
+        visitor.visit_file(&parsed);
+        mismatches.extend(visitor.mismatches);
     }
 
     Ok(mismatches)
+}
+
+/// Functions whose `peer_name` argument projects a typed terminal identity from
+/// the inert presentation string instead of transporting the typed route /
+/// display / correlation facts the core already owns.
+const PEER_NAME_PROJECTION_CALLS: &[(&str, &str)] = &[
+    (
+        "PeerResponseTerminalRouteIdentity::parse",
+        "terminal route identity projected from peer_name",
+    ),
+    (
+        "PeerResponseTerminalDisplayIdentity::parse",
+        "terminal display identity projected from peer_name",
+    ),
+    (
+        "peer_response_terminal_input",
+        "terminal input projected from peer_name",
+    ),
+];
+
+/// AST visitor for the production runtime boundary files. Flags the typed
+/// terminal-projection construction, the handwritten terminal render string
+/// literal, and the handwritten terminal context-key call.
+struct PeerResponseTerminalProjectionVisitor<'a> {
+    rel: &'a str,
+    mismatches: Vec<String>,
+}
+
+impl<'a> PeerResponseTerminalProjectionVisitor<'a> {
+    fn new(rel: &'a str) -> Self {
+        Self {
+            rel,
+            mismatches: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, span: proc_macro2::Span, reason: &str, token: &str) {
+        let rel = self.rel;
+        let line = span.start().line;
+        self.mismatches.push(format!(
+            "{rel}:{line}: {reason} `{token}` must route through typed core peer-response terminal facts"
+        ));
+    }
+}
+
+impl<'ast> Visit<'ast> for PeerResponseTerminalProjectionVisitor<'_> {
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref()
+            && path_tail_ident(&path.path).as_deref() == Some("peer_response_terminal_context_key")
+        {
+            self.push(
+                node.span(),
+                "handwritten terminal context key projection",
+                "peer_response_terminal_context_key(",
+            );
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_path(&mut self, node: &'ast syn::Path) {
+        if path_tail_pair_is(node, "PeerConversationProjection", "ResponseTerminal") {
+            self.push(
+                node.span(),
+                "direct terminal projection construction",
+                "PeerConversationProjection::ResponseTerminal",
+            );
+        }
+        syn::visit::visit_path(self, node);
+    }
+
+    fn visit_lit_str(&mut self, node: &'ast syn::LitStr) {
+        if node
+            .value()
+            .contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]")
+        {
+            self.push(
+                node.span(),
+                "handwritten terminal render text",
+                "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]",
+            );
+        }
+        syn::visit::visit_lit_str(self, node);
+    }
+}
+
+/// AST visitor for the shell boundary files. Flags a `peer_name: PeerName`
+/// identity-bus field declaration and any call that projects a typed terminal
+/// identity from a `peer_name` argument.
+struct PeerResponseTerminalShellVisitor<'a> {
+    rel: &'a str,
+    mismatches: Vec<String>,
+}
+
+impl<'a> PeerResponseTerminalShellVisitor<'a> {
+    fn new(rel: &'a str) -> Self {
+        Self {
+            rel,
+            mismatches: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, span: proc_macro2::Span, reason: &str, token: &str) {
+        let rel = self.rel;
+        let line = span.start().line;
+        self.mismatches.push(format!(
+            "{rel}:{line}: {reason} `{token}` must transport typed route/display/correlation facts"
+        ));
+    }
+
+    fn check_fields(&mut self, fields: &syn::Fields) {
+        // Only a `pub` struct field is the terminal shell identity bus the rule
+        // bans. Enum-variant `peer_name` carriers (e.g. the RMAT-exempt
+        // WirePersistedInput projection) are a different, allowed shape, so we
+        // do not descend into enum variants and we require `pub` here — this
+        // preserves the prior `pub peer_name: PeerName` text-scan contract.
+        for field in fields {
+            let is_pub = matches!(field.vis, syn::Visibility::Public(_));
+            let is_peer_name = field
+                .ident
+                .as_ref()
+                .is_some_and(|ident| ident == "peer_name");
+            if is_pub && is_peer_name && type_is_named(&field.ty, "PeerName") {
+                self.push(
+                    field.span(),
+                    "terminal shell peer_name identity bus",
+                    "peer_name: PeerName",
+                );
+            }
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for PeerResponseTerminalShellVisitor<'_> {
+    fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
+        self.check_fields(&node.fields);
+        syn::visit::visit_item_struct(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref() {
+            for (banned_callee, reason) in PEER_NAME_PROJECTION_CALLS {
+                // Match on the path *tail* so a fully-qualified callee
+                // (`meerkat_runtime::peer_response_terminal_input`,
+                // `crate::..::PeerResponseTerminalRouteIdentity::parse`) is
+                // recognized regardless of import/qualification style.
+                if path_tail_matches(&path.path, banned_callee)
+                    && call_args_reference_peer_name(&node.args)
+                {
+                    self.push(node.span(), reason, banned_callee);
+                }
+            }
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+}
+
+/// `true` when any call argument reads `peer_name` (by value or by reference).
+fn call_args_reference_peer_name(
+    args: &syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>,
+) -> bool {
+    args.iter().any(expr_references_peer_name)
+}
+
+fn expr_references_peer_name(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Reference(reference) => expr_references_peer_name(&reference.expr),
+        syn::Expr::Path(path) => path_tail_ident(&path.path).as_deref() == Some("peer_name"),
+        syn::Expr::Field(field) => matches!(
+            &field.member,
+            syn::Member::Named(ident) if ident == "peer_name"
+        ),
+        _ => false,
+    }
+}
+
+/// The last segment ident of a path, e.g. `a::b::peer_name` -> `peer_name`.
+fn path_tail_ident(path: &syn::Path) -> Option<String> {
+    path.segments.last().map(|seg| seg.ident.to_string())
+}
+
+/// `true` when the path's last two segments are exactly `outer::inner`
+/// (e.g. `crate::foo::PeerConversationProjection::ResponseTerminal`).
+fn path_tail_pair_is(path: &syn::Path, outer: &str, inner: &str) -> bool {
+    let len = path.segments.len();
+    if len < 2 {
+        return false;
+    }
+    path.segments[len - 2].ident == outer && path.segments[len - 1].ident == inner
+}
+
+/// `true` when the path's trailing segments equal the `::`-joined `expected`
+/// callee (e.g. `expected = "PeerResponseTerminalRouteIdentity::parse"` matches
+/// `crate::a::PeerResponseTerminalRouteIdentity::parse`, and
+/// `expected = "peer_response_terminal_input"` matches
+/// `meerkat_runtime::peer_response_terminal_input`).
+fn path_tail_matches(path: &syn::Path, expected: &str) -> bool {
+    let expected_segments = expected.split("::").collect::<Vec<_>>();
+    if path.segments.len() < expected_segments.len() {
+        return false;
+    }
+    let skip = path.segments.len() - expected_segments.len();
+    path.segments
+        .iter()
+        .skip(skip)
+        .zip(expected_segments.iter())
+        .all(|(seg, want)| seg.ident == *want)
 }
 
 fn collect_peer_response_terminal_core_fact_mismatches(

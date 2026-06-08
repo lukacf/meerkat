@@ -4753,7 +4753,6 @@ dependencies = [
  "meerkat-runtime",
  "meerkat-store",
  "meerkat-tools",
- "nix 0.29.0",
  "parking_lot",
  "reqwest",
  "serde",

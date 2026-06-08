@@ -178,17 +178,24 @@ impl MemoryIndexScope {
 }
 
 /// One scoped semantic-memory indexing request.
+///
+/// The request carries the typed [`MemoryIndexableContent`] decision rather
+/// than a flattened `String`, so the store — not the producer — owns the
+/// include/exclude policy. An `Excluded(_)` request reaches the store with its
+/// typed exclusion reason intact; the store decides what (if anything) to
+/// index. This removes the empty-string "not indexable" convention from the
+/// producer/store seam.
 #[derive(Debug, Clone)]
 pub struct MemoryIndexRequest {
     scope: MemoryIndexScope,
-    content: String,
+    content: crate::types::MemoryIndexableContent,
     metadata: MemoryMetadata,
 }
 
 impl MemoryIndexRequest {
     pub fn new(
         scope: MemoryIndexScope,
-        content: String,
+        content: crate::types::MemoryIndexableContent,
         metadata: MemoryMetadata,
     ) -> Result<Self, MemoryStoreError> {
         if !scope.includes(&metadata) {
@@ -209,15 +216,27 @@ impl MemoryIndexRequest {
         &self.scope
     }
 
-    pub fn content(&self) -> &str {
+    /// The typed indexability decision the store owns.
+    pub fn content(&self) -> &crate::types::MemoryIndexableContent {
         &self.content
+    }
+
+    /// Borrow the indexable text, or `None` when the message is excluded.
+    pub fn indexable_text(&self) -> Option<&str> {
+        self.content.indexable_text()
     }
 
     pub fn metadata(&self) -> &MemoryMetadata {
         &self.metadata
     }
 
-    pub fn into_parts(self) -> (MemoryIndexScope, String, MemoryMetadata) {
+    pub fn into_parts(
+        self,
+    ) -> (
+        MemoryIndexScope,
+        crate::types::MemoryIndexableContent,
+        MemoryMetadata,
+    ) {
         (self.scope, self.content, self.metadata)
     }
 }

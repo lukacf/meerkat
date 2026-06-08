@@ -16,6 +16,7 @@ pub mod tokio {
 
 pub mod ephemeral;
 pub(crate) mod generated;
+pub mod staged_registry;
 pub(crate) mod turn_admission;
 
 /// Session persistence migration entry points.
@@ -45,6 +46,7 @@ pub use ephemeral::{
     EphemeralSessionService, RuntimeContextAdmissionGuard, SessionAgent, SessionAgentBuilder,
     SessionSnapshot,
 };
+pub use staged_registry::{AdmissionOutcome, MaterializationStatus, StagedSessionRegistry};
 
 /// Metadata key used to store session labels in the `Session.metadata` map.
 ///

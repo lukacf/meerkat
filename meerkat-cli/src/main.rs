@@ -50,7 +50,7 @@ use meerkat_core::{
 #[cfg(feature = "mcp")]
 use meerkat_mcp::McpRouterAdapter;
 #[cfg(feature = "mob")]
-use meerkat_mob::{FlowId, MobDefinition, RunId, mob_machine_run_status_is_terminal};
+use meerkat_mob::{FlowId, RunId, mob_machine_run_status_is_terminal};
 #[cfg(feature = "mob")]
 use meerkat_mob_pack::archive::MobpackArchive;
 #[cfg(all(feature = "mob", test))]
@@ -8069,7 +8069,6 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
 #[cfg(feature = "mob")]
 struct RunMobToolsContext {
     state: Arc<meerkat_mob_mcp::MobMcpState>,
-    known_mob_ids: std::collections::BTreeSet<String>,
 }
 
 #[cfg(feature = "mob")]
@@ -8078,39 +8077,6 @@ impl RunMobToolsContext {
     fn dispatcher(&self) -> Arc<dyn AgentToolDispatcher> {
         Arc::new(meerkat_mob_mcp::MobMcpDispatcher::new(self.state.clone()))
     }
-
-    async fn persist(&mut self, scope: &RuntimeScope) -> anyhow::Result<()> {
-        let _lock = acquire_mob_registry_lock(scope).await?;
-        let mut registry = load_mob_registry(scope).await?;
-        let active = self.state.mob_list().await;
-        let active_ids: std::collections::BTreeSet<String> =
-            active.iter().map(|(id, _)| id.to_string()).collect();
-
-        for (mob_id, status) in active {
-            let mob_id = mob_id.to_string();
-            registry
-                .mobs
-                .entry(mob_id.clone())
-                .or_insert_with(|| PersistedMob {
-                    definition: None,
-                    status: Some(status.as_str().to_string()),
-                    events: Vec::new(),
-                    runs: std::collections::BTreeMap::new(),
-                });
-            sync_mob_events(self.state.as_ref(), &mut registry, &mob_id).await?;
-        }
-
-        // Remove entries that disappeared from this context's previously known set.
-        // This avoids dropping mobs created by other concurrent CLI processes.
-        for mob_id in &self.known_mob_ids {
-            if !active_ids.contains(mob_id) {
-                registry.mobs.remove(mob_id);
-            }
-        }
-        save_mob_registry(scope, &registry).await?;
-        self.known_mob_ids = active_ids;
-        Ok(())
-    }
 }
 
 #[cfg(feature = "mob")]
@@ -8118,8 +8084,7 @@ async fn prepare_run_mob_tools(
     scope: &RuntimeScope,
     session_service: Arc<dyn meerkat_mob::MobSessionService>,
 ) -> anyhow::Result<RunMobToolsContext> {
-    let _lock = acquire_mob_registry_lock(scope).await?;
-    let (state, _registry) = hydrate_mob_state(
+    let state = hydrate_mob_state(
         scope,
         session_service,
         None,
@@ -8128,16 +8093,7 @@ async fn prepare_run_mob_tools(
         std::collections::BTreeMap::new(),
     )
     .await?;
-    let known_mob_ids = state
-        .mob_list()
-        .await
-        .into_iter()
-        .map(|(mob_id, _)| mob_id.to_string())
-        .collect();
-    Ok(RunMobToolsContext {
-        state,
-        known_mob_ids,
-    })
+    Ok(RunMobToolsContext { state })
 }
 
 #[cfg(all(feature = "mob", feature = "session-store"))]
@@ -8145,7 +8101,6 @@ async fn prepare_run_mob_tools_from_surface(
     scope: &RuntimeScope,
     surface: Arc<CliPersistentSurfaceState>,
 ) -> anyhow::Result<RunMobToolsContext> {
-    let _lock = acquire_mob_registry_lock(scope).await?;
     let state = hydrate_cli_mob_state_cached(
         scope,
         Arc::clone(&surface.service),
@@ -8153,16 +8108,7 @@ async fn prepare_run_mob_tools_from_surface(
         Arc::clone(&surface.mob_state_cache),
     )
     .await?;
-    let known_mob_ids = state
-        .mob_list()
-        .await
-        .into_iter()
-        .map(|(mob_id, _)| mob_id.to_string())
-        .collect();
-    Ok(RunMobToolsContext {
-        state,
-        known_mob_ids,
-    })
+    Ok(RunMobToolsContext { state })
 }
 
 fn compose_external_tool_dispatchers(
@@ -8697,7 +8643,7 @@ async fn run_agent(
         let service = Arc::new(service);
 
         #[cfg(feature = "mob")]
-        let mut run_mob_tools = if effective_mob {
+        let run_mob_tools = if effective_mob {
             let mob_surface = get_or_create_cli_persistent_surface_from_bundle(
                 scope,
                 config.clone(),
@@ -8710,7 +8656,7 @@ async fn run_agent(
             None
         };
         #[cfg(not(feature = "mob"))]
-        let mut run_mob_tools: Option<()> = None;
+        let run_mob_tools: Option<()> = None;
         // Prepare epoch-local bindings before MCP startup so the router stages
         // and applies external-tool surface lifecycle directly on the
         // session-owned MeerkatMachine handle.
@@ -9002,10 +8948,6 @@ async fn run_agent(
                 runtime_adapter.unregister_session(&session_id).await;
                 service.shutdown().await;
                 shutdown_mcp(&mcp_adapter).await;
-                #[cfg(feature = "mob")]
-                if let Some(ref mut mob_ctx) = run_mob_tools {
-                    mob_ctx.persist(scope).await?;
-                }
                 Ok(())
             },
         ))
@@ -9345,7 +9287,7 @@ async fn resume_session_with_llm_override(
 
         log_stage("compose_external_tool_dispatchers");
         #[cfg(feature = "mob")]
-        let mut run_mob_tools = if tooling.mob.resolve(config.tools.mob_enabled) {
+        let run_mob_tools = if tooling.mob.resolve(config.tools.mob_enabled) {
             log_stage("get_or_create_mob_persistent_service");
             let mob_persistent = remember_mob_persistent_service(scope, Arc::clone(&service))?;
             let run_mob_service: Arc<dyn meerkat_mob::MobSessionService> =
@@ -9355,7 +9297,7 @@ async fn resume_session_with_llm_override(
             None
         };
         #[cfg(not(feature = "mob"))]
-        let mut run_mob_tools: Option<()> = None;
+        let run_mob_tools: Option<()> = None;
         // Prepare epoch-local bindings before MCP startup so resumed sessions
         // stage and apply MCP surface lifecycle directly on the session-owned
         // MeerkatMachine handle.
@@ -9663,11 +9605,6 @@ async fn resume_session_with_llm_override(
                 service.shutdown().await;
                 log_stage("shutdown_mcp");
                 shutdown_mcp(&mcp_adapter).await;
-                log_stage("persist_mob_registry");
-                #[cfg(feature = "mob")]
-                if let Some(ref mut mob_ctx) = run_mob_tools {
-                    mob_ctx.persist(scope).await?;
-                }
                 Ok(())
             },
         ))
@@ -9881,7 +9818,7 @@ async fn hydrate_cli_mob_state_cached(
 
     let mob_service: Arc<dyn meerkat_mob::MobSessionService> =
         Arc::new(MobCliSessionService::new(service));
-    let (mob_state, _) = hydrate_mob_state(
+    let mob_state = hydrate_mob_state(
         scope,
         mob_service,
         Some(runtime_adapter),
@@ -9901,7 +9838,6 @@ async fn get_or_hydrate_cli_mob_state(
     runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
     mob_state_cache: Arc<CliMobStateCache>,
 ) -> anyhow::Result<Arc<meerkat_mob_mcp::MobMcpState>> {
-    let _lock = acquire_mob_registry_lock(scope).await?;
     hydrate_cli_mob_state_cached(scope, service, runtime_adapter, mob_state_cache).await
 }
 
@@ -11776,326 +11712,10 @@ async fn preflight_mcp_auth_challenge(url: &str) -> Option<String> {
 }
 
 #[cfg(feature = "mob")]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-struct PersistedMobRegistry {
-    mobs: std::collections::BTreeMap<String, PersistedMob>,
-}
-
-#[cfg(feature = "mob")]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct PersistedMob {
-    /// Legacy fallback for old registry entries written before events were persisted.
-    #[serde(default)]
-    definition: Option<MobDefinition>,
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    events: Vec<meerkat_mob::MobEvent>,
-    #[serde(default)]
-    runs: std::collections::BTreeMap<String, meerkat_mob::MobRun>,
-}
-
-#[cfg(feature = "mob")]
-fn mob_registry_path(scope: &RuntimeScope) -> PathBuf {
-    let paths =
-        meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str());
-    paths.root.join("mob_registry.json")
-}
-
-#[cfg(feature = "mob")]
-fn mob_registry_lock_path(scope: &RuntimeScope) -> PathBuf {
-    let paths =
-        meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str());
-    paths.root.join("mob_registry.lock")
-}
-
-#[cfg(feature = "mob")]
 fn mob_persistent_runtime_root(scope: &RuntimeScope) -> PathBuf {
     let paths =
         meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str());
     paths.root
-}
-
-#[cfg(feature = "mob")]
-struct MobRegistryLock {
-    #[cfg(unix)]
-    _lock: nix::fcntl::Flock<std::fs::File>,
-    #[cfg(not(unix))]
-    _lock: std::fs::File,
-}
-
-#[cfg(feature = "mob")]
-async fn acquire_mob_registry_lock(scope: &RuntimeScope) -> anyhow::Result<MobRegistryLock> {
-    let path = mob_registry_lock_path(scope);
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
-            anyhow::anyhow!(
-                "failed to create mob registry lock directory '{}': {e}",
-                parent.display()
-            )
-        })?;
-    }
-
-    let lock_path = path.clone();
-
-    #[cfg(unix)]
-    let lock_file = {
-        tokio::time::timeout(
-            Duration::from_secs(30),
-            tokio::task::spawn_blocking(
-                move || -> anyhow::Result<nix::fcntl::Flock<std::fs::File>> {
-                    use std::io::{Seek, SeekFrom, Write};
-
-                    let file = std::fs::OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .create(true)
-                        .truncate(false)
-                        .open(&lock_path)
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "failed to open mob registry lock '{}': {e}",
-                                lock_path.display()
-                            )
-                        })?;
-
-                    let mut file =
-                        nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive)
-                            .map_err(|(_file, e)| {
-                                anyhow::anyhow!(
-                                    "failed to acquire mob registry lock '{}': {e}",
-                                    lock_path.display()
-                                )
-                            })?;
-
-                    file.set_len(0).map_err(|e| {
-                        anyhow::anyhow!(
-                            "failed to reset mob registry lock '{}': {e}",
-                            lock_path.display()
-                        )
-                    })?;
-                    file.seek(SeekFrom::Start(0)).map_err(|e| {
-                        anyhow::anyhow!(
-                            "failed to seek mob registry lock '{}': {e}",
-                            lock_path.display()
-                        )
-                    })?;
-                    writeln!(file, "{}", std::process::id()).map_err(|e| {
-                        anyhow::anyhow!(
-                            "failed to write mob registry lock owner '{}': {e}",
-                            lock_path.display()
-                        )
-                    })?;
-                    file.flush().map_err(|e| {
-                        anyhow::anyhow!(
-                            "failed to flush mob registry lock '{}': {e}",
-                            lock_path.display()
-                        )
-                    })?;
-
-                    Ok(file)
-                },
-            ),
-        )
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "timed out waiting for mob registry lock '{}'",
-                path.display()
-            )
-        })?
-        .map_err(|e| anyhow::anyhow!("mob registry lock task failed: {e}"))??
-    };
-
-    #[cfg(not(unix))]
-    let lock_file = {
-        // On Windows, use a simple open-for-write as a best-effort advisory lock.
-        std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "failed to open mob registry lock '{}': {e}",
-                    lock_path.display()
-                )
-            })?
-    };
-
-    Ok(MobRegistryLock { _lock: lock_file })
-}
-
-#[cfg(feature = "mob")]
-async fn load_mob_registry(scope: &RuntimeScope) -> anyhow::Result<PersistedMobRegistry> {
-    let path = mob_registry_path(scope);
-    if !path.exists() {
-        return Ok(PersistedMobRegistry::default());
-    }
-    let content = tokio::fs::read_to_string(&path)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to read mob registry '{}': {e}", path.display()))?;
-    let parsed = serde_json::from_str::<PersistedMobRegistry>(&content)
-        .map_err(|e| anyhow::anyhow!("failed to parse mob registry '{}': {e}", path.display()))?;
-    Ok(parsed)
-}
-
-#[cfg(feature = "mob")]
-async fn save_mob_registry(
-    scope: &RuntimeScope,
-    registry: &PersistedMobRegistry,
-) -> anyhow::Result<()> {
-    let path = mob_registry_path(scope);
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
-            anyhow::anyhow!(
-                "failed to create mob registry directory '{}': {e}",
-                parent.display()
-            )
-        })?;
-    }
-    let content = serde_json::to_string_pretty(registry)
-        .map_err(|e| anyhow::anyhow!("failed to encode mob registry: {e}"))?;
-    let tmp_path = path.with_extension(format!(
-        "json.tmp.{}.{}",
-        std::process::id(),
-        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-    ));
-    tokio::fs::write(&tmp_path, content).await.map_err(|e| {
-        anyhow::anyhow!(
-            "failed to write temp mob registry '{}': {e}",
-            tmp_path.display()
-        )
-    })?;
-    tokio::fs::rename(&tmp_path, &path)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to commit mob registry '{}': {e}", path.display()))
-}
-
-#[cfg(feature = "mob")]
-// Compatibility registry snapshots are display-only mirrors; canonical restore
-// reads persistent mob storage instead of this JSON event copy.
-const MOB_REGISTRY_COMPAT_EVENT_LIMIT: usize = 10_000;
-
-#[cfg(feature = "mob")]
-async fn sync_mob_events(
-    state: &meerkat_mob_mcp::MobMcpState,
-    registry: &mut PersistedMobRegistry,
-    mob_id: &str,
-) -> anyhow::Result<()> {
-    let mob = registry
-        .mobs
-        .get_mut(mob_id)
-        .ok_or_else(|| anyhow::anyhow!("mob not found in persisted registry: {mob_id}"))?;
-    mob.events = state
-        .mob_events(
-            &meerkat_mob::MobId::from(mob_id.to_string()),
-            0,
-            MOB_REGISTRY_COMPAT_EVENT_LIMIT,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    mob.status = Some(
-        state
-            .mob_status(&meerkat_mob::MobId::from(mob_id.to_string()))
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .as_str()
-            .to_string(),
-    );
-    refresh_persisted_run_snapshots(state, mob_id, mob).await?;
-    Ok(())
-}
-
-#[cfg(feature = "mob")]
-async fn persist_mob_handle_snapshot(
-    scope: &RuntimeScope,
-    session_service: Arc<dyn meerkat_mob::MobSessionService>,
-    handle: &meerkat_mob::MobHandle,
-    definition: Option<meerkat_mob::MobDefinition>,
-) -> anyhow::Result<()> {
-    let _lock = acquire_mob_registry_lock(scope).await?;
-    let mut registry = load_mob_registry(scope).await?;
-    let mob_id = handle.mob_id().to_string();
-    let current_status = handle
-        .status()
-        .await
-        .map_err(|e| anyhow::anyhow!("read mob status: {e}"))?
-        .as_str()
-        .to_string();
-    let entry = registry
-        .mobs
-        .entry(mob_id.clone())
-        .or_insert_with(|| PersistedMob {
-            definition: definition.clone(),
-            status: Some(current_status),
-            events: Vec::new(),
-            runs: std::collections::BTreeMap::new(),
-        });
-    if entry.definition.is_none() {
-        entry.definition = definition;
-    }
-    let state = Arc::new(meerkat_mob_mcp::MobMcpState::new(session_service));
-    state
-        .mob_insert_handle(handle.mob_id().clone(), handle.clone())
-        .await;
-    sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-    save_mob_registry(scope, &registry).await
-}
-
-#[cfg(feature = "mob")]
-async fn refresh_persisted_run_snapshots(
-    state: &meerkat_mob_mcp::MobMcpState,
-    mob_id: &str,
-    mob: &mut PersistedMob,
-) -> anyhow::Result<()> {
-    let mut refreshed = std::collections::BTreeMap::new();
-    for (run_id, cached_run) in std::mem::take(&mut mob.runs) {
-        let parsed = match run_id.parse::<RunId>() {
-            Ok(run_id) => run_id,
-            Err(_) => {
-                refreshed.insert(run_id, cached_run);
-                continue;
-            }
-        };
-        let live = state
-            .mob_flow_status(
-                &meerkat_mob::MobId::from(mob_id.to_string()),
-                parsed.clone(),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        match live {
-            Some(run) => {
-                refreshed.insert(run.run_id.to_string(), run);
-            }
-            None => {
-                let cached_terminal =
-                    mob_machine_run_status_is_terminal(&parsed, cached_run.status())
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                if cached_terminal {
-                    refreshed.insert(run_id, cached_run);
-                }
-            }
-        }
-    }
-    mob.runs = refreshed;
-    Ok(())
-}
-
-#[cfg(feature = "mob")]
-fn cache_run_snapshot(
-    registry: &mut PersistedMobRegistry,
-    mob_id: &str,
-    run: meerkat_mob::MobRun,
-) -> anyhow::Result<()> {
-    let mob = registry
-        .mobs
-        .get_mut(mob_id)
-        .ok_or_else(|| anyhow::anyhow!("mob not found in persisted registry: {mob_id}"))?;
-    mob.runs.insert(run.run_id.to_string(), run);
-    Ok(())
 }
 
 #[cfg(feature = "mob")]
@@ -12110,8 +11730,7 @@ async fn hydrate_mob_state(
     default_llm_client_provider: Option<LlmClientProvider>,
     external_tools_provider: Option<meerkat_mob::ExternalToolsProvider>,
     seeded_handles: std::collections::BTreeMap<String, meerkat_mob::MobHandle>,
-) -> anyhow::Result<(Arc<meerkat_mob_mcp::MobMcpState>, PersistedMobRegistry)> {
-    let registry = load_mob_registry(scope).await?;
+) -> anyhow::Result<Arc<meerkat_mob_mcp::MobMcpState>> {
     let runtime_adapter = runtime_adapter.or_else(|| session_service.runtime_adapter());
     let state = Arc::new(
         meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
@@ -12127,7 +11746,7 @@ async fn hydrate_mob_state(
             .mob_insert_handle(meerkat_mob::MobId::from(mob_id.clone()), handle.clone())
             .await;
     }
-    Ok((state, registry))
+    Ok(state)
 }
 
 #[cfg(feature = "mob")]
@@ -12300,7 +11919,6 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
         return Ok(());
     }
 
-    let _lock = acquire_mob_registry_lock(scope).await?;
     let (config, _) = load_config(scope).await?;
     let (manifest, persistence) = create_persistence_bundle(scope).await?;
     let surface =
@@ -12313,7 +11931,6 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
         Arc::clone(&surface.mob_state_cache),
     )
     .await?;
-    let mut registry = load_mob_registry(scope).await?;
     let result = match command {
         MobCommands::RunFlow {
             mob_id,
@@ -12345,10 +11962,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let run = wait_for_terminal_flow_run(state.as_ref(), &mob_id, &run_id).await?;
-            cache_run_snapshot(&mut registry, &mob_id, run)?;
-            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-            save_mob_registry(scope, &registry).await?;
+            wait_for_terminal_flow_run(state.as_ref(), &mob_id, &run_id).await?;
             drop(scoped_event_tx);
             if let Some(task) = stream_task {
                 let summary = task
@@ -12375,19 +11989,10 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             let parsed_run_id = run_id
                 .parse::<RunId>()
                 .map_err(|e| anyhow::anyhow!("invalid run_id '{run_id}': {e}"))?;
-            let run = state
+            let resolved = state
                 .mob_flow_status(&meerkat_mob::MobId::from(mob_id.clone()), parsed_run_id)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let resolved = match run {
-                Some(run) => {
-                    cache_run_snapshot(&mut registry, &mob_id, run.clone())?;
-                    Some(run)
-                }
-                None => None,
-            };
-            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-            save_mob_registry(scope, &registry).await?;
             println!("{}", render_flow_status_json(resolved)?);
             Ok(())
         }
@@ -12420,8 +12025,6 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-            save_mob_registry(scope, &registry).await?;
             if json {
                 println!("{}", render_helper_result_json(&mob_id, &result)?);
             } else if let Some(output) = &result.output {
@@ -12471,8 +12074,6 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-            save_mob_registry(scope, &registry).await?;
             if json {
                 println!("{}", render_helper_result_json(&mob_id, &result)?);
             } else if let Some(output) = &result.output {
@@ -12527,8 +12128,6 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-            save_mob_registry(scope, &registry).await?;
             println!("cancelled");
             Ok(())
         }
@@ -12546,8 +12145,6 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 .await;
             match result {
                 Ok(receipt) => {
-                    sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-                    save_mob_registry(scope, &registry).await?;
                     println!(
                         "{}",
                         serde_json::json!({
@@ -12561,8 +12158,6 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                     receipt,
                     failed_peer_ids,
                 }) => {
-                    sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-                    save_mob_registry(scope, &registry).await?;
                     println!(
                         "{}",
                         serde_json::json!({
@@ -12599,8 +12194,6 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-            save_mob_registry(scope, &registry).await?;
 
             if json {
                 println!(
@@ -13266,21 +12859,13 @@ where
         }
     }
 
-    persist_mob_handle_snapshot(
-        scope,
-        session_service.clone(),
-        &handle,
-        Some(archive.definition.clone()),
-    )
-    .await?;
-
     let default_llm_client_provider = Some(Arc::new({
         let runtime = runtime.clone();
         move || runtime.default_llm_client()
     })
         as Arc<dyn Fn() -> Option<Arc<dyn meerkat_client::LlmClient>> + Send + Sync + 'static>);
     let seeded_handles = std::collections::BTreeMap::from([(deployed_mob_id.clone(), handle)]);
-    let (mob_state, _) = hydrate_mob_state(
+    let mob_state = hydrate_mob_state(
         scope,
         session_service,
         Some(runtime_adapter),
@@ -13292,7 +12877,7 @@ where
 
     // Set mob tools factory using the SAME hydrated state the router will use.
     // This ensures agent-created mobs (via delegate/mob_create) live in the
-    // same registry that archive cleanup scans.
+    // same MobMcpState that archive cleanup scans.
     *mob_tools_slot
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
@@ -19397,6 +18982,11 @@ capabilities = ["definitely_missing_capability"]
         assert_eq!(member_id, "helper-json");
     }
 
+    // The CLI keeps no second mob store: cross-process mob visibility is
+    // served entirely by the persistent MobStorage substrate that RPC/MCP use
+    // (`MobMcpState::with_persistent_storage_root`). A mob created in one
+    // context must be observable from a freshly rebuilt context with NO
+    // sidecar mirror and NO explicit persist step.
     #[cfg(feature = "mob")]
     #[tokio::test]
     async fn test_run_mob_tools_persist_across_context_rebuild() {
@@ -19405,7 +18995,7 @@ capabilities = ["definitely_missing_capability"]
 
         let mob_service_a: Arc<dyn meerkat_mob::MobSessionService> =
             Arc::new(TestMobSessionService::new());
-        let mut ctx_a = prepare_run_mob_tools(&scope, mob_service_a)
+        let ctx_a = prepare_run_mob_tools(&scope, mob_service_a)
             .await
             .expect("first mob tools context should initialize");
         let dispatcher_a = ctx_a.dispatcher();
@@ -19431,21 +19021,27 @@ capabilities = ["definitely_missing_capability"]
             }),
         )
         .await;
-        ctx_a
-            .persist(&scope)
-            .await
-            .expect("first context should persist mob registry");
         drop(dispatcher_a);
         drop(ctx_a);
+
+        // No JSON sidecar is ever written.
+        let realm_root =
+            meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str())
+                .root;
+        assert!(
+            !realm_root.join("mob_registry.json").exists(),
+            "CLI must not write a mob_registry.json sidecar"
+        );
 
         // Simulate a fresh CLI process by rebuilding session service + tools context.
         let mob_service_b: Arc<dyn meerkat_mob::MobSessionService> =
             Arc::new(TestMobSessionService::new());
-        let mut ctx_b = prepare_run_mob_tools(&scope, mob_service_b)
+        let ctx_b = prepare_run_mob_tools(&scope, mob_service_b)
             .await
             .expect("second mob tools context should initialize");
         let dispatcher_b = ctx_b.dispatcher();
 
+        // Recovery is served by the persistent MobStorage substrate alone.
         let status = call_tool_json(
             &dispatcher_b,
             "t-status",
@@ -19464,10 +19060,6 @@ capabilities = ["definitely_missing_capability"]
             }),
         )
         .await;
-        ctx_b
-            .persist(&scope)
-            .await
-            .expect("second context should persist registry updates");
     }
 
     #[cfg(feature = "mob")]
@@ -19519,15 +19111,18 @@ capabilities = ["definitely_missing_capability"]
         assert_eq!(lead_mode, Some("turn_driven"));
     }
 
+    // Destroy must clear the mob from the canonical persistent substrate
+    // (and never via a JSON sidecar). A rebuilt context restored from the
+    // substrate must observe zero mobs.
     #[cfg(feature = "mob")]
     #[tokio::test]
-    async fn test_run_mob_tools_persist_destroy_removes_registry_entry() {
+    async fn test_run_mob_tools_destroy_clears_persistent_substrate() {
         let temp = tempfile::tempdir().expect("tempdir must be created");
         let scope = test_scope_with_context(temp.path().to_path_buf());
 
         let mob_service: Arc<dyn meerkat_mob::MobSessionService> =
             Arc::new(TestMobSessionService::new());
-        let mut ctx = prepare_run_mob_tools(&scope, mob_service)
+        let ctx = prepare_run_mob_tools(&scope, mob_service)
             .await
             .expect("mob tools context should initialize");
         let dispatcher = ctx.dispatcher();
@@ -19550,16 +19145,27 @@ capabilities = ["definitely_missing_capability"]
             serde_json::json!({"mob_id": mob_id, "action": "destroy"}),
         )
         .await;
-        ctx.persist(&scope)
-            .await
-            .expect("context should persist registry updates");
+        drop(dispatcher);
+        drop(ctx);
 
-        let registry = load_mob_registry(&scope)
-            .await
-            .expect("registry should load");
+        // No JSON sidecar is ever written.
+        let realm_root =
+            meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str())
+                .root;
         assert!(
-            registry.mobs.is_empty(),
-            "destroyed mob should be removed from persisted registry"
+            !realm_root.join("mob_registry.json").exists(),
+            "CLI must not write a mob_registry.json sidecar"
+        );
+
+        // A fresh context restored from the persistent substrate sees no mobs.
+        let mob_service_b: Arc<dyn meerkat_mob::MobSessionService> =
+            Arc::new(TestMobSessionService::new());
+        let ctx_b = prepare_run_mob_tools(&scope, mob_service_b)
+            .await
+            .expect("rebuilt mob tools context should initialize");
+        assert!(
+            ctx_b.state.mob_list().await.is_empty(),
+            "destroyed mob must not be recovered from the persistent substrate"
         );
     }
 
@@ -20396,9 +20002,13 @@ supports_reasoning = true
         }
     }
 
+    // Preparing a second mob tools context must not block on the first: the
+    // CLI holds no cross-context file lock (the canonical persistent substrate
+    // owns its own concurrency), so a live first context never serializes the
+    // second one's initialization.
     #[cfg(feature = "mob")]
     #[tokio::test]
-    async fn test_prepare_run_mob_tools_does_not_hold_registry_lock_for_context_lifetime() {
+    async fn test_prepare_run_mob_tools_second_context_does_not_block() {
         let temp = tempfile::tempdir().expect("tempdir");
         let scope = test_scope_with_context(temp.path().to_path_buf());
 
@@ -20415,7 +20025,7 @@ supports_reasoning = true
             prepare_run_mob_tools(&scope, mob_service_b),
         )
         .await
-        .expect("second context should not block on long-held registry lock")
+        .expect("second context should not block on a live first context")
         .expect("second context should initialize");
     }
 

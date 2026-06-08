@@ -144,12 +144,19 @@ impl CompositeDispatcher {
     ) -> Result<Self, CompositeDispatcherError> {
         let mut builtin_tools: Vec<Arc<dyn BuiltinTool>> = Vec::new();
         let shell_session_id = session_id.clone();
+        // The project root is a concrete authority threaded by the caller (the
+        // factory seeds it from the session store parent / shell config). We must
+        // never fall back to the ambient process CWD: that silently re-derives a
+        // filesystem root the caller is responsible for owning, leaking
+        // whichever directory the host process happens to be in into
+        // apply_patch / view_image. Fail closed when no concrete root is supplied
+        // (dogma row #299).
         let project_root = project_root
             .or_else(|| shell_config.as_ref().map(|cfg| cfg.project_root.clone()))
-            .or_else(|| std::env::current_dir().ok())
             .ok_or_else(|| CompositeDispatcherError::ToolInitFailed {
                 name: "apply_patch".into(),
-                message: "failed to resolve project root".to_string(),
+                message: "failed to resolve project root: no project_root or shell_config supplied"
+                    .to_string(),
             })?;
 
         // Add task tools
@@ -785,7 +792,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::builtin::MemoryTaskStore;
@@ -797,6 +804,16 @@ mod tests {
     use std::collections::HashMap;
     use tempfile::TempDir;
     use tokio::sync::Mutex;
+
+    /// Concrete project root for tests that do not exercise the project-root
+    /// dependent tools (apply_patch / view_image / shell). The composite now
+    /// fails closed without a concrete root rather than falling back to the
+    /// ambient process CWD (dogma row #299), so tests must supply one explicitly.
+    /// The crate manifest dir is a stable, real directory and is never the
+    /// laundered ambient CWD.
+    fn test_project_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
 
     #[derive(Default)]
     struct TestBlobStore {
@@ -1008,6 +1025,63 @@ mod tests {
     }
 
     #[test]
+    fn composite_fails_closed_without_concrete_project_root() {
+        // With neither a concrete `project_root` nor a `shell_config`, the
+        // composite must fail closed with a typed `ToolInitFailed` rather than
+        // laundering the ambient process CWD into apply_patch / view_image
+        // (dogma row #299).
+        let store = Arc::new(MemoryTaskStore::new());
+        let err = CompositeDispatcher::new(
+            store,
+            &BuiltinToolConfig::default(),
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .err()
+        .expect("composite must fail closed without a concrete project root");
+        match err {
+            CompositeDispatcherError::ToolInitFailed { name, message } => {
+                assert_eq!(name, "apply_patch");
+                assert!(
+                    message.contains("project root"),
+                    "error must explain the missing project root: {message}"
+                );
+            }
+            other => panic!("expected ToolInitFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn composite_resolves_project_root_from_shell_config_when_root_unset() {
+        // The shell config's project_root is a concrete authority and must be
+        // honored when no explicit project_root is threaded — without falling
+        // back to the ambient CWD.
+        let store = Arc::new(MemoryTaskStore::new());
+        let temp_dir = TempDir::new().expect("temp dir");
+        let shell_config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let dispatcher = CompositeDispatcher::new(
+            store,
+            &BuiltinToolConfig::default(),
+            None,
+            Some(shell_config),
+            None,
+            None,
+            true,
+        )
+        .expect("composite should resolve project root from shell config");
+        assert!(
+            dispatcher
+                .tools()
+                .iter()
+                .any(|tool| tool.name == "apply_patch"),
+            "apply_patch must register once a concrete project root is resolved"
+        );
+    }
+
+    #[test]
     fn usage_instructions_include_external_tools() {
         let store = Arc::new(MemoryTaskStore::new());
         let external: Arc<dyn AgentToolDispatcher> =
@@ -1016,7 +1090,7 @@ mod tests {
         let dispatcher = CompositeDispatcher::new(
             store,
             &BuiltinToolConfig::default(),
-            None,
+            Some(test_project_root()),
             None,
             Some(external),
             None,
@@ -1041,7 +1115,7 @@ mod tests {
         let dispatcher = CompositeDispatcher::new(
             store,
             &BuiltinToolConfig::default(),
-            None,
+            Some(test_project_root()),
             None,
             Some(external),
             None,
@@ -1086,7 +1160,7 @@ mod tests {
         let dispatcher = CompositeDispatcher::new(
             store,
             &BuiltinToolConfig::default(),
-            None,
+            Some(test_project_root()),
             None,
             Some(external),
             None,
@@ -1119,7 +1193,7 @@ mod tests {
         let dispatcher = CompositeDispatcher::new(
             store,
             &BuiltinToolConfig::default(),
-            None,
+            Some(test_project_root()),
             None,
             None,
             None,
@@ -1167,7 +1241,7 @@ mod tests {
         let dispatcher = CompositeDispatcher::new(
             store,
             &BuiltinToolConfig::default(),
-            None,
+            Some(test_project_root()),
             None,
             None,
             None,
@@ -1203,7 +1277,7 @@ mod tests {
         let dispatcher = CompositeDispatcher::new(
             store,
             &BuiltinToolConfig::default(),
-            None,
+            Some(test_project_root()),
             None,
             Some(external),
             None,
@@ -1232,7 +1306,7 @@ mod tests {
         let dispatcher = CompositeDispatcher::new(
             store,
             &BuiltinToolConfig::default(),
-            None,
+            Some(test_project_root()),
             None,
             Some(external),
             None,
@@ -1270,7 +1344,7 @@ mod tests {
         let mut dispatcher = CompositeDispatcher::new(
             store,
             &BuiltinToolConfig::default(),
-            None,
+            Some(test_project_root()),
             None,
             Some(external),
             None,
@@ -1567,7 +1641,7 @@ mod tests {
             let dispatcher = CompositeDispatcher::new(
                 store,
                 &BuiltinToolConfig::default(),
-                None,
+                Some(test_project_root()),
                 None,
                 None,
                 None,
@@ -1594,7 +1668,7 @@ mod tests {
         let dispatcher = CompositeDispatcher::new(
             store,
             &BuiltinToolConfig::default(),
-            None,
+            Some(test_project_root()),
             None,
             None,
             None,
@@ -1736,7 +1810,7 @@ mod tests {
         let mut dispatcher = CompositeDispatcher::new(
             store,
             &BuiltinToolConfig::default(),
-            None,
+            Some(test_project_root()),
             None,
             None,
             None,
@@ -1772,8 +1846,16 @@ mod tests {
                 .enable_tool("load_skill"),
             ..BuiltinToolConfig::default()
         };
-        let mut dispatcher =
-            CompositeDispatcher::new(store, &config, None, None, None, None, false).unwrap();
+        let mut dispatcher = CompositeDispatcher::new(
+            store,
+            &config,
+            Some(test_project_root()),
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
 
         dispatcher.register_skill_tools(stub_skill_tool_set());
 

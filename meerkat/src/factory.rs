@@ -16,8 +16,6 @@ use std::sync::Arc;
 use meerkat_client::{FactoryError, LlmClient, LlmClientAdapter};
 #[cfg(feature = "openai")]
 use meerkat_client::{OpenAiCompatibleClient, OpenAiCompatibleMode};
-#[cfg(feature = "openai")]
-use meerkat_core::CredentialSourceSpec;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
 
@@ -964,16 +962,25 @@ fn provider_tool_defaults_for(
 /// resolve `None` to the *same* default instead of each hand-coding a ladder or
 /// literal. Resolution order:
 ///
-/// 1. The configured per-provider default (`config.models.{provider}`) walked
+/// 1. The configured global agent default (`config.agent.model`) when set —
+///    this is the operator's explicit "default model" knob and outranks the
+///    per-provider entries, which [`ModelDefaults::default`] auto-populates from
+///    the catalog (so they are never empty and would otherwise mask the global
+///    default entirely).
+/// 2. The configured per-provider default (`config.models.{provider}`) walked
 ///    in the catalog-owned [`provider_priority`] order — the first non-empty
-///    entry wins.
-/// 2. The configured global agent default (`config.agent.model`) when set.
+///    entry wins. This is the fallback for builds that pin providers but set no
+///    global default.
 /// 3. The catalog-owned [`global_default_model`] as the terminal fallback.
 ///
 /// [`provider_priority`]: meerkat_core::model_profile::catalog::provider_priority
 /// [`global_default_model`]: meerkat_core::model_profile::catalog::global_default_model
+/// [`ModelDefaults::default`]: meerkat_core::config::ModelDefaults
 #[must_use]
 pub fn resolve_create_session_default_model(config: &Config) -> String {
+    if !config.agent.model.is_empty() {
+        return config.agent.model.clone();
+    }
     let from_provider_priority = meerkat_core::model_profile::catalog::provider_priority()
         .iter()
         .find_map(|provider| {
@@ -987,9 +994,6 @@ pub fn resolve_create_session_default_model(config: &Config) -> String {
         });
     if let Some(model) = from_provider_priority {
         return model;
-    }
-    if !config.agent.model.is_empty() {
-        return config.agent.model.clone();
     }
     meerkat_core::model_profile::catalog::global_default_model().to_string()
 }
@@ -1082,9 +1086,6 @@ impl meerkat_llm_core::ImageGenerationExecutor for UnavailableImageGenerationExe
         })
     }
 }
-
-#[cfg(feature = "openai")]
-const SELF_HOSTED_LEGACY_REALM_ID: &str = "self_hosted_legacy";
 
 #[cfg(feature = "openai")]
 struct SelfHostedClientSpec {
@@ -3023,12 +3024,16 @@ impl AgentFactory {
             )));
         }
 
-        Self::legacy_self_hosted_connection(spec).map(|(realm, auth_binding)| {
-            // Legacy `[self_hosted]` compatibility is a transient migration
-            // binding. Do not persist it as `SessionMetadata.auth_binding`;
-            // future resumes rebuild it from the model registry server id.
-            (realm, auth_binding, None)
-        })
+        // No transient `[self_hosted]` migration realm is synthesized: the
+        // canonical `RealmConnectionSet` (from `auth_binding` or a configured
+        // realm default binding resolved above) is the sole owner of the
+        // self-hosted connection. A `[self_hosted]` server with no canonical
+        // realm binding fails closed rather than fabricating a parallel
+        // `self_hosted_legacy` realm + FNV-hashed transient binding id.
+        Err(FactoryError::ClientCreationFailed(format!(
+            "self-hosted server '{}' has no canonical realm binding; define a realm with a self_hosted backend + binding and select it with auth_binding or a realm default binding",
+            spec.server_id
+        )))
     }
 
     #[cfg(feature = "openai")]
@@ -3068,7 +3073,7 @@ impl AgentFactory {
             Err(err) => {
                 tracing::debug!(
                     error = %err,
-                    "self-hosted connection seam lookup did not find a configured binding; falling back to legacy self_hosted config"
+                    "self-hosted connection seam lookup did not find a configured realm binding; resolution will fail closed"
                 );
                 Ok(None)
             }
@@ -3084,93 +3089,6 @@ impl AgentFactory {
             .is_some_and(|server| {
                 server.bearer_token.is_some() || server.bearer_token_env.is_some()
             })
-    }
-
-    #[cfg(feature = "openai")]
-    fn legacy_self_hosted_connection(
-        spec: &SelfHostedClientSpec,
-    ) -> Result<(RealmConnectionSet, AuthBindingRef), FactoryError> {
-        let realm_id = RealmId::parse(SELF_HOSTED_LEGACY_REALM_ID).map_err(|err| {
-            FactoryError::ClientCreationFailed(format!(
-                "invalid self-hosted legacy realm id '{SELF_HOSTED_LEGACY_REALM_ID}': {err}"
-            ))
-        })?;
-        let binding_id = Self::legacy_self_hosted_binding_id(&spec.server_id)?;
-        let binding_key = binding_id.as_str().to_string();
-
-        let backend = meerkat_core::BackendProfile {
-            id: spec.server_id.clone(),
-            provider: Provider::SelfHosted,
-            backend_kind: "self_hosted".to_string(),
-            base_url: Some(spec.base_url.clone()),
-            options: serde_json::json!({
-                "remote_model": spec.remote_model,
-                "api_style": match spec.mode {
-                    OpenAiCompatibleMode::Responses => "responses",
-                    OpenAiCompatibleMode::ChatCompletions => "chat_completions",
-                },
-            }),
-        };
-        let auth = meerkat_core::AuthProfile {
-            id: format!("{}_auth", spec.server_id),
-            provider: Provider::SelfHosted,
-            auth_method: "none".to_string(),
-            source: CredentialSourceSpec::PlatformDefault,
-            constraints: Default::default(),
-            metadata_defaults: Default::default(),
-        };
-        let binding = meerkat_core::ProviderBinding {
-            id: binding_key.clone(),
-            backend_profile: backend.id.clone(),
-            auth_profile: auth.id.clone(),
-            default_model: Some(spec.remote_model.clone()),
-            policy: Default::default(),
-            provider_default: false,
-        };
-
-        let mut backends = BTreeMap::new();
-        backends.insert(backend.id.clone(), backend);
-        let mut auth_profiles = BTreeMap::new();
-        auth_profiles.insert(auth.id.clone(), auth);
-        let mut bindings = BTreeMap::new();
-        bindings.insert(binding.id.clone(), binding);
-
-        Ok((
-            RealmConnectionSet {
-                realm_id: realm_id.clone(),
-                backends,
-                auth_profiles,
-                bindings,
-                default_binding: Some(binding_key),
-            },
-            AuthBindingRef {
-                realm: realm_id,
-                binding: binding_id,
-                profile: None,
-                origin: meerkat_core::BindingOrigin::Configured,
-            },
-        ))
-    }
-
-    #[cfg(feature = "openai")]
-    fn legacy_self_hosted_binding_id(
-        server_id: &str,
-    ) -> Result<meerkat_core::BindingId, FactoryError> {
-        if let Ok(binding_id) = meerkat_core::BindingId::parse(server_id.to_string()) {
-            return Ok(binding_id);
-        }
-
-        let mut hash = 0xcbf29ce484222325_u64;
-        for byte in server_id.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        let generated = format!("legacy-{hash:016x}");
-        meerkat_core::BindingId::parse(generated).map_err(|err| {
-            FactoryError::ClientCreationFailed(format!(
-                "failed to derive transient legacy binding id for self-hosted server '{server_id}': {err}"
-            ))
-        })
     }
 
     fn publish_auth_lease(
@@ -3353,6 +3271,18 @@ impl AgentFactory {
             ops_lifecycle,
             image_tool_results,
         };
+
+        // dogma #299: the composite no longer launders the ambient process CWD
+        // into the project root. Re-supply a concrete, caller-owned fallback at
+        // this single chokepoint that every factory-built dispatcher
+        // (`build_agent` plus all SDK `create_*` helpers) funnels through, so
+        // none can reach the composite with an unresolved root. Precedence
+        // mirrors the composite's own order with the removed CWD step replaced
+        // by the factory's store-parent authority: explicit `project_root`, then
+        // any `shell_config` root, then `shell_project_root()`.
+        let project_root = project_root
+            .or_else(|| shell_config.as_ref().map(|cfg| cfg.project_root.clone()))
+            .or_else(|| Some(self.shell_project_root()));
 
         #[cfg_attr(not(feature = "skills"), allow(unused_mut))]
         let mut composite = self
@@ -5566,13 +5496,20 @@ mod tests {
 
     #[test]
     fn create_session_default_model_resolves_to_catalog_seam() {
-        // A default config carries catalog-owned per-provider defaults; the
-        // resolver must return the catalog default (Anthropic priority) — the
-        // SAME value every surface gets, never a surface-local literal.
+        // A default config carries the operator-facing template default
+        // (`config.agent.model`, seeded from `config_template.toml`). The
+        // resolver must return THAT explicit global default — the SAME value
+        // every surface gets — in preference to the per-provider catalog fills
+        // (which `ModelDefaults::default` always populates and would otherwise
+        // mask the global default) and the terminal catalog global fallback.
         let config = Config::default();
+        assert!(
+            !config.agent.model.is_empty(),
+            "the default template must seed a global agent model"
+        );
         assert_eq!(
             resolve_create_session_default_model(&config),
-            meerkat_core::model_profile::catalog::global_default_model()
+            config.agent.model,
         );
     }
 
@@ -6956,11 +6893,15 @@ mod tests {
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
     #[tokio::test]
-    async fn self_hosted_legacy_non_slug_server_id_uses_safe_transient_binding() {
+    async fn self_hosted_server_without_canonical_realm_binding_fails_closed() {
         let temp = tempfile::tempdir().unwrap();
         let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let calls = install_recording_self_hosted_runtime(&mut factory);
 
+        // A `[self_hosted]` server with a non-slug id and no canonical realm
+        // binding must fail closed. No transient `self_hosted_legacy` realm is
+        // synthesized and no FNV-hashed transient binding id is fabricated from
+        // the server id string.
         let config = config_with_self_hosted_legacy_server_id(
             "localhost:11434",
             SelfHostedServerConfig {
@@ -6975,48 +6916,44 @@ mod tests {
         build.provider = Some(Provider::SelfHosted);
         build.override_builtins = ToolCategoryOverride::Disable;
 
-        let agent = factory.build_agent(build, &config).await.unwrap();
+        let err = match factory.build_agent(build, &config).await {
+            Ok(_) => panic!("self-hosted server without canonical realm binding must fail closed"),
+            Err(err) => err,
+        };
 
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].auth_binding.realm.as_str(), "self_hosted_legacy");
-        assert_ne!(calls[0].auth_binding.binding.as_str(), "localhost:11434");
         assert!(
-            matches!(calls[0].auth_source, CredentialSourceSpec::PlatformDefault),
-            "authless legacy compatibility must not synthesize bearer auth"
+            calls.lock().unwrap().is_empty(),
+            "missing canonical realm binding must not synthesize a transient legacy connection"
         );
         assert!(
-            calls[0]
-                .auth_binding
-                .binding
-                .as_str()
-                .starts_with("legacy-"),
-            "non-slug legacy server IDs should map to a generated transient binding ID"
-        );
-        assert!(
-            agent
-                .session()
-                .session_metadata()
-                .unwrap()
-                .auth_binding
-                .is_none(),
-            "generated legacy compatibility binding must remain transient"
+            err.to_string().contains("self-hosted")
+                && err.to_string().contains("no canonical realm binding"),
+            "unexpected error: {err}"
         );
     }
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
     #[tokio::test]
-    async fn self_hosted_legacy_runtime_resolution_publishes_auth_lease_visibility() {
+    async fn self_hosted_realm_runtime_resolution_publishes_auth_lease_visibility() {
         let temp = tempfile::tempdir().unwrap();
         let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let calls = install_recording_self_hosted_runtime(&mut factory);
-        let config = config_with_self_hosted_legacy_server(SelfHostedServerConfig {
+        let mut config = config_with_self_hosted_legacy_server(SelfHostedServerConfig {
             transport: SelfHostedTransport::OpenAiCompatible,
             base_url: "http://127.0.0.1:11434".to_string(),
             api_style: SelfHostedApiStyle::ChatCompletions,
             bearer_token: None,
             bearer_token_env: None,
         });
+        insert_self_hosted_realm_binding(
+            &mut config,
+            "default",
+            "default_local",
+            "http://realm.example/v1",
+            CredentialSourceSpec::InlineSecret {
+                secret: "realm-token".to_string(),
+            },
+        );
 
         let session = Session::new();
         let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
@@ -7640,9 +7577,13 @@ mod tests {
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
     #[tokio::test]
-    async fn self_hosted_legacy_without_credentials_remains_authless_compatible() {
+    async fn self_hosted_without_credentials_or_realm_binding_fails_closed() {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        // A credential-free `[self_hosted]` server is no longer silently
+        // resolved through a synthesized transient `self_hosted_legacy` realm:
+        // without a canonical realm binding it fails closed, leaving the
+        // canonical `RealmConnectionSet` as the sole owner of the connection.
         let config = config_with_self_hosted_legacy_server(SelfHostedServerConfig {
             transport: SelfHostedTransport::OpenAiCompatible,
             base_url: "http://127.0.0.1:11434".to_string(),
@@ -7654,16 +7595,19 @@ mod tests {
         build.provider = Some(Provider::SelfHosted);
         build.override_builtins = ToolCategoryOverride::Disable;
 
-        let agent = factory.build_agent(build, &config).await.unwrap();
+        let err = match factory.build_agent(build, &config).await {
+            Ok(_) => {
+                panic!(
+                    "authless self-hosted server without a canonical realm binding must fail closed"
+                )
+            }
+            Err(err) => err,
+        };
 
         assert!(
-            agent
-                .session()
-                .session_metadata()
-                .unwrap()
-                .auth_binding
-                .is_none(),
-            "authless legacy compatibility must remain transient"
+            err.to_string().contains("self-hosted")
+                && err.to_string().contains("no canonical realm binding"),
+            "unexpected error: {err}"
         );
     }
 

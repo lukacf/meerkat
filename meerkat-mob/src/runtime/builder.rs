@@ -2667,11 +2667,21 @@ impl MobBuilder {
                     entry.agent_identity, entry.role, definition.id
                 );
                 let req = build::to_create_session_request(&resumed_config, prompt.into());
-                let peer_name = super::actor::render_member_comms_name(
+                let peer_name = match super::actor::render_member_comms_name(
                     definition.id.as_str(),
                     entry.role.as_str(),
                     entry.agent_identity.as_str(),
-                );
+                ) {
+                    Ok(name) => name,
+                    Err(error) => {
+                        record_restore_failure(format!(
+                            "failed to render comms name for resumed member '{}': {error}",
+                            entry.agent_identity
+                        ))
+                        .await;
+                        continue;
+                    }
+                };
                 let mut provision_authority =
                     match crate::machines::mob_machine::MobMachineAuthority::recover_from_state(
                         dsl_authority.state().clone(),
@@ -2841,7 +2851,7 @@ impl MobBuilder {
                 definition.id.as_str(),
                 entry.role.as_str(),
                 entry.agent_identity.as_str(),
-            );
+            )?;
             let mut provision_request = super::provisioner::ProvisionMemberRequest {
                 create_session: req,
                 binding: crate::RuntimeBinding::Session,
@@ -2977,7 +2987,7 @@ impl MobBuilder {
                     definition.id.as_str(),
                     entry.role.as_str(),
                     entry.agent_identity.as_str(),
-                );
+                )?;
                 let spec = provisioner
                     .trusted_peer_spec(&entry.member_ref, &name_a, &key_a)
                     .await?;
@@ -2997,7 +3007,7 @@ impl MobBuilder {
                     definition.id.as_str(),
                     entry.role.as_str(),
                     entry.agent_identity.as_str(),
-                );
+                )?;
                 let spec = provisioner
                     .trusted_peer_spec(&entry.member_ref, &name, peer_id)
                     .await?;
@@ -3109,7 +3119,7 @@ impl MobBuilder {
                     definition.id.as_str(),
                     peer_entry.role.as_str(),
                     peer_entry.agent_identity.as_str(),
-                );
+                )?;
                 if broken_members.contains(&peer_meerkat_id) {
                     if let (Some(comms_a), Some(local_peer_id)) =
                         (local_comms.as_ref(), local_peer_id.as_ref())

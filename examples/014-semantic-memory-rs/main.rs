@@ -25,6 +25,7 @@
 use std::sync::Arc;
 
 use meerkat::{AgentBuilder, AgentFactory, AnthropicClient, ToolGatewayBuilder};
+use meerkat_core::MemoryIndexableContent;
 use meerkat_core::memory::{
     MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemorySource, MemoryStore as _,
     MessageRange,
@@ -106,7 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let request = MemoryIndexRequest::new(
             MemoryIndexScope::for_session(memory_session_id.clone()),
-            (*fact).to_string(),
+            MemoryIndexableContent::Indexable((*fact).to_string()),
             metadata,
         )?;
         memory_store.index_scoped(request).await?;

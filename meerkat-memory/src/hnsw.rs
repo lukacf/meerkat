@@ -377,21 +377,29 @@ impl MemoryStore for HnswMemoryStore {
         batch: MemoryIndexBatch,
     ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
         let (receipt_scope, requests) = batch.into_parts();
-        let indexed_entries = requests.len();
-        if requests.is_empty() {
+        let mut entries = Vec::with_capacity(requests.len());
+        for request in requests {
+            let (_scope, content, metadata) = request.into_parts();
+            // Store-side include/exclude gate (#319): the producer marks each
+            // message Indexable(text) or Excluded(reason) via the typed
+            // MemoryIndexableContent. The store indexes the former and skips
+            // the latter, rather than the producer pre-flattening to a String
+            // and dropping empties blindly.
+            if !content.is_indexable() {
+                continue;
+            }
+            let text = content.into_indexable_text();
+            let meta_json = serde_json::to_vec(&metadata)
+                .map_err(|e| MemoryStoreError::Embedding(e.to_string()))?;
+            let embedding = self.policy.embed(&text);
+            entries.push((text, meta_json, embedding));
+        }
+        let indexed_entries = entries.len();
+        if indexed_entries == 0 {
             return Ok(MemoryIndexReceipt {
                 scope: receipt_scope,
                 indexed_entries: 0,
             });
-        }
-
-        let mut entries = Vec::with_capacity(indexed_entries);
-        for request in requests {
-            let (_scope, content, metadata) = request.into_parts();
-            let meta_json = serde_json::to_vec(&metadata)
-                .map_err(|e| MemoryStoreError::Embedding(e.to_string()))?;
-            let embedding = self.policy.embed(&content);
-            entries.push((content, meta_json, embedding));
         }
 
         let db_path = self.db_path.clone();
@@ -627,7 +635,7 @@ mod tests {
     fn request(content: impl Into<String>, session_id: &SessionId) -> MemoryIndexRequest {
         MemoryIndexRequest::new(
             MemoryIndexScope::for_session(session_id.clone()),
-            content.into(),
+            meerkat_core::MemoryIndexableContent::Indexable(content.into()),
             meta(session_id),
         )
         .unwrap()

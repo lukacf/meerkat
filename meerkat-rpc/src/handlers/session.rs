@@ -210,14 +210,19 @@ pub async fn handle_create(
     }
 
     let model_was_explicit = params.model.is_some();
-    let runtime_default_model = if let Some(config_runtime) = runtime.config_runtime() {
-        config_runtime
-            .get()
-            .await
-            .ok()
-            .map(|snapshot| snapshot.config.agent.model)
-    } else {
-        None
+    // When the caller does not pin a model, the runtime's configured default is
+    // resolved through the catalog-owned `resolve_create_session_default_model`
+    // ladder (provider-priority -> config.agent.model -> catalog global default)
+    // — the single owner of the create-session default-model fact. Surfaces MUST
+    // NOT re-derive their own default ladder from `config.agent.model`.
+    let runtime_default_model = match runtime.config_runtime() {
+        Some(config_runtime) => match config_runtime.get().await {
+            Ok(snapshot) => Some(meerkat::resolve_create_session_default_model(
+                &snapshot.config,
+            )),
+            Err(_) => None,
+        },
+        None => None,
     };
     let model_name = match params.model.clone().or(runtime_default_model) {
         Some(model) => model,

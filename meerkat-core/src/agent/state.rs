@@ -436,16 +436,29 @@ where
 
         let hydrated_messages = if let Some(blob_store) = self.blob_store.as_ref() {
             let mut hydrated = messages.to_vec();
+            let missing_blob_behavior = self.missing_blob_behavior;
             hydrate_messages_for_execution(
                 blob_store.as_ref(),
                 &mut hydrated,
-                MissingBlobBehavior::HistoricalPlaceholder,
+                missing_blob_behavior,
             )
             .await
-            .map_err(|err| {
-                AgentError::InternalError(format!(
-                    "failed to hydrate image refs before llm execution: {err}"
-                ))
+            .map_err(|err| match err {
+                // A blob the policy refuses to placeholder is a typed
+                // configuration/policy refusal, not a generic internal fault:
+                // the surface explicitly selected `Error`, so the missing live
+                // blob terminalizes the turn as a `ConfigError` (Config class)
+                // rather than being laundered into `InternalError`.
+                crate::blob::BlobStoreError::NotFound(blob_id)
+                    if missing_blob_behavior == MissingBlobBehavior::Error =>
+                {
+                    AgentError::ConfigError(format!(
+                        "required image blob is unavailable before llm execution: {blob_id}"
+                    ))
+                }
+                other => AgentError::InternalError(format!(
+                    "failed to hydrate image refs before llm execution: {other}"
+                )),
             })?;
             Some(hydrated)
         } else {
@@ -1039,10 +1052,10 @@ where
         // The typed source carries that offset as the canonical origin handle,
         // not the compaction turn number (which was only a proxy).
         for (offset, message) in discarded.iter().enumerate() {
-            let content = message.as_indexable_text();
-            if content.is_empty() {
-                continue;
-            }
+            // Carry the typed indexability decision to the store; the store
+            // owns the include/exclude policy rather than the producer inferring
+            // it from an empty flattened string.
+            let content = message.indexable_content();
             let metadata = crate::memory::MemoryMetadata {
                 session_id: session_id.clone(),
                 source: crate::memory::MemorySource::Compaction {
@@ -2199,18 +2212,53 @@ where
                             executable_tool_calls.push((tool_index, tc));
                         }
 
-                        // Execute all allowed tool calls in parallel using join_all
+                        // Execute all allowed tool calls in parallel, bounding
+                        // concurrency with a semaphore and applying the typed
+                        // per-call timeout policy from `tools_config`. Timeout
+                        // expiry becomes a `ToolError::Timeout` so it flows
+                        // through `terminal_tool_outcome_for_error` exactly like
+                        // any other tool execution failure.
                         let tool_dispatch_context = self.tool_dispatch_context.clone();
+                        let default_timeout = self.tools_config.default_timeout;
+                        let tool_timeouts = self.tools_config.tool_timeouts.clone();
+                        let max_concurrent = self.tools_config.max_concurrent.max(1);
+                        let dispatch_semaphore =
+                            Arc::new(tokio::sync::Semaphore::new(max_concurrent));
                         let dispatch_futures: Vec<_> = executable_tool_calls
                             .into_iter()
                             .map(|(tool_index, tc)| {
                                 let tools_ref = Arc::clone(&tools_ref);
                                 let tool_dispatch_context = tool_dispatch_context.clone();
+                                let dispatch_semaphore = Arc::clone(&dispatch_semaphore);
+                                let call_timeout = tool_timeouts
+                                    .get(tc.name.as_str())
+                                    .copied()
+                                    .unwrap_or(default_timeout);
                                 async move {
                                     let start = crate::time_compat::Instant::now();
-                                    let dispatch_result = tools_ref
-                                        .dispatch_with_context(tc.as_view(), &tool_dispatch_context)
-                                        .await;
+                                    let dispatch_result = match dispatch_semaphore.acquire().await {
+                                        Ok(_permit) => {
+                                            match tokio::time::timeout(
+                                                call_timeout,
+                                                tools_ref.dispatch_with_context(
+                                                    tc.as_view(),
+                                                    &tool_dispatch_context,
+                                                ),
+                                            )
+                                            .await
+                                            {
+                                                Ok(result) => result,
+                                                Err(_) => Err(ToolError::timeout(
+                                                    tc.name.clone(),
+                                                    u64::try_from(call_timeout.as_millis())
+                                                        .unwrap_or(u64::MAX),
+                                                )),
+                                            }
+                                        }
+                                        Err(_) => Err(ToolError::execution_failed(
+                                            "tool dispatch concurrency semaphore closed",
+                                        )),
+                                    };
                                     let duration_ms = start.elapsed().as_millis() as u64;
                                     (tool_index, tc, dispatch_result, duration_ms)
                                 }
@@ -3817,7 +3865,13 @@ mod tests {
     }
 
     struct RecordingMemoryStore {
-        entries: Mutex<Vec<(MemoryIndexScope, String, MemoryMetadata)>>,
+        entries: Mutex<
+            Vec<(
+                MemoryIndexScope,
+                crate::types::MemoryIndexableContent,
+                MemoryMetadata,
+            )>,
+        >,
         fail_indexing: bool,
         fail_after_successful_entries: Option<usize>,
     }
@@ -3848,6 +3902,15 @@ mod tests {
         }
 
         fn contents(&self) -> Vec<String> {
+            self.entries
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, content, _)| content.clone().into_indexable_text())
+                .collect()
+        }
+
+        fn typed_contents(&self) -> Vec<crate::types::MemoryIndexableContent> {
             self.entries
                 .lock()
                 .unwrap()
@@ -4914,6 +4977,60 @@ mod tests {
         );
     }
 
+    /// Row 319: the compaction-discard producer must carry the typed
+    /// `MemoryIndexableContent` (the include/exclude policy) to the store,
+    /// rather than flattening to a `String` and silently skipping excluded
+    /// messages via the empty-string convention. A discarded tool-result
+    /// message must reach the store as a typed `Excluded(ToolResults)` request,
+    /// so the store — not the producer — owns indexability.
+    #[tokio::test]
+    async fn compaction_discard_producer_carries_typed_indexability_to_store() {
+        let client = Arc::new(StaticLlmClient);
+        let memory_store = Arc::new(RecordingMemoryStore::new());
+        let agent = with_test_turn_state_handle(AgentBuilder::new())
+            .memory_store(memory_store.clone())
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let discarded = vec![
+            Message::User(UserMessage::text("indexable user turn")),
+            Message::tool_results(vec![ToolResult::new(
+                "call-1".to_string(),
+                "tool output".to_string(),
+                false,
+            )]),
+        ];
+
+        let delivery = agent.index_compaction_discards(&discarded).await;
+        assert!(
+            matches!(delivery, crate::memory::MemoryIndexDelivery::Delivered(_)),
+            "typed indexability delivery should succeed: {delivery:?}"
+        );
+
+        let typed = memory_store.typed_contents();
+        assert_eq!(
+            typed.len(),
+            2,
+            "both discarded messages must reach the store as typed requests, not be skipped by the producer"
+        );
+        assert!(
+            typed.iter().any(|content| matches!(
+                content,
+                crate::types::MemoryIndexableContent::Indexable(text) if text == "indexable user turn"
+            )),
+            "the user turn must reach the store as typed Indexable content: {typed:?}"
+        );
+        assert!(
+            typed.iter().any(|content| matches!(
+                content,
+                crate::types::MemoryIndexableContent::Excluded(
+                    crate::types::MemoryIndexExclusion::ToolResults
+                )
+            )),
+            "the tool-result message must reach the store with its typed ToolResults exclusion, not be silently dropped by the producer: {typed:?}"
+        );
+    }
+
     #[tokio::test]
     async fn compaction_memory_index_failure_preserves_original_history() {
         let client = Arc::new(CompactionAwareLlmClient::new());
@@ -5877,6 +5994,53 @@ mod tests {
         assert_eq!(blob_store.gets(), vec![blob_id]);
     }
 
+    /// Row 205: when the composition seam selects
+    /// `MissingBlobBehavior::Error`, a durable image blob missing from the
+    /// store at the live LLM-execution hydration seam must terminalize the
+    /// turn with a typed `ConfigError` rather than silently degrading to a
+    /// placeholder. (The default policy remains the graceful placeholder, as
+    /// exercised by `llm_execution_hydrates_blob_refs_before_provider_call`.)
+    #[tokio::test]
+    async fn llm_execution_errors_on_missing_blob_when_policy_is_error() {
+        let missing_blob_id = BlobId::new("sha256:absent-image");
+        // Empty blob store: the referenced blob is absent.
+        let blob_store = Arc::new(RecordingBlobStore::new(Vec::new()));
+        let client = Arc::new(ImageHydrationLlmClient::new());
+        let mut session = crate::Session::new();
+        session.push(Message::User(UserMessage::with_blocks(vec![
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Blob {
+                    blob_id: missing_blob_id.clone(),
+                },
+            },
+        ])));
+
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .resume_session(session)
+            .with_blob_store(blob_store.clone())
+            .with_missing_blob_behavior(crate::image_content::MissingBlobBehavior::Error)
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(1);
+
+        let err = agent
+            .run("current turn".to_string().into())
+            .await
+            .expect_err("missing required blob under Error policy must fail the run");
+
+        assert!(
+            matches!(err, AgentError::ConfigError(ref message) if message.contains("absent-image")),
+            "missing-blob refusal must surface as a typed ConfigError, got: {err:?}"
+        );
+        // The provider must never be reached with a placeholder-substituted
+        // image: the fault is raised before the LLM call.
+        assert!(
+            client.seen().is_empty(),
+            "provider must not be called when the required blob is missing under Error policy"
+        );
+    }
+
     #[tokio::test]
     async fn standalone_filter_staging_requires_generated_visibility_authority() {
         let client = Arc::new(VisibilityRecordingLlmClient::new());
@@ -5980,6 +6144,86 @@ mod tests {
         );
         assert!(outcome.is_runtime_tool_timeout());
         assert_eq!(outcome.terminal_cause(), expected.terminal_cause());
+    }
+
+    /// Row 166: the normal LLM-driven tool dispatch loop must apply the typed
+    /// `ToolsConfig` per-call timeout. A tool that hangs forever must be
+    /// terminalized as a `timeout` tool result (flowing through
+    /// `terminal_tool_outcome_for_error`) rather than blocking the turn.
+    #[tokio::test]
+    async fn normal_loop_tool_dispatch_applies_tools_config_timeout() {
+        struct HangingTurnDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for HangingTurnDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                _call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                std::future::pending().await
+            }
+        }
+
+        let client = Arc::new(BoundaryContextRecordingClient::new());
+        let tools = Arc::new(HangingTurnDispatcher {
+            tools: Arc::from([Arc::new(ToolDef::new(
+                "slow_tool",
+                "hangs until the per-call timeout fires",
+                serde_json::json!({ "type": "object" }),
+            ))]),
+        });
+
+        let tools_config = crate::config::ToolsConfig {
+            default_timeout: std::time::Duration::from_millis(20),
+            ..crate::config::ToolsConfig::default()
+        };
+
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tools_config(tools_config)
+            .build_standalone(client, tools, Arc::new(NoopStore))
+            .await;
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            agent.run_with_events("start with a tool".to_string().into(), tx),
+        )
+        .await
+        .expect("run must complete promptly once the per-call timeout fires")
+        .expect("agent run should succeed after timeout terminalization");
+
+        // The hanging tool resolves to a timeout tool result, so the second
+        // turn ends the conversation: two turns total.
+        assert_eq!(result.turns, 2);
+
+        let mut saw_timeout_completion = false;
+        while let Ok(event) = rx.try_recv() {
+            if let crate::event::AgentEvent::ToolExecutionCompleted {
+                name,
+                is_error,
+                result,
+                ..
+            } = event
+                && name == "slow_tool"
+            {
+                assert!(is_error, "timed-out tool result must be an error");
+                assert!(
+                    result.contains("\"error\":\"timeout\""),
+                    "timed-out tool result must carry the canonical timeout payload, got: {result}"
+                );
+                saw_timeout_completion = true;
+            }
+        }
+        assert!(
+            saw_timeout_completion,
+            "normal dispatch loop must emit a timeout tool completion for the hanging tool"
+        );
     }
 
     #[tokio::test]

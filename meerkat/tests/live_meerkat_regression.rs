@@ -297,7 +297,11 @@ mod image_generation_substrate {
         let mut dispatcher = CompositeDispatcher::new(
             Arc::new(MemoryTaskStore::new()),
             &BuiltinToolConfig::default(),
-            None,
+            // dogma #299: the composite fails closed without a concrete,
+            // caller-owned project root. Use the crate manifest dir (a stable
+            // real directory) rather than relying on the removed ambient-CWD
+            // fallback; this live image-gen path does not touch apply_patch.
+            Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
             None,
             None,
             None,

@@ -39,10 +39,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 #[cfg(target_arch = "wasm32")]
-use crate::tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot, watch};
+use crate::tokio::sync::{OwnedSemaphorePermit, RwLock, mpsc, oneshot, watch};
 #[cfg(not(target_arch = "wasm32"))]
-use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot, watch};
+use tokio::sync::{OwnedSemaphorePermit, RwLock, mpsc, oneshot, watch};
 
+use crate::staged_registry::{MaterializationStatus, StagedSessionRegistry};
 pub use crate::turn_admission::ObservedSessionTailKind;
 use crate::turn_admission::{
     StartTurnDispatchAuthorization, StartTurnDisposition, StartTurnPublicTerminal,
@@ -791,17 +792,17 @@ pub struct EphemeralSessionService<B: SessionAgentBuilder> {
     sessions: RwLock<IndexMap<SessionId, SessionHandle>>,
     archived_views: RwLock<IndexMap<SessionId, SessionView>>,
     builder: B,
-    max_sessions: Option<usize>,
-    /// Global concurrency limit on simultaneously-active sessions.
+    /// Single typed owner of session materialization status fused with the
+    /// global active-capacity admission seam.
     ///
-    /// This is a RESOURCE GATE, not lifecycle authority: it bounds how many
-    /// sessions may hold live work at once, it does NOT own any session's
-    /// semantic materialization status. Acquiring or failing to acquire a
-    /// permit conveys "is there spare capacity right now", never "is this
-    /// session a valid/admitted authority". The canonical materialization
-    /// status decision belongs to runtime/machine admission, not to this
-    /// semaphore. Treat permit accounting purely as a concurrency limiter.
-    active_session_capacity: Option<Arc<Semaphore>>,
+    /// The registry holds the canonical [`MaterializationStatus`] per session
+    /// (`Staged`/`Promoting`/`Active`) AND the global concurrency gate behind
+    /// one lock, so status is never re-derived from permit-existence +
+    /// handle-existence. The embedded semaphore remains a pure RESOURCE GATE:
+    /// it bounds how many sessions hold live work at once and never decides
+    /// whether a session is a valid/admitted authority — that decision is owned
+    /// by runtime/machine admission.
+    staged_registry: Arc<StagedSessionRegistry>,
     /// Notified when a new session handle is stored. Used by CLI --stdin
     /// to avoid polling for the session to appear.
     session_registered: tokio::sync::Notify,
@@ -984,39 +985,28 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             sessions: RwLock::new(IndexMap::new()),
             archived_views: RwLock::new(IndexMap::new()),
             builder,
-            max_sessions: Some(max_sessions),
-            active_session_capacity: Some(Arc::new(Semaphore::new(max_sessions))),
+            staged_registry: Arc::new(StagedSessionRegistry::bounded(max_sessions)),
             session_registered: tokio::sync::Notify::new(),
         }
     }
 
-    /// Acquire a global active-capacity permit.
+    /// Acquire a global active-capacity permit through the single typed
+    /// admission seam.
     ///
     /// This is a resource gate (concurrency limit), not lifecycle authority:
     /// success means there is spare capacity, failure means the global active
     /// ceiling is reached. It never decides whether a session is a valid
     /// admitted authority — that decision is owned by runtime/machine
-    /// admission, not by this semaphore.
+    /// admission. The permit is reserved inside the
+    /// [`StagedSessionRegistry`] lock so capacity accounting can never
+    /// interleave with a concurrent status transition.
     fn try_acquire_active_permit(&self) -> Result<Option<OwnedSemaphorePermit>, SessionError> {
-        let Some(capacity) = self.active_session_capacity.as_ref() else {
-            return Ok(None);
-        };
-        match capacity.clone().try_acquire_owned() {
-            Ok(permit) => Ok(Some(permit)),
-            Err(_) => {
-                let max_sessions = self.max_sessions.unwrap_or(0);
-                let active = max_sessions.saturating_sub(capacity.available_permits());
-                Err(SessionError::Agent(
-                    meerkat_core::error::AgentError::InternalError(format!(
-                        "Max sessions reached ({active}/{max_sessions})"
-                    )),
-                ))
-            }
-        }
+        self.staged_registry.reserve_capacity()
     }
 
     fn acquire_runtime_context_admission_for_handle(
         &self,
+        id: &SessionId,
         handle: &SessionHandle,
     ) -> Result<RuntimeContextAdmissionGuard, SessionError> {
         if let Some(permit) = take_staged_capacity_permit(&handle.staged_capacity_permit) {
@@ -1024,6 +1014,13 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 let state = lock_deferred_turn_state(&handle.deferred_turn_state);
                 matches!(state.first_turn_phase(), DeferredFirstTurnPhase::Pending)
             };
+            // Taking the staged permit promotes the session from `Staged` into
+            // live work. Flip the typed status through the registry so the
+            // singular materialization fact tracks the permit it is fused with.
+            // `begin_promotion` guards against a concurrent double-promotion;
+            // either way the session ends `Active`.
+            self.staged_registry.begin_promotion(id);
+            self.staged_registry.mark_active(id);
             return Ok(acquire_active_capacity_lease(
                 Arc::clone(&handle.active_capacity_lease),
                 Some(permit),
@@ -1056,19 +1053,15 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     }
 
     pub fn ensure_active_capacity_available(&self) -> Result<(), SessionError> {
-        let Some(capacity) = self.active_session_capacity.as_ref() else {
-            return Ok(());
-        };
-        if capacity.available_permits() > 0 {
-            return Ok(());
-        }
-        let max_sessions = self.max_sessions.unwrap_or(0);
-        let active = max_sessions.saturating_sub(capacity.available_permits());
-        Err(SessionError::Agent(
-            meerkat_core::error::AgentError::InternalError(format!(
-                "Max sessions reached ({active}/{max_sessions})"
-            )),
-        ))
+        self.staged_registry.ensure_capacity_available()
+    }
+
+    /// Current typed materialization status for a session as owned by the
+    /// admission registry. Exposed for tests that assert the singular status
+    /// fact is recorded/cleared with the session lifecycle.
+    #[cfg(test)]
+    fn materialization_status(&self, id: &SessionId) -> Option<MaterializationStatus> {
+        self.staged_registry.status(id)
     }
 
     fn archived_view_from_handle(id: &SessionId, handle: &SessionHandle) -> SessionView {
@@ -1374,6 +1367,10 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .swap_remove(id)
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
         drop(sessions);
+        // Clear the singular typed materialization status alongside the
+        // capacity permit so the registry never retains a phantom record for a
+        // session whose handle no longer exists.
+        self.staged_registry.forget(id);
         release_staged_capacity_permit(&handle.staged_capacity_permit);
         let projection = {
             let mut slot = lock_turn_admission(&handle.turn_admission);
@@ -1941,7 +1938,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let handle = sessions
             .get(id)
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        self.acquire_runtime_context_admission_for_handle(handle)
+        self.acquire_runtime_context_admission_for_handle(id, handle)
     }
 
     pub async fn join_active_runtime_context_admission(
@@ -2085,7 +2082,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 if let Some(admission) = reserved_admission.take() {
                     admission.into_start_turn_parts()
                 } else {
-                    match self.acquire_runtime_context_admission_for_handle(handle) {
+                    match self.acquire_runtime_context_admission_for_handle(id, handle) {
                         Ok(admission) => admission.into_start_turn_parts(),
                         Err(err) => {
                             Self::try_abort_admitted_turn(handle);
@@ -2240,7 +2237,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     /// Shut down all sessions.
     pub async fn shutdown(&self) {
         let mut sessions = self.sessions.write().await;
-        for (_id, handle) in sessions.drain(..) {
+        for (id, handle) in sessions.drain(..) {
+            // Clear the singular typed materialization status with the handle.
+            self.staged_registry.forget(&id);
             release_staged_capacity_permit(&handle.staged_capacity_permit);
             let projection = {
                 let mut slot = lock_turn_admission(&handle.turn_admission);
@@ -2439,16 +2438,19 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let staged_capacity_permit = Arc::new(std::sync::Mutex::new(None));
         let active_capacity_lease =
             Arc::new(std::sync::Mutex::new(SessionActiveCapacityLease::default()));
-        let eager_active_admission = if defer_initial_turn {
+        let (eager_active_admission, materialization_status) = if defer_initial_turn {
             *lock_staged_capacity_permit(&staged_capacity_permit) = create_capacity_permit;
-            None
+            (None, MaterializationStatus::Staged)
         } else {
-            Some(acquire_active_capacity_lease(
-                Arc::clone(&active_capacity_lease),
-                create_capacity_permit,
-                None,
-                false,
-            ))
+            (
+                Some(acquire_active_capacity_lease(
+                    Arc::clone(&active_capacity_lease),
+                    create_capacity_permit,
+                    None,
+                    false,
+                )),
+                MaterializationStatus::Active,
+            )
         };
 
         // Extract the event injector before the agent moves into its task.
@@ -2545,6 +2547,13 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 false
             } else {
                 sessions.insert(session_id.clone(), handle);
+                // Record the singular typed materialization status keyed by
+                // session id. The capacity permit was reserved through the
+                // registry above; this registers the status under the same
+                // owner so it is never re-derived from permit-existence plus
+                // handle-existence elsewhere.
+                self.staged_registry
+                    .record_status(&session_id, materialization_status);
                 // Notify waiters (e.g., CLI --stdin) that a session is available.
                 self.session_registered.notify_waiters();
                 true
@@ -2643,6 +2652,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             drop(sessions);
             let mut sessions = self.sessions.write().await;
             sessions.swap_remove(&session_id);
+            self.staged_registry.forget(&session_id);
             return Err(SessionError::Agent(
                 meerkat_core::error::AgentError::InternalError(
                     "Session task exited before first turn".to_string(),
@@ -2655,6 +2665,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             Err(_) => {
                 let mut sessions = self.sessions.write().await;
                 sessions.swap_remove(&session_id);
+                self.staged_registry.forget(&session_id);
                 return Err(SessionError::Agent(
                     meerkat_core::error::AgentError::InternalError(
                         "Session task dropped the result channel".to_string(),
@@ -2914,6 +2925,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
         let archived_view = Self::archived_view_from_handle(id, &handle);
         drop(sessions);
+        // Clear the singular typed materialization status with the handle.
+        self.staged_registry.forget(id);
         release_staged_capacity_permit(&handle.staged_capacity_permit);
         self.archived_views
             .write()
@@ -4722,6 +4735,81 @@ mod runtime_turn_metadata_tests {
             Some(false),
             "draining boundary is not enough to prove another LLM request remains"
         );
+    }
+
+    #[tokio::test]
+    async fn materialization_status_is_owned_by_registry_across_lifecycle() {
+        let turn_state = Arc::new(RuntimeTurnStateHandle::ephemeral());
+        let service = EphemeralSessionService::new(
+            BoundaryPhaseProbeBuilder {
+                turn_state: Arc::clone(&turn_state),
+            },
+            1,
+        );
+
+        // A deferred-first-turn session reserves capacity and is recorded as
+        // `Staged` by the single registry owner — not re-derived from
+        // permit-existence plus handle-existence.
+        let created = service
+            .create_session(CreateSessionRequest {
+                model: "phase-probe".to_string(),
+                prompt: ContentInput::Text("hello".to_string()),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: None,
+                labels: None,
+            })
+            .await
+            .expect("create deferred session");
+
+        assert_eq!(
+            service.materialization_status(&created.session_id),
+            Some(MaterializationStatus::Staged),
+            "deferred session is recorded Staged by the registry"
+        );
+
+        // The single global permit is held by the staged reservation, so a
+        // second session must fail closed rather than be admitted silently.
+        let second = service
+            .create_session(CreateSessionRequest {
+                model: "phase-probe".to_string(),
+                prompt: ContentInput::Text("again".to_string()),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: None,
+                labels: None,
+            })
+            .await;
+        let err = second.expect_err("capacity gate must reject the second session");
+        assert!(
+            format!("{err}").contains("Max sessions reached"),
+            "expected typed capacity-exhaustion error, got: {err}"
+        );
+
+        // Archiving the session clears the typed status through the same owner
+        // and frees the capacity permit.
+        service
+            .archive(&created.session_id)
+            .await
+            .expect("archive deferred session");
+        assert_eq!(
+            service.materialization_status(&created.session_id),
+            None,
+            "archive clears the registry status with the handle"
+        );
+        service
+            .ensure_active_capacity_available()
+            .expect("capacity freed after archive");
     }
 
     #[tokio::test]

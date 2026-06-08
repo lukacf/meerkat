@@ -25,7 +25,6 @@ use meerkat_core::comms::{
     PeerLifecycleKind, PeerName, PeerRoute, SendError, TrustedPeerDescriptor,
 };
 use meerkat_core::time_compat::SystemTime;
-use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 /// Lightweight handle for a spawned autonomous initial turn.
@@ -328,16 +327,17 @@ pub(super) static SPAWN_PROVISIONED_COMMAND_DELAY_MS: std::sync::atomic::AtomicU
 /// through the single owner [`meerkat_core::MemberCommsName`].
 ///
 /// The components here are already typed mob slugs (`MobId`/`ProfileName`/
-/// `AgentIdentity`), so construction succeeds; the join is owned by
-/// `MemberCommsName::Display` rather than an inline `format!`.
-pub(super) fn render_member_comms_name(mob_id: &str, role: &str, member: &str) -> String {
-    match meerkat_core::MemberCommsName::new(mob_id, role, member) {
-        Ok(name) => name.to_string(),
-        // Defensive only: inputs are pre-validated typed slugs. Preserve the
-        // raw join shape so a future slug-rule relaxation cannot silently drop
-        // a routing name.
-        Err(_) => format!("{mob_id}/{role}/{member}"),
-    }
+/// `AgentIdentity`), so construction normally succeeds; the join is owned by
+/// `MemberCommsName::Display` rather than an inline `format!`. A component that
+/// fails the slug rule fails closed as a typed [`MobError::MemberCommsName`]
+/// rather than reconstructing the raw `mob_id/role/member` join that the single
+/// owner already rejected.
+pub(super) fn render_member_comms_name(
+    mob_id: &str,
+    role: &str,
+    member: &str,
+) -> Result<String, MobError> {
+    Ok(meerkat_core::MemberCommsName::new(mob_id, role, member)?.to_string())
 }
 
 fn observed_runtime_id(signal: &mob_dsl::MobMachineSignal) -> Option<&mob_dsl::AgentRuntimeId> {
@@ -2846,7 +2846,7 @@ impl MobActor {
         }
     }
 
-    async fn send_bridge_command_typed<R: DeserializeOwned>(
+    async fn send_bridge_command_typed<R: super::bridge_protocol::FromBridgeReply>(
         &self,
         peer: &TrustedPeerDescriptor,
         command: &super::bridge_protocol::BridgeCommand,
@@ -2860,11 +2860,7 @@ impl MobActor {
         if let Some(rejection) = Self::bridge_rejection_reply(command.protocol_version(), &value) {
             return Err(Self::bridge_rejection_error(rejection));
         }
-        let payload =
-            super::bridge_protocol::decode_bridge_success_payload(command, value, "command")?;
-        serde_json::from_value(payload).map_err(|error| {
-            MobError::Internal(format!("failed to decode bridge command response: {error}"))
-        })
+        super::bridge_protocol::decode_bridge_payload(command, value, "command")
     }
 
     fn bridge_ack_from_value(
@@ -3742,7 +3738,7 @@ impl MobActor {
                 entry.agent_identity
             ))
         })?;
-        let comms_name = self.comms_name_for(entry);
+        let comms_name = self.comms_name_for(entry)?;
         TrustedPeerDescriptor::unsigned_with_pubkey(
             comms_name.clone(),
             peer_id.to_string(),
@@ -3764,7 +3760,7 @@ impl MobActor {
         peer_identities: &BTreeSet<AgentIdentity>,
         context: &'static str,
     ) -> Result<Option<TrustedPeerDescriptor>, MobError> {
-        let expected_name = self.comms_name_for(entry);
+        let expected_name = self.comms_name_for(entry)?;
         let mut retained = None;
         for peer_identity in peer_identities {
             let peer_entry = {
@@ -8050,7 +8046,7 @@ impl MobActor {
                         self.definition.id.as_str(),
                         profile_name.as_str(),
                         agent_identity.as_str(),
-                    );
+                    )?;
                     let provision_request = ProvisionMemberRequest {
                         create_session: req,
                         binding: selected_binding,
@@ -8213,7 +8209,7 @@ impl MobActor {
                 self.definition.id.as_str(),
                 profile_name.as_str(),
                 agent_identity.as_str(),
-            );
+            )?;
             let provision_request = ProvisionMemberRequest {
                 create_session: req,
                 binding: selected_binding,
@@ -8771,7 +8767,7 @@ impl MobActor {
             self.definition.id.as_str(),
             profile_name.as_str(),
             agent_identity.as_str(),
-        );
+        )?;
         let mut provision_request = ProvisionMemberRequest {
             create_session: req,
             binding: selected_binding,
@@ -9158,7 +9154,7 @@ impl MobActor {
                                     self.definition.id.as_str(),
                                     profile_name.as_str(),
                                     identity.as_str(),
-                                );
+                                )?;
                                 Some(
                                     self.provisioner
                                         .trusted_peer_spec_for_operation(
@@ -13146,7 +13142,7 @@ impl MobActor {
             self.definition.id.as_str(),
             snapshot.profile_name.as_str(),
             agent_identity.as_str(),
-        );
+        )?;
         let mut provision_request = ProvisionMemberRequest {
             create_session: req,
             binding: snapshot.binding.clone(),
@@ -18581,7 +18577,7 @@ impl MobActor {
     }
 
     /// Generate the comms name for a roster entry.
-    fn comms_name_for(&self, entry: &RosterEntry) -> String {
+    fn comms_name_for(&self, entry: &RosterEntry) -> Result<String, MobError> {
         render_member_comms_name(
             self.definition.id.as_str(),
             entry.role.as_str(),
@@ -18619,7 +18615,7 @@ impl MobActor {
         entry: &RosterEntry,
         context: &'static str,
     ) -> Result<WiringEndpoint, MobError> {
-        let comms_name = self.comms_name_for(entry);
+        let comms_name = self.comms_name_for(entry)?;
         let member_ref = self.machine_member_ref_for_behavior(entry, context)?;
         if let Some(comms) = self.provisioner_comms(&member_ref).await {
             let public_key = comms.public_key().ok_or_else(|| {
@@ -18936,6 +18932,46 @@ mod runtime_observation_tests {
         };
 
         assert!(foreign_runtime_observation(authority.state(), &signal).is_none());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod member_comms_name_tests {
+    use super::render_member_comms_name;
+    use crate::MobError;
+
+    #[test]
+    fn valid_slugs_render_via_single_owner_display() {
+        let name = render_member_comms_name("mob-1", "worker", "w-a")
+            .expect("valid identifier-safe slugs should render");
+        assert_eq!(name, "mob-1/worker/w-a");
+    }
+
+    #[test]
+    fn invalid_component_fails_closed_with_typed_error() {
+        // A component that violates the comms-name slug rule (leading digit /
+        // illegal `/` inside) must fail closed as the typed
+        // `MobError::MemberCommsName` rather than reconstructing the raw join.
+        let error = render_member_comms_name("mob-1", "wor/ker", "w-a")
+            .expect_err("a component containing '/' must fail closed");
+        assert!(
+            matches!(error, MobError::MemberCommsName(_)),
+            "comms-name failure must surface the typed owner error, got: {error}"
+        );
+        // No raw-join fallback: the rejected component must not leak back out as
+        // a rendered routing name.
+        assert!(
+            !error.to_string().contains("mob-1/wor/ker/w-a"),
+            "rejected component must not be laundered into a raw routing name: {error}"
+        );
+    }
+
+    #[test]
+    fn empty_component_fails_closed() {
+        let error = render_member_comms_name("mob-1", "", "w-a")
+            .expect_err("an empty component is not identifier-safe");
+        assert!(matches!(error, MobError::MemberCommsName(_)));
     }
 }
 

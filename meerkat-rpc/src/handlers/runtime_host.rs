@@ -11,6 +11,7 @@ fn host_surface_options(
     runtime_available: bool,
     event_replay: bool,
     approvals_available: bool,
+    skills_enabled: bool,
 ) -> meerkat::surface::RuntimeHostSurfaceOptions {
     let catalog_options = meerkat_contracts::RpcMethodCatalogOptions {
         runtime_available,
@@ -22,7 +23,7 @@ fn host_surface_options(
         session_streams_enabled: true,
         schedule_enabled: cfg!(feature = "schedule"),
         workgraph_enabled: cfg!(feature = "workgraph"),
-        skills_enabled: true,
+        skills_enabled,
     };
     let mut options = meerkat::surface::RuntimeHostSurfaceOptions::process(
         "meerkat-rpc",
@@ -38,7 +39,7 @@ fn host_surface_options(
     options.event_replay = event_replay;
     options.session_streams = true;
     options.schedules = cfg!(feature = "schedule");
-    options.skills = true;
+    options.skills = skills_enabled;
     options.approvals = approvals_available;
     options.rpc_transport = Some("json_rpc".to_string());
     options.rpc_methods = meerkat_contracts::rpc_method_names(catalog_options);
@@ -50,11 +51,13 @@ pub fn handle_info(
     runtime: &Arc<SessionRuntime>,
     config_store: &Arc<dyn ConfigStore>,
     runtime_available: bool,
+    skills_enabled: bool,
 ) -> RpcResponse {
     let options = host_surface_options(
         runtime_available,
         runtime.supports_event_replay(),
         runtime.approval_service().is_persistent(),
+        skills_enabled,
     );
     let (context_root, _) = runtime.skill_identity_roots();
     let metadata = config_store.metadata();
@@ -69,11 +72,13 @@ pub fn handle_capabilities(
     id: Option<RpcId>,
     runtime: &Arc<SessionRuntime>,
     runtime_available: bool,
+    skills_enabled: bool,
 ) -> RpcResponse {
     let options = host_surface_options(
         runtime_available,
         runtime.supports_event_replay(),
         runtime.approval_service().is_persistent(),
+        skills_enabled,
     );
     let capabilities = meerkat::surface::build_runtime_host_capabilities(&options);
     RpcResponse::success(id, &capabilities)

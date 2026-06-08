@@ -37,6 +37,11 @@ const MACHINE_SPECS = [
   {
     id: "meerkat_machine",
     title: "MeerkatMachine",
+    // Canonical machine this poster represents. Cross-checked by `--check`
+    // against the `dsl::dsl_<fn>()` call list in
+    // meerkat-machine-schema/src/catalog/mod.rs::canonical_machine_schemas so
+    // that adding a canonical machine without a poster fails the drift gate.
+    canonicalFn: "dsl_meerkat_machine",
     subtitle: "Lifecycle / Transition / Visibility / Effect Architecture",
     tlaPath: path.join(
       repoRoot,
@@ -374,6 +379,7 @@ const MACHINE_SPECS = [
   {
     id: "mob_machine",
     title: "MobMachine",
+    canonicalFn: "dsl_mob_machine",
     subtitle: "Identity / Runtime / Flow / Orchestration Architecture",
     tlaPath: path.join(
       repoRoot,
@@ -687,9 +693,122 @@ const MACHINE_SPECS = [
   },
 ];
 
-main();
+// Parse the `dsl::dsl_<fn>()` calls inside `canonical_machine_schemas()` in
+// meerkat-machine-schema/src/catalog/mod.rs. This is the canonical machine
+// authority; the posters are a hand-authored, NON-AUTHORITATIVE internal
+// rendering and must stay coverage-aligned with it.
+function canonicalMachineFns() {
+  const catalogModPath = path.join(
+    repoRoot,
+    "meerkat-machine-schema",
+    "src",
+    "catalog",
+    "mod.rs",
+  );
+  const text = fs.readFileSync(catalogModPath, "utf8");
+  const fnMatch = text.match(
+    /pub fn canonical_machine_schemas\(\)\s*->\s*Vec<MachineSchema>\s*\{([\s\S]*?)\n\}/,
+  );
+  if (!fnMatch) {
+    throw new Error(
+      `could not locate canonical_machine_schemas() in ${path.relative(repoRoot, catalogModPath)}`,
+    );
+  }
+  return unique(
+    [...fnMatch[1].matchAll(/dsl::(dsl_[a-z0-9_]+)\(\)/g)].map((m) => m[1]),
+  );
+}
+
+// Canonical machines that are intentionally NOT yet rendered as posters.
+//
+// The posters are hand-authored visual artifacts (per-machine SVG layouts with
+// explicit coordinates), not a catalog projection, so they cannot be
+// auto-generated for every machine. This is the EXPLICIT, reviewed gap: every
+// canonical machine must be either covered by a MACHINE_SPECS entry or listed
+// here. A NEW canonical machine that appears in neither fails `--check` — which
+// forces a deliberate decision (author a poster, or extend this allow-list)
+// instead of the coverage silently drifting.
+const POSTER_COVERAGE_KNOWN_GAPS = new Set([
+  "dsl_schedule_lifecycle_machine",
+  "dsl_occurrence_lifecycle_machine",
+  "dsl_auth_machine",
+  "dsl_approval_lifecycle_machine",
+  "dsl_session_document_machine",
+  "dsl_session_turn_admission_machine",
+  "dsl_workgraph_lifecycle_machine",
+  "dsl_work_attention_lifecycle_machine",
+]);
+
+// `--check` drift gate: every canonical machine must be either covered by a
+// poster spec or listed in POSTER_COVERAGE_KNOWN_GAPS. Fails (non-zero exit)
+// when a canonical machine is added without either, when a poster names a
+// `canonicalFn` that no longer exists, or when a known-gap entry is no longer
+// canonical (stale allow-list).
+function checkCoverage() {
+  const canonical = canonicalMachineFns();
+  const covered = MACHINE_SPECS.map((spec) => spec.canonicalFn);
+
+  const missingFn = MACHINE_SPECS.filter((spec) => !spec.canonicalFn).map(
+    (spec) => spec.id,
+  );
+  if (missingFn.length > 0) {
+    console.error(
+      `machine-poster --check: poster specs missing a canonicalFn binding: ${missingFn.join(", ")}`,
+    );
+    return 1;
+  }
+
+  const coveredSet = new Set(covered);
+  const canonicalSet = new Set(canonical);
+  const accounted = new Set([...coveredSet, ...POSTER_COVERAGE_KNOWN_GAPS]);
+
+  const uncovered = canonical.filter((fn) => !accounted.has(fn));
+  const staleSpecs = covered.filter((fn) => !canonicalSet.has(fn));
+  const staleGaps = [...POSTER_COVERAGE_KNOWN_GAPS].filter(
+    (fn) => !canonicalSet.has(fn),
+  );
+
+  if (uncovered.length === 0 && staleSpecs.length === 0 && staleGaps.length === 0) {
+    console.log(
+      `machine-poster --check: all ${canonical.length} canonical machines accounted for ` +
+        `(${coveredSet.size} postered, ${POSTER_COVERAGE_KNOWN_GAPS.size} known-gap).`,
+    );
+    return 0;
+  }
+
+  if (uncovered.length > 0) {
+    console.error(
+      "machine-poster --check: canonical machines neither postered nor in POSTER_COVERAGE_KNOWN_GAPS " +
+        "(author a poster, or add an explicit known-gap entry):",
+    );
+    for (const fn of uncovered) {
+      console.error(`  - ${fn}`);
+    }
+  }
+  if (staleSpecs.length > 0) {
+    console.error(
+      "machine-poster --check: poster canonicalFn bindings that are no longer canonical:",
+    );
+    for (const fn of staleSpecs) {
+      console.error(`  - ${fn}`);
+    }
+  }
+  if (staleGaps.length > 0) {
+    console.error(
+      "machine-poster --check: POSTER_COVERAGE_KNOWN_GAPS entries that are no longer canonical:",
+    );
+    for (const fn of staleGaps) {
+      console.error(`  - ${fn}`);
+    }
+  }
+  return 1;
+}
 
 function main() {
+  if (process.argv.includes("--check")) {
+    process.exit(checkCoverage());
+  }
+
   fs.mkdirSync(outputDir, { recursive: true });
 
   const posters = MACHINE_SPECS.map((spec) => buildPoster(spec));
@@ -2403,3 +2522,5 @@ function escapeHtml(value) {
 function cleanGeneratedText(text) {
   return text.replace(/[ \t]+$/gm, "");
 }
+
+main();

@@ -28,8 +28,7 @@ use meerkat_providers::auth_oauth::{
 };
 use meerkat_providers::auth_store::{
     PersistedAuthMode, PersistedTokens, TokenKey, TokenStore,
-    credential_source_uses_persisted_store, persisted_auth_mode_for_auth_method,
-    persisted_auth_mode_is_oauth_login,
+    credential_source_uses_persisted_store, persisted_auth_mode_is_oauth_login,
 };
 use meerkat_providers::oauth_flow::{
     OAuthDevicePollLease, OAuthFlowError, OAuthProviderIdentity, resolve_oauth_provider,
@@ -57,6 +56,50 @@ async fn load_config(runtime: &SessionRuntime) -> Result<meerkat_core::Config, R
     } else {
         Ok(meerkat_core::Config::default())
     }
+}
+
+/// Resolve the typed [`NormalizedAuthMethod`] for a resolved [`AuthProfile`],
+/// using the profile's typed `provider` to select the correct per-provider
+/// matrix enum (provider-disambiguated parse-at-boundary).
+///
+/// Row 100: the auth-status / create surfaces hold a typed
+/// `meerkat_core::AuthProfile` (which carries a typed `Provider` and the
+/// declared `auth_method` string). Rather than re-deriving the persisted mode
+/// through the provider-agnostic `persisted_auth_mode_for_auth_method` string
+/// shim (which guesses the provider by trying each matrix in order), these
+/// surfaces parse the method against the profile's known provider and then ask
+/// the typed enum directly via [`NormalizedAuthMethod::persisted_auth_mode`] —
+/// the single owner of the auth-method -> persisted-mode mapping. `None` when
+/// the declared method is not a member of the provider's auth matrix.
+fn normalized_auth_method(
+    auth_profile: &meerkat_core::AuthProfile,
+) -> Option<meerkat_providers::NormalizedAuthMethod> {
+    use meerkat_core::provider_matrix::{
+        AnthropicAuthMethod, GoogleAuthMethod, OpenAiAuthMethod, SelfHostedAuthMethod,
+    };
+    use meerkat_providers::NormalizedAuthMethod;
+
+    let raw = auth_profile.auth_method.as_str();
+    match auth_profile.provider {
+        Provider::OpenAI => OpenAiAuthMethod::parse(raw).map(NormalizedAuthMethod::OpenAi),
+        Provider::Anthropic => AnthropicAuthMethod::parse(raw).map(NormalizedAuthMethod::Anthropic),
+        Provider::Gemini => GoogleAuthMethod::parse(raw).map(NormalizedAuthMethod::Google),
+        Provider::SelfHosted => {
+            SelfHostedAuthMethod::parse(raw).map(NormalizedAuthMethod::SelfHosted)
+        }
+        Provider::Other => None,
+    }
+}
+
+/// Resolve the persisted credential mode for a resolved auth profile through
+/// the typed [`NormalizedAuthMethod`] owner (row 100). Returns `None` for
+/// methods that hold no persisted secret (authorizer/ADC/SigV4-backed) or that
+/// are not a member of the profile provider's auth matrix.
+fn persisted_auth_mode_for_profile(
+    auth_profile: &meerkat_core::AuthProfile,
+) -> Option<PersistedAuthMode> {
+    normalized_auth_method(auth_profile)
+        .and_then(meerkat_providers::NormalizedAuthMethod::persisted_auth_mode)
 }
 
 async fn resolve_realm(
@@ -934,10 +977,11 @@ pub async fn handle_auth_profile_create(
     }
     // The persisted-mode mapping + "direct-secret only at create surfaces"
     // predicate are owned by the typed enum (canonical table + createability),
-    // not a hand-maintained literal allowlist. Parse the wire auth_method at the
-    // boundary, then ask the type. OAuth-login-lifecycle modes and
+    // not a hand-maintained literal allowlist. Resolve the typed
+    // `NormalizedAuthMethod` from the profile's typed provider + declared
+    // method, then ask the type. OAuth-login-lifecycle modes and
     // authorizer-backed methods (no persisted secret) are rejected here.
-    let auth_mode = match persisted_auth_mode_for_auth_method(&auth_profile.auth_method) {
+    let auth_mode = match persisted_auth_mode_for_profile(&auth_profile) {
         Some(mode) if meerkat_core::persisted_auth_mode_is_directly_creatable(mode) => mode,
         _ => {
             return RpcResponse::error(
@@ -1741,7 +1785,7 @@ pub async fn handle_auth_status_get(
         );
     }
     let mut snapshot = auth_lease.snapshot(&lease_key);
-    let expected_mode = persisted_auth_mode_for_auth_method(&auth_profile.auth_method);
+    let expected_mode = persisted_auth_mode_for_profile(&auth_profile);
     let source_uses_store = credential_source_uses_persisted_store(&auth_profile.source);
     let oauth_mode = expected_mode
         .map(persisted_auth_mode_is_oauth_login)
@@ -2520,6 +2564,56 @@ mod tests {
         .unwrap();
         assert!(provision.realm_id.is_none());
         assert!(provision.binding_id.is_none());
+    }
+
+    #[test]
+    fn persisted_auth_mode_resolves_provider_disambiguated_typed_method() {
+        // Row 100: the auth-status / create surfaces resolve the persisted mode
+        // from the typed `NormalizedAuthMethod` selected by the profile's typed
+        // `Provider` — not the provider-agnostic string-guessing shim. An
+        // `api_key` method must resolve to `PersistedAuthMode::ApiKey` against
+        // the OpenAI matrix.
+        let profile = meerkat_core::AuthProfile {
+            id: "p".to_string(),
+            provider: Provider::OpenAI,
+            auth_method: "api_key".to_string(),
+            source: CredentialSourceSpec::ManagedStore,
+            constraints: meerkat_core::auth::AuthConstraints::default(),
+            metadata_defaults: meerkat_core::auth::AuthMetadataDefaults::default(),
+        };
+        assert_eq!(
+            persisted_auth_mode_for_profile(&profile),
+            Some(PersistedAuthMode::ApiKey),
+            "api_key on the OpenAI provider matrix must resolve to ApiKey"
+        );
+        let typed = normalized_auth_method(&profile).expect("api_key parses on OpenAI matrix");
+        assert!(matches!(
+            typed,
+            meerkat_providers::NormalizedAuthMethod::OpenAi(_)
+        ));
+    }
+
+    #[test]
+    fn persisted_auth_mode_rejects_method_outside_provider_matrix() {
+        // Row 100: an auth_method that is not a member of the profile
+        // provider's typed matrix must resolve to `None` — the typed enum is
+        // the single owner and refuses to fabricate a mode for a method the
+        // provider does not support (fail closed instead of cross-provider
+        // string guessing).
+        let profile = meerkat_core::AuthProfile {
+            id: "p".to_string(),
+            provider: Provider::Anthropic,
+            auth_method: "azure_api_key".to_string(),
+            source: CredentialSourceSpec::ManagedStore,
+            constraints: meerkat_core::auth::AuthConstraints::default(),
+            metadata_defaults: meerkat_core::auth::AuthMetadataDefaults::default(),
+        };
+        assert_eq!(
+            normalized_auth_method(&profile),
+            None,
+            "azure_api_key is not in the Anthropic matrix and must not resolve"
+        );
+        assert_eq!(persisted_auth_mode_for_profile(&profile), None);
     }
 
     #[tokio::test]

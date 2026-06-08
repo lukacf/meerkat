@@ -517,3 +517,94 @@ fn schema_input_rows_classify_same_left_only_and_different_surfaces() {
         HopcroftSchemaInputClassification::DifferentSurface
     ));
 }
+
+fn peer_terminal_projection_mismatches(source: &str) -> Vec<String> {
+    let parsed = syn::parse_file(source).expect("parse projection fixture");
+    let mut visitor = PeerResponseTerminalProjectionVisitor::new("meerkat-runtime/src/accept.rs");
+    visitor.visit_file(&parsed);
+    visitor.mismatches
+}
+
+#[test]
+fn peer_terminal_projection_flags_construction_string_and_call_via_ast() {
+    let flagged = peer_terminal_projection_mismatches(
+        r#"
+        fn build() {
+            let _proj = PeerConversationProjection::ResponseTerminal { id: 1 };
+            let _key = peer_response_terminal_context_key(route, correlation);
+            let _notice = "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] done";
+        }
+    "#,
+    );
+    assert_eq!(
+        flagged.len(),
+        3,
+        "all three banned shapes must flag: {flagged:#?}"
+    );
+}
+
+#[test]
+fn peer_terminal_projection_ignores_names_in_comments_and_unrelated_calls() {
+    // The banned names appear only in a comment and in an unrelated call/path;
+    // the AST carries no banned construction/call/string, so nothing flags.
+    let clean = peer_terminal_projection_mismatches(
+        r"
+        fn build() {
+            // PeerConversationProjection::ResponseTerminal is gone; context key too
+            let _ = some_other_module::peer_response_terminal_context_key_helper_doc();
+            let _ = PeerConversationProjection::Streaming { id: 1 };
+        }
+    ",
+    );
+    assert!(
+        clean.is_empty(),
+        "comment/unrelated mentions must not flag: {clean:#?}"
+    );
+}
+
+fn peer_terminal_shell_mismatches(source: &str) -> Vec<String> {
+    let parsed = syn::parse_file(source).expect("parse shell fixture");
+    let mut visitor = PeerResponseTerminalShellVisitor::new("meerkat-rpc/src/session_runtime.rs");
+    visitor.visit_file(&parsed);
+    visitor.mismatches
+}
+
+#[test]
+fn peer_terminal_shell_flags_pub_identity_bus_and_peer_name_projection() {
+    let flagged = peer_terminal_shell_mismatches(
+        r"
+        pub struct ShellBus {
+            pub peer_name: PeerName,
+        }
+        fn project(peer_name: &PeerName) {
+            let _ = PeerResponseTerminalRouteIdentity::parse(peer_name);
+            let _ = peer_response_terminal_input(&peer_name, status);
+        }
+    ",
+    );
+    assert_eq!(
+        flagged.len(),
+        3,
+        "field + two projections must flag: {flagged:#?}"
+    );
+}
+
+#[test]
+fn peer_terminal_shell_allows_enum_variant_carrier_and_typed_facts() {
+    // An enum-variant `peer_name: PeerName` carrier is an allowed shape, and a
+    // call that passes typed facts (not `peer_name`) is not a projection.
+    let clean = peer_terminal_shell_mismatches(
+        r"
+        pub enum WirePersistedInput {
+            PeerMessage { peer_name: PeerName },
+        }
+        fn admit(peer_id: PeerId, request_id: PeerCorrelationId) {
+            let _ = peer_response_terminal_input(peer_id, None, request_id, status, result);
+        }
+    ",
+    );
+    assert!(
+        clean.is_empty(),
+        "enum carrier + typed-fact call must not flag: {clean:#?}"
+    );
+}

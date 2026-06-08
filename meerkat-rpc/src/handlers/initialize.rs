@@ -20,6 +20,15 @@ pub struct ServerInfo {
 }
 
 /// Handle the `initialize` method.
+///
+/// The advertised method catalog describes the *surface* this build speaks,
+/// not its per-instance runtime state — exactly as `mob/status` is advertised
+/// with zero mobs present. `skills/list` is compiled unconditionally into the
+/// router, so it is always part of the surface; calling it without a skill
+/// runtime returns a runtime-state error ("skills not enabled"), the same shape
+/// every other stateful method uses. Advertising it is therefore honest and
+/// keeps the catalog stable (sibling capabilities gate on compile features,
+/// never on runtime-instance presence).
 pub fn handle_initialize(id: Option<RpcId>, runtime_available: bool) -> RpcResponse {
     let options = meerkat_contracts::RpcMethodCatalogOptions {
         runtime_available,

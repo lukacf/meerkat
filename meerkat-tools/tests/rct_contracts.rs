@@ -11,6 +11,14 @@ use serde_json::json;
 use std::path::Path;
 use std::sync::Arc;
 
+/// Concrete project root for contract tests. The composite now fails closed
+/// without a concrete root rather than laundering the ambient process CWD
+/// (dogma row #299), so tests must supply one explicitly. The crate manifest
+/// dir is a stable, real directory.
+fn test_project_root() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
+}
+
 async fn dispatch_tool(
     dispatcher: &dyn AgentToolDispatcher,
     name: &str,
@@ -33,7 +41,15 @@ async fn test_rct_contracts_tool_dispatcher_contract() -> Result<(), Box<dyn std
     let store = Arc::new(MemoryTaskStore::new());
     let config = BuiltinToolConfig::default();
 
-    let dispatcher = CompositeDispatcher::new(store, &config, None, None, None, None, true)?;
+    let dispatcher = CompositeDispatcher::new(
+        store,
+        &config,
+        Some(test_project_root()),
+        None,
+        None,
+        None,
+        true,
+    )?;
 
     let tools = dispatcher.tools();
     assert!(!tools.is_empty());
@@ -58,7 +74,15 @@ async fn test_rct_contracts_task_store_persistence_contract()
 -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(MemoryTaskStore::new());
     let config = BuiltinToolConfig::default();
-    let tool = CompositeDispatcher::new(store, &config, None, None, None, None, true)?;
+    let tool = CompositeDispatcher::new(
+        store,
+        &config,
+        Some(test_project_root()),
+        None,
+        None,
+        None,
+        true,
+    )?;
 
     let result = dispatch_tool(
         &tool,
@@ -80,7 +104,7 @@ async fn test_rct_contracts_inv_004_task_tools_session_id() -> Result<(), Box<dy
     let tool = CompositeDispatcher::new(
         store,
         &config,
-        None,
+        Some(test_project_root()),
         None,
         None,
         Some("test-session-123".into()),
@@ -107,7 +131,15 @@ fn test_rct_contracts_all_builtin_schemas_have_required_field()
 -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(MemoryTaskStore::new());
     let config = BuiltinToolConfig::default();
-    let dispatcher = CompositeDispatcher::new(store, &config, None, None, None, None, true)?;
+    let dispatcher = CompositeDispatcher::new(
+        store,
+        &config,
+        Some(test_project_root()),
+        None,
+        None,
+        None,
+        true,
+    )?;
 
     for tool in dispatcher.tools().iter() {
         let schema = &tool.input_schema;
@@ -125,7 +157,15 @@ fn test_rct_contracts_inv_007_builtin_task_persistence_strategy()
     let store = Arc::new(MemoryTaskStore::new());
     let config = BuiltinToolConfig::default();
 
-    let dispatcher = CompositeDispatcher::new(store, &config, None, None, None, None, true)?;
+    let dispatcher = CompositeDispatcher::new(
+        store,
+        &config,
+        Some(test_project_root()),
+        None,
+        None,
+        None,
+        true,
+    )?;
 
     // Verify task_create is available as a tool
     let tools = dispatcher.tools();
@@ -339,7 +379,7 @@ async fn test_regression_builder_populates_registry() -> Result<(), Box<dyn std:
         source: ToolDispatcherSource::Composite(Box::new(BuiltinDispatcherConfig {
             store,
             config,
-            project_root: None,
+            project_root: Some(test_project_root()),
             shell_config: None,
             external: None,
             session_id: None,
@@ -499,8 +539,15 @@ async fn test_regression_composite_deduplicates_external_tools()
     let config = BuiltinToolConfig::default();
     let external = Arc::new(DuplicatingDispatcher) as Arc<dyn AgentToolDispatcher>;
 
-    let dispatcher =
-        CompositeDispatcher::new(store, &config, None, None, Some(external), None, true)?;
+    let dispatcher = CompositeDispatcher::new(
+        store,
+        &config,
+        Some(test_project_root()),
+        None,
+        Some(external),
+        None,
+        true,
+    )?;
     let tools = dispatcher.tools();
 
     // Count occurrences of task_list

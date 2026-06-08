@@ -38,8 +38,6 @@ use meerkat_runtime::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, MeerkatMachine, PromptInput,
 };
 #[cfg(feature = "runtime-adapter")]
-use serde::de::DeserializeOwned;
-#[cfg(feature = "runtime-adapter")]
 use std::collections::HashMap;
 #[cfg(feature = "runtime-adapter")]
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
@@ -2926,7 +2924,7 @@ impl MultiBackendProvisioner {
         Ok(())
     }
 
-    async fn send_bridge_command_typed<R: DeserializeOwned>(
+    async fn send_bridge_command_typed<R: super::bridge_protocol::FromBridgeReply>(
         &self,
         peer: &TrustedPeerDescriptor,
         command: &super::bridge_protocol::BridgeCommand,
@@ -2940,11 +2938,7 @@ impl MultiBackendProvisioner {
         if let Some(rejection) = Self::bridge_rejection_reply(command.protocol_version(), &value) {
             return Err(Self::bridge_rejection_error(rejection));
         }
-        let payload =
-            super::bridge_protocol::decode_bridge_success_payload(command, value, "command")?;
-        serde_json::from_value(payload).map_err(|error| {
-            MobError::Internal(format!("failed to decode bridge command response: {error}"))
-        })
+        super::bridge_protocol::decode_bridge_payload(command, value, "command")
     }
 
     async fn bind_peer_only_member(

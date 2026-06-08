@@ -1230,6 +1230,17 @@ where
     pub(crate) tool_dispatch_context: ToolDispatchContext,
     /// Runtime-owned dispatch metadata for this turn.
     pub(crate) turn_tool_dispatch_metadata: BTreeMap<String, serde_json::Value>,
+    /// Typed tool-execution policy (per-call timeouts + concurrency bound)
+    /// applied to the normal LLM-driven tool dispatch loop. Populated by the
+    /// composition seam via `AgentBuilder::with_tools_config`; defaults to
+    /// `ToolsConfig::default()` for standalone/test construction.
+    pub(crate) tools_config: crate::config::ToolsConfig,
+    /// Policy governing how the live LLM-execution hydration seam treats a
+    /// durable image blob that is missing from the blob store. Defaults to
+    /// `HistoricalPlaceholder` (resume hydration degrades gracefully); a
+    /// surface that requires a hard fault on a missing live blob selects
+    /// `Error` via the composition seam (`with_missing_blob_behavior`).
+    pub(crate) missing_blob_behavior: crate::image_content::MissingBlobBehavior,
 }
 
 #[cfg(test)]

@@ -206,7 +206,7 @@ mod tests {
     fn request(content: impl Into<String>, session_id: &SessionId) -> MemoryIndexRequest {
         MemoryIndexRequest::new(
             MemoryIndexScope::for_session(session_id.clone()),
-            content.into(),
+            meerkat_core::MemoryIndexableContent::Indexable(content.into()),
             meta(session_id),
         )
         .unwrap()

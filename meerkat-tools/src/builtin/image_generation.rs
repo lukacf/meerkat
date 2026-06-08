@@ -222,7 +222,7 @@ struct GenerateImageToolArgs {
         with = "GenerateImageToolRequestSchema",
         description = "Image request. For normal generation, use {\"intent\":\"generate\",\"prompt\":\"...\",\"size\":\"1024x1024\",\"quality\":\"auto\",\"format\":\"png\",\"count\":1}. Omit optional fields to use automatic defaults. Provider/model and size behavior is described in the tool description."
     )]
-    request: Value,
+    request: GenerateImageToolRequest,
 }
 
 #[allow(dead_code)]
@@ -266,20 +266,30 @@ struct GenerateImageToolRequestSchema {
     provider_params: Option<Value>,
 }
 
+/// Typed, deserialize-once boundary for the model-facing `generate_image` request.
+///
+/// This owns the single LLM-facing wire shape. The documented ergonomic aliases
+/// (bare-string intent/size/target, `{content}` prompt objects, the `n` count
+/// alias) are absorbed into typed sub-enums at the serde boundary rather than
+/// being re-discriminated from an untyped `Value` inside the tool body. The
+/// canonical internal shape (`{"intent":"generate",...,"prompt":{"content":...}}`)
+/// is a strict superset of these fields, so it parses through the same path;
+/// the canonical `prompt_source` is intentionally not accepted from the model
+/// because it is synthesized from the dispatch-time operation id.
 #[derive(Debug, Deserialize)]
-struct SimpleGenerateImageToolRequest {
+struct GenerateImageToolRequest {
     #[serde(default)]
-    intent: Option<Value>,
+    intent: Option<ImageIntentInput>,
     #[serde(default)]
-    prompt: Option<Value>,
+    prompt: Option<PromptInput>,
     #[serde(default)]
-    instruction: Option<Value>,
+    instruction: Option<PromptInput>,
     #[serde(default)]
     source_images: Vec<ImageSourceRef>,
     #[serde(default)]
     reference_images: Vec<ImageSourceRef>,
     #[serde(default)]
-    size: Option<Value>,
+    size: Option<ImageSizeInput>,
     #[serde(default)]
     quality: Option<String>,
     #[serde(default)]
@@ -289,13 +299,72 @@ struct SimpleGenerateImageToolRequest {
     #[serde(default, alias = "n")]
     n: Option<NonZeroU32>,
     #[serde(default)]
-    target: Option<Value>,
+    target: Option<ImageTargetInput>,
     #[serde(default)]
     provider: Option<String>,
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
     provider_params: Option<Value>,
+}
+
+/// Model-facing intent selector: either a bare string (`"generate"`, `"edit"`,
+/// and the documented `"create"`/`"new"`/`"modify"` aliases) or an object that
+/// nests the choice under `intent`/`type` (the `{ "type": "create" }`
+/// compatibility alias). Nested `prompt`/`instruction` are absorbed so a model
+/// that packs the text inside the intent object still parses.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum ImageIntentInput {
+    Named(String),
+    Object {
+        #[serde(default)]
+        intent: Option<String>,
+        #[serde(default, rename = "type")]
+        kind: Option<String>,
+        #[serde(default)]
+        prompt: Option<PromptInput>,
+        #[serde(default)]
+        instruction: Option<PromptInput>,
+    },
+}
+
+/// Model-facing text input: either a bare string or an object carrying the text
+/// under a `content` field (the canonical `PromptText` wire shape).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum PromptInput {
+    Text(String),
+    Object { content: String },
+}
+
+impl PromptInput {
+    fn into_content(self) -> String {
+        match self {
+            PromptInput::Text(text) => text,
+            PromptInput::Object { content } => content,
+        }
+    }
+}
+
+/// Model-facing size selector: either a documented string alias
+/// (`"auto"`, `"1024x1024"`, `"WIDTHxHEIGHT"`, ...) or the canonical tagged
+/// `ImageSizePreference` object.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum ImageSizeInput {
+    Canonical(ImageSizePreference),
+    Alias(String),
+}
+
+/// Model-facing target selector: either a documented string alias
+/// (`"auto"` or a provider name) or the canonical tagged
+/// `ImageGenerationTargetPreference` object.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum ImageTargetInput {
+    Canonical(ImageGenerationTargetPreference),
+    Alias(String),
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -325,8 +394,9 @@ impl BuiltinTool for GenerateImageTool {
         let args: GenerateImageToolArgs = serde_json::from_value(args)
             .map_err(|err| BuiltinToolError::invalid_args(err.to_string()))?;
         let operation_id = ImageOperationId::new(uuid::Uuid::new_v4());
-        let request =
-            parse_generate_image_request(args.request, operation_id, &*self.runtime.planner)?;
+        let request = args
+            .request
+            .into_request(operation_id, &*self.runtime.planner)?;
 
         let status = self
             .runtime
@@ -584,109 +654,117 @@ impl BuiltinTool for GenerateImageTool {
     }
 }
 
-fn parse_generate_image_request(
-    request: Value,
-    operation_id: ImageOperationId,
-    planner: &dyn ImageGenerationPlanner,
-) -> Result<GenerateImageRequest, BuiltinToolError> {
-    if let Ok(canonical) = serde_json::from_value::<GenerateImageRequest>(request.clone()) {
-        return Ok(canonical);
+impl GenerateImageToolRequest {
+    /// Resolve the typed model-facing request into the canonical
+    /// [`GenerateImageRequest`], synthesizing the `prompt_source` from the
+    /// dispatch-time operation id and consulting the planner for the
+    /// `model`-only provider inference. All malformed inputs fail closed with a
+    /// typed [`BuiltinToolError::invalid_args`].
+    fn into_request(
+        self,
+        operation_id: ImageOperationId,
+        planner: &dyn ImageGenerationPlanner,
+    ) -> Result<GenerateImageRequest, BuiltinToolError> {
+        let intent_kind = self.resolve_intent_kind()?;
+        let source = PromptSource::ModelDistilled {
+            tool_call_id: ToolCallId::new(format!("generate_image:{}", operation_id.0)),
+        };
+        let nested_text = self.intent.as_ref().and_then(ImageIntentInput::nested_text);
+        let intent = match intent_kind {
+            SimpleImageIntentKind::Generate => {
+                let prompt = self
+                    .prompt
+                    .clone()
+                    .map(PromptInput::into_content)
+                    .or(nested_text)
+                    .ok_or_else(|| BuiltinToolError::invalid_args("request.prompt is required"))?;
+                ImageGenerationIntent::Generate {
+                    prompt: PromptText::new(prompt)
+                        .map_err(|err| BuiltinToolError::invalid_args(err.to_string()))?,
+                    prompt_source: source,
+                    reference_images: self.reference_images,
+                }
+            }
+            SimpleImageIntentKind::Edit => {
+                let instruction = self
+                    .instruction
+                    .clone()
+                    .map(PromptInput::into_content)
+                    .or(nested_text)
+                    .ok_or_else(|| {
+                        BuiltinToolError::invalid_args("request.instruction is required")
+                    })?;
+                ImageGenerationIntent::Edit {
+                    instruction: PromptText::new(instruction)
+                        .map_err(|err| BuiltinToolError::invalid_args(err.to_string()))?,
+                    instruction_source: source,
+                    source_images: self.source_images,
+                }
+            }
+        };
+
+        GenerateImageRequest::with_provider_params(
+            intent,
+            resolve_target(
+                self.target.as_ref(),
+                self.provider.as_deref(),
+                self.model.as_deref(),
+                planner,
+            )?,
+            resolve_size(self.size.as_ref())?,
+            parse_simple_quality(self.quality.as_deref())?,
+            parse_simple_format(self.format.as_deref())?,
+            self.count.or(self.n).unwrap_or(NonZeroU32::MIN),
+            self.provider_params,
+        )
+        .map_err(|err| BuiltinToolError::invalid_args(err.to_string()))
     }
 
-    let simple: SimpleGenerateImageToolRequest = serde_json::from_value(request)
-        .map_err(|err| BuiltinToolError::invalid_args(format!("invalid image request: {err}")))?;
-
-    let intent_kind = parse_simple_intent_kind(simple.intent.as_ref(), &simple)?;
-    let source = PromptSource::ModelDistilled {
-        tool_call_id: ToolCallId::new(format!("generate_image:{}", operation_id.0)),
-    };
-    let intent = match intent_kind {
-        SimpleImageIntentKind::Generate => {
-            let prompt = extract_text_field(
-                "prompt",
-                simple.prompt.as_ref().or_else(|| {
-                    simple
-                        .intent
-                        .as_ref()
-                        .and_then(|intent| intent.get("prompt"))
+    fn resolve_intent_kind(&self) -> Result<SimpleImageIntentKind, BuiltinToolError> {
+        let Some(intent) = self.intent.as_ref() else {
+            return if self.instruction.is_some() || !self.source_images.is_empty() {
+                Ok(SimpleImageIntentKind::Edit)
+            } else {
+                Ok(SimpleImageIntentKind::Generate)
+            };
+        };
+        match intent {
+            ImageIntentInput::Named(value) => parse_intent_name(value),
+            ImageIntentInput::Object { intent, kind, .. } => intent
+                .as_deref()
+                .or(kind.as_deref())
+                .map(parse_intent_name)
+                .unwrap_or_else(|| {
+                    Err(BuiltinToolError::invalid_args(
+                        "request.intent object must include intent=\"generate\" or intent=\"edit\"",
+                    ))
                 }),
-            )?;
-            ImageGenerationIntent::Generate {
-                prompt: PromptText::new(prompt)
-                    .map_err(|err| BuiltinToolError::invalid_args(err.to_string()))?,
-                prompt_source: source,
-                reference_images: simple.reference_images,
-            }
         }
-        SimpleImageIntentKind::Edit => {
-            let instruction = extract_text_field(
-                "instruction",
-                simple.instruction.as_ref().or_else(|| {
-                    simple
-                        .intent
-                        .as_ref()
-                        .and_then(|intent| intent.get("instruction"))
-                }),
-            )?;
-            ImageGenerationIntent::Edit {
-                instruction: PromptText::new(instruction)
-                    .map_err(|err| BuiltinToolError::invalid_args(err.to_string()))?,
-                instruction_source: source,
-                source_images: simple.source_images,
-            }
-        }
-    };
+    }
+}
 
-    GenerateImageRequest::with_provider_params(
-        intent,
-        parse_simple_target(
-            simple.target.as_ref(),
-            simple.provider.as_deref(),
-            simple.model.as_deref(),
-            planner,
-        )?,
-        parse_simple_size(simple.size.as_ref())?,
-        parse_simple_quality(simple.quality.as_deref())?,
-        parse_simple_format(simple.format.as_deref())?,
-        simple.count.or(simple.n).unwrap_or(NonZeroU32::MIN),
-        simple.provider_params,
-    )
-    .map_err(|err| BuiltinToolError::invalid_args(err.to_string()))
+impl ImageIntentInput {
+    /// Text packed inside an intent object (`{ "intent": "...", "prompt": ... }`),
+    /// used as a fallback when the top-level `prompt`/`instruction` is omitted.
+    fn nested_text(&self) -> Option<String> {
+        match self {
+            ImageIntentInput::Named(_) => None,
+            ImageIntentInput::Object {
+                prompt,
+                instruction,
+                ..
+            } => prompt
+                .clone()
+                .or_else(|| instruction.clone())
+                .map(PromptInput::into_content),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SimpleImageIntentKind {
     Generate,
     Edit,
-}
-
-fn parse_simple_intent_kind(
-    intent: Option<&Value>,
-    request: &SimpleGenerateImageToolRequest,
-) -> Result<SimpleImageIntentKind, BuiltinToolError> {
-    let Some(intent) = intent else {
-        return if request.instruction.is_some() || !request.source_images.is_empty() {
-            Ok(SimpleImageIntentKind::Edit)
-        } else {
-            Ok(SimpleImageIntentKind::Generate)
-        };
-    };
-    match intent {
-        Value::String(value) => parse_intent_name(value),
-        Value::Object(map) => map
-            .get("intent")
-            .or_else(|| map.get("type"))
-            .and_then(Value::as_str)
-            .map(parse_intent_name)
-            .unwrap_or_else(|| {
-                Err(BuiltinToolError::invalid_args(
-                    "request.intent object must include intent=\"generate\" or intent=\"edit\"",
-                ))
-            }),
-        _ => Err(BuiltinToolError::invalid_args(
-            "request.intent must be \"generate\", \"edit\", or an object with an intent field",
-        )),
-    }
 }
 
 fn parse_intent_name(value: &str) -> Result<SimpleImageIntentKind, BuiltinToolError> {
@@ -699,57 +777,24 @@ fn parse_intent_name(value: &str) -> Result<SimpleImageIntentKind, BuiltinToolEr
     }
 }
 
-fn extract_text_field(
-    field: &'static str,
-    value: Option<&Value>,
-) -> Result<String, BuiltinToolError> {
-    match value {
-        Some(Value::String(text)) => Ok(text.clone()),
-        Some(Value::Object(map)) => map
-            .get("content")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| {
-                BuiltinToolError::invalid_args(format!(
-                    "request.{field} object must include a string content field"
-                ))
-            }),
-        Some(_) => Err(BuiltinToolError::invalid_args(format!(
-            "request.{field} must be a string"
-        ))),
-        None => Err(BuiltinToolError::invalid_args(format!(
-            "request.{field} is required"
-        ))),
-    }
-}
-
-fn parse_simple_target(
-    target: Option<&Value>,
+fn resolve_target(
+    target: Option<&ImageTargetInput>,
     provider: Option<&str>,
     model: Option<&str>,
     planner: &dyn ImageGenerationPlanner,
 ) -> Result<ImageGenerationTargetPreference, BuiltinToolError> {
     if let Some(target) = target {
-        if let Ok(canonical) =
-            serde_json::from_value::<ImageGenerationTargetPreference>(target.clone())
-        {
-            return Ok(canonical);
-        }
-        if let Some(value) = target.as_str() {
-            if normalize_choice(value) == "auto" {
-                return Ok(ImageGenerationTargetPreference::Auto);
+        match target {
+            ImageTargetInput::Canonical(canonical) => return Ok(canonical.clone()),
+            ImageTargetInput::Alias(value) => {
+                if normalize_choice(value) == "auto" {
+                    return Ok(ImageGenerationTargetPreference::Auto);
+                }
+                return Ok(ImageGenerationTargetPreference::ProviderDefault {
+                    provider: ProviderId::new(value.clone()),
+                });
             }
-            return Ok(ImageGenerationTargetPreference::ProviderDefault {
-                provider: ProviderId::new(value),
-            });
         }
-        // A target value is present but is neither the canonical target shape nor a
-        // string alias. Fail closed with a typed error rather than silently laundering
-        // the malformed target into a fabricated `Auto` default.
-        return Err(BuiltinToolError::invalid_args(
-            "request.target must be \"auto\", a provider string, or a canonical target object \
-             ({\"target\":\"auto\"|\"provider_default\"|\"model\", ...})",
-        ));
     }
 
     match (provider, model) {
@@ -775,16 +820,14 @@ fn parse_simple_target(
     }
 }
 
-fn parse_simple_size(size: Option<&Value>) -> Result<ImageSizePreference, BuiltinToolError> {
+fn resolve_size(size: Option<&ImageSizeInput>) -> Result<ImageSizePreference, BuiltinToolError> {
     let Some(size) = size else {
         return Ok(ImageSizePreference::Auto);
     };
-    if let Ok(canonical) = serde_json::from_value::<ImageSizePreference>(size.clone()) {
-        return Ok(canonical);
-    }
-    let value = size.as_str().ok_or_else(|| {
-        BuiltinToolError::invalid_args("request.size must be a string or canonical size object")
-    })?;
+    let value = match size {
+        ImageSizeInput::Canonical(canonical) => return Ok(canonical.clone()),
+        ImageSizeInput::Alias(value) => value,
+    };
     let normalized = normalize_choice(value);
     match normalized.as_str() {
         "auto" => Ok(ImageSizePreference::Auto),
@@ -1300,6 +1343,19 @@ mod tests {
         .unwrap()
     }
 
+    /// Exercise the real typed boundary: deserialize the model-facing `request`
+    /// payload once into the typed [`GenerateImageToolRequest`], then convert it
+    /// to the canonical [`GenerateImageRequest`]. Mirrors `GenerateImageTool::call`.
+    fn parse_generate_image_request(
+        request: Value,
+        operation_id: ImageOperationId,
+        planner: &dyn ImageGenerationPlanner,
+    ) -> Result<GenerateImageRequest, BuiltinToolError> {
+        let typed: GenerateImageToolRequest = serde_json::from_value(request)
+            .map_err(|err| BuiltinToolError::invalid_args(err.to_string()))?;
+        typed.into_request(operation_id, planner)
+    }
+
     #[test]
     fn generate_image_schema_documents_simple_model_facing_request() {
         let schema = crate::schema::schema_for::<GenerateImageToolArgs>();
@@ -1493,8 +1549,10 @@ mod tests {
 
     #[test]
     fn generate_image_rejects_malformed_target_instead_of_laundering_to_auto() {
-        // A present-but-uninterpretable target must fail closed with a typed arg error,
-        // not silently fall through to a fabricated `Auto` default (dogma row #64).
+        // A present-but-uninterpretable target must fail closed at the typed
+        // deserialize boundary (the untagged `ImageTargetInput` accepts only a
+        // canonical target object or a provider/"auto" string), not silently
+        // fall through to a fabricated `Auto` default (dogma row #64).
         let err = parse_generate_image_request(
             json!({
                 "intent": "generate",
@@ -1508,9 +1566,72 @@ mod tests {
 
         let message = err.to_string();
         assert!(
-            message.contains("request.target"),
-            "error should name the malformed target field: {message}"
+            message.to_ascii_lowercase().contains("target"),
+            "error should reference the malformed target input: {message}"
         );
+    }
+
+    #[test]
+    fn generate_image_target_string_alias_resolves_to_provider_default() {
+        // A bare provider string for `target` resolves through the typed
+        // `ImageTargetInput::Alias` path, not an untyped `Value` re-parse.
+        let parsed = parse_generate_image_request(
+            json!({
+                "intent": "generate",
+                "prompt": "draw a cozy tabby cat",
+                "target": "openai"
+            }),
+            ImageOperationId::new(uuid::Uuid::new_v4()),
+            &FakePlanner,
+        )
+        .unwrap();
+        assert!(matches!(
+            parsed.target,
+            ImageGenerationTargetPreference::ProviderDefault { ref provider }
+                if provider.0 == "openai"
+        ));
+    }
+
+    #[test]
+    fn generate_image_canonical_target_object_resolves_through_typed_boundary() {
+        // The canonical tagged target object deserializes directly into the
+        // typed `ImageTargetInput::Canonical` variant.
+        let parsed = parse_generate_image_request(
+            json!({
+                "intent": "generate",
+                "prompt": "draw a cozy tabby cat",
+                "target": { "target": "provider_default", "provider": "gemini" }
+            }),
+            ImageOperationId::new(uuid::Uuid::new_v4()),
+            &FakePlanner,
+        )
+        .unwrap();
+        assert!(matches!(
+            parsed.target,
+            ImageGenerationTargetPreference::ProviderDefault { ref provider }
+                if provider.0 == "gemini"
+        ));
+    }
+
+    #[test]
+    fn generate_image_accepts_prompt_content_object() {
+        // The canonical `{"content":"..."}` prompt object is absorbed by the
+        // typed `PromptInput` boundary alongside the bare-string ergonomic form.
+        let parsed = parse_generate_image_request(
+            json!({
+                "intent": "generate",
+                "prompt": { "content": "draw a cozy tabby cat" }
+            }),
+            ImageOperationId::new(uuid::Uuid::new_v4()),
+            &FakePlanner,
+        )
+        .unwrap();
+        match parsed.intent {
+            ImageGenerationIntent::Generate { prompt, .. } => {
+                assert_eq!(prompt.content, "draw a cozy tabby cat");
+            }
+            other => panic!("expected generate intent, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1545,10 +1666,13 @@ mod tests {
             blob_store: blob_store.clone(),
             executor: Arc::new(FakeExecutor),
         };
+        // The composite fails closed without a concrete project root (dogma row
+        // #299), so supply one explicitly instead of relying on the ambient CWD.
+        let project_root = tempfile::TempDir::new().unwrap();
         let mut dispatcher = crate::builtin::CompositeDispatcher::new(
             Arc::new(crate::builtin::MemoryTaskStore::new()),
             &crate::builtin::BuiltinToolConfig::default(),
-            None,
+            Some(project_root.path().to_path_buf()),
             None,
             None,
             None,
@@ -1663,10 +1787,13 @@ mod tests {
             }),
             executor: Arc::new(FakeExecutor),
         };
+        // The composite fails closed without a concrete project root (dogma row
+        // #299), so supply one explicitly instead of relying on the ambient CWD.
+        let project_root = tempfile::TempDir::new().unwrap();
         let mut dispatcher = crate::builtin::CompositeDispatcher::new(
             Arc::new(crate::builtin::MemoryTaskStore::new()),
             &crate::builtin::BuiltinToolConfig::default(),
-            None,
+            Some(project_root.path().to_path_buf()),
             None,
             None,
             None,

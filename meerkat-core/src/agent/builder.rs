@@ -1,7 +1,7 @@
 //! Agent builder.
 
 use crate::budget::{Budget, BudgetLimits};
-use crate::config::{AgentConfig, CallTimeoutOverride, HookRunOverrides};
+use crate::config::{AgentConfig, CallTimeoutOverride, HookRunOverrides, ToolsConfig};
 use crate::hooks::HookEngine;
 use crate::model_defaults::ModelOperationalDefaultsResolver;
 use crate::ops::ConcurrencyLimits;
@@ -86,6 +86,8 @@ pub struct AgentBuilder {
     pub(super) default_event_tx: Option<mpsc::Sender<crate::event::AgentEvent>>,
     pub(super) model_defaults_resolver: Option<Arc<dyn ModelOperationalDefaultsResolver>>,
     pub(super) call_timeout_override: CallTimeoutOverride,
+    pub(super) tools_config: ToolsConfig,
+    pub(super) missing_blob_behavior: crate::image_content::MissingBlobBehavior,
     pub(super) epoch_cursor_state: Option<Arc<crate::runtime_epoch::EpochCursorState>>,
     pub(super) tool_visibility_owner: Option<GeneratedToolVisibilityOwner>,
     pub(super) capability_base_filter_override: Option<ToolFilter>,
@@ -238,6 +240,8 @@ impl AgentBuilder {
             default_event_tx: None,
             model_defaults_resolver: None,
             call_timeout_override: CallTimeoutOverride::default(),
+            tools_config: ToolsConfig::default(),
+            missing_blob_behavior: crate::image_content::MissingBlobBehavior::default(),
             epoch_cursor_state: None,
             tool_visibility_owner: None,
             capability_base_filter_override: None,
@@ -653,6 +657,8 @@ impl AgentBuilder {
             last_pending_catalog_sources: Default::default(),
             tool_dispatch_context: Default::default(),
             turn_tool_dispatch_metadata: Default::default(),
+            tools_config: self.tools_config,
+            missing_blob_behavior: self.missing_blob_behavior,
         };
 
         let has_canonical_visibility_state = agent
@@ -992,6 +998,33 @@ impl AgentBuilder {
     /// - `Value(d)`: explicitly set call timeout to `d`
     pub fn with_call_timeout_override(mut self, override_value: CallTimeoutOverride) -> Self {
         self.call_timeout_override = override_value;
+        self
+    }
+
+    /// Set the typed tool-execution policy applied to the normal LLM-driven
+    /// tool dispatch loop: per-call timeouts (`tool_timeouts[name]` else
+    /// `default_timeout`) and a concurrency bound (`max_concurrent`).
+    ///
+    /// The composition seam owns this policy; standalone/test construction
+    /// keeps `ToolsConfig::default()`.
+    pub fn with_tools_config(mut self, tools_config: ToolsConfig) -> Self {
+        self.tools_config = tools_config;
+        self
+    }
+
+    /// Select the policy for a durable image blob that is missing from the
+    /// blob store at the live LLM-execution hydration seam.
+    ///
+    /// - `HistoricalPlaceholder` (default): degrade to a textual placeholder.
+    /// - `Error`: terminalize the turn with a typed fault on a missing blob.
+    ///
+    /// The composition seam owns this policy; standalone/test construction
+    /// keeps the graceful `HistoricalPlaceholder` default.
+    pub fn with_missing_blob_behavior(
+        mut self,
+        behavior: crate::image_content::MissingBlobBehavior,
+    ) -> Self {
+        self.missing_blob_behavior = behavior;
         self
     }
 }

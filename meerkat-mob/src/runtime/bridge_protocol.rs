@@ -57,26 +57,62 @@ pub(crate) fn decode_bridge_reply(
     Ok(reply)
 }
 
-pub(crate) fn decode_bridge_success_payload(
+/// A typed bridge-success payload that can be extracted directly from a decoded
+/// [`BridgeReply`] without any `serde_json::Value` roundtrip.
+///
+/// Each success payload owns exactly one [`BridgeReply`] variant. Extraction
+/// matches the typed enum once; a reply whose kind does not match the requested
+/// payload is a protocol mismatch surfaced as a typed [`MobError`] (never
+/// silently coerced). This replaces the former serialize-to-`Value`-then-
+/// `from_value` roundtrip: there is one typed decode/compat seam
+/// ([`decode_bridge_reply`]) and one typed extraction per payload.
+pub(crate) trait FromBridgeReply: Sized {
+    /// Extract this typed payload from a decoded [`BridgeReply`], or report the
+    /// kind mismatch as a typed protocol fault.
+    fn from_bridge_reply(reply: BridgeReply, context: &str) -> Result<Self, MobError>;
+}
+
+/// Report a `BridgeReply` whose kind does not match the requested payload.
+fn unexpected_reply<T>(expected: &str, reply: &BridgeReply, context: &str) -> Result<T, MobError> {
+    Err(MobError::Internal(format!(
+        "unexpected {context} bridge reply: expected {expected}, got {}",
+        reply_kind(reply).as_str()
+    )))
+}
+
+macro_rules! impl_from_bridge_reply {
+    ($payload:ty, $variant:ident, $expected:literal) => {
+        impl FromBridgeReply for $payload {
+            fn from_bridge_reply(reply: BridgeReply, context: &str) -> Result<Self, MobError> {
+                match reply {
+                    BridgeReply::$variant(payload) => Ok(payload),
+                    other => unexpected_reply($expected, &other, context),
+                }
+            }
+        }
+    };
+}
+
+impl_from_bridge_reply!(BridgeBindResponse, BindMember, "bind_member");
+impl_from_bridge_reply!(BridgeAck, Ack, "ack");
+impl_from_bridge_reply!(BridgeObservationResponse, Observation, "observation");
+impl_from_bridge_reply!(BridgeDeliveryResponse, Delivery, "delivery");
+impl_from_bridge_reply!(BridgeRetireResponse, Retire, "retire");
+impl_from_bridge_reply!(BridgeDestroyResponse, Destroy, "destroy");
+
+/// Decode a wire `Value` into the specific typed success payload `R`.
+///
+/// The typed compat check is performed once by [`decode_bridge_reply`]
+/// (rejections become typed errors; reply-vs-command kind mismatches become
+/// typed protocol faults); the matching success payload is then moved out of
+/// the typed [`BridgeReply`] by [`FromBridgeReply`] with no `Value` roundtrip.
+pub(crate) fn decode_bridge_payload<R: FromBridgeReply>(
     command: &BridgeCommand,
     value: serde_json::Value,
     context: &str,
-) -> Result<serde_json::Value, MobError> {
-    match decode_bridge_reply(command, value, context)? {
-        BridgeReply::BindMember(payload) => serialize_success_payload(payload, context),
-        BridgeReply::Ack(payload) => serialize_success_payload(payload, context),
-        BridgeReply::Observation(payload) => serialize_success_payload(payload, context),
-        BridgeReply::Delivery(payload) => serialize_success_payload(payload, context),
-        BridgeReply::Retire(payload) => serialize_success_payload(payload, context),
-        BridgeReply::Destroy(payload) => serialize_success_payload(payload, context),
-        // `decode_bridge_reply` already rejected `Rejected` and mismatched
-        // kinds; any remaining (non-exhaustive future) variant is a protocol
-        // mismatch surfaced as a typed fault rather than silently normalized.
-        other => Err(MobError::Internal(format!(
-            "unexpected {context} bridge reply: got {}",
-            reply_kind(&other).as_str()
-        ))),
-    }
+) -> Result<R, MobError> {
+    let reply = decode_bridge_reply(command, value, context)?;
+    R::from_bridge_reply(reply, context)
 }
 
 pub(crate) fn decode_bridge_ack(
@@ -87,24 +123,7 @@ pub(crate) fn decode_bridge_ack(
     // Match the typed reply directly: no serialize-to-`Value`-and-back
     // roundtrip. `decode_bridge_reply` has already enforced that the reply
     // kind matches the command (so a non-`Ack` reply here is a protocol bug).
-    match decode_bridge_reply(command, value, context)? {
-        BridgeReply::Ack(ack) => Ok(ack),
-        other => Err(MobError::Internal(format!(
-            "unexpected {context} bridge reply: expected ack, got {}",
-            reply_kind(&other).as_str()
-        ))),
-    }
-}
-
-fn serialize_success_payload<T: serde::Serialize>(
-    payload: T,
-    context: &str,
-) -> Result<serde_json::Value, MobError> {
-    serde_json::to_value(payload).map_err(|error| {
-        MobError::Internal(format!(
-            "failed to normalize {context} bridge reply: {error}"
-        ))
-    })
+    decode_bridge_payload(command, value, context)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -229,6 +248,61 @@ mod tests {
                 .to_string()
                 .contains("unexpected interrupt bridge reply"),
             "mismatch should be reported as a protocol error: {error}"
+        );
+    }
+
+    fn observe_command() -> BridgeCommand {
+        BridgeCommand::ObserveMember(BridgeSupervisorPayload {
+            supervisor: BridgePeerSpec {
+                name: "mob/supervisor/lead".to_string(),
+                peer_id: "peer-lead".to_string(),
+                address: "inproc://mob/supervisor/lead".to_string(),
+                pubkey: [7u8; 32],
+            },
+            epoch: 1,
+            protocol_version: BridgeProtocolVersion::default(),
+        })
+    }
+
+    #[test]
+    fn decode_bridge_payload_moves_typed_payload_without_value_roundtrip() {
+        // The success path now extracts the typed payload by moving it out of
+        // the decoded `BridgeReply` (no serialize-to-`Value`-then-`from_value`
+        // roundtrip).
+        let reply = BridgeReply::Observation(BridgeObservationResponse {
+            state: BridgeMemberRuntimeState::Running,
+            accepting_inputs: Some(true),
+            current_run_id: None,
+            peer_connectivity: None,
+            last_error: None,
+            observed_at: "2026-04-17T00:00:00Z".to_string(),
+        });
+        let value = serde_json::to_value(&reply).expect("serialize observation");
+        let observation: BridgeObservationResponse =
+            decode_bridge_payload(&observe_command(), value, "observe")
+                .expect("observation payload should decode");
+        assert_eq!(observation.state, BridgeMemberRuntimeState::Running);
+        assert_eq!(observation.accepting_inputs, Some(true));
+    }
+
+    #[test]
+    fn decode_bridge_payload_surfaces_typed_rejection() {
+        // A rejection must surface as a typed error regardless of the requested
+        // payload type — never coerced into a synthetic success.
+        let reply = BridgeReply::Rejected {
+            cause: BridgeRejectionCause::StaleSupervisor,
+            reason: "stale epoch".to_string(),
+        };
+        let value = serde_json::to_value(&reply).expect("serialize rejection");
+        let error: MobError = decode_bridge_payload::<BridgeObservationResponse>(
+            &observe_command(),
+            value,
+            "observe",
+        )
+        .expect_err("rejection must surface as a typed error");
+        assert!(
+            error.to_string().contains("stale epoch"),
+            "rejection reason should be surfaced: {error}"
         );
     }
 }

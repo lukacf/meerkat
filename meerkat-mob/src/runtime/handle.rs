@@ -757,6 +757,13 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::BridgeSessionNotInLiveAuthority { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
+        // Member comms-name resolution and flow condition-eval failures are not
+        // spawn-many provisioning causes; spawn-many never resolves comms names
+        // nor evaluates flow conditions. Classify as Internal to keep the match
+        // total.
+        MobError::MemberCommsName(_) | MobError::ConditionEval { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::Internal
+        }
         MobError::Internal(_) => mob_dsl::MobSpawnManyFailureObservationKind::Internal,
     }
 }

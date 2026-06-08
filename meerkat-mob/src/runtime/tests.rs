@@ -37703,6 +37703,8 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::BridgeSessionNotInLiveAuthority { .. } => {
             "bridge_session_not_in_live_authority".to_string()
         }
+        MobError::MemberCommsName(_) => "member_comms_name".to_string(),
+        MobError::ConditionEval { .. } => "condition_eval".to_string(),
         MobError::Internal(reason) => format!("internal:{reason}"),
     }
 }

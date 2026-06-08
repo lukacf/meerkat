@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use quote::ToTokens;
 use serde::{Deserialize, Serialize};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
@@ -52,7 +51,7 @@ pub struct Baseline {
 
 pub fn rmat_audit(args: RmatAuditArgs) -> Result<()> {
     let root = repo_root()?;
-    let policy = AuditPolicy::load();
+    let policy = AuditPolicy::load()?;
     let findings = collect_findings(&root, &policy)?;
     let ownership_findings = ownership_ledger::collect_current_findings(&root)?;
     let ownership_doc_in_sync = ownership_ledger::ownership_doc_is_in_sync(&root)?;
@@ -605,33 +604,88 @@ fn collect_route_realization_findings(root: &Path, policy: &AuditPolicy) -> Vec<
             continue;
         }
         for file in files {
-            let rel = file.strip_prefix(root).unwrap_or(&file).to_string_lossy();
-            // Skip the wave-b composition module itself; banned tokens
-            // may appear there as the positive identity of the replacement
-            // path in module commentary / imports.
-            if rel.contains("/composition/") || rel.ends_with("/composition.rs") {
-                continue;
-            }
+            let rel = file
+                .strip_prefix(root)
+                .unwrap_or(&file)
+                .to_string_lossy()
+                .to_string();
             let Ok(source) = fs::read_to_string(&file) else {
                 continue;
             };
-            for banned in BANNED_LEGACY_HELPERS {
-                if source.contains(banned) {
-                    findings.push(error_finding(
-                        "CompositionDispatchIsThePath",
-                        rel.as_ref(),
-                        banned,
-                        format!(
-                            "forbidden legacy helper `{banned}` reappeared; routed-effect dispatch must go through meerkat_runtime::composition::CompositionDispatcher + ConsumerSurface::apply_routed_input"
-                        ),
-                        false,
-                    ));
-                }
-            }
+            // AST-precise: flag a banned helper only when it is *called*
+            // (free-fn `composition_dispatch(..)` or method `.composition_dispatch(..)`).
+            // String literals, comments, and `use`/path imports that merely
+            // mention the name are not the forbidden dispatch fork, so the old
+            // `/composition/` skip hack (which masked the positive-identity
+            // references in the replacement module) is no longer needed.
+            let Ok(parsed) = syn::parse_file(&source) else {
+                continue;
+            };
+            let mut visitor = BannedHelperCallVisitor::new(&rel, &source, BANNED_LEGACY_HELPERS);
+            visitor.visit_file(&parsed);
+            findings.extend(visitor.findings);
         }
     }
 
     findings
+}
+
+/// Detect *calls* to a banned legacy helper (free function or method). Unlike
+/// the prior `source.contains(name)` byte scan, this ignores string-literal
+/// and comment occurrences of the name and only fires on a real call
+/// expression, so a rename that preserves the banned dispatch relationship
+/// still trips while a doc/import mention of the name does not.
+struct BannedHelperCallVisitor<'a> {
+    relative: &'a str,
+    source: &'a str,
+    banned: &'a [&'a str],
+    findings: Vec<Finding>,
+}
+
+impl<'a> BannedHelperCallVisitor<'a> {
+    fn new(relative: &'a str, source: &'a str, banned: &'a [&'a str]) -> Self {
+        Self {
+            relative,
+            source,
+            banned,
+            findings: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, name: &str, span: proc_macro2::Span) {
+        let suppressed = has_rmat_allow(self.source, span, "CompositionDispatchIsThePath");
+        self.findings.push(error_finding(
+            "CompositionDispatchIsThePath",
+            self.relative,
+            name,
+            format!(
+                "forbidden legacy helper `{name}` is called here; routed-effect dispatch must go through meerkat_runtime::composition::CompositionDispatcher + ConsumerSurface::apply_routed_input"
+            ),
+            suppressed,
+        ));
+    }
+}
+
+impl<'ast> Visit<'ast> for BannedHelperCallVisitor<'_> {
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let Expr::Path(path) = node.func.as_ref()
+            && let Some(segment) = path.path.segments.last()
+        {
+            let name = segment.ident.to_string();
+            if self.banned.contains(&name.as_str()) {
+                self.push(&name, node.span());
+            }
+        }
+        visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        let name = node.method.to_string();
+        if self.banned.contains(&name.as_str()) {
+            self.push(&name, node.span());
+        }
+        visit::visit_expr_method_call(self, node);
+    }
 }
 
 struct GuardedApplyVisitor<'a> {
@@ -650,25 +704,69 @@ impl<'a> GuardedApplyVisitor<'a> {
     }
 }
 
+/// Field/method names that name a canonical authority state read. A guard
+/// condition that touches one of these and then conditionally calls `apply()`
+/// is a shell pre-check the authority must own instead.
+const STATE_READ_NAMES: &[&str] = &[
+    "current_state",
+    "phase",
+    "snapshot",
+    "state",
+    "terminal_outcome",
+    "is_terminal",
+];
+
+/// True when the expression subtree contains a method call or field access to
+/// a canonical authority state name — matched on AST node kinds, not on a
+/// stringified token soup, so a `// phase` comment or a `"phase"` string
+/// literal in the condition does not count.
+struct StateReadDetector {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for StateReadDetector {
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        if STATE_READ_NAMES.contains(&node.method.to_string().as_str()) {
+            self.found = true;
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_field(&mut self, node: &'ast ExprField) {
+        if let Member::Named(ident) = &node.member
+            && STATE_READ_NAMES.contains(&ident.to_string().as_str())
+        {
+            self.found = true;
+        }
+        visit::visit_expr_field(self, node);
+    }
+}
+
+/// True when the block subtree contains an `.apply(...)` method call.
+struct ApplyCallDetector {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for ApplyCallDetector {
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        if node.method == "apply" {
+            self.found = true;
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+}
+
 impl<'ast> Visit<'ast> for GuardedApplyVisitor<'_> {
     fn visit_expr_if(&mut self, node: &'ast ExprIf) {
-        let cond_text = node.cond.to_token_stream().to_string();
-        let body_text = node.then_branch.to_token_stream().to_string();
-        let apply_count =
-            body_text.matches(". apply").count() + body_text.matches(".apply").count();
+        let mut state_read = StateReadDetector { found: false };
+        state_read.visit_expr(&node.cond);
+
+        let mut apply_in_body = ApplyCallDetector { found: false };
+        apply_in_body.visit_block(&node.then_branch);
+
         let else_empty = node.else_branch.is_none();
-        let suppress = has_rmat_allow(self.source, node.span(), "NoGuardedApply");
-        let stateish = [
-            "current_state",
-            "phase",
-            "snapshot",
-            "state()",
-            "terminal_outcome",
-            "is_terminal",
-        ]
-        .iter()
-        .any(|needle| cond_text.contains(needle));
-        if stateish && apply_count > 0 && else_empty {
+        if state_read.found && apply_in_body.found && else_empty {
+            let suppress = has_rmat_allow(self.source, node.span(), "NoGuardedApply");
             self.findings.push(error_finding(
                 "NoGuardedApply",
                 self.relative,
@@ -1705,6 +1803,8 @@ fn warn_finding(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::panic)]
+
     use super::*;
 
     #[test]
@@ -1941,6 +2041,127 @@ mod tests {
         assert!(
             findings.len() >= 4,
             "expected multiple projection findings, got {findings:#?}"
+        );
+    }
+
+    fn guarded_apply_findings(source: &str) -> Vec<Finding> {
+        let parsed = syn::parse_file(source).expect("parse guarded-apply fixture");
+        let mut visitor = GuardedApplyVisitor::new("meerkat-mob/src/runtime/actor.rs", source);
+        visitor.visit_file(&parsed);
+        visitor.findings
+    }
+
+    #[test]
+    fn guarded_apply_flags_state_gated_apply_via_ast_not_token_soup() {
+        let flagged = guarded_apply_findings(
+            r"
+            fn drive(orch: &Orchestrator) {
+                if orch.phase().is_running() {
+                    authority.apply(input);
+                }
+            }
+        ",
+        );
+        assert_eq!(
+            flagged.len(),
+            1,
+            "state-read-gated apply must flag: {flagged:#?}"
+        );
+        assert_eq!(flagged[0].key.rule, "NoGuardedApply");
+    }
+
+    #[test]
+    fn guarded_apply_ignores_state_names_in_strings_and_comments() {
+        // `phase`/`apply` appear only inside a string literal and a comment in
+        // the condition; the AST carries no state-read method/field there, so
+        // the token-soup false positive is gone.
+        let clean = guarded_apply_findings(
+            r#"
+            fn drive(label: &str) {
+                // phase check used to live here; apply() now unconditional
+                if label == "phase" {
+                    authority.apply(input);
+                }
+            }
+        "#,
+        );
+        assert!(
+            clean.is_empty(),
+            "string/comment mentions must not flag: {clean:#?}"
+        );
+    }
+
+    #[test]
+    fn guarded_apply_ignores_apply_with_else_branch() {
+        let clean = guarded_apply_findings(
+            r"
+            fn drive(orch: &Orchestrator) {
+                if orch.phase().is_running() {
+                    authority.apply(input);
+                } else {
+                    record_skip();
+                }
+            }
+        ",
+        );
+        assert!(
+            clean.is_empty(),
+            "an else branch is not a silent gate: {clean:#?}"
+        );
+    }
+
+    fn banned_helper_findings(rel: &str, source: &str) -> Vec<Finding> {
+        let parsed = syn::parse_file(source).expect("parse banned-helper fixture");
+        let mut visitor = BannedHelperCallVisitor::new(
+            rel,
+            source,
+            &["composition_dispatch", "recompute_mob_peer_overlay"],
+        );
+        visitor.visit_file(&parsed);
+        visitor.findings
+    }
+
+    #[test]
+    fn banned_helper_flags_call_not_string_or_comment() {
+        let flagged = banned_helper_findings(
+            "meerkat-mob/src/runtime/actor.rs",
+            r"
+            fn run(&self) {
+                self.composition_dispatch(effect);
+                let _ = recompute_mob_peer_overlay(state);
+            }
+        ",
+        );
+        assert_eq!(
+            flagged.len(),
+            2,
+            "both banned calls must flag: {flagged:#?}"
+        );
+        assert!(
+            flagged
+                .iter()
+                .all(|f| f.key.rule == "CompositionDispatchIsThePath")
+        );
+    }
+
+    #[test]
+    fn banned_helper_ignores_name_in_string_and_comment() {
+        // Names appear only in a comment and a string literal — no call site,
+        // so the prior `/composition/`-skip byte scan false positive is gone
+        // even in a file under the composition module.
+        let clean = banned_helper_findings(
+            "meerkat-runtime/src/composition/dispatcher.rs",
+            r#"
+            fn run(&self) {
+                // composition_dispatch was the legacy fork; gone now.
+                let label = "recompute_mob_peer_overlay";
+                let _ = label;
+            }
+        "#,
+        );
+        assert!(
+            clean.is_empty(),
+            "doc/import mentions must not flag: {clean:#?}"
         );
     }
 }

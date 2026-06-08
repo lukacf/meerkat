@@ -476,6 +476,43 @@ pub fn collect_ownership_findings(
         .map(|entry| (entry.path.clone(), entry.symbol.clone()))
         .collect::<BTreeSet<_>>();
 
+    // Map each boundary path to the set of owner type-names (shells) the
+    // manifest declares for it. `discover_boundaries` has already proven every
+    // manifest family resolves to live symbols (it bails otherwise), so these
+    // are the live owner shells. A Closed SemanticOperationEntry whose
+    // `owner_shell` does not appear for its path no longer points at a live
+    // boundary owner — its closure claim is stale.
+    let mut owner_shells_by_path: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for family in &registry.manifest.trait_impls {
+        owner_shells_by_path
+            .entry(family.path_suffix.clone())
+            .or_default()
+            .insert(family.type_name.clone());
+    }
+    for family in &registry.manifest.public_inherent {
+        owner_shells_by_path
+            .entry(family.path_suffix.clone())
+            .or_default()
+            .insert(family.type_name.clone());
+    }
+    for family in &registry.manifest.enum_dispatch {
+        owner_shells_by_path
+            .entry(family.path_suffix.clone())
+            .or_default()
+            .insert(family.owner_type_name.clone());
+    }
+    for callback in &registry.manifest.callbacks {
+        owner_shells_by_path
+            .entry(callback.path_suffix.clone())
+            .or_default()
+            .insert(
+                callback
+                    .owner_type_name
+                    .clone()
+                    .unwrap_or_else(|| "<free fn>".to_string()),
+            );
+    }
+
     for boundary in &discovered {
         if !entry_keys.contains(&(boundary.path.clone(), boundary.symbol.clone())) {
             findings.push(error_finding(
@@ -611,6 +648,28 @@ pub fn collect_ownership_findings(
                     entry.symbol, entry.anchor
                 ),
             ));
+        }
+
+        // A Closed entry asserts a finished hand-off into a named owner shell.
+        // Resolve that owner_shell against the live boundary owners the
+        // manifest declares for this path; if the type-name no longer owns a
+        // live boundary here, the closure is stale and the finite-ownership
+        // ledger's authoritative/zero-findings claim must not stand.
+        if entry.status == EntryStatus::Closed && !entry.owner_shell.trim().is_empty() {
+            let owner_resolves = owner_shells_by_path
+                .get(&entry.path)
+                .is_some_and(|owners| owners.contains(&entry.owner_shell));
+            if !owner_resolves {
+                findings.push(error_finding(
+                    "OwnershipOperationOwnerUnresolved",
+                    &entry.path,
+                    &entry.symbol,
+                    format!(
+                        "closed semantic operation `{}` names owner_shell `{}` that owns no live discovered boundary at `{}`; the closure is stale",
+                        entry.symbol, entry.owner_shell, entry.path
+                    ),
+                ));
+            }
         }
     }
 
@@ -3583,5 +3642,58 @@ mod tests {
             .expect("runtime external event projection invariant must exist");
         assert_eq!(invariant.subsystem, Subsystem::Runtime);
         assert_eq!(invariant.status, EntryStatus::Closed);
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn live_ledger_has_no_unresolved_closed_owner_shells() {
+        let root = match repo_root() {
+            Ok(root) => root,
+            Err(err) => panic!("repo root: {err}"),
+        };
+        let findings = match collect_current_findings(&root) {
+            Ok(findings) => findings,
+            Err(err) => panic!("ownership findings: {err}"),
+        };
+        let stale = findings
+            .iter()
+            .filter(|f| f.key.rule == "OwnershipOperationOwnerUnresolved")
+            .collect::<Vec<_>>();
+        assert!(
+            stale.is_empty(),
+            "live ledger Closed entries must all resolve to a live owner shell: {stale:#?}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn stale_closed_owner_shell_fails_closed() {
+        let root = match repo_root() {
+            Ok(root) => root,
+            Err(err) => panic!("repo root: {err}"),
+        };
+        let mut registry = ownership_registry();
+        // Point the first Closed entry at an owner shell that owns no live
+        // boundary; the resolution must flag it instead of trusting the
+        // closure claim.
+        let target = registry
+            .semantic_operations
+            .iter_mut()
+            .find(|entry| entry.status == EntryStatus::Closed)
+            .expect("at least one closed semantic operation");
+        let target_path = target.path.clone();
+        let target_symbol = target.symbol.clone();
+        target.owner_shell = "PhantomOwnerShellThatOwnsNothing".to_string();
+
+        let findings =
+            collect_ownership_findings(&root, &registry).expect("collect ownership findings");
+        assert!(
+            findings.iter().any(|f| {
+                f.key.rule == "OwnershipOperationOwnerUnresolved"
+                    && f.key.path == target_path
+                    && f.key.symbol == target_symbol
+            }),
+            "stale Closed owner_shell must be flagged: {findings:#?}"
+        );
     }
 }

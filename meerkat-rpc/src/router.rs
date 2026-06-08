@@ -50,12 +50,7 @@ impl meerkat_live::LiveToolDispatcher for RuntimeLiveToolDispatcher {
         self.runtime
             .dispatch_external_tool_call(session_id, call)
             .await
-            .map_err(|err| match err {
-                SessionError::NotFound { id } => meerkat_live::LiveToolDispatchError::Rejected(
-                    format!("session {id} not found for live tool dispatch"),
-                ),
-                other => meerkat_live::LiveToolDispatchError::Internal(other.to_string()),
-            })
+            .map_err(|err| meerkat_live::LiveToolDispatchError::from_session_error(session_id, err))
     }
 }
 
@@ -1792,11 +1787,13 @@ impl MethodRouter {
                 &self.runtime,
                 &self.config_store,
                 self.runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant,
+                self.skill_runtime.is_some(),
             ),
             "runtime/capabilities" => handlers::runtime_host::handle_capabilities(
                 id,
                 &self.runtime,
                 self.runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant,
+                self.skill_runtime.is_some(),
             ),
             "runtime/health" => handlers::runtime_host::handle_health(id),
             "approval/request" => {
@@ -3440,6 +3437,39 @@ mod tests {
         async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             Err(ToolError::not_found(call.name))
         }
+    }
+
+    #[test]
+    fn live_tool_dispatch_routes_session_error_through_typed_classifier() {
+        // Row 113: the RPC live-tool dispatch seam must route SessionError
+        // through the typed `LiveToolDispatchError::from_session_error` owner
+        // instead of collapsing every non-NotFound variant into a prose-only
+        // `Internal(to_string())`. A `Busy` error must land in the distinct
+        // typed `SessionBusy` variant (the class the inline match previously
+        // erased), and a `NotFound` must land in `SessionNotFound` — both
+        // preserving the terminal class for callers downstream of the live
+        // adapter.
+        let session_id = SessionId::new();
+        let busy = meerkat_live::LiveToolDispatchError::from_session_error(
+            &session_id,
+            SessionError::Busy {
+                id: session_id.clone(),
+            },
+        );
+        assert!(
+            matches!(busy, meerkat_live::LiveToolDispatchError::SessionBusy(_)),
+            "Busy must map to the typed SessionBusy variant, not Internal"
+        );
+        let not_found = meerkat_live::LiveToolDispatchError::from_session_error(
+            &session_id,
+            SessionError::NotFound {
+                id: session_id.clone(),
+            },
+        );
+        assert!(matches!(
+            not_found,
+            meerkat_live::LiveToolDispatchError::SessionNotFound(_)
+        ));
     }
 
     #[cfg(feature = "mob")]

@@ -2492,7 +2492,9 @@ rust_test(
         "live",
         "required-feature",
     ],
-    data = [],
+    data = [
+        ":package_runfiles",
+    ],
     env = {
         "RUST_MIN_STACK": "16777216",
     },

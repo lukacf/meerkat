@@ -1,7 +1,7 @@
 use super::conditions::evaluate_condition;
 use super::events::MobEventEmitter;
 use super::handle::MobHandle;
-use super::path::resolve_context_path;
+use super::path::resolve_context_path_opt;
 use super::supervisor::Supervisor;
 use super::terminalization::{
     FlowTerminalizationAuthority, TerminalizationOutcome, TerminalizationTarget,
@@ -428,14 +428,16 @@ impl FlowEngine {
         }
 
         // ── 1. Condition check ─────────────────────────────────────────────
-        if evaluate_condition_guard
-            && step
-                .condition
-                .as_ref()
-                .is_some_and(|cond| !evaluate_condition(cond, context))
-        {
-            let reason = "condition evaluated to false".to_string();
-            return Ok(StepGuardOutcome::Skipped { reason });
+        if evaluate_condition_guard && let Some(cond) = step.condition.as_ref() {
+            let condition_met =
+                evaluate_condition(cond, context).map_err(|error| MobError::ConditionEval {
+                    location: format!("step '{step_id}'"),
+                    reason: error.to_string(),
+                })?;
+            if !condition_met {
+                let reason = "condition evaluated to false".to_string();
+                return Ok(StepGuardOutcome::Skipped { reason });
+            }
         }
 
         // ── 2. Prompt rendering ────────────────────────────────────────────
@@ -2367,7 +2369,11 @@ fn render_content_input_template(
 }
 
 fn resolve_template_value<'a>(expression: &str, context: &'a FlowContext) -> Option<&'a Value> {
-    resolve_context_path(context, expression)
+    // Template rendering legitimately treats an unresolved reference as an
+    // absent placeholder (rendered as null), so the lossy `_opt` view is the
+    // correct seam here — distinct from condition evaluation, which fails
+    // closed on the same unresolved reference.
+    resolve_context_path_opt(context, expression)
 }
 
 // ─── FlowTurnExecutorAdapter ────────────────────────────────────────────────

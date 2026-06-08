@@ -29,7 +29,11 @@ impl LoopState {
 ",
     );
 
-    let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
+    let findings = collect_findings(
+        dir.path(),
+        &AuditPolicy::load().expect("audit policy loads"),
+    )
+    .expect("findings");
     assert!(findings.iter().any(|finding| {
         finding.key.rule == "NoParallelTransitionTable"
             && finding.key.path == "meerkat-core/src/state.rs"
@@ -56,7 +60,11 @@ fn probe(driver: &mut Driver) {
 ",
     );
 
-    let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
+    let findings = collect_findings(
+        dir.path(),
+        &AuditPolicy::load().expect("audit policy loads"),
+    )
+    .expect("findings");
     assert!(
         findings
             .iter()
@@ -81,7 +89,11 @@ fn future_shell_hook() {}
 ",
     );
 
-    let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
+    let findings = collect_findings(
+        dir.path(),
+        &AuditPolicy::load().expect("audit policy loads"),
+    )
+    .expect("findings");
     assert!(findings.iter().any(|finding| {
         finding.key.rule == "NoDeadAuthorityWiring"
             && finding.key.path == "meerkat-mob/src/runtime/actor.rs"
@@ -108,7 +120,11 @@ fn wrong(driver: &mut Driver) {
 ",
     );
 
-    let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
+    let findings = collect_findings(
+        dir.path(),
+        &AuditPolicy::load().expect("audit policy loads"),
+    )
+    .expect("findings");
     assert!(findings.iter().any(|finding| {
         finding.key.rule == "NoShellSemanticFlagWrites"
             && finding.key.path == "meerkat-runtime/src/driver/ephemeral.rs"
@@ -126,7 +142,11 @@ enum ReservationState { Reserved, Attached, Completed }
 ",
     );
 
-    let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
+    let findings = collect_findings(
+        dir.path(),
+        &AuditPolicy::load().expect("audit policy loads"),
+    )
+    .expect("findings");
     assert!(
         findings
             .iter()
@@ -146,7 +166,11 @@ enum ReservationState { Reserved, Attached, Completed }
 ",
     );
 
-    let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
+    let findings = collect_findings(
+        dir.path(),
+        &AuditPolicy::load().expect("audit policy loads"),
+    )
+    .expect("findings");
     let finding = findings
         .iter()
         .find(|finding| finding.key.rule == "LifecycleSuspicionReport")
@@ -173,7 +197,11 @@ impl Actor {
 ",
     );
 
-    let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
+    let findings = collect_findings(
+        dir.path(),
+        &AuditPolicy::load().expect("audit policy loads"),
+    )
+    .expect("findings");
     assert!(findings.iter().any(|finding| {
         finding.key.rule == "ForbiddenShellAuthorityReads"
             && finding.key.path == "meerkat-mob/src/runtime/actor.rs"
@@ -200,7 +228,11 @@ impl Actor {
 ",
     );
 
-    let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
+    let findings = collect_findings(
+        dir.path(),
+        &AuditPolicy::load().expect("audit policy loads"),
+    )
+    .expect("findings");
     assert!(
         !findings
             .iter()
@@ -226,7 +258,11 @@ fn route(policy: &Policy) -> u8 {
 ",
     );
 
-    let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
+    let findings = collect_findings(
+        dir.path(),
+        &AuditPolicy::load().expect("audit policy loads"),
+    )
+    .expect("findings");
     let forbidden: Vec<_> = findings
         .iter()
         .filter(|finding| finding.key.rule == "ForbiddenShellAuthorityReads")
@@ -253,7 +289,11 @@ struct Router { removal_timeouts: HashMap<String, u64> }
 ",
     );
 
-    let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
+    let findings = collect_findings(
+        dir.path(),
+        &AuditPolicy::load().expect("audit policy loads"),
+    )
+    .expect("findings");
     assert!(findings.iter().any(|finding| {
         finding.key.rule == "ForbiddenShellAuthorityReads"
             && finding.key.path == "meerkat-mcp/src/router.rs"
@@ -276,7 +316,11 @@ struct MobActor {
 ",
     );
 
-    let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
+    let findings = collect_findings(
+        dir.path(),
+        &AuditPolicy::load().expect("audit policy loads"),
+    )
+    .expect("findings");
     let has_symbol = |needle: &str| {
         findings.iter().any(|finding| {
             finding.key.rule == "ForbiddenShellAuthorityReads" && finding.key.symbol == needle
@@ -304,7 +348,11 @@ fn projection() -> Snapshot {
 ",
     );
 
-    let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
+    let findings = collect_findings(
+        dir.path(),
+        &AuditPolicy::load().expect("audit policy loads"),
+    )
+    .expect("findings");
     assert!(
         !findings
             .iter()
@@ -328,7 +376,11 @@ struct Router {
 ",
     );
 
-    let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
+    let findings = collect_findings(
+        dir.path(),
+        &AuditPolicy::load().expect("audit policy loads"),
+    )
+    .expect("findings");
     let finding = findings
         .iter()
         .find(|finding| {
@@ -357,7 +409,11 @@ struct Router {
 ",
     );
 
-    let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
+    let findings = collect_findings(
+        dir.path(),
+        &AuditPolicy::load().expect("audit policy loads"),
+    )
+    .expect("findings");
     let finding = findings
         .iter()
         .find(|finding| {
@@ -393,7 +449,7 @@ fn legacy_rmat_read_seam_script_is_removed() {
 
 #[test]
 fn rmat_policy_knows_workgraph_attention_route() {
-    let policy = AuditPolicy::load();
+    let policy = AuditPolicy::load().expect("audit policy loads");
     let rule = policy
         .routed_effect_realizations
         .iter()
@@ -433,7 +489,11 @@ enum AnotherState { Pending, Running, Completed }
 ",
     );
 
-    let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
+    let findings = collect_findings(
+        dir.path(),
+        &AuditPolicy::load().expect("audit policy loads"),
+    )
+    .expect("findings");
     let reservation = findings
         .iter()
         .find(|finding| {

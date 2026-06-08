@@ -1706,7 +1706,13 @@ fn value_matches_type(schema: &MachineSchema, value: &KernelValue, ty: &TypeRef)
 
     match (value, ty) {
         (KernelValue::Bool(_), TypeRef::Bool) => true,
-        (KernelValue::U64(_), TypeRef::U32 | TypeRef::U64) => true,
+        // dogma #172 (runtime half): U32 and U64 are distinct bounded domains,
+        // not a collapsed numeric alias. A value bound to a `U32` field must fit
+        // in u32 width; the kernel rejects out-of-range values fail-closed
+        // rather than silently accepting any u64. (The matching distinct-domain
+        // TLA emission is the codegen half, landed in the keystone-A pass.)
+        (KernelValue::U64(value), TypeRef::U32) => u32::try_from(*value).is_ok(),
+        (KernelValue::U64(_), TypeRef::U64) => true,
         (KernelValue::String(_), TypeRef::String) => true,
         (KernelValue::Named { type_name, value }, TypeRef::Named(name)) if type_name == name => {
             named_type_inner_matches(schema, name, value.as_ref())

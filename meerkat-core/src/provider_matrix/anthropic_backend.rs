@@ -1,5 +1,7 @@
 //! Anthropic backend kinds (typed, provider-owned).
 
+use super::anthropic_auth::AnthropicAuthMethod;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AnthropicBackendKind {
     /// Native `api.anthropic.com` API (Claude.ai / Console).
@@ -35,6 +37,35 @@ impl AnthropicBackendKind {
             Self::Bedrock => "bedrock",
             Self::Vertex => "vertex",
             Self::Foundry => "foundry",
+        }
+    }
+
+    /// The Anthropic auth methods this backend supports — the provider-owned
+    /// (backend, auth) compatibility policy that the provider-runtime
+    /// `supports()` seam delegates to (dogma rows #122/#178).
+    pub fn supported_auth_methods(self) -> &'static [AnthropicAuthMethod] {
+        match self {
+            Self::AnthropicApi => &[
+                AnthropicAuthMethod::ApiKey,
+                AnthropicAuthMethod::StaticBearer,
+                AnthropicAuthMethod::ClaudeAiOauth,
+                AnthropicAuthMethod::OauthToApiKey,
+                AnthropicAuthMethod::ExternalAuthorizer,
+            ],
+            Self::Bedrock => &[
+                AnthropicAuthMethod::BedrockBearer,
+                AnthropicAuthMethod::BedrockAwsSigv4,
+                AnthropicAuthMethod::ExternalAuthorizer,
+            ],
+            Self::Vertex => &[
+                AnthropicAuthMethod::VertexGoogleAuth,
+                AnthropicAuthMethod::ExternalAuthorizer,
+            ],
+            Self::Foundry => &[
+                AnthropicAuthMethod::FoundryApiKey,
+                AnthropicAuthMethod::FoundryAzureAd,
+                AnthropicAuthMethod::ExternalAuthorizer,
+            ],
         }
     }
     pub fn default_base_url(self) -> &'static str {

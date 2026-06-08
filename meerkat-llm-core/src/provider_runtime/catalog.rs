@@ -196,84 +196,32 @@ impl ProviderRuntimeCatalog {
         }
     }
 
+    /// Whether a `(backend, auth)` pairing is supported.
+    ///
+    /// Dogma rows #122/#178: each provider's backend enum in
+    /// `meerkat_core::provider_matrix` owns its supported auth-method set via
+    /// `supported_auth_methods()`. This seam only dispatches by provider and
+    /// delegates — adding/removing a supported pairing is a single edit in the
+    /// owning provider module, not a change to a global hand-maintained match
+    /// table. A cross-provider pairing (e.g. an OpenAI backend with an
+    /// Anthropic auth method) is never supported.
     pub fn supports(backend: NormalizedBackendKind, auth: NormalizedAuthMethod) -> bool {
-        matches!(
-            (backend, auth),
+        match (backend, auth) {
+            (NormalizedBackendKind::OpenAi(backend), NormalizedAuthMethod::OpenAi(auth)) => {
+                backend.supported_auth_methods().contains(&auth)
+            }
+            (NormalizedBackendKind::Anthropic(backend), NormalizedAuthMethod::Anthropic(auth)) => {
+                backend.supported_auth_methods().contains(&auth)
+            }
+            (NormalizedBackendKind::Google(backend), NormalizedAuthMethod::Google(auth)) => {
+                backend.supported_auth_methods().contains(&auth)
+            }
             (
-                NormalizedBackendKind::OpenAi(OpenAiBackendKind::OpenAiApi),
-                NormalizedAuthMethod::OpenAi(
-                    OpenAiAuthMethod::ApiKey
-                        | OpenAiAuthMethod::StaticBearer
-                        | OpenAiAuthMethod::ExternalAuthorizer,
-                ),
-            ) | (
-                NormalizedBackendKind::OpenAi(OpenAiBackendKind::AzureOpenAi),
-                NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::AzureApiKey),
-            ) | (
-                NormalizedBackendKind::OpenAi(OpenAiBackendKind::ChatGptBackend),
-                NormalizedAuthMethod::OpenAi(
-                    OpenAiAuthMethod::ManagedChatGptOauth | OpenAiAuthMethod::ExternalChatGptTokens,
-                ),
-            ) | (
-                NormalizedBackendKind::Anthropic(AnthropicBackendKind::AnthropicApi),
-                NormalizedAuthMethod::Anthropic(
-                    AnthropicAuthMethod::ApiKey
-                        | AnthropicAuthMethod::StaticBearer
-                        | AnthropicAuthMethod::ClaudeAiOauth
-                        | AnthropicAuthMethod::OauthToApiKey
-                        | AnthropicAuthMethod::ExternalAuthorizer,
-                ),
-            ) | (
-                NormalizedBackendKind::Anthropic(AnthropicBackendKind::Bedrock),
-                NormalizedAuthMethod::Anthropic(
-                    AnthropicAuthMethod::BedrockBearer
-                        | AnthropicAuthMethod::BedrockAwsSigv4
-                        | AnthropicAuthMethod::ExternalAuthorizer,
-                ),
-            ) | (
-                NormalizedBackendKind::Anthropic(AnthropicBackendKind::Vertex),
-                NormalizedAuthMethod::Anthropic(
-                    AnthropicAuthMethod::VertexGoogleAuth | AnthropicAuthMethod::ExternalAuthorizer,
-                ),
-            ) | (
-                NormalizedBackendKind::Anthropic(AnthropicBackendKind::Foundry),
-                NormalizedAuthMethod::Anthropic(
-                    AnthropicAuthMethod::FoundryApiKey
-                        | AnthropicAuthMethod::FoundryAzureAd
-                        | AnthropicAuthMethod::ExternalAuthorizer,
-                ),
-            ) | (
-                NormalizedBackendKind::Google(GoogleBackendKind::GoogleGenAi),
-                NormalizedAuthMethod::Google(
-                    GoogleAuthMethod::ApiKey
-                        | GoogleAuthMethod::BearerApiKey
-                        | GoogleAuthMethod::ExternalAuthorizer,
-                ),
-            ) | (
-                NormalizedBackendKind::Google(GoogleBackendKind::VertexAi),
-                NormalizedAuthMethod::Google(
-                    GoogleAuthMethod::Adc
-                        | GoogleAuthMethod::ApiKeyExpress
-                        | GoogleAuthMethod::ExternalAuthorizer,
-                ),
-            ) | (
-                NormalizedBackendKind::Google(GoogleBackendKind::GoogleCodeAssist),
-                NormalizedAuthMethod::Google(
-                    GoogleAuthMethod::GoogleOauth
-                        | GoogleAuthMethod::ComputeAdc
-                        | GoogleAuthMethod::ExternalAuthorizer,
-                ),
-            ) | (
-                NormalizedBackendKind::SelfHosted(
-                    SelfHostedBackendKind::SelfHosted | SelfHostedBackendKind::OpenAiCompatible,
-                ),
-                NormalizedAuthMethod::SelfHosted(
-                    SelfHostedAuthMethod::ApiKey
-                        | SelfHostedAuthMethod::None
-                        | SelfHostedAuthMethod::StaticBearer,
-                ),
-            )
-        )
+                NormalizedBackendKind::SelfHosted(backend),
+                NormalizedAuthMethod::SelfHosted(auth),
+            ) => backend.supported_auth_methods().contains(&auth),
+            _ => false,
+        }
     }
 }
 
@@ -450,6 +398,62 @@ mod tests {
             NormalizedBackendKind::OpenAi(OpenAiBackendKind::OpenAiApi),
             NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::ApiKey),
         ));
+    }
+
+    #[test]
+    fn catalog_supports_delegates_to_provider_owned_declarations() {
+        // Dogma rows #122/#178: the catalog only dispatches by provider; each
+        // backend's `supported_auth_methods()` in
+        // `meerkat_core::provider_matrix` is the single owner of its
+        // (backend, auth) policy. The catalog answer must equal that
+        // declaration for every in-provider pair, proving there is no separate
+        // hand-maintained compatibility table that could drift.
+        for &backend in OpenAiBackendKind::ALL {
+            for &auth in OpenAiAuthMethod::ALL {
+                assert_eq!(
+                    ProviderRuntimeCatalog::supports(
+                        NormalizedBackendKind::OpenAi(backend),
+                        NormalizedAuthMethod::OpenAi(auth),
+                    ),
+                    backend.supported_auth_methods().contains(&auth),
+                    "OpenAi {backend:?}/{auth:?}",
+                );
+            }
+        }
+        for &backend in AnthropicBackendKind::ALL {
+            for &auth in AnthropicAuthMethod::ALL {
+                assert_eq!(
+                    ProviderRuntimeCatalog::supports(
+                        NormalizedBackendKind::Anthropic(backend),
+                        NormalizedAuthMethod::Anthropic(auth),
+                    ),
+                    backend.supported_auth_methods().contains(&auth),
+                    "Anthropic {backend:?}/{auth:?}",
+                );
+            }
+        }
+        for &backend in GoogleBackendKind::ALL {
+            for &auth in GoogleAuthMethod::ALL {
+                assert_eq!(
+                    ProviderRuntimeCatalog::supports(
+                        NormalizedBackendKind::Google(backend),
+                        NormalizedAuthMethod::Google(auth),
+                    ),
+                    backend.supported_auth_methods().contains(&auth),
+                    "Google {backend:?}/{auth:?}",
+                );
+            }
+        }
+        // Self-hosted backends share one declaration; spot-check both edges.
+        assert!(ProviderRuntimeCatalog::supports(
+            NormalizedBackendKind::SelfHosted(SelfHostedBackendKind::OpenAiCompatible),
+            NormalizedAuthMethod::SelfHosted(SelfHostedAuthMethod::StaticBearer),
+        ));
+        assert!(
+            SelfHostedBackendKind::SelfHosted
+                .supported_auth_methods()
+                .contains(&SelfHostedAuthMethod::None)
+        );
     }
 
     #[test]

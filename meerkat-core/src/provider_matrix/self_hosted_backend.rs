@@ -1,5 +1,7 @@
 //! Self-hosted backend kinds (typed, provider-owned).
 
+use super::self_hosted_auth::SelfHostedAuthMethod;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SelfHostedBackendKind {
     SelfHosted,
@@ -19,6 +21,20 @@ impl SelfHostedBackendKind {
         match self {
             Self::SelfHosted => "self_hosted",
             Self::OpenAiCompatible => "openai_compatible",
+        }
+    }
+
+    /// The self-hosted auth methods this backend supports — the provider-owned
+    /// (backend, auth) compatibility policy that the provider-runtime
+    /// `supports()` seam delegates to (dogma rows #122/#178). Both backend
+    /// kinds accept the same minimal credential set.
+    pub fn supported_auth_methods(self) -> &'static [SelfHostedAuthMethod] {
+        match self {
+            Self::SelfHosted | Self::OpenAiCompatible => &[
+                SelfHostedAuthMethod::ApiKey,
+                SelfHostedAuthMethod::None,
+                SelfHostedAuthMethod::StaticBearer,
+            ],
         }
     }
 }

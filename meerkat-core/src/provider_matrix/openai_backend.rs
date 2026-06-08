@@ -1,5 +1,7 @@
 //! OpenAI backend kinds (typed, provider-owned).
 
+use super::openai_auth::OpenAiAuthMethod;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OpenAiBackendKind {
     OpenAiApi,
@@ -32,6 +34,26 @@ impl OpenAiBackendKind {
             Self::OpenAiApi => "openai_api",
             Self::ChatGptBackend => "chatgpt_backend",
             Self::AzureOpenAi => "azure_openai",
+        }
+    }
+
+    /// The OpenAI auth methods this backend supports — the provider-owned
+    /// (backend, auth) compatibility policy. Adding or removing a supported
+    /// pairing is a single edit here; the cross-provider `supports()` seam in
+    /// the provider-runtime catalog delegates to this declaration instead of
+    /// hand-maintaining a global match table (dogma rows #122/#178).
+    pub fn supported_auth_methods(self) -> &'static [OpenAiAuthMethod] {
+        match self {
+            Self::OpenAiApi => &[
+                OpenAiAuthMethod::ApiKey,
+                OpenAiAuthMethod::StaticBearer,
+                OpenAiAuthMethod::ExternalAuthorizer,
+            ],
+            Self::ChatGptBackend => &[
+                OpenAiAuthMethod::ManagedChatGptOauth,
+                OpenAiAuthMethod::ExternalChatGptTokens,
+            ],
+            Self::AzureOpenAi => &[OpenAiAuthMethod::AzureApiKey],
         }
     }
 

@@ -14,6 +14,35 @@ pub enum MobMemberCapability {
     InteractionEventInjector,
 }
 
+/// Mob-owned classification of why a mob operation failed.
+///
+/// This is the typed owner of "what class of failure does this `MobError`
+/// represent" — the knowledge of which variants are missing-target vs busy vs
+/// transport vs internal lives next to the variants themselves, not in
+/// downstream classifiers that re-`match` the enum.
+///
+/// Consumers (e.g. the schedule delivery host) map this onto their own
+/// domain-failure vocabulary (`DeliveryFailureReason`); the mapping lives at
+/// the consumer because the schedule-failure type is owned by a crate
+/// `meerkat-mob` does not (and must not) depend on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MobFailureClass {
+    /// The addressed mob/profile/member/flow/run/work does not exist.
+    TargetMissing,
+    /// The target exists but cannot accept the operation right now
+    /// (e.g. a member id collision).
+    TargetBusy,
+    /// A transport/persistence/session/timeout fault prevented delivery.
+    Transport,
+    /// A runtime accepted the work but parked at an external boundary
+    /// (callback pending) rather than completing.
+    RuntimeRejected,
+    /// An internal/unexpected-state fault.
+    Internal,
+    /// The mob authority rejected the operation on its own terms.
+    MobRejected,
+}
+
 impl std::fmt::Display for MobMemberCapability {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -353,6 +382,42 @@ impl MobError {
             _ => None,
         }
     }
+
+    /// Whether this error means the addressed target (mob, profile, member,
+    /// flow, run, or work unit) does not exist.
+    ///
+    /// Owned here so target-existence probing does not re-`match` the
+    /// `MobError` variant list in downstream classifiers.
+    pub fn is_missing_target(&self) -> bool {
+        matches!(self.failure_class(), MobFailureClass::TargetMissing)
+    }
+
+    /// Classify this error into the mob-owned [`MobFailureClass`].
+    ///
+    /// This is the single source of truth for which `MobError` variants fall
+    /// into which failure class; consumers map [`MobFailureClass`] onto their
+    /// own domain vocabularies rather than re-matching the variant list.
+    pub fn failure_class(&self) -> MobFailureClass {
+        match self {
+            Self::MobNotFound(_)
+            | Self::ProfileNotFound(_)
+            | Self::MemberNotFound(_)
+            | Self::FlowNotFound(_)
+            | Self::RunNotFound(_)
+            | Self::WorkNotFound(_) => MobFailureClass::TargetMissing,
+            Self::MemberAlreadyExists(_) => MobFailureClass::TargetBusy,
+            Self::StorageError(_)
+            | Self::SessionError(_)
+            | Self::CommsError(_)
+            | Self::MemberRestoreFailed { .. }
+            | Self::KickoffWaitTimedOut { .. }
+            | Self::ReadyWaitTimedOut { .. }
+            | Self::FlowTurnTimedOut => MobFailureClass::Transport,
+            Self::Internal(_) => MobFailureClass::Internal,
+            Self::CallbackPending { .. } => MobFailureClass::RuntimeRejected,
+            _ => MobFailureClass::MobRejected,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -549,5 +614,70 @@ mod tests {
             },
             MobError::Internal("i".to_string()),
         ];
+    }
+
+    #[test]
+    fn failure_class_partitions_missing_target_variants() {
+        // The missing-target class is the authority `is_missing_target`
+        // delegates to; both must agree on the same variant partition.
+        let missing = [
+            MobError::MobNotFound(MobId::from("mob")),
+            MobError::ProfileNotFound(ProfileName::from("p")),
+            MobError::MemberNotFound(MeerkatId::from("m")),
+            MobError::FlowNotFound(FlowId::from("f")),
+            MobError::RunNotFound(RunId::new()),
+            MobError::WorkNotFound(WorkRef::new()),
+        ];
+        for err in &missing {
+            assert_eq!(
+                err.failure_class(),
+                MobFailureClass::TargetMissing,
+                "{err} should classify as TargetMissing",
+            );
+            assert!(
+                err.is_missing_target(),
+                "{err} should report is_missing_target()",
+            );
+        }
+    }
+
+    #[test]
+    fn failure_class_maps_non_missing_variants() {
+        let cases = [
+            (
+                MobError::MemberAlreadyExists(MeerkatId::from("m")),
+                MobFailureClass::TargetBusy,
+            ),
+            (
+                MobError::StorageError(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "e",
+                ))),
+                MobFailureClass::Transport,
+            ),
+            (MobError::FlowTurnTimedOut, MobFailureClass::Transport),
+            (
+                MobError::CallbackPending {
+                    session_id: meerkat_core::types::SessionId::new(),
+                    tool_name: "t".to_string(),
+                    args: serde_json::Value::Null,
+                },
+                MobFailureClass::RuntimeRejected,
+            ),
+            (
+                MobError::Internal("i".to_string()),
+                MobFailureClass::Internal,
+            ),
+            // A variant outside every explicit arm falls through to the
+            // mob-rejected default.
+            (MobError::ResetBarrier, MobFailureClass::MobRejected),
+        ];
+        for (err, expected) in &cases {
+            assert_eq!(err.failure_class(), *expected, "{err} misclassified");
+            assert!(
+                !err.is_missing_target(),
+                "{err} must not report is_missing_target()",
+            );
+        }
     }
 }

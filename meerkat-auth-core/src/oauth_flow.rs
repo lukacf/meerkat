@@ -37,6 +37,12 @@ const ANTHROPIC_CLAUDE_AI_SCOPES: &[&str] = &[
     "user:file_upload",
 ];
 
+// OpenAI ChatGPT OAuth provider facts are owned by the single
+// `OAuthProviderDeclaration` for `OAuthProviderIdentity::OpenAiChatGpt`
+// (see `declaration()` below). They are re-exported from this crate so the
+// `meerkat-openai` runtime reads them from here instead of redeclaring its own
+// `CHATGPT_*` constant set (dogma row #123). The dependency direction is
+// `meerkat-openai -> meerkat-auth-core`, so auth-core is the only legal home.
 const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 const OPENAI_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
@@ -79,6 +85,41 @@ pub enum OAuthProviderIdentity {
     #[serde(rename = "google_code_assist")]
     GoogleCodeAssist,
 }
+
+/// Single, provider-owned declaration of the static OAuth provider facts:
+/// `client_id`, the authorize/token endpoints, the requested scopes, and the
+/// typed backend kind these credentials target.
+///
+/// This is the one canonical home for each provider's verbatim OAuth
+/// constants. Both the auth-core login flow ([`OAuthProviderIdentity::endpoints`])
+/// and the per-provider runtimes (`meerkat-openai`'s ChatGPT runtime) read the
+/// same declaration rather than each redeclaring the literals. Precedent:
+/// the provider-owned typed enums in `meerkat_core::provider_matrix`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OAuthProviderDeclaration {
+    /// OAuth client identifier registered with the provider.
+    pub client_id: &'static str,
+    /// Authorization endpoint (browser consent flow).
+    pub authorize_endpoint: &'static str,
+    /// Token-exchange endpoint.
+    pub token_endpoint: &'static str,
+    /// Scopes requested at authorize time.
+    pub scopes: &'static [&'static str],
+    /// Typed backend kind these credentials authenticate against.
+    pub backend_kind: NormalizedBackendKind,
+    /// Provider-specific authorize-query params that are part of the public
+    /// login contract (e.g. the OpenAI `originator`). Empty for providers that
+    /// require none.
+    pub extra_authorize_params: &'static [(&'static str, &'static str)],
+}
+
+const OPENAI_EXTRA_AUTHORIZE_PARAMS: &[(&str, &str)] = &[
+    ("id_token_add_organizations", "true"),
+    ("codex_cli_simplified_flow", "true"),
+    ("originator", OPENAI_ORIGINATOR),
+];
+
+const ANTHROPIC_CLAUDE_AI_EXTRA_AUTHORIZE_PARAMS: &[(&str, &str)] = &[("code", "true")];
 
 impl OAuthProviderIdentity {
     pub fn from_alias(alias: &str) -> Option<Self> {
@@ -139,48 +180,93 @@ impl OAuthProviderIdentity {
         }
     }
 
+    /// The single, canonical declaration of this provider's static OAuth facts
+    /// (`client_id`, authorize/token endpoints, scopes, typed backend kind, and
+    /// provider-specific authorize params). The login flow builds
+    /// [`OAuthEndpoints`] from this declaration, and the per-provider runtimes
+    /// read the same declaration — neither side redeclares the literals.
+    pub fn declaration(self) -> OAuthProviderDeclaration {
+        let backend_kind = self.normalized_backend_kind();
+        match self {
+            Self::AnthropicClaudeAi => OAuthProviderDeclaration {
+                client_id: ANTHROPIC_CLIENT_ID,
+                authorize_endpoint: ANTHROPIC_AUTHORIZE_URL,
+                token_endpoint: ANTHROPIC_TOKEN_URL,
+                scopes: ANTHROPIC_CLAUDE_AI_SCOPES,
+                backend_kind,
+                extra_authorize_params: ANTHROPIC_CLAUDE_AI_EXTRA_AUTHORIZE_PARAMS,
+            },
+            Self::AnthropicConsoleApiKey => OAuthProviderDeclaration {
+                client_id: ANTHROPIC_CLIENT_ID,
+                authorize_endpoint: ANTHROPIC_CONSOLE_AUTHORIZE_URL,
+                token_endpoint: ANTHROPIC_TOKEN_URL,
+                scopes: ANTHROPIC_CONSOLE_SCOPES,
+                backend_kind,
+                extra_authorize_params: &[],
+            },
+            Self::OpenAiChatGpt => OAuthProviderDeclaration {
+                client_id: OPENAI_CLIENT_ID,
+                authorize_endpoint: OPENAI_AUTHORIZE_URL,
+                token_endpoint: OPENAI_TOKEN_URL,
+                scopes: OPENAI_SCOPES,
+                backend_kind,
+                extra_authorize_params: OPENAI_EXTRA_AUTHORIZE_PARAMS,
+            },
+            Self::GoogleCodeAssist => OAuthProviderDeclaration {
+                client_id: GOOGLE_CLIENT_ID,
+                authorize_endpoint: GOOGLE_AUTHORIZE_URL,
+                token_endpoint: GOOGLE_TOKEN_URL,
+                scopes: GOOGLE_SCOPES,
+                backend_kind,
+                extra_authorize_params: &[],
+            },
+        }
+    }
+
     pub fn endpoints(self, redirect_uri: impl Into<String>) -> OAuthEndpoints {
+        let declaration = self.declaration();
+        let extra_authorize_params = declaration
+            .extra_authorize_params
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect();
         let endpoints = match self {
             Self::AnthropicClaudeAi => OAuthEndpoints {
-                client_id: ANTHROPIC_CLIENT_ID.into(),
-                authorize_url: ANTHROPIC_AUTHORIZE_URL.into(),
-                token_url: ANTHROPIC_TOKEN_URL.into(),
+                client_id: declaration.client_id.into(),
+                authorize_url: declaration.authorize_endpoint.into(),
+                token_url: declaration.token_endpoint.into(),
                 device_code_url: None,
                 redirect_uri: redirect_uri.into(),
-                scopes: strings(ANTHROPIC_CLAUDE_AI_SCOPES),
-                extra_authorize_params: vec![("code".into(), "true".into())],
+                scopes: strings(declaration.scopes),
+                extra_authorize_params,
                 token_request_format: OAuthTokenRequestFormat::Json,
                 include_state_in_token_exchange: true,
                 extra_token_params: Vec::new(),
-                refresh_scopes: strings(ANTHROPIC_CLAUDE_AI_SCOPES),
+                refresh_scopes: strings(declaration.scopes),
                 extra_headers: Vec::new(),
             },
             Self::AnthropicConsoleApiKey => OAuthEndpoints {
-                client_id: ANTHROPIC_CLIENT_ID.into(),
-                authorize_url: ANTHROPIC_CONSOLE_AUTHORIZE_URL.into(),
-                token_url: ANTHROPIC_TOKEN_URL.into(),
+                client_id: declaration.client_id.into(),
+                authorize_url: declaration.authorize_endpoint.into(),
+                token_url: declaration.token_endpoint.into(),
                 device_code_url: None,
                 redirect_uri: redirect_uri.into(),
-                scopes: strings(ANTHROPIC_CONSOLE_SCOPES),
-                extra_authorize_params: Vec::new(),
+                scopes: strings(declaration.scopes),
+                extra_authorize_params,
                 token_request_format: OAuthTokenRequestFormat::Json,
                 include_state_in_token_exchange: true,
                 extra_token_params: Vec::new(),
-                refresh_scopes: strings(ANTHROPIC_CONSOLE_SCOPES),
+                refresh_scopes: strings(declaration.scopes),
                 extra_headers: Vec::new(),
             },
             Self::OpenAiChatGpt => OAuthEndpoints {
-                client_id: OPENAI_CLIENT_ID.into(),
-                authorize_url: OPENAI_AUTHORIZE_URL.into(),
-                token_url: OPENAI_TOKEN_URL.into(),
+                client_id: declaration.client_id.into(),
+                authorize_url: declaration.authorize_endpoint.into(),
+                token_url: declaration.token_endpoint.into(),
                 device_code_url: None,
                 redirect_uri: redirect_uri.into(),
-                scopes: strings(OPENAI_SCOPES),
-                extra_authorize_params: vec![
-                    ("id_token_add_organizations".into(), "true".into()),
-                    ("codex_cli_simplified_flow".into(), "true".into()),
-                    ("originator".into(), OPENAI_ORIGINATOR.into()),
-                ],
+                scopes: strings(declaration.scopes),
+                extra_authorize_params,
                 token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
                 include_state_in_token_exchange: false,
                 extra_token_params: Vec::new(),
@@ -188,13 +274,13 @@ impl OAuthProviderIdentity {
                 extra_headers: Vec::new(),
             },
             Self::GoogleCodeAssist => OAuthEndpoints {
-                client_id: GOOGLE_CLIENT_ID.into(),
-                authorize_url: GOOGLE_AUTHORIZE_URL.into(),
-                token_url: GOOGLE_TOKEN_URL.into(),
+                client_id: declaration.client_id.into(),
+                authorize_url: declaration.authorize_endpoint.into(),
+                token_url: declaration.token_endpoint.into(),
                 device_code_url: Some(GOOGLE_DEVICE_CODE_URL.into()),
                 redirect_uri: redirect_uri.into(),
-                scopes: strings(GOOGLE_SCOPES),
-                extra_authorize_params: Vec::new(),
+                scopes: strings(declaration.scopes),
+                extra_authorize_params,
                 token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
                 include_state_in_token_exchange: false,
                 extra_token_params: Vec::new(),
@@ -2458,5 +2544,73 @@ mod tests {
                 .extra_authorize_params
                 .contains(&("code".to_string(), "true".to_string()))
         );
+    }
+
+    #[test]
+    fn openai_declaration_is_the_single_owner_of_chatgpt_oauth_facts() {
+        use meerkat_core::provider_matrix::openai::OpenAiBackendKind;
+
+        // Gate: the canonical OpenAI ChatGPT OAuth declaration carries the exact
+        // provider values. This is the one home for these literals; the
+        // `meerkat-openai` runtime reads this declaration instead of redeclaring
+        // its own `CHATGPT_*` constant set (dogma row #123).
+        let declaration = OAuthProviderIdentity::OpenAiChatGpt.declaration();
+        assert_eq!(declaration.client_id, "app_EMoamEEZ73f0CkXaXp7hrann");
+        assert_eq!(
+            declaration.authorize_endpoint,
+            "https://auth.openai.com/oauth/authorize"
+        );
+        assert_eq!(
+            declaration.token_endpoint,
+            "https://auth.openai.com/oauth/token"
+        );
+        assert_eq!(
+            declaration.scopes,
+            &[
+                "openid",
+                "profile",
+                "email",
+                "offline_access",
+                "api.connectors.read",
+                "api.connectors.invoke",
+            ]
+        );
+        assert_eq!(
+            declaration.backend_kind,
+            NormalizedBackendKind::OpenAi(OpenAiBackendKind::ChatGptBackend)
+        );
+        assert_eq!(
+            declaration.extra_authorize_params,
+            &[
+                ("id_token_add_organizations", "true"),
+                ("codex_cli_simplified_flow", "true"),
+                ("originator", "codex_cli_rs"),
+            ]
+        );
+    }
+
+    #[test]
+    fn endpoints_are_built_from_the_declaration() {
+        // The login flow's `OAuthEndpoints` must be a faithful projection of the
+        // single declaration, so there is no second source of truth.
+        for identity in [
+            OAuthProviderIdentity::AnthropicClaudeAi,
+            OAuthProviderIdentity::AnthropicConsoleApiKey,
+            OAuthProviderIdentity::OpenAiChatGpt,
+            OAuthProviderIdentity::GoogleCodeAssist,
+        ] {
+            let declaration = identity.declaration();
+            let endpoints = identity.endpoints("http://127.0.0.1:0/callback");
+            assert_eq!(endpoints.client_id, declaration.client_id);
+            assert_eq!(endpoints.authorize_url, declaration.authorize_endpoint);
+            assert_eq!(endpoints.token_url, declaration.token_endpoint);
+            assert_eq!(endpoints.scopes, strings(declaration.scopes));
+            let expected_params: Vec<(String, String)> = declaration
+                .extra_authorize_params
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect();
+            assert_eq!(endpoints.extra_authorize_params, expected_params);
+        }
     }
 }

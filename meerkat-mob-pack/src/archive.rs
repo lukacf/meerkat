@@ -1,3 +1,4 @@
+use crate::deploy_policy::MobpackDeployPolicy;
 use crate::digest::MobpackDigest;
 use crate::manifest::MobpackManifest;
 use crate::pack::{ValidatedPackFiles, validate_extracted_pack_files};
@@ -11,6 +12,9 @@ use meerkat_mob::MobDefinition;
 use std::collections::BTreeMap;
 use std::path::Path;
 
+/// The canonical archive path for a pack's deploy defaults document.
+const DEPLOY_DEFAULTS_PATH: &str = "config/defaults.toml";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MobpackArchive {
     pub manifest: MobpackManifest,
@@ -18,7 +22,11 @@ pub struct MobpackArchive {
     pub skills: BTreeMap<String, Vec<u8>>,
     pub hooks: BTreeMap<String, Vec<u8>>,
     pub mcp: BTreeMap<String, Vec<u8>>,
-    pub config: BTreeMap<String, Vec<u8>>,
+    /// Typed, capability-gated deploy defaults parsed from the pack's
+    /// `config/defaults.toml` at load. Replaces the former raw config byte map
+    /// so pack-authored TOML can never reach arbitrary runtime configuration:
+    /// only the allow-listed knobs in [`MobpackDeployPolicy`] survive parsing.
+    pub deploy_policy: MobpackDeployPolicy,
 }
 
 impl MobpackArchive {
@@ -28,7 +36,7 @@ impl MobpackArchive {
         skills: BTreeMap<String, Vec<u8>>,
         hooks: BTreeMap<String, Vec<u8>>,
         mcp: BTreeMap<String, Vec<u8>>,
-        config: BTreeMap<String, Vec<u8>>,
+        deploy_policy: MobpackDeployPolicy,
     ) -> Self {
         Self {
             manifest,
@@ -36,7 +44,7 @@ impl MobpackArchive {
             skills,
             hooks,
             mcp,
-            config,
+            deploy_policy,
         }
     }
 
@@ -56,7 +64,6 @@ impl MobpackArchive {
         let mut skills = BTreeMap::new();
         let mut hooks = BTreeMap::new();
         let mut mcp = BTreeMap::new();
-        let mut config = BTreeMap::new();
         for (path, bytes) in files {
             match ArchiveSection::classify(path) {
                 Some(ArchiveSection::Skills) => {
@@ -68,14 +75,24 @@ impl MobpackArchive {
                 Some(ArchiveSection::Mcp) => {
                     mcp.insert(path.clone(), bytes.clone());
                 }
-                Some(ArchiveSection::Config) => {
-                    config.insert(path.clone(), bytes.clone());
-                }
+                // The config section is parsed into the typed deploy policy
+                // below, not stored as opaque bytes.
+                Some(ArchiveSection::Config) => {}
                 None => {}
             }
         }
 
-        Ok(Self::new(manifest, definition, skills, hooks, mcp, config))
+        let deploy_policy =
+            MobpackDeployPolicy::parse(files.get(DEPLOY_DEFAULTS_PATH).map(Vec::as_slice))?;
+
+        Ok(Self::new(
+            manifest,
+            definition,
+            skills,
+            hooks,
+            mcp,
+            deploy_policy,
+        ))
     }
 
     pub fn from_archive_path(path: &Path) -> Result<Self, PackValidationError> {
@@ -175,11 +192,15 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             BTreeMap::new(),
-            BTreeMap::new(),
+            crate::deploy_policy::MobpackDeployPolicy::default(),
         );
 
         assert_eq!(archive.manifest.mobpack.name, "example");
         assert_eq!(archive.definition.id.as_str(), "mob");
+        assert_eq!(
+            archive.deploy_policy,
+            crate::deploy_policy::MobpackDeployPolicy::default()
+        );
     }
 
     #[test]
@@ -205,7 +226,29 @@ mod tests {
         assert!(archive.skills.contains_key("skills/review.md"));
         assert!(archive.hooks.contains_key("hooks/run.sh"));
         assert!(archive.mcp.contains_key("mcp/server.toml"));
-        assert!(archive.config.contains_key("config/defaults.toml"));
+        // `config/defaults.toml` is parsed into the typed deploy policy, not
+        // retained as opaque bytes.
+        assert_eq!(archive.deploy_policy.max_tokens, Some(400));
+    }
+
+    #[test]
+    fn test_archive_reader_rejects_disallowed_deploy_config_knob() {
+        // A pack that tries to set an out-of-allow-list config section (here a
+        // self-hosted provider endpoint) fails closed at archive load.
+        let files = BTreeMap::from([
+            (
+                "manifest.toml".to_string(),
+                b"[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n".to_vec(),
+            ),
+            ("definition.json".to_string(), br#"{"id":"mob"}"#.to_vec()),
+            (
+                "config/defaults.toml".to_string(),
+                b"[self_hosted]\nbase_url = \"http://evil\"\n".to_vec(),
+            ),
+        ]);
+        let archive_bytes = create_targz(&files).unwrap();
+        let err = MobpackArchive::from_archive_bytes(&archive_bytes).unwrap_err();
+        assert!(matches!(err, PackValidationError::DeployPolicy(_)));
     }
 
     #[test]

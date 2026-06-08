@@ -13,7 +13,7 @@ use meerkat::{
 };
 use meerkat_core::types::{ContentInput, HandlingMode, RenderMetadata};
 use meerkat_mob::{
-    AgentIdentity, FlowId, ForkContext, HelperOptions, MobBackendKind, MobError,
+    AgentIdentity, FlowId, ForkContext, HelperOptions, MobBackendKind, MobError, MobFailureClass,
     MobFlowRunPublicResultClass, MobId, MobRunStatus, RunId, mob_machine_run_public_result_class,
     mob_machine_run_status_is_terminal,
 };
@@ -443,17 +443,17 @@ fn fork_context_from_spec(spec: &ForkContextSpec) -> ForkContext {
 }
 
 fn mob_delivery_failed_dispatch(occurrence: &Occurrence, error: MobError) -> DeliveryDispatch {
-    let failure_reason = mob_error_failure_reason(&error);
+    let failure_reason = delivery_failure_reason_for(&error);
     immediate_delivery_failure(occurrence, error.to_string(), failure_reason, None, None)
 }
 
 fn mob_delivery_failed_terminal(error: MobError) -> DeliveryTerminal {
-    let failure_reason = mob_error_failure_reason(&error);
+    let failure_reason = delivery_failure_reason_for(&error);
     DeliveryTerminal::delivery_failed(error.to_string(), failure_reason)
 }
 
 fn mob_probe_error_outcome(error: MobError) -> Result<TargetProbeOutcome, ScheduleDomainError> {
-    if mob_error_is_missing_target(&error) {
+    if error.is_missing_target() {
         Ok(TargetProbeOutcome::Missing {
             detail: Some(error.to_string()),
         })
@@ -462,37 +462,21 @@ fn mob_probe_error_outcome(error: MobError) -> Result<TargetProbeOutcome, Schedu
     }
 }
 
-fn mob_error_is_missing_target(error: &MobError) -> bool {
-    matches!(
-        error,
-        MobError::MobNotFound(_)
-            | MobError::ProfileNotFound(_)
-            | MobError::MemberNotFound(_)
-            | MobError::FlowNotFound(_)
-            | MobError::RunNotFound(_)
-            | MobError::WorkNotFound(_)
-    )
-}
-
-fn mob_error_failure_reason(error: &MobError) -> DeliveryFailureReason {
-    match error {
-        MobError::MobNotFound(_)
-        | MobError::ProfileNotFound(_)
-        | MobError::MemberNotFound(_)
-        | MobError::FlowNotFound(_)
-        | MobError::RunNotFound(_)
-        | MobError::WorkNotFound(_) => DeliveryFailureReason::TargetMissing,
-        MobError::MemberAlreadyExists(_) => DeliveryFailureReason::TargetBusy,
-        MobError::StorageError(_)
-        | MobError::SessionError(_)
-        | MobError::CommsError(_)
-        | MobError::MemberRestoreFailed { .. }
-        | MobError::KickoffWaitTimedOut { .. }
-        | MobError::ReadyWaitTimedOut { .. }
-        | MobError::FlowTurnTimedOut => DeliveryFailureReason::TransportError,
-        MobError::Internal(_) => DeliveryFailureReason::InternalError,
-        MobError::CallbackPending { .. } => DeliveryFailureReason::RuntimeRejected,
-        _ => DeliveryFailureReason::MobRejected,
+/// Map the mob-owned [`MobFailureClass`] onto the schedule-domain
+/// [`DeliveryFailureReason`].
+///
+/// The classification of which `MobError` variant means what is owned by
+/// `meerkat-mob` (`MobError::failure_class`); this consumer only translates
+/// that mob-owned class into the schedule delivery vocabulary, since
+/// `DeliveryFailureReason` is owned by a crate `meerkat-mob` does not depend on.
+fn delivery_failure_reason_for(error: &MobError) -> DeliveryFailureReason {
+    match error.failure_class() {
+        MobFailureClass::TargetMissing => DeliveryFailureReason::TargetMissing,
+        MobFailureClass::TargetBusy => DeliveryFailureReason::TargetBusy,
+        MobFailureClass::Transport => DeliveryFailureReason::TransportError,
+        MobFailureClass::RuntimeRejected => DeliveryFailureReason::RuntimeRejected,
+        MobFailureClass::Internal => DeliveryFailureReason::InternalError,
+        MobFailureClass::MobRejected => DeliveryFailureReason::MobRejected,
     }
 }
 
@@ -1052,17 +1036,19 @@ mod tests {
     }
 
     #[test]
-    fn mob_error_failure_reason_maps_common_target_failures() {
+    fn delivery_failure_reason_maps_common_target_failures() {
         assert_eq!(
-            mob_error_failure_reason(&MobError::MemberNotFound(AgentIdentity::from("missing"))),
+            delivery_failure_reason_for(&MobError::MemberNotFound(AgentIdentity::from("missing"))),
             DeliveryFailureReason::TargetMissing
         );
         assert_eq!(
-            mob_error_failure_reason(&MobError::MemberAlreadyExists(AgentIdentity::from("busy"))),
+            delivery_failure_reason_for(&MobError::MemberAlreadyExists(AgentIdentity::from(
+                "busy"
+            ))),
             DeliveryFailureReason::TargetBusy
         );
         assert_eq!(
-            mob_error_failure_reason(&MobError::Internal("boom".to_string())),
+            delivery_failure_reason_for(&MobError::Internal("boom".to_string())),
             DeliveryFailureReason::InternalError
         );
     }

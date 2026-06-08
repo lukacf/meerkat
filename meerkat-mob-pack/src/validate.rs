@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::deploy_policy::DeployPolicyError;
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PackValidationError {
     #[error("manifest.toml is missing")]
@@ -52,6 +54,8 @@ pub enum PackValidationError {
         path: String,
         reason: String,
     },
+    #[error("mobpack deploy policy is invalid: {0}")]
+    DeployPolicy(#[from] DeployPolicyError),
 }
 
 impl From<std::io::Error> for PackValidationError {
@@ -109,8 +113,11 @@ mod tests {
                 path: "skills/review.md".to_string(),
                 reason: "invalid utf-8 sequence".to_string(),
             },
+            PackValidationError::DeployPolicy(crate::deploy_policy::DeployPolicyError::Invalid(
+                "bad toml".to_string(),
+            )),
         ];
 
-        assert_eq!(errors.len(), 21);
+        assert_eq!(errors.len(), 22);
     }
 }

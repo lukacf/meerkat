@@ -288,7 +288,8 @@ async fn openai_managed_chatgpt_oauth_fresh_token_resolves() {
         id_token: None,
         expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
         last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
+        scopes: o_oauth::chatgpt_declaration()
+            .scopes
             .iter()
             .map(|s| (*s).into())
             .collect(),
@@ -332,7 +333,8 @@ async fn openai_managed_chatgpt_oauth_force_refresh_bypasses_fresh_token() {
         id_token: None,
         expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
         last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
+        scopes: o_oauth::chatgpt_declaration()
+            .scopes
             .iter()
             .map(|s| (*s).into())
             .collect(),
@@ -389,7 +391,8 @@ async fn openai_managed_chatgpt_oauth_force_refresh_with_refresh_disallowed_erro
         id_token: None,
         expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
         last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
+        scopes: o_oauth::chatgpt_declaration()
+            .scopes
             .iter()
             .map(|s| (*s).into())
             .collect(),
@@ -430,7 +433,8 @@ async fn openai_managed_chatgpt_oauth_refresh_failure_is_typed() {
         id_token: None,
         expires_at: Some(Utc::now() - ChronoDuration::minutes(5)),
         last_refresh: Some(Utc::now() - ChronoDuration::hours(1)),
-        scopes: o_oauth::CHATGPT_SCOPES
+        scopes: o_oauth::chatgpt_declaration()
+            .scopes
             .iter()
             .map(|s| (*s).into())
             .collect(),
@@ -473,7 +477,8 @@ async fn openai_managed_chatgpt_oauth_rejects_marked_token_without_auth_lease() 
         id_token: None,
         expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
         last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
+        scopes: o_oauth::chatgpt_declaration()
+            .scopes
             .iter()
             .map(|s| (*s).into())
             .collect(),
@@ -517,7 +522,8 @@ async fn openai_managed_chatgpt_oauth_restores_marker_with_empty_auth_lifecycle(
         id_token: None,
         expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
         last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
+        scopes: o_oauth::chatgpt_declaration()
+            .scopes
             .iter()
             .map(|s| (*s).into())
             .collect(),
@@ -568,7 +574,8 @@ async fn openai_managed_chatgpt_oauth_rejects_unmarked_token_after_empty_lifecyc
                 id_token: None,
                 expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
                 last_refresh: Some(Utc::now()),
-                scopes: o_oauth::CHATGPT_SCOPES
+                scopes: o_oauth::chatgpt_declaration()
+                    .scopes
                     .iter()
                     .map(|s| (*s).into())
                     .collect(),
@@ -616,7 +623,8 @@ async fn openai_managed_chatgpt_oauth_refreshes_expired_marker_with_empty_auth_l
         id_token: None,
         expires_at: Some(Utc::now() - ChronoDuration::minutes(5)),
         last_refresh: Some(Utc::now() - ChronoDuration::hours(1)),
-        scopes: o_oauth::CHATGPT_SCOPES
+        scopes: o_oauth::chatgpt_declaration()
+            .scopes
             .iter()
             .map(|s| (*s).into())
             .collect(),
@@ -638,7 +646,8 @@ async fn openai_managed_chatgpt_oauth_refreshes_expired_marker_with_empty_auth_l
         id_token: None,
         expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
         last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
+        scopes: o_oauth::chatgpt_declaration()
+            .scopes
             .iter()
             .map(|s| (*s).into())
             .collect(),
@@ -739,7 +748,8 @@ async fn openai_managed_chatgpt_oauth_rejects_wrong_source_even_with_matching_mo
                 id_token: None,
                 expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
                 last_refresh: Some(Utc::now()),
-                scopes: o_oauth::CHATGPT_SCOPES
+                scopes: o_oauth::chatgpt_declaration()
+                    .scopes
                     .iter()
                     .map(|s| (*s).into())
                     .collect(),
@@ -790,7 +800,8 @@ async fn openai_managed_chatgpt_oauth_refresh_publishes_through_generated_auth_l
         id_token: None,
         expires_at: Some(old_expiry),
         last_refresh: Some(Utc::now() - ChronoDuration::hours(1)),
-        scopes: o_oauth::CHATGPT_SCOPES
+        scopes: o_oauth::chatgpt_declaration()
+            .scopes
             .iter()
             .map(|s| (*s).into())
             .collect(),
@@ -809,7 +820,8 @@ async fn openai_managed_chatgpt_oauth_refresh_publishes_through_generated_auth_l
         id_token: None,
         expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
         last_refresh: Some(Utc::now()),
-        scopes: o_oauth::CHATGPT_SCOPES
+        scopes: o_oauth::chatgpt_declaration()
+            .scopes
             .iter()
             .map(|s| (*s).into())
             .collect(),

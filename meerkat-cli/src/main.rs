@@ -12458,10 +12458,12 @@ async fn execute_mob_deploy_internal(
     .await?;
     validate_required_capabilities(&archive.manifest, &runtime_capabilities(invocation.surface))
         .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
-    let effective_config = load_deploy_config_with_pack_defaults(
-        scope,
-        archive.config.get("config/defaults.toml"),
-        invocation.cli_overrides,
+    let mut effective_config = load_deploy_runtime_config(scope, invocation.cli_overrides)?;
+    apply_pack_deploy_policy(
+        &mut effective_config,
+        &archive.manifest,
+        &archive.deploy_policy,
+        invocation.surface,
     )?;
     if let Some(observer) = invocation.config_observer.as_ref() {
         observer(&effective_config);
@@ -12588,16 +12590,20 @@ fn read_config_trust_policy(scope: &RuntimeScope) -> anyhow::Result<Option<Trust
         .map(Some)
 }
 
+/// Build the operator-owned deploy config: realm config file, then environment
+/// secrets, then CLI overrides.
+///
+/// The pack contributes nothing here. Pack-authored deploy defaults are applied
+/// separately and only through the typed, capability-gated
+/// [`meerkat_mob_pack::deploy_policy::MobpackDeployPolicy`] layered *after* this
+/// config (see [`apply_pack_deploy_policy`]). A pack may never override
+/// operator-owned realm/env/CLI truth or set out-of-allow-list fields.
 #[cfg(feature = "mob")]
-fn load_deploy_config_with_pack_defaults(
+fn load_deploy_runtime_config(
     scope: &RuntimeScope,
-    pack_defaults_toml: Option<&Vec<u8>>,
     cli_overrides: CliOverrides,
 ) -> anyhow::Result<Config> {
     let mut config = Config::default();
-    if let Some(pack_defaults_toml) = pack_defaults_toml {
-        apply_toml_delta_layer(&mut config, pack_defaults_toml, "config/defaults.toml")?;
-    }
 
     let config_path =
         meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str())
@@ -12613,6 +12619,115 @@ fn load_deploy_config_with_pack_defaults(
         .map_err(|err| anyhow::anyhow!("failed applying env overrides: {err}"))?;
     config.apply_cli_overrides(cli_overrides);
     Ok(config)
+}
+
+/// Resolve a pack's typed deploy policy through the same capability allow-list
+/// as the manifest `[requires]` gate, then apply only the validated
+/// allow-listed knobs onto `config`.
+///
+/// `config` already carries realm/env/CLI truth, so the pack contributes deploy
+/// *defaults* over operator config without ever overriding it: only fields a
+/// realm config left at its default are moved, and gated knobs apply solely
+/// when the manifest declared and the runtime provides the backing capability.
+#[cfg(feature = "mob")]
+fn apply_pack_deploy_policy(
+    config: &mut Config,
+    manifest: &meerkat_mob_pack::manifest::MobpackManifest,
+    policy: &meerkat_mob_pack::deploy_policy::MobpackDeployPolicy,
+    surface: DeploySurfaceArg,
+) -> anyhow::Result<()> {
+    use meerkat_contracts::capability::CapabilityId;
+
+    let manifest_declares = |capability: CapabilityId| {
+        manifest.requires.as_ref().is_some_and(|requires| {
+            requires.capability_ids().any(|id| {
+                matches!(
+                    id,
+                    meerkat_contracts::capability::MobpackCapabilityId::Known(known)
+                        if known == capability
+                )
+            })
+        })
+    };
+    let runtime_provides =
+        |capability: CapabilityId| deploy_runtime_provides_capability(capability, surface);
+
+    policy
+        .validate(manifest_declares, runtime_provides)
+        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+
+    let baseline = Config::default();
+    if let Some(max_tokens) = policy.max_tokens
+        && config.max_tokens == baseline.max_tokens
+    {
+        config.max_tokens = max_tokens;
+    }
+    if let Some(model) = policy.models.anthropic.as_ref()
+        && config.models.anthropic == baseline.models.anthropic
+    {
+        config.models.anthropic = model.as_str().to_string();
+    }
+    if let Some(model) = policy.models.openai.as_ref()
+        && config.models.openai == baseline.models.openai
+    {
+        config.models.openai = model.as_str().to_string();
+    }
+    if let Some(model) = policy.models.gemini.as_ref()
+        && config.models.gemini == baseline.models.gemini
+    {
+        config.models.gemini = model.as_str().to_string();
+    }
+    if let Some(max_tokens) = policy.budget.max_tokens
+        && config.budget.max_tokens.is_none()
+    {
+        config.budget.max_tokens = Some(max_tokens);
+    }
+    if let Some(secs) = policy.budget.max_duration_secs
+        && config.budget.max_duration.is_none()
+    {
+        config.budget.max_duration = Some(std::time::Duration::from_secs(secs));
+    }
+    if let Some(calls) = policy.budget.max_tool_calls
+        && config.budget.max_tool_calls.is_none()
+    {
+        config.budget.max_tool_calls = Some(calls);
+    }
+    if let Some(threshold) = policy.compaction.auto_compact_threshold
+        && config.compaction.auto_compact_threshold == baseline.compaction.auto_compact_threshold
+    {
+        config.compaction.auto_compact_threshold = threshold;
+        config.compaction.auto_compact_threshold_explicit = true;
+    }
+    if let Some(budget) = policy.compaction.recent_turn_budget
+        && config.compaction.recent_turn_budget == baseline.compaction.recent_turn_budget
+    {
+        config.compaction.recent_turn_budget = budget;
+    }
+    if let Some(tokens) = policy.compaction.max_summary_tokens
+        && config.compaction.max_summary_tokens == baseline.compaction.max_summary_tokens
+    {
+        config.compaction.max_summary_tokens = tokens;
+    }
+    if let Some(turns) = policy.compaction.min_turns_between_compactions
+        && config.compaction.min_turns_between_compactions
+            == baseline.compaction.min_turns_between_compactions
+    {
+        config.compaction.min_turns_between_compactions = turns;
+    }
+    Ok(())
+}
+
+/// Whether the deploy runtime provides a typed capability that gates a pack
+/// deploy knob. Mirrors the token-based runtime surface in
+/// [`runtime_capabilities`] but in the typed [`CapabilityId`] vocabulary the
+/// deploy policy gates against.
+#[cfg(feature = "mob")]
+fn deploy_runtime_provides_capability(
+    capability: meerkat_contracts::capability::CapabilityId,
+    _surface: DeploySurfaceArg,
+) -> bool {
+    use meerkat_contracts::capability::CapabilityId;
+    matches!(capability, CapabilityId::SessionCompaction) && cfg!(feature = "session-compaction")
 }
 
 #[cfg(feature = "mob")]
@@ -17169,71 +17284,92 @@ url = "https://user.example/mcp"
     }
 
     #[cfg(feature = "mob")]
-    #[test]
-    fn test_pack_config_merges_with_runtime_config() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let mut scope = test_scope_with_context(temp.path().to_path_buf());
-        scope.user_config_root = Some(temp.path().to_path_buf());
-        let config_path =
-            meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str())
-                .config_path;
-        std::fs::create_dir_all(config_path.parent().expect("config parent"))
-            .expect("mkdir config");
-        std::fs::write(&config_path, "[agent]\nmax_tokens_per_turn = 1234\n")
-            .expect("write config");
-
-        let pack_defaults = br"
-[agent]
-max_tokens_per_turn = 100
-
-[tools]
-mob_enabled = true
-"
-        .to_vec();
-
-        let merged = load_deploy_config_with_pack_defaults(
-            &scope,
-            Some(&pack_defaults),
-            CliOverrides::default(),
+    fn empty_deploy_manifest() -> meerkat_mob_pack::manifest::MobpackManifest {
+        toml::from_str(
+            r#"
+[mobpack]
+name = "deploy-fixture"
+version = "1.0.0"
+"#,
         )
-        .expect("pack defaults should merge");
+        .expect("manifest fixture")
+    }
+
+    #[cfg(feature = "mob")]
+    #[test]
+    fn test_pack_deploy_policy_fills_runtime_defaults_but_never_overrides() {
+        // Realm config pins the openai default model; the pack policy may not
+        // override it, but may fill the gemini default the realm left alone.
+        let mut config = Config::default();
+        config
+            .merge_toml_str("[models]\nopenai = \"operator-openai\"\n")
+            .expect("realm config merge");
+        let operator_anthropic = config.models.anthropic.clone();
+
+        let policy = meerkat_mob_pack::deploy_policy::MobpackDeployPolicy::parse(Some(
+            b"[models]\nopenai = \"pack-openai\"\ngemini = \"pack-gemini\"\n",
+        ))
+        .expect("valid policy");
+
+        apply_pack_deploy_policy(
+            &mut config,
+            &empty_deploy_manifest(),
+            &policy,
+            DeploySurfaceArg::Cli,
+        )
+        .expect("ungated knobs apply");
+
         assert_eq!(
-            merged.agent.max_tokens_per_turn, 1234,
-            "file config should override pack defaults"
+            config.models.openai, "operator-openai",
+            "operator-owned realm value must not be overridden by pack defaults"
         );
-        assert!(
-            merged.tools.mob_enabled,
-            "pack defaults should apply when higher-priority layers omit field"
+        assert_eq!(
+            config.models.gemini, "pack-gemini",
+            "pack default applies where realm left the field at its default"
+        );
+        assert_eq!(
+            config.models.anthropic, operator_anthropic,
+            "untouched field stays at its resolved default"
         );
     }
 
     #[cfg(feature = "mob")]
     #[test]
-    fn test_pack_config_explicit_runtime_default_is_not_clobbered() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let mut scope = test_scope_with_context(temp.path().to_path_buf());
-        scope.user_config_root = Some(temp.path().to_path_buf());
-        let config_path =
-            meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str())
-                .config_path;
-        std::fs::create_dir_all(config_path.parent().expect("config parent"))
-            .expect("mkdir config");
-        std::fs::write(&config_path, "[tools]\nmob_enabled = false\n").expect("write config");
+    fn test_pack_deploy_policy_rejects_out_of_allow_list_section() {
+        // A pack must not be able to set self-hosted provider endpoints,
+        // provider-tool keys, comms credentials, or hook commands through its
+        // deploy defaults — parsing fails closed.
+        let err = meerkat_mob_pack::deploy_policy::MobpackDeployPolicy::parse(Some(
+            b"[self_hosted]\nbase_url = \"http://evil\"\n",
+        ))
+        .expect_err("disallowed deploy knob must fail closed");
+        assert!(matches!(
+            err,
+            meerkat_mob_pack::deploy_policy::DeployPolicyError::Invalid(_)
+        ));
+    }
 
-        let pack_defaults = br"
-[tools]
-mob_enabled = true
-"
-        .to_vec();
-        let merged = load_deploy_config_with_pack_defaults(
-            &scope,
-            Some(&pack_defaults),
-            CliOverrides::default(),
+    #[cfg(feature = "mob")]
+    #[test]
+    fn test_pack_deploy_policy_gated_knob_requires_declared_capability() {
+        // The compaction knob is gated by session_compaction; a pack that does
+        // not declare that capability cannot tune compaction.
+        let mut config = Config::default();
+        let policy = meerkat_mob_pack::deploy_policy::MobpackDeployPolicy::parse(Some(
+            b"[compaction]\nrecent_turn_budget = 9\n",
+        ))
+        .expect("valid policy");
+
+        let err = apply_pack_deploy_policy(
+            &mut config,
+            &empty_deploy_manifest(),
+            &policy,
+            DeploySurfaceArg::Cli,
         )
-        .expect("merge should succeed");
+        .expect_err("undeclared gating capability must reject");
         assert!(
-            !merged.tools.mob_enabled,
-            "explicit file value equal to default should not be clobbered by pack defaults"
+            err.to_string().contains("session_compaction"),
+            "unexpected error: {err}"
         );
     }
 
@@ -17982,9 +18118,15 @@ capabilities = ["definitely_missing_capability"]
 
         let mob_dir = create_mobpack_fixture_dir(temp.path());
         std::fs::create_dir_all(mob_dir.join("config")).expect("config dir");
+        // dogma #245: a pack may only contribute the typed, capability-gated
+        // deploy-policy knobs (max_tokens / models / budget / compaction) — it
+        // can no longer set arbitrary config sections like `[tools]`. The pack
+        // sets `max_tokens`; the operator's realm file owns `[tools]` and the
+        // CLI override owns the model. This proves the precedence: pack fills
+        // only its allow-listed default and never overrides operator/CLI truth.
         std::fs::write(
             mob_dir.join("config").join("defaults.toml"),
-            "[tools]\nmob_enabled = true\n",
+            "max_tokens = 4321\n",
         )
         .expect("write pack defaults");
         let pack_out = temp.path().join("config-proof.mobpack");
@@ -17992,12 +18134,15 @@ capabilities = ["definitely_missing_capability"]
             .await
             .expect("pack succeeds");
 
-        let observed = Arc::new(Mutex::new(None::<(bool, String)>));
+        let observed = Arc::new(Mutex::new(None::<(bool, u32, String)>));
         let observer: Arc<dyn Fn(&Config) + Send + Sync> = Arc::new({
             let observed = Arc::clone(&observed);
             move |config: &Config| {
-                *observed.lock().expect("lock observed") =
-                    Some((config.tools.mob_enabled, config.agent.model.clone()));
+                *observed.lock().expect("lock observed") = Some((
+                    config.tools.mob_enabled,
+                    config.max_tokens,
+                    config.agent.model.clone(),
+                ));
             }
         });
         let output = Box::pin(execute_mob_deploy_internal(
@@ -18027,8 +18172,10 @@ capabilities = ["definitely_missing_capability"]
         );
         assert_eq!(
             *observed.lock().expect("lock observed"),
-            Some((false, "override-model-for-deploy".to_string())),
-            "file config must override pack defaults and CLI overrides must still win at deploy boundary"
+            Some((false, 4321, "override-model-for-deploy".to_string())),
+            "operator realm [tools] config is untouched by the pack (mob_enabled=false), the pack's \
+             allow-listed max_tokens default fills (4321), and the CLI model override still wins at \
+             the deploy boundary"
         );
     }
 

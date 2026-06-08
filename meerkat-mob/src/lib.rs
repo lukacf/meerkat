@@ -78,7 +78,7 @@ pub use coordination::{
     WorkIntentStatus,
 };
 pub use definition::MobDefinition;
-pub use error::MobError;
+pub use error::{MobError, MobFailureClass};
 pub use event::{AttributedEvent, MemberWireEdge, MobEvent, MobEventKind, NewMobEvent};
 pub use ids::{
     AgentIdentity, AgentRuntimeId, BranchId, FenceToken, FlowId, FlowNodeId, FrameId, Generation,

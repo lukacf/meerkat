@@ -41,12 +41,12 @@ const TLC_SAFE_RUST_U64_MAX_VALUE: u64 = 2_147_483_647;
 
 use meerkat_machine_schema::{
     CompositionCoverageManifest, CompositionInvariantKind, CompositionSchema,
-    CompositionStateLimits, CompositionWitness, EntryInput, EnumSchema, Expr, FeedbackFieldSource,
-    FeedbackInputRef, Guard, HelperSchema, MachineCoverageManifest, MachineSchema, Quantifier,
-    Route, RouteBindingSource, RouteDelivery, RouteTarget, RouteTargetKind, SchedulerRule,
-    TransitionSchema, TriggerKind, TypePathEnumPayloadAtom, TypePathEnumStructuralVariant,
-    TypePathStructField, TypePathStructFieldAtom, TypeRef, Update, VariantSchema,
-    canonical_machine_schemas,
+    CompositionStateLimits, CompositionWitness, CoverageAnchor, CoverageSchemaTarget, EntryInput,
+    EnumSchema, Expr, FeedbackFieldSource, FeedbackInputRef, Guard, HelperSchema,
+    MachineCoverageManifest, MachineSchema, Quantifier, Route, RouteBindingSource, RouteDelivery,
+    RouteTarget, RouteTargetKind, SchedulerRule, TransitionSchema, TriggerKind,
+    TypePathEnumPayloadAtom, TypePathEnumStructuralVariant, TypePathStructField,
+    TypePathStructFieldAtom, TypeRef, Update, VariantSchema, canonical_machine_schemas,
 };
 
 /// Fail-closed error for composition/machine TLA model generation.
@@ -552,6 +552,23 @@ fn helper_dependency_order(
     Ok(ordered)
 }
 
+/// Render one coverage anchor as a generated contract-markdown bullet,
+/// surfacing its typed schema target so artifact drift is visible to the
+/// rerun-and-diff gate.
+fn render_contract_coverage_anchor_bullet(anchor: &CoverageAnchor) -> String {
+    let target = match &anchor.target {
+        CoverageSchemaTarget::Machine(machine) => format!("machine `{machine}`"),
+        CoverageSchemaTarget::Route(route) => format!("route `{route}`"),
+    };
+    format!(
+        "- `{}` ({}): `{}` — {}",
+        anchor.id,
+        target,
+        anchor.symbol.as_str(),
+        anchor.note
+    )
+}
+
 pub fn render_machine_contract_markdown(
     schema: &MachineSchema,
     coverage: &MachineCoverageManifest,
@@ -676,7 +693,11 @@ pub fn render_machine_contract_markdown(
     pushln!(&mut out, "## Coverage");
     pushln!(&mut out, "### Code Anchors");
     for anchor in &coverage.code_anchors {
-        pushln!(&mut out, "- `{}` — {}", anchor.path, anchor.note);
+        pushln!(
+            &mut out,
+            "{}",
+            render_contract_coverage_anchor_bullet(anchor)
+        );
     }
     pushln!(&mut out);
     pushln!(&mut out, "### Scenarios");
@@ -844,7 +865,11 @@ pub fn render_composition_contract_markdown(
     writeln!(&mut out, "## Coverage");
     pushln!(&mut out, "### Code Anchors");
     for anchor in &coverage.code_anchors {
-        pushln!(&mut out, "- `{}` — {}", anchor.path, anchor.note);
+        pushln!(
+            &mut out,
+            "{}",
+            render_contract_coverage_anchor_bullet(anchor)
+        );
     }
     pushln!(&mut out);
     pushln!(&mut out, "### Scenarios");

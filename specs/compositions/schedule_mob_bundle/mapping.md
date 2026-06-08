@@ -8,9 +8,9 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `schedule_mob_bundle`
 
 ### Code Anchors
-- `schedule_driver`: `meerkat-schedule/src/driver.rs` — mechanical scheduler driver precursor for mob-target claim, revision supersede, handoff, lease expiry, delivery failure, and completion feedback
-- `mob_delivery_precursor`: `meerkat-mob-mcp/src/lib.rs` — mob-owned action delivery precursor that scheduling must hand off into for dispatch, completion, target materialization failure, and lease recovery
-- `schedule_mob_bundle_schema`: `meerkat-machine-schema/src/catalog/compositions.rs` — formal schedule mob bundle composition
+- `schedule_driver` (route `revision_supersede_enters_occurrence_authority`): `meerkat-schedule/src/driver.rs` — mechanical scheduler driver precursor for mob-target claim, revision supersede, handoff, lease expiry, delivery failure, and completion feedback
+- `mob_delivery_precursor` (route `revision_supersede_enters_occurrence_authority`): `meerkat-mob-mcp/src/lib.rs` — mob-owned action delivery precursor that scheduling must hand off into for dispatch, completion, target materialization failure, and lease recovery
+- `schedule_mob_bundle_schema` (route `revision_supersede_enters_occurrence_authority`): `meerkat-machine-schema/src/catalog/compositions.rs` — formal schedule mob bundle composition
 
 ### Scenarios
 - `mob-delivery-feedback` — DispatchToMob is realized by mob-owned delivery and closed by typed completion feedback

@@ -8,8 +8,8 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthMachine`
 
 ### Code Anchors
-- `auth_lease_handle`: `meerkat-runtime/src/handles/auth_lease.rs` — per-binding AuthMachine registry; AuthLeaseHandle trait impl drives acquire, observe credential freshness, expiring, expired, refresh, reauth, release, lifecycle event, and wake loop DSL transitions through it
-- `oauth_flow_handle`: `meerkat-runtime/src/handles/oauth_flow.rs` — per-binding AuthMachine-owned OAuth browser and device flow lifecycle authority for admit, verify, begin poll, finish poll, consume, expire, valid, expiring, expired, refreshing, and reauth required phases
+- `auth_lease_handle` (machine `AuthMachine`): `meerkat-runtime/src/handles/auth_lease.rs` — per-binding AuthMachine registry; AuthLeaseHandle trait impl drives acquire, observe credential freshness, expiring, expired, refresh, reauth, release, lifecycle event, and wake loop DSL transitions through it
+- `oauth_flow_handle` (machine `AuthMachine`): `meerkat-runtime/src/handles/oauth_flow.rs` — per-binding AuthMachine-owned OAuth browser and device flow lifecycle authority for admit, verify, begin poll, finish poll, consume, expire, valid, expiring, expired, refreshing, and reauth required phases
 
 ### Scenarios
 - `acquire_expire_refresh_complete` — lease transitions through valid, expiring, expired, refreshing, and back to valid on successful refresh

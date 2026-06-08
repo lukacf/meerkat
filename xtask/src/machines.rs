@@ -19,7 +19,7 @@ use meerkat_machine_codegen::{
     render_machine_mapping_coverage, render_machine_semantic_model,
 };
 use meerkat_machine_schema::{
-    CompositionCoverageManifest, CompositionSchema, MachineCoverageManifest,
+    CompositionCoverageManifest, CompositionSchema, CoverageSchemaTarget, MachineCoverageManifest,
     MachineProductionOwnerRelation, MachineSchema, SchedulerRule, SemanticCoverageEntry,
     TriggerKind, canonical_composition_coverage_manifests, canonical_composition_schemas,
     canonical_machine_coverage_manifests, canonical_machine_production_owner_relations,
@@ -2076,12 +2076,34 @@ fn retired_generated_source_paths() -> &'static [&'static str] {
     ]
 }
 
+/// Validate every selected coverage anchor against both the on-disk code
+/// location it names and the canonical schema element it claims to realize.
+///
+/// Two fail-closed checks run per anchor:
+///
+/// 1. **Symbol resolution** — the anchor's `symbol` path must exist on disk.
+/// 2. **Schema-target resolution** — the anchor's typed `target` must name a
+///    real schema element. A [`CoverageSchemaTarget::Machine`] must name a
+///    machine in the canonical machine-id set; a [`CoverageSchemaTarget::Route`]
+///    must name a route declared by the owning composition. An anchor that
+///    names a machine/route absent from the schema is a generated-artifact
+///    drift and pushes a mismatch (it never silently passes).
+///
+/// Machine targets resolve against the full canonical machine set rather than
+/// the current selection, so a composition anchor that references a machine
+/// bound elsewhere (e.g. `MeerkatMachine`) still resolves under a narrowed
+/// `--composition` selection.
 pub fn collect_coverage_anchor_mismatches(root: &Path, selection: &Selection) -> Vec<String> {
     let mut mismatches = Vec::new();
 
+    let canonical_machine_names = canonical_machine_schemas()
+        .iter()
+        .map(|schema| schema.machine.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+
     for machine in &selection.machines {
         for anchor in &machine.coverage.code_anchors {
-            let path = root.join(&anchor.path);
+            let path = root.join(anchor.symbol.as_str());
             if !path.exists() {
                 mismatches.push(format!(
                     "missing machine coverage anchor {} for {}",
@@ -2089,18 +2111,61 @@ pub fn collect_coverage_anchor_mismatches(root: &Path, selection: &Selection) ->
                     machine.schema.machine
                 ));
             }
+            // Machine coverage manifests own no routes; every anchor must
+            // target a canonical machine.
+            match &anchor.target {
+                CoverageSchemaTarget::Machine(machine_id) => {
+                    if !canonical_machine_names.contains(machine_id.as_str()) {
+                        mismatches.push(format!(
+                            "machine coverage anchor `{}` for {} targets unknown machine `{}`",
+                            anchor.id, machine.schema.machine, machine_id
+                        ));
+                    }
+                }
+                CoverageSchemaTarget::Route(route_id) => {
+                    mismatches.push(format!(
+                        "machine coverage anchor `{}` for {} targets route `{}` but a machine coverage manifest declares no routes",
+                        anchor.id, machine.schema.machine, route_id
+                    ));
+                }
+            }
         }
     }
 
     for composition in &selection.compositions {
+        let route_names = composition
+            .schema
+            .routes
+            .iter()
+            .map(|route| route.name.as_str().to_owned())
+            .collect::<BTreeSet<_>>();
+
         for anchor in &composition.coverage.code_anchors {
-            let path = root.join(&anchor.path);
+            let path = root.join(anchor.symbol.as_str());
             if !path.exists() {
                 mismatches.push(format!(
                     "missing composition coverage anchor {} for {}",
                     path.display(),
                     composition.schema.name
                 ));
+            }
+            match &anchor.target {
+                CoverageSchemaTarget::Route(route_id) => {
+                    if !route_names.contains(route_id.as_str()) {
+                        mismatches.push(format!(
+                            "composition coverage anchor `{}` for {} targets undeclared route `{}`",
+                            anchor.id, composition.schema.name, route_id
+                        ));
+                    }
+                }
+                CoverageSchemaTarget::Machine(machine_id) => {
+                    if !canonical_machine_names.contains(machine_id.as_str()) {
+                        mismatches.push(format!(
+                            "composition coverage anchor `{}` for {} targets unknown machine `{}`",
+                            anchor.id, composition.schema.name, machine_id
+                        ));
+                    }
+                }
             }
         }
     }

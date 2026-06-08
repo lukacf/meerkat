@@ -37,8 +37,8 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `meerkat_mob_seam`
 
 ### Code Anchors
-- `mob_meerkat_seam`: `meerkat-mob/src/runtime/actor.rs` — MobMachine to MeerkatMachine seam realization for binding requests, work submission, cancellation, lifecycle notices, terminal outcomes, and peer ingress
-- `meerkat_runtime_entry`: `meerkat-runtime/src/meerkat_machine/mod.rs` — MeerkatMachine command authority consuming runtime binding, admitted work, cancellation, lifecycle, terminal, and peer ingress seam traffic
+- `mob_meerkat_seam` (route `binding_request_reaches_meerkat`): `meerkat-mob/src/runtime/actor.rs` — MobMachine to MeerkatMachine seam realization for binding requests, work submission, cancellation, lifecycle notices, terminal outcomes, and peer ingress
+- `meerkat_runtime_entry` (machine `MeerkatMachine`): `meerkat-runtime/src/meerkat_machine/mod.rs` — MeerkatMachine command authority consuming runtime binding, admitted work, cancellation, lifecycle, terminal, and peer ingress seam traffic
 
 ### Scenarios
 - `binding_round_trip` — mob runtime binding request becomes a Meerkat binding and feeds readiness back to Mob

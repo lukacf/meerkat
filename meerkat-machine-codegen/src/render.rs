@@ -20,8 +20,9 @@ macro_rules! pushln {
 
 #[cfg(not(test))]
 use meerkat_machine_schema::{
-    CompositionCoverageManifest, CompositionInvariantKind, CompositionSchema,
-    MachineCoverageManifest, RouteDelivery, RouteTargetKind, SchedulerRule, SemanticCoverageEntry,
+    CompositionCoverageManifest, CompositionInvariantKind, CompositionSchema, CoverageAnchor,
+    CoverageSchemaTarget, MachineCoverageManifest, RouteDelivery, RouteTargetKind, SchedulerRule,
+    SemanticCoverageEntry,
 };
 use meerkat_machine_schema::{
     EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema, Guard, HelperSchema, MachineSchema,
@@ -236,6 +237,23 @@ pub fn render_composition_module(schema: &CompositionSchema) -> String {
     out
 }
 
+/// Render one coverage anchor as a generated-docs bullet, surfacing its typed
+/// schema target so artifact drift is visible to the rerun-and-diff gate.
+#[cfg(not(test))]
+fn render_coverage_anchor_bullet(anchor: &CoverageAnchor) -> String {
+    let target = match &anchor.target {
+        CoverageSchemaTarget::Machine(machine) => format!("machine `{machine}`"),
+        CoverageSchemaTarget::Route(route) => format!("route `{route}`"),
+    };
+    format!(
+        "- `{}` ({}): `{}` — {}",
+        anchor.id,
+        target,
+        anchor.symbol.as_str(),
+        anchor.note
+    )
+}
+
 #[cfg(not(test))]
 pub fn render_machine_mapping_coverage(
     schema: &MachineSchema,
@@ -256,13 +274,7 @@ pub fn render_machine_mapping_coverage(
 
     pushln!(&mut out, "### Code Anchors");
     for anchor in &coverage.code_anchors {
-        pushln!(
-            &mut out,
-            "- `{}`: `{}` — {}",
-            anchor.id,
-            anchor.path,
-            anchor.note
-        );
+        pushln!(&mut out, "{}", render_coverage_anchor_bullet(anchor));
     }
     out.push('\n');
 
@@ -299,13 +311,7 @@ pub fn render_composition_mapping_coverage(
 
     pushln!(&mut out, "### Code Anchors");
     for anchor in &coverage.code_anchors {
-        pushln!(
-            &mut out,
-            "- `{}`: `{}` — {}",
-            anchor.id,
-            anchor.path,
-            anchor.note
-        );
+        pushln!(&mut out, "{}", render_coverage_anchor_bullet(anchor));
     }
     out.push('\n');
 

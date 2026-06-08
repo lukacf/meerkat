@@ -8,8 +8,8 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `auth_lease_bundle`
 
 ### Code Anchors
-- `auth_lease_handle`: `meerkat-runtime/src/handles/auth_lease.rs` — runtime auth lease owner consumes canonical AuthMachine lifecycle acquire, refresh, reauth, release, wake, and publication events
-- `auth_lease_bundle_schema`: `meerkat-machine-schema/src/catalog/compositions.rs` — formal AuthMachine lifecycle publication handoff composition
+- `auth_lease_handle` (machine `AuthMachine`): `meerkat-runtime/src/handles/auth_lease.rs` — runtime auth lease owner consumes canonical AuthMachine lifecycle acquire, refresh, reauth, release, wake, and publication events
+- `auth_lease_bundle_schema` (machine `AuthMachine`): `meerkat-machine-schema/src/catalog/compositions.rs` — formal AuthMachine lifecycle publication handoff composition
 
 ### Scenarios
 - `auth-lease-lifecycle-publication` — AuthMachine acquire, refresh, reauth, release, wake, and lifecycle transitions publish through the explicit auth lease handoff protocol

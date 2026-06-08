@@ -649,6 +649,82 @@ pub fn collect_authority_language_mismatches(root: &Path) -> Result<Vec<String>>
     Ok(mismatches)
 }
 
+/// Parse a whole Rust source file and structurally drop every `#[cfg(test)]`
+/// item (top-level, nested in `mod`, or impl member) so the production-only
+/// contract scanners never see test fixtures — and never fail to parse. The
+/// prior approach split the text at the first `#[cfg(test)]`, which truncates
+/// an inline `#[cfg(test)] fn` mid-file and yields unbalanced (unparseable)
+/// Rust. The full file is always balanced, so it always parses.
+fn parse_production_file(contents: &str) -> syn::Result<syn::File> {
+    let mut file = syn::parse_file(contents)?;
+    strip_cfg_test_items(&mut file.items);
+    Ok(file)
+}
+
+fn strip_cfg_test_items(items: &mut Vec<syn::Item>) {
+    items.retain(|item| !item_attrs(item).iter().any(attr_is_cfg_test));
+    for item in items.iter_mut() {
+        match item {
+            syn::Item::Mod(module) => {
+                if let Some((_, inner)) = module.content.as_mut() {
+                    strip_cfg_test_items(inner);
+                }
+            }
+            syn::Item::Impl(item_impl) => {
+                item_impl.items.retain(|impl_item| {
+                    let attrs = match impl_item {
+                        syn::ImplItem::Const(inner) => &inner.attrs,
+                        syn::ImplItem::Fn(inner) => &inner.attrs,
+                        syn::ImplItem::Type(inner) => &inner.attrs,
+                        syn::ImplItem::Macro(inner) => &inner.attrs,
+                        _ => return true,
+                    };
+                    !attrs.iter().any(attr_is_cfg_test)
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The attributes attached to a top-level item, for the variants that can carry
+/// a `#[cfg(test)]` gate. Variants that cannot are reported as having none.
+fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
+    match item {
+        syn::Item::Const(inner) => &inner.attrs,
+        syn::Item::Enum(inner) => &inner.attrs,
+        syn::Item::ExternCrate(inner) => &inner.attrs,
+        syn::Item::Fn(inner) => &inner.attrs,
+        syn::Item::ForeignMod(inner) => &inner.attrs,
+        syn::Item::Impl(inner) => &inner.attrs,
+        syn::Item::Macro(inner) => &inner.attrs,
+        syn::Item::Mod(inner) => &inner.attrs,
+        syn::Item::Static(inner) => &inner.attrs,
+        syn::Item::Struct(inner) => &inner.attrs,
+        syn::Item::Trait(inner) => &inner.attrs,
+        syn::Item::TraitAlias(inner) => &inner.attrs,
+        syn::Item::Type(inner) => &inner.attrs,
+        syn::Item::Union(inner) => &inner.attrs,
+        syn::Item::Use(inner) => &inner.attrs,
+        _ => &[],
+    }
+}
+
+/// `true` for a `#[cfg(test)]` attribute.
+fn attr_is_cfg_test(attr: &syn::Attribute) -> bool {
+    if !attr.path().is_ident("cfg") {
+        return false;
+    }
+    let mut is_test = false;
+    let _ = attr.parse_nested_meta(|meta| {
+        if meta.path.is_ident("test") {
+            is_test = true;
+        }
+        Ok(())
+    });
+    is_test
+}
+
 pub fn collect_peer_response_terminal_projection_mismatches(root: &Path) -> Result<Vec<String>> {
     let mut mismatches = Vec::new();
     let boundary_files = [
@@ -672,13 +748,12 @@ pub fn collect_peer_response_terminal_projection_mismatches(root: &Path) -> Resu
         // *construction* (enum variant path), the handwritten render string
         // *literal*, and the context-key *call* are detected structurally, so
         // a token rename that keeps the banned relationship still fails and a
-        // doc/comment mention does not false-positive. Production prefix only
-        // (mirrors the core-fact AST model), so test fixtures don't trip.
-        let production = contents
-            .split("\n#[cfg(test)]")
-            .next()
-            .unwrap_or(contents.as_str());
-        let parsed = syn::parse_file(production)
+        // doc/comment mention does not false-positive. We parse the whole
+        // (always balanced) file and drop `#[cfg(test)]` items structurally so
+        // test fixtures don't trip the production contract — a textual prefix
+        // split at `#[cfg(test)]` truncates inline test helpers mid-file and
+        // breaks the parse.
+        let parsed = parse_production_file(&contents)
             .with_context(|| format!("parse peer-response terminal boundary file {rel}"))?;
         let mut visitor = PeerResponseTerminalProjectionVisitor::new(rel);
         visitor.visit_file(&parsed);
@@ -694,11 +769,7 @@ pub fn collect_peer_response_terminal_projection_mismatches(root: &Path) -> Resu
                 core_projection_owner.display()
             )
         })?;
-        let production = contents
-            .split("\n#[cfg(test)]")
-            .next()
-            .unwrap_or(contents.as_str());
-        collect_peer_response_terminal_core_fact_mismatches(rel, production, &mut mismatches)?;
+        collect_peer_response_terminal_core_fact_mismatches(rel, &contents, &mut mismatches)?;
     }
 
     let shell_boundary_files = [
@@ -719,11 +790,7 @@ pub fn collect_peer_response_terminal_projection_mismatches(root: &Path) -> Resu
                 path.display()
             )
         })?;
-        let production = contents
-            .split("\n#[cfg(test)]")
-            .next()
-            .unwrap_or(contents.as_str());
-        let parsed = syn::parse_file(production)
+        let parsed = parse_production_file(&contents)
             .with_context(|| format!("parse peer-response terminal shell boundary file {rel}"))?;
         let mut visitor = PeerResponseTerminalShellVisitor::new(rel);
         visitor.visit_file(&parsed);
@@ -961,7 +1028,7 @@ fn collect_peer_response_terminal_core_fact_mismatches(
     source: &str,
     mismatches: &mut Vec<String>,
 ) -> Result<()> {
-    let parsed = syn::parse_file(source)
+    let parsed = parse_production_file(source)
         .with_context(|| format!("parse peer-response terminal core fact owner {rel}"))?;
 
     let Some(source_struct) = find_struct_item(&parsed, "PeerResponseTerminalSource") else {

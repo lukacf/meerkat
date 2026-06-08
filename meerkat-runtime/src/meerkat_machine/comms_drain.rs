@@ -1451,6 +1451,9 @@ impl MeerkatMachine {
         endpoint: crate::meerkat_machine::dsl::PeerEndpoint,
         comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
     ) -> Result<(), PeerEndpointStageError> {
+        // Parse-at-boundary: reject a malformed endpoint BEFORE it mutates the
+        // machine peer set or emits CommsTrustReconcileRequested.
+        validate_peer_endpoint_for_stage(&endpoint)?;
         let (reconciler, reconcile_obligation) = self
             .stage_peer_projection_input(
                 session_id,
@@ -1524,6 +1527,12 @@ impl MeerkatMachine {
         command_kind: crate::meerkat_machine::dsl::MobPeerOverlayCommandKind,
         comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
     ) -> Result<(), PeerEndpointStageError> {
+        // Parse-at-boundary: reject any malformed overlay endpoint (the overlay
+        // set and the command endpoint) BEFORE mutating the machine peer set.
+        for endpoint in &endpoints {
+            validate_peer_endpoint_for_stage(endpoint)?;
+        }
+        validate_peer_endpoint_for_stage(&command_endpoint)?;
         let (reconciler, reconcile_obligation) = self
             .stage_peer_projection_input(
                 session_id,
@@ -1641,6 +1650,11 @@ pub enum PeerEndpointStageError {
     /// The reconciler failed to mechanically reconcile the trust
     /// store.
     Reconcile(crate::comms_trust_reconcile::CommsTrustReconcileError),
+    /// A staged `PeerEndpoint` carried a malformed `peer_id`/`address`/`name`.
+    /// Rejected at the ingress boundary (parse-at-boundary) BEFORE any machine
+    /// peer-set mutation or effect emission, so invalid identity atoms never
+    /// reach `direct_peer_endpoints`/`mob_overlay_peer_endpoints`.
+    InvalidEndpoint(crate::comms_trust_reconcile::CommsTrustReconcileError),
 }
 
 impl std::fmt::Display for PeerEndpointStageError {
@@ -1659,8 +1673,23 @@ impl std::fmt::Display for PeerEndpointStageError {
                 )
             }
             Self::Reconcile(err) => write!(f, "trust reconciliation failed: {err}"),
+            Self::InvalidEndpoint(err) => {
+                write!(f, "peer endpoint rejected at ingress boundary: {err}")
+            }
         }
     }
 }
 
 impl std::error::Error for PeerEndpointStageError {}
+
+/// Parse-at-boundary validation for a peer endpoint about to be staged into the
+/// MeerkatMachine peer set. Reuses the canonical
+/// [`endpoint_to_descriptor`](crate::comms_trust_reconcile::endpoint_to_descriptor)
+/// parse so the machine never admits a malformed `peer_id`/`address`/`name`.
+fn validate_peer_endpoint_for_stage(
+    endpoint: &crate::meerkat_machine::dsl::PeerEndpoint,
+) -> Result<(), PeerEndpointStageError> {
+    crate::comms_trust_reconcile::endpoint_to_descriptor(endpoint)
+        .map(|_| ())
+        .map_err(PeerEndpointStageError::InvalidEndpoint)
+}

@@ -228,7 +228,13 @@ impl CommsTrustReconciler {
 /// validator sees opaque newtype shapes; the trust store requires
 /// parsed typed atoms. The signing key is already part of the
 /// MeerkatMachine-owned projection and is forwarded unchanged.
-fn endpoint_to_descriptor(
+///
+/// This is also the canonical parse-at-boundary validator: peer-projection
+/// staging (`stage_add_direct_peer_endpoint`,
+/// `stage_authorized_supervisor_mob_peer_overlay`) calls it BEFORE mutating the
+/// MeerkatMachine peer set, so a malformed `peer_id`/`address`/`name` is
+/// rejected at ingress and never reaches machine state or effect emission.
+pub(crate) fn endpoint_to_descriptor(
     endpoint: &PeerEndpoint,
 ) -> Result<TrustedPeerDescriptor, CommsTrustReconcileError> {
     let name = PeerName::new(endpoint.name.0.as_str()).map_err(|detail| {
@@ -302,6 +308,34 @@ mod tests {
 
     fn local_peer_id() -> PeerId {
         PeerId::parse(LOCAL_UUID).expect("valid local test peer id")
+    }
+
+    #[test]
+    fn endpoint_to_descriptor_rejects_malformed_identity_atoms_at_boundary() {
+        // The canonical parse-at-boundary validator (#224): peer-projection
+        // staging calls this BEFORE mutating the machine peer set, so malformed
+        // identity atoms are rejected at ingress and never reach machine state.
+        assert!(endpoint_to_descriptor(&endpoint("ok", UUID_A)).is_ok());
+
+        let bad_peer_id = endpoint("bad-id", "not-a-uuid");
+        assert!(
+            matches!(
+                endpoint_to_descriptor(&bad_peer_id),
+                Err(CommsTrustReconcileError::InvalidEndpoint { .. })
+            ),
+            "a non-UUID peer_id must be rejected at the ingress boundary"
+        );
+
+        let mut bad_address = endpoint("bad-addr", UUID_B);
+        bad_address.address =
+            crate::meerkat_machine::dsl::PeerAddress("::::not a valid url".to_string());
+        assert!(
+            matches!(
+                endpoint_to_descriptor(&bad_address),
+                Err(CommsTrustReconcileError::InvalidEndpoint { .. })
+            ),
+            "a malformed address must be rejected at the ingress boundary"
+        );
     }
 
     /// Records every `add_trusted_peer` / `remove_trusted_peer` call

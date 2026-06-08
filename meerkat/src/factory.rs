@@ -758,6 +758,7 @@ impl AgentBuildConfig {
         self.override_memory = build.override_memory;
         self.override_schedule = build.override_schedule;
         self.override_workgraph = build.override_workgraph;
+        self.override_comms = build.override_comms;
         let (override_mob, mob_tool_authority_context) =
             meerkat_runtime::mob_operator_authority::resolve_mob_operator_access(
                 build.override_mob,
@@ -2531,6 +2532,9 @@ impl AgentFactory {
         if !mask.override_workgraph {
             build_config.override_workgraph = metadata.tooling.workgraph;
         }
+        if !mask.override_comms {
+            build_config.override_comms = metadata.tooling.comms;
+        }
         if !mask.override_mob {
             let persisted_mob_authority = build_config
                 .resume_session
@@ -3365,6 +3369,8 @@ impl AgentFactory {
             build_config.override_workgraph,
             ToolCategoryOverride::Inherit
         );
+        build_config.resume_override_mask.override_comms |=
+            !matches!(build_config.override_comms, ToolCategoryOverride::Inherit);
         let has_explicit_mob_authority_context = build_config
             .mob_tool_authority_context
             .as_ref()

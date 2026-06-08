@@ -1447,6 +1447,98 @@ async fn build_agent_with_resume_preserves_explicit_inherit_tool_override() {
     assert_eq!(metadata.tooling.workgraph, ToolCategoryOverride::Disable);
 }
 
+// Regression for dogma row #76: the facade must carry `override_comms`
+// through the full resume-override pipeline — apply_build copy, mask-OR
+// (explicit override wins over persisted), and mask-rehydration (persisted
+// value survives when the caller did not set the mask). Comms previously had
+// the typed field plumbed in core + on the build struct, but the facade
+// dropped it at all three seams, so a resumed turn silently re-derived comms
+// tooling from the build default instead of honoring the explicit override.
+#[tokio::test]
+async fn build_agent_with_resume_carries_explicit_comms_override_and_rehydrates() {
+    fn session_with_comms(comms: ToolCategoryOverride) -> Session {
+        let mut session = Session::new();
+        session
+            .set_session_metadata(SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: "claude-sonnet-4-5".to_string(),
+                max_tokens: 4096,
+                structured_output_retries: 2,
+                provider: Provider::Anthropic,
+                provider_params: None,
+                self_hosted_server_id: None,
+                tooling: SessionTooling {
+                    builtins: ToolCategoryOverride::Enable,
+                    shell: ToolCategoryOverride::Inherit,
+                    comms,
+                    mob: ToolCategoryOverride::Inherit,
+                    memory: ToolCategoryOverride::Inherit,
+                    schedule: ToolCategoryOverride::Inherit,
+                    workgraph: ToolCategoryOverride::Inherit,
+                    image_generation: ToolCategoryOverride::Inherit,
+                    web_search: ToolCategoryOverride::Inherit,
+                    active_skills: None,
+                },
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                auth_binding: None,
+                mob_member_binding: None,
+            })
+            .unwrap();
+        session
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let config = Config::default();
+
+    // Explicit-override leg: caller sets override_comms + its mask bit, so the
+    // explicit Disable must win over the persisted Enable.
+    let mut explicit = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        resume_session: Some(session_with_comms(ToolCategoryOverride::Enable)),
+        override_comms: ToolCategoryOverride::Disable,
+        ..AgentBuildConfig::new("gpt-5.4")
+    };
+    explicit.resume_override_mask.override_comms = true;
+
+    let agent = factory.build_agent(explicit, &config).await.unwrap();
+    let metadata = agent
+        .session()
+        .session_metadata()
+        .expect("session should have metadata");
+    assert_eq!(
+        metadata.tooling.comms,
+        ToolCategoryOverride::Disable,
+        "explicit override_comms must win over the persisted comms tooling on resume"
+    );
+
+    // Rehydration leg: caller leaves override_comms at Inherit with no mask
+    // bit, so the persisted Enable must survive instead of collapsing to the
+    // build default.
+    let rehydrate = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        resume_session: Some(session_with_comms(ToolCategoryOverride::Enable)),
+        ..AgentBuildConfig::new("gpt-5.4")
+    };
+
+    let agent = factory.build_agent(rehydrate, &config).await.unwrap();
+    let metadata = agent
+        .session()
+        .session_metadata()
+        .expect("session should have metadata");
+    assert_eq!(
+        metadata.tooling.comms,
+        ToolCategoryOverride::Enable,
+        "persisted comms tooling must rehydrate when the caller sets no explicit override"
+    );
+}
+
 #[cfg(feature = "comms")]
 #[tokio::test]
 async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id() {

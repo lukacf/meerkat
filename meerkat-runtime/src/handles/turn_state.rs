@@ -194,9 +194,14 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
                     .iter()
                     .map(|op_ref| op_ref.operation_id.to_string())
                     .collect(),
+                // #354: barrier ids are now a typed `Set<OperationId>` in the
+                // DSL. The token repr stays the plain-UUID Display string that
+                // `parse_operation_id` round-trips (NOT the JSON `from_domain`
+                // form), so the projection back to domain `OperationId` is
+                // lossless.
                 barrier_operation_ids: barrier_operation_ids
                     .iter()
-                    .map(ToString::to_string)
+                    .map(|id| mm_dsl::OperationId::from(id.to_string()))
                     .collect(),
             },
             TurnExecutionInput::ToolCallsResolved { run_id } => {
@@ -209,7 +214,11 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
                 operation_ids,
             } => mm_dsl::MeerkatMachineInput::OpsBarrierSatisfied {
                 run_id: mm_dsl::RunId::from_domain(&run_id),
-                operation_ids: operation_ids.iter().map(ToString::to_string).collect(),
+                // #354: typed `Set<OperationId>`; same plain-UUID token repr.
+                operation_ids: operation_ids
+                    .iter()
+                    .map(|id| mm_dsl::OperationId::from(id.to_string()))
+                    .collect(),
             },
             TurnExecutionInput::BoundaryContinue { run_id } => {
                 mm_dsl::MeerkatMachineInput::BoundaryContinue {
@@ -614,7 +623,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         let barrier_operation_ids: BTreeSet<_> = state
             .barrier_operation_ids
             .iter()
-            .map(|id| parse_operation_id(id))
+            .map(|id| parse_operation_id(id.0.as_str()))
             .collect();
         let pending_op_refs = state
             .pending_op_refs

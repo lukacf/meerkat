@@ -10176,7 +10176,7 @@ pub struct State {
     pub image_tool_results_enabled: bool,
     pub tool_calls_pending: u64,
     pub pending_op_refs: std::collections::BTreeSet<String>,
-    pub barrier_operation_ids: std::collections::BTreeSet<String>,
+    pub barrier_operation_ids: std::collections::BTreeSet<OperationId>,
     pub has_barrier_ops: bool,
     pub barrier_satisfied: bool,
     pub boundary_count: u64,
@@ -11050,7 +11050,7 @@ pub mod inputs {
     pub struct RegisterPendingOps {
         pub run_id: RunId,
         pub op_refs: std::collections::BTreeSet<String>,
-        pub barrier_operation_ids: std::collections::BTreeSet<String>,
+        pub barrier_operation_ids: std::collections::BTreeSet<OperationId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ToolCallsResolved {
@@ -11059,7 +11059,7 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct OpsBarrierSatisfied {
         pub run_id: RunId,
-        pub operation_ids: std::collections::BTreeSet<String>,
+        pub operation_ids: std::collections::BTreeSet<OperationId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BoundaryContinue {

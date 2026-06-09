@@ -185,6 +185,18 @@ fn string_set(values: impl IntoIterator<Item = String>) -> KernelValue {
     KernelValue::Set(values.into_iter().map(KernelValue::String).collect())
 }
 
+/// #354: build a `Set<OperationId>` kernel value (each element wrapped in the
+/// `OperationId` Named token, mirroring how the generated kernel carries a
+/// typed-id set — NOT a bare string set).
+fn operation_id_set(values: impl IntoIterator<Item = String>) -> KernelValue {
+    KernelValue::Set(
+        values
+            .into_iter()
+            .map(|value| named_string("OperationId", value))
+            .collect(),
+    )
+}
+
 fn state_field<'a>(state: &'a KernelState, name: &str) -> Option<&'a KernelValue> {
     state.fields.get(&field_id(name))
 }
@@ -373,6 +385,32 @@ fn state_string_set(
         _ => Err(generated_projection_error(
             context,
             format!("field `{name}` was not a string set"),
+        )),
+    }
+}
+
+/// #354: read a `Set<OperationId>` state field, unwrapping each member from its
+/// `OperationId` Named token to the inner string (the kernel projects typed-id
+/// set members as `KernelValue::Named`, NOT bare strings).
+fn state_operation_id_set(
+    state: &KernelState,
+    name: &str,
+    context: &'static str,
+) -> Result<BTreeSet<String>, DslTransitionError> {
+    match required_state_field(state, name, context)? {
+        KernelValue::Set(values) => values
+            .iter()
+            .map(|value| match named_payload(value, "OperationId") {
+                Some(KernelValue::String(inner)) => Ok(inner.clone()),
+                _ => Err(generated_projection_error(
+                    context,
+                    format!("field `{name}` contained a non-OperationId set member"),
+                )),
+            })
+            .collect(),
+        _ => Err(generated_projection_error(
+            context,
+            format!("field `{name}` was not an OperationId set"),
         )),
     }
 }
@@ -785,7 +823,9 @@ impl TurnStateHandle for TestTurnStateHandle {
                     ),
                     (
                         "barrier_operation_ids",
-                        string_set(barrier_operation_ids.into_iter().map(|id| id.to_string())),
+                        operation_id_set(
+                            barrier_operation_ids.into_iter().map(|id| id.to_string()),
+                        ),
                     ),
                 ],
             ),
@@ -801,7 +841,7 @@ impl TurnStateHandle for TestTurnStateHandle {
                     ("run_id", run_id_value(&run_id)),
                     (
                         "operation_ids",
-                        string_set(operation_ids.into_iter().map(|id| id.to_string())),
+                        operation_id_set(operation_ids.into_iter().map(|id| id.to_string())),
                     ),
                 ],
             ),
@@ -1261,10 +1301,11 @@ impl TurnStateHandle for TestTurnStateHandle {
                 &state_enum_variant(&state, "turn_phase", "TurnPhase", CONTEXT)?,
                 CONTEXT,
             )?;
-            let barrier_operation_ids = state_string_set(&state, "barrier_operation_ids", CONTEXT)?
-                .into_iter()
-                .map(|id| parse_operation_id(&id, "barrier_operation_ids", CONTEXT))
-                .collect::<Result<BTreeSet<_>, _>>()?;
+            let barrier_operation_ids =
+                state_operation_id_set(&state, "barrier_operation_ids", CONTEXT)?
+                    .into_iter()
+                    .map(|id| parse_operation_id(&id, "barrier_operation_ids", CONTEXT))
+                    .collect::<Result<BTreeSet<_>, _>>()?;
             let pending_op_refs = state_string_set(&state, "pending_op_refs", CONTEXT)?
                 .into_iter()
                 .map(|id| {

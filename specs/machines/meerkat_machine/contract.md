@@ -22,7 +22,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `image_tool_results_enabled`: `Bool`
 - `tool_calls_pending`: `u64`
 - `pending_op_refs`: `Set<String>`
-- `barrier_operation_ids`: `Set<String>`
+- `barrier_operation_ids`: `Set<OperationId>`
 - `has_barrier_ops`: `Bool`
 - `barrier_satisfied`: `Bool`
 - `boundary_count`: `u64`
@@ -389,9 +389,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PrimitiveApplied`(run_id: RunId)
 - `LlmReturnedToolCalls`(run_id: RunId, tool_count: u64)
 - `LlmReturnedTerminal`(run_id: RunId)
-- `RegisterPendingOps`(run_id: RunId, op_refs: Set<String>, barrier_operation_ids: Set<String>)
+- `RegisterPendingOps`(run_id: RunId, op_refs: Set<String>, barrier_operation_ids: Set<OperationId>)
 - `ToolCallsResolved`(run_id: RunId)
-- `OpsBarrierSatisfied`(run_id: RunId, operation_ids: Set<String>)
+- `OpsBarrierSatisfied`(run_id: RunId, operation_ids: Set<OperationId>)
 - `BoundaryContinue`(run_id: RunId)
 - `BoundaryComplete`(run_id: RunId)
 - `EnterExtraction`(run_id: RunId, max_extraction_retries: u64)

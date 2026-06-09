@@ -12692,8 +12692,11 @@ impl MobActor {
         );
         let preserve_topology_for_respawn = preserve_realtime_binding;
         let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
+        // K3 (#26): the Retiring marker is owned by MobMachine
+        // (`member_state_markers`). Trust that fact alone; do NOT OR-in the
+        // `roster.state` projection, which is a materialized view of this same
+        // machine fact and must not be a second source of truth.
         let cleanup_retry = retire_event_already_present
-            || entry.state == crate::roster::MemberState::Retiring
             || matches!(
                 self.dsl_authority
                     .state()
@@ -12960,14 +12963,16 @@ impl MobActor {
                 crate::event::MemberRef::Session { .. } => crate::RuntimeBinding::Session,
             };
             let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
-            let cleanup_retry = entry.state == crate::roster::MemberState::Retiring
-                || matches!(
-                    self.dsl_authority
-                        .state()
-                        .member_state_markers
-                        .get(&dsl_runtime_id),
-                    Some(mob_dsl::MobMemberState::Retiring)
-                );
+            // K3 (#26): trust the MobMachine-owned Retiring marker alone; the
+            // `roster.state` projection is a materialized view of this fact, not
+            // an independent source of truth.
+            let cleanup_retry = matches!(
+                self.dsl_authority
+                    .state()
+                    .member_state_markers
+                    .get(&dsl_runtime_id),
+                Some(mob_dsl::MobMemberState::Retiring)
+            );
             RespawnSnapshot {
                 profile_name: entry.role.clone(),
                 runtime_mode: entry.runtime_mode,

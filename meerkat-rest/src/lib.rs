@@ -123,7 +123,6 @@ pub struct SessionMcpState {
 #[derive(Clone)]
 pub struct AppState {
     pub store_path: PathBuf,
-    pub default_model: Cow<'static, str>,
     pub max_tokens: u32,
     pub rest_host: Cow<'static, str>,
     pub rest_port: u16,
@@ -461,7 +460,6 @@ impl AppState {
         let enable_builtins = config.tools.builtins_enabled;
         let enable_shell = config.tools.shell_enabled;
 
-        let default_model = Cow::Owned(config.agent.model.clone());
         let max_tokens = config.agent.max_tokens_per_turn;
         let rest_host = Cow::Owned(config.rest.host.clone());
         let rest_port = config.rest.port;
@@ -524,7 +522,6 @@ impl AppState {
 
         Ok(Self {
             store_path,
-            default_model,
             max_tokens,
             rest_host,
             rest_port,
@@ -1061,6 +1058,28 @@ async fn resolve_validation_identity(
         provider_params: None,
         auth_binding: None,
     })
+}
+
+/// Resolve the create-session default model from the CURRENT durable config
+/// through the canonical [`meerkat::resolve_create_session_default_model`]
+/// ladder — the single owner of the create-time default-model fact across
+/// surfaces (RPC resolves through the same seam).
+///
+/// Resolved at request time rather than cached at server construction: REST
+/// config is mutable for the server's lifetime (`PUT`/`PATCH /config` via
+/// `ConfigRuntime`) and the session build path already re-reads the latest
+/// config per build, so a startup snapshot would silently diverge from the
+/// config the built agent actually uses. A config read failure is propagated
+/// as a typed fault, never laundered into a fallback default.
+async fn resolve_default_model(state: &AppState) -> Result<String, ApiError> {
+    let snapshot = state
+        .config_runtime
+        .get()
+        .await
+        .map_err(config_runtime_err_to_api)?;
+    Ok(meerkat::resolve_create_session_default_model(
+        &snapshot.config,
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -4247,7 +4266,16 @@ async fn create_session_inner(
     let model_was_explicit = req.model.is_some();
     let provider_was_explicit = req.provider.is_some();
     let resume_override_mask = create_session_resume_override_mask(&req, keep_alive_override);
-    let model = req.model.unwrap_or_else(|| state.default_model.clone());
+    let model = match req.model {
+        Some(model) => model,
+        // No caller-pinned model: resolve through the canonical
+        // create-session default-model ladder over the CURRENT config —
+        // never a surface-cached copy of `config.agent.model`.
+        None => match resolve_default_model(state).await {
+            Ok(model) => Cow::Owned(model),
+            Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
+        },
+    };
     let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
     let skill_references = match canonical_skill_keys_for_state(state, req.skill_refs.clone()).await
     {
@@ -5511,12 +5539,28 @@ async fn continue_session_inner(
             initial_turn_metadata: None,
         };
         build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::Inherit);
+        let model = match req.model.clone() {
+            Some(model) => model.into_owned(),
+            // No caller-pinned model: same canonical default-model ladder
+            // over the CURRENT config as POST /sessions (the resume mask
+            // keeps the persisted model authoritative unless overridden).
+            None => match resolve_default_model(state).await {
+                Ok(model) => model,
+                Err(e) => {
+                    unregister_rest_runtime_if_new_idle_locked(
+                        state,
+                        &session_id,
+                        runtime_was_registered,
+                    )
+                    .await;
+                    drop(caller_event_tx);
+                    drain_event_forwarder(&session_id, forward_task).await;
+                    return RequestTerminal::RespondWithoutPublish(Err(e));
+                }
+            },
+        };
         let create_req = SvcCreateSessionRequest {
-            model: req
-                .model
-                .clone()
-                .unwrap_or_else(|| state.default_model.clone())
-                .to_string(),
+            model,
             prompt: turn_prompt.clone(),
             render_metadata: None,
             system_prompt: req.system_prompt.clone(),
@@ -6966,6 +7010,15 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use tempfile::TempDir;
 
+    /// Test-side view of the canonical create-session default model: resolved
+    /// per call from the state's current config (the `AppState` no longer
+    /// carries a default-model mirror).
+    async fn resolved_default_model(state: &AppState) -> String {
+        resolve_default_model(state)
+            .await
+            .expect("default model must resolve")
+    }
+
     /// Regression: a serialization fault on an authoritative SSE payload must
     /// surface AS a fault — an `error` event carrying the typed cause — never a
     /// fabricated success-shaped event (the old `json!({"type":"unknown"})`
@@ -7338,7 +7391,7 @@ mod tests {
         let create_result = state
             .session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 render_metadata: None,
                 system_prompt: None,
@@ -7457,7 +7510,7 @@ mod tests {
         let created = state
             .session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 render_metadata: None,
                 system_prompt: None,
@@ -7595,7 +7648,7 @@ mod tests {
         state
             .session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(state).await,
                 prompt: "Hello".to_string().into(),
                 render_metadata: None,
                 system_prompt: None,
@@ -7645,7 +7698,7 @@ mod tests {
         let created = match state
             .session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(state).await,
                 prompt: "Hello".to_string().into(),
                 render_metadata: None,
                 system_prompt: None,
@@ -7814,7 +7867,7 @@ mod tests {
             .expect("runtime bindings should prepare");
         let (request, initial_turn) =
             split_runtime_backed_eager_create_request(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(state).await,
                 prompt: "Hello".to_string().into(),
                 render_metadata: None,
                 system_prompt: None,
@@ -7866,7 +7919,7 @@ mod tests {
             .expect("runtime bindings should prepare");
         let (request, initial_turn) =
             split_runtime_backed_eager_create_request(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(state).await,
                 prompt: "Hello".to_string().into(),
                 render_metadata: None,
                 system_prompt: None,
@@ -8990,7 +9043,7 @@ mod tests {
         let created = state
             .session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 render_metadata: None,
                 system_prompt: None,
@@ -9060,9 +9113,47 @@ mod tests {
         let state = AppState::load_from(temp.path().to_path_buf())
             .await
             .unwrap();
-        assert!(!state.default_model.is_empty());
+        assert!(!resolved_default_model(&state).await.is_empty());
         assert!(state.max_tokens > 0);
         // runtime_adapter is always present (non-optional)
+    }
+
+    /// Regression (default-model ladder): with `config.agent.model` EMPTY the
+    /// create-session default must resolve through the canonical
+    /// `meerkat::resolve_create_session_default_model` ladder (per-provider
+    /// defaults → catalog global default), never collapse to `""` the way the
+    /// deleted `AppState.default_model` snapshot of `config.agent.model` did.
+    #[tokio::test]
+    async fn create_session_default_model_resolves_ladder_when_agent_model_empty() {
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let mut config = state
+            .config_runtime
+            .get()
+            .await
+            .expect("config should read")
+            .config;
+        config.agent.model = String::new();
+        state
+            .config_runtime
+            .set(config.clone(), None)
+            .await
+            .expect("config should persist");
+
+        let resolved = resolve_default_model(&state)
+            .await
+            .expect("default model must resolve");
+        assert!(
+            !resolved.is_empty(),
+            "empty config.agent.model must resolve the catalog ladder, not ''"
+        );
+        assert_eq!(
+            resolved,
+            meerkat::resolve_create_session_default_model(&config),
+            "REST must serve exactly the canonical ladder over the current config"
+        );
     }
 
     #[tokio::test]
@@ -10097,7 +10188,7 @@ mod tests {
         let session_service = state.session_service.clone();
         let created = session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 render_metadata: None,
                 system_prompt: None,
@@ -10176,7 +10267,7 @@ mod tests {
             .expect("runtime bindings should prepare");
         let create_result = session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 render_metadata: None,
                 system_prompt: None,
@@ -10253,7 +10344,7 @@ mod tests {
             .expect("runtime bindings should prepare");
         let create_result = session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 render_metadata: None,
                 system_prompt: None,
@@ -10872,7 +10963,7 @@ mod tests {
         let session_service = state.session_service.clone();
         let created = session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 render_metadata: None,
                 system_prompt: None,
@@ -10943,7 +11034,7 @@ mod tests {
         let created = state
             .session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 render_metadata: None,
                 system_prompt: None,
@@ -11027,7 +11118,7 @@ mod tests {
         let created = state
             .session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 render_metadata: None,
                 system_prompt: None,
@@ -11114,7 +11205,7 @@ mod tests {
         let created = state
             .session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 render_metadata: None,
                 system_prompt: None,
@@ -11203,7 +11294,7 @@ mod tests {
         let created = state
             .session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 render_metadata: None,
                 system_prompt: None,
@@ -11283,7 +11374,7 @@ mod tests {
         let created = state
             .session_service
             .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
+                model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 render_metadata: None,
                 system_prompt: None,
@@ -12454,7 +12545,7 @@ mod tests {
             let created = state
                 .session_service
                 .create_session(SvcCreateSessionRequest {
-                    model: state.default_model.to_string(),
+                    model: resolved_default_model(&state).await,
                     prompt: "Hello".to_string().into(),
                     render_metadata: None,
                     system_prompt: None,
@@ -12521,7 +12612,7 @@ mod tests {
             let created = state
                 .session_service
                 .create_session(SvcCreateSessionRequest {
-                    model: state.default_model.to_string(),
+                    model: resolved_default_model(&state).await,
                     prompt: "Hello".to_string().into(),
                     render_metadata: None,
                     system_prompt: None,

@@ -244,32 +244,38 @@ fn default_max_sessions() -> usize {
     MAX_SESSIONS
 }
 
-/// Resolve the default model for the highest-priority configured provider.
+/// Normalize a credentials-map provider key to its typed identity.
 ///
-/// Rule 7: the surface must not decide which provider's default to use
-/// independent of which key is configured. The decision is delegated to the
-/// catalog seam — `provider_priority()` owns the cross-provider preference order
-/// and `default_model(provider)` owns each provider's default model. The surface
-/// only enumerates the configured providers and consults the catalog.
+/// The `google` alias maps to the Gemini identity; unrecognized keys yield
+/// `None`.
+fn canonical_provider_key(key: &str) -> Option<meerkat_core::Provider> {
+    let normalized = if key == "google" { "gemini" } else { key };
+    meerkat_core::Provider::parse_strict(normalized)
+}
+
+/// Build the bootstrap `Config` from this surface's actual inputs (explicit
+/// model override + configured API keys + base URLs) and resolve the default
+/// model through the canonical create-session ladder.
 ///
-/// `api_keys` is keyed by the same provider strings populated into the realm
-/// (`anthropic` / `openai` / `gemini`); the `google` alias normalizes to the
-/// Gemini identity before lookup. Returns the catalog global default when no
-/// configured provider yields a typed identity (e.g. an unrecognized key).
-fn default_model_for_configured_providers(api_keys: &HashMap<String, String>) -> String {
-    let canonical = |key: &str| -> Option<meerkat_core::Provider> {
-        let normalized = if key == "google" { "gemini" } else { key };
-        meerkat_core::Provider::parse_strict(normalized)
-    };
-    let configured: Vec<meerkat_core::Provider> =
-        api_keys.keys().filter_map(|key| canonical(key)).collect();
-    meerkat_models::catalog::provider_priority()
-        .iter()
-        .copied()
-        .find(|provider| configured.contains(provider))
-        .and_then(|provider| meerkat_models::catalog::default_model(provider.as_str()))
-        .unwrap_or_else(meerkat_models::catalog::global_default_model)
-        .to_string()
+/// The browser bootstrap synthesizes its config from `credentials_json`
+/// alone: the embedded template's global agent model is an operator-file fact
+/// that does not exist on this surface, so `config.agent.model` carries only
+/// the caller's explicit override (or nothing). After
+/// [`populate_realm_from_api_keys`] makes the config truthful about which
+/// providers are configured, the model decision itself is owned by
+/// [`meerkat::resolve_create_session_default_model`] — this surface keeps no
+/// parallel default-model ladder.
+fn build_bootstrap_config(
+    explicit_model: Option<String>,
+    api_keys: &HashMap<String, String>,
+    base_urls: Option<&HashMap<String, String>>,
+) -> (meerkat_core::Config, String) {
+    let mut config = Config::default();
+    config.agent.model = explicit_model.unwrap_or_default();
+    populate_realm_from_api_keys(&mut config, api_keys, base_urls);
+    let model = meerkat::resolve_create_session_default_model(&config);
+    config.agent.model.clone_from(&model);
+    (config, model)
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -360,8 +366,7 @@ fn populate_realm_from_api_keys(
     // the Gemini identity before lookup.
     let priority = meerkat_models::catalog::provider_priority();
     let provider_rank = |key: &str| -> usize {
-        let canonical = if key == "google" { "gemini" } else { key };
-        match meerkat_core::Provider::parse_strict(canonical) {
+        match canonical_provider_key(key) {
             Some(provider) => priority
                 .iter()
                 .position(|p| *p == provider)
@@ -370,6 +375,28 @@ fn populate_realm_from_api_keys(
         }
     };
     entries.sort_by_key(|(k, _)| provider_rank(k));
+
+    // A per-provider default model is only a true config fact for providers
+    // that have a key-backed binding in this realm — but `Config::default()`
+    // pre-fills `config.models` for every catalog provider. Clear the
+    // unconfigured entries so the canonical create-session default-model
+    // ladder (which walks non-empty `config.models` entries in catalog
+    // priority order) sees only the providers this surface actually
+    // configured.
+    let configured = |provider: meerkat_core::Provider| {
+        api_keys
+            .keys()
+            .any(|key| canonical_provider_key(key) == Some(provider))
+    };
+    if !configured(meerkat_core::Provider::Anthropic) {
+        config.models.anthropic.clear();
+    }
+    if !configured(meerkat_core::Provider::OpenAI) {
+        config.models.openai.clear();
+    }
+    if !configured(meerkat_core::Provider::Gemini) {
+        config.models.gemini.clear();
+    }
 
     let mut section = meerkat_core::RealmConfigSection::from_inline_api_keys(&entries);
     if let Some(urls) = base_urls {
@@ -1334,11 +1361,6 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
         creds.gemini_api_key.as_deref(),
     )?;
 
-    // Catalog-owned default: pick the default model for the highest-priority
-    // configured provider rather than hardcoding a single provider's default.
-    let model = creds
-        .model
-        .unwrap_or_else(|| default_model_for_configured_providers(&api_keys));
     let max_sessions = creds.max_sessions;
 
     let providers: Vec<String> = api_keys.keys().cloned().collect();
@@ -1347,9 +1369,11 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
         creds.openai_base_url.as_deref(),
         creds.gemini_base_url.as_deref(),
     );
-    let mut config = Config::default();
-    config.agent.model.clone_from(&model);
-    populate_realm_from_api_keys(&mut config, &api_keys, base_urls.as_ref());
+    // The default model comes from the canonical
+    // `resolve_create_session_default_model` ladder over the bootstrap
+    // config, after the api-keys→realm population makes that config truthful
+    // about which providers are configured.
+    let (config, model) = build_bootstrap_config(creds.model, &api_keys, base_urls.as_ref());
 
     let (session_service, mob_state) = build_service_infrastructure(config, max_sessions)?;
 
@@ -1399,11 +1423,6 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
         rt_config.gemini_api_key.as_deref(),
     )?;
 
-    // Catalog-owned default: pick the default model for the highest-priority
-    // configured provider rather than hardcoding a single provider's default.
-    let model = rt_config
-        .model
-        .unwrap_or_else(|| default_model_for_configured_providers(&api_keys));
     let max_sessions = rt_config.max_sessions;
 
     let providers: Vec<String> = api_keys.keys().cloned().collect();
@@ -1412,9 +1431,11 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
         rt_config.openai_base_url.as_deref(),
         rt_config.gemini_base_url.as_deref(),
     );
-    let mut config = Config::default();
-    config.agent.model.clone_from(&model);
-    populate_realm_from_api_keys(&mut config, &api_keys, base_urls.as_ref());
+    // The default model comes from the canonical
+    // `resolve_create_session_default_model` ladder over the bootstrap
+    // config, after the api-keys→realm population makes that config truthful
+    // about which providers are configured.
+    let (config, model) = build_bootstrap_config(rt_config.model, &api_keys, base_urls.as_ref());
 
     let (session_service, mob_state) = build_service_infrastructure(config, max_sessions)?;
 
@@ -2835,9 +2856,7 @@ pub fn close_subscription(handle: u32) -> Result<(), JsValue> {
 #[cfg(test)]
 mod tests {
     #[cfg(not(target_arch = "wasm32"))]
-    use super::{
-        Credentials, default_model_for_configured_providers, extract_verify_and_parse_mobpack,
-    };
+    use super::{Credentials, build_bootstrap_config, extract_verify_and_parse_mobpack};
     use super::{
         EventSubscription, SUBSCRIPTIONS, SubscriptionInner, SubscriptionLaggedItem,
         close_subscription, destroy_session_with_services, merge_runtime_system_context_state,
@@ -3755,41 +3774,75 @@ capabilities = [{capability_values}]
     }
 
     // ── Row #40: provider-aware default model resolution ───────────────────
+    //
+    // The bootstrap default model is the OUTPUT of the canonical
+    // `meerkat::resolve_create_session_default_model` ladder over the
+    // bootstrap config; the surface keeps no parallel ladder. Each test pins
+    // both the expected value AND that the value is exactly the canonical
+    // ladder over the produced config.
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn default_model_for_only_openai_is_openai_catalog_default() {
+    fn bootstrap_default_model_for_only_openai_is_openai_catalog_default() {
         let keys = HashMap::from([("openai".to_string(), "sk-oai".to_string())]);
-        let model = default_model_for_configured_providers(&keys);
+        let (config, model) = build_bootstrap_config(None, &keys, None);
         let expected = meerkat_models::catalog::default_model("openai")
             .expect("openai catalog default")
             .to_string();
         assert_eq!(model, expected);
         // Must NOT hardcode the anthropic global default when anthropic is absent.
         assert_ne!(model, meerkat_models::catalog::global_default_model());
+        assert_eq!(
+            model,
+            meerkat::resolve_create_session_default_model(&config)
+        );
+        assert_eq!(config.agent.model, model);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn default_model_prefers_highest_priority_configured_provider() {
+    fn bootstrap_default_model_prefers_highest_priority_configured_provider() {
         // openai + gemini configured (no anthropic): priority picks openai.
         let keys = HashMap::from([
             ("gemini".to_string(), "g".to_string()),
             ("openai".to_string(), "o".to_string()),
         ]);
-        let model = default_model_for_configured_providers(&keys);
+        let (config, model) = build_bootstrap_config(None, &keys, None);
         assert_eq!(
             model,
             meerkat_models::catalog::default_model("openai").expect("openai catalog default")
+        );
+        assert_eq!(
+            model,
+            meerkat::resolve_create_session_default_model(&config)
         );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn default_model_unrecognized_key_falls_back_to_global_default() {
+    fn bootstrap_default_model_unrecognized_key_falls_back_to_global_default() {
         let keys = HashMap::from([("notaprovider".to_string(), "x".to_string())]);
-        let model = default_model_for_configured_providers(&keys);
+        let (config, model) = build_bootstrap_config(None, &keys, None);
         assert_eq!(model, meerkat_models::catalog::global_default_model());
+        assert_eq!(
+            model,
+            meerkat::resolve_create_session_default_model(&config)
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn bootstrap_explicit_model_outranks_configured_provider_defaults() {
+        // An explicit caller model is the bootstrap config's global agent
+        // default — ladder tier 1 — and outranks every provider default.
+        let keys = HashMap::from([("openai".to_string(), "sk-oai".to_string())]);
+        let (config, model) = build_bootstrap_config(Some("custom-model".to_string()), &keys, None);
+        assert_eq!(model, "custom-model");
+        assert_eq!(config.agent.model, "custom-model");
+        assert_eq!(
+            model,
+            meerkat::resolve_create_session_default_model(&config)
+        );
     }
 
     // ── Row #60: realm binding order pinned to catalog provider_priority ────

@@ -66,7 +66,6 @@ async fn integration_real_live_continue_hangs() {
 
     let state = AppState {
         store_path: store_path.clone(),
-        default_model: config.agent.model.clone().into(),
         max_tokens: config.agent.max_tokens_per_turn,
         rest_host: config.rest.host.clone().into(),
         rest_port: config.rest.port,

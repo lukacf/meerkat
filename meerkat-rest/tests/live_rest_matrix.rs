@@ -139,10 +139,20 @@ async fn request_text(
 }
 
 async fn create_deferred_session(state: &AppState, prompt: &str) -> String {
+    // Canonical create-session default-model ladder over the state's current
+    // config — the AppState carries no default-model mirror.
+    let default_model = meerkat::resolve_create_session_default_model(
+        &state
+            .config_runtime
+            .get()
+            .await
+            .expect("config should read")
+            .config,
+    );
     let result = state
         .session_service
         .create_session(SvcCreateSessionRequest {
-            model: state.default_model.to_string(),
+            model: default_model,
             prompt: prompt.to_string().into(),
             render_metadata: None,
             system_prompt: None,

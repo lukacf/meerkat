@@ -82,7 +82,6 @@ async fn inner_test_rest_resume_metadata() {
 
     let state_run = AppState {
         store_path: store_path.clone(),
-        default_model: config.agent.model.clone().into(),
         max_tokens: config.agent.max_tokens_per_turn,
         rest_host: config.rest.host.clone().into(),
         rest_port: config.rest.port,
@@ -212,8 +211,14 @@ async fn inner_test_rest_resume_metadata() {
         Some(runtime_adapter2.clone()),
         None,
     );
+    // The resume server's CONFIG carries deliberately divergent defaults
+    // (model resolved per request via the canonical
+    // `meerkat::resolve_create_session_default_model` ladder, max_tokens on
+    // state); resume must preserve the session's persisted values regardless.
+    let mut resume_config = config.clone();
+    resume_config.agent.model = "gpt-5.2".to_string();
     let config_store_resume: Arc<dyn meerkat_core::ConfigStore> =
-        Arc::new(MemoryConfigStore::new(config.clone()));
+        Arc::new(MemoryConfigStore::new(resume_config));
     let config_runtime_resume = Arc::new(meerkat_core::ConfigRuntime::new(
         Arc::clone(&config_store_resume),
         store_path.join("config_state.json"),
@@ -221,7 +226,6 @@ async fn inner_test_rest_resume_metadata() {
 
     let state_resume = AppState {
         store_path: store_path.clone(),
-        default_model: "gpt-5.2".into(),
         max_tokens: 7,
         rest_host: config.rest.host.clone().into(),
         rest_port: config.rest.port,

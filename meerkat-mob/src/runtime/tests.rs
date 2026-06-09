@@ -34567,6 +34567,80 @@ async fn test_root_frame_condition_skip_emits_single_skip_projection() {
 }
 
 #[tokio::test]
+async fn test_step_condition_referencing_absent_root_skips_not_fails() {
+    // Regression (worktree-ultimate-dogma): a step condition that references a
+    // context root which has not been produced yet (e.g. a loop-iteration step
+    // output, or an `Eq`/`In` against an absent step) must resolve to a definite
+    // "not present" and SKIP the step, exactly as it did when the evaluator
+    // returned a plain `bool`. The fail-closed rewrite over-broadened and turned
+    // an absent root into a step/flow FAULT, collapsing every conditional flow
+    // step to `Failed`. Structural faults (typo'd keys inside a present root,
+    // unparsable references) must still fail closed; this only restores the
+    // absent-root case.
+    use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec};
+    use crate::ids::FlowNodeId;
+
+    let mut definition = sample_definition_with_single_step_flow(500, 8);
+    let flow = definition
+        .flows
+        .get_mut(&FlowId::from("demo"))
+        .expect("demo flow");
+    let step = flow.steps.get_mut(&step_id("start")).expect("start step");
+    // This loop-iteration root is never produced by this flow, mirroring the
+    // smoke-test `loops.{loop}.iterations.0.steps.{step}.done` references that
+    // gate first-vs-subsequent loop-body behavior before the referenced step
+    // has run.
+    step.condition = Some(ConditionExpr::Eq {
+        path: "loops.never.iterations.0.steps.absent.done".to_string(),
+        value: serde_json::json!(true),
+    });
+    let mut root_nodes = IndexMap::new();
+    root_nodes.insert(
+        FlowNodeId::from("start-node"),
+        FlowNodeSpec::Step(FrameStepSpec {
+            step_id: step_id("start"),
+            depends_on: Vec::new(),
+            depends_on_mode: DependencyMode::All,
+            branch: None,
+        }),
+    );
+    flow.root = Some(FrameSpec { nodes: root_nodes });
+
+    let (handle, _service) = create_test_mob(definition).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({ "ok": false }))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(
+        terminal.status,
+        MobRunStatus::Completed,
+        "an absent-root condition must skip the step and complete the run, not fail it: {terminal:?}"
+    );
+
+    let run = handle
+        .flow_status(run_id.clone())
+        .await
+        .expect("flow status")
+        .expect("run exists");
+    assert_eq!(
+        run.step_ledger
+            .iter()
+            .filter(|entry| {
+                entry.step_id.as_str() == "start" && entry.status == StepRunStatus::Skipped
+            })
+            .count(),
+        1,
+        "absent-root condition must skip the step exactly once"
+    );
+}
+
+#[tokio::test]
 async fn test_root_frame_step_failure_does_not_abort_independent_siblings() {
     use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec};
     use crate::ids::FlowNodeId;

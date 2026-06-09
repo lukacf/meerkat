@@ -5,6 +5,39 @@ use crate::definition::ConditionExpr;
 use crate::run::FlowContext;
 use serde_json::Value;
 
+/// Outcome of resolving a leaf operand path against the flow context.
+///
+/// A leaf comparison (`Eq`/`In`/`Gt`/`Lt`) distinguishes three cases:
+/// - the value is present (`Present`),
+/// - the named context root is simply not produced yet (`AbsentRoot`) — a
+///   legitimate "not present" signal, not a fault,
+/// - the reference is structurally invalid (`StructuralFault`) — a typo'd key
+///   inside a present root, an unparsable reference, or a walk into a scalar.
+enum OperandResolution<'a> {
+    Present(&'a Value),
+    AbsentRoot,
+    StructuralFault(ConditionEvalError),
+}
+
+/// Resolve a leaf operand path, classifying an absent context root as a
+/// definite "not present" rather than a fault.
+///
+/// `MissingRoot` means the named step/loop-iteration output has not been
+/// produced yet. Conditions legitimately reference such roots to gate
+/// first-vs-subsequent behavior (e.g. a loop-body step keyed on a prior
+/// iteration's output that does not exist on the first pass). For a comparison
+/// operand this is a definite "value not present", so the comparison is
+/// `false` — exactly as the former `-> bool` evaluator behaved. Every other
+/// resolution failure (typo'd key, unparsable reference, scalar walk) remains a
+/// structural fault that the caller surfaces as a step/flow fault.
+fn resolve_operand<'a>(ctx: &'a FlowContext, path: &str) -> OperandResolution<'a> {
+    match resolve_context_path(ctx, path) {
+        Ok(value) => OperandResolution::Present(value),
+        Err(PathResolveError::MissingRoot { .. }) => OperandResolution::AbsentRoot,
+        Err(error) => OperandResolution::StructuralFault(ConditionEvalError::UnresolvedPath(error)),
+    }
+}
+
 /// Why a condition expression could not be evaluated to a definite boolean.
 ///
 /// A condition references runtime context that must exist and be of a
@@ -12,7 +45,8 @@ use serde_json::Value;
 /// fault (missing path, non-comparable operand types) into a silent `false`,
 /// so a typo in a `path` or a schema-violating step output would skip a step
 /// rather than surface a flow fault. These are now typed and propagated by the
-/// caller as a step/flow fault.
+/// caller as a step/flow fault — EXCEPT an absent context root, which remains a
+/// definite "not present" so conditions can gate on not-yet-produced outputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ConditionEvalError {
     /// The referenced context path did not resolve to a present value.
@@ -48,23 +82,41 @@ impl From<PathResolveError> for ConditionEvalError {
 
 /// Evaluate a condition expression against runtime flow context.
 ///
-/// Fails closed: a missing/invalid path or non-comparable operands surface as a
-/// typed [`ConditionEvalError`] rather than silently evaluating to `false`.
+/// Fails closed on STRUCTURAL faults: a typo'd key inside a present root, an
+/// unparsable reference, or non-comparable operands surface as a typed
+/// [`ConditionEvalError`] rather than silently evaluating to `false`. An absent
+/// context root (a step/loop-iteration output not yet produced) is a definite
+/// "not present" and resolves a comparison to `false`, so conditions can gate
+/// on not-yet-produced outputs without faulting the step.
 pub(crate) fn evaluate_condition(
     expr: &ConditionExpr,
     ctx: &FlowContext,
 ) -> Result<bool, ConditionEvalError> {
     match expr {
-        ConditionExpr::Eq { path, value } => Ok(resolve_context_path(ctx, path)? == value),
-        ConditionExpr::In { path, values } => Ok(values.contains(resolve_context_path(ctx, path)?)),
-        ConditionExpr::Gt { path, value } => {
-            let resolved = resolve_context_path(ctx, path)?;
-            Ok(compare_values(resolved, value, path)?.is_gt())
-        }
-        ConditionExpr::Lt { path, value } => {
-            let resolved = resolve_context_path(ctx, path)?;
-            Ok(compare_values(resolved, value, path)?.is_lt())
-        }
+        ConditionExpr::Eq { path, value } => match resolve_operand(ctx, path) {
+            OperandResolution::Present(resolved) => Ok(resolved == value),
+            OperandResolution::AbsentRoot => Ok(false),
+            OperandResolution::StructuralFault(error) => Err(error),
+        },
+        ConditionExpr::In { path, values } => match resolve_operand(ctx, path) {
+            OperandResolution::Present(resolved) => Ok(values.contains(resolved)),
+            OperandResolution::AbsentRoot => Ok(false),
+            OperandResolution::StructuralFault(error) => Err(error),
+        },
+        ConditionExpr::Gt { path, value } => match resolve_operand(ctx, path) {
+            OperandResolution::Present(resolved) => {
+                Ok(compare_values(resolved, value, path)?.is_gt())
+            }
+            OperandResolution::AbsentRoot => Ok(false),
+            OperandResolution::StructuralFault(error) => Err(error),
+        },
+        ConditionExpr::Lt { path, value } => match resolve_operand(ctx, path) {
+            OperandResolution::Present(resolved) => {
+                Ok(compare_values(resolved, value, path)?.is_lt())
+            }
+            OperandResolution::AbsentRoot => Ok(false),
+            OperandResolution::StructuralFault(error) => Err(error),
+        },
         ConditionExpr::And { exprs } => {
             for expr in exprs {
                 if !evaluate_condition(expr, ctx)? {
@@ -330,18 +382,36 @@ mod tests {
     }
 
     #[test]
-    fn test_evaluate_absent_root_fails_closed() {
+    fn test_evaluate_absent_root_resolves_false_not_fault() {
+        // Regression guard: an absent context ROOT (a step/loop-iteration output
+        // not yet produced) is a definite "not present", not a fault. A
+        // comparison against it must evaluate to `false` so conditions can gate
+        // on not-yet-produced outputs — exactly as the former `-> bool`
+        // evaluator behaved. Only STRUCTURAL faults (typo'd keys inside a
+        // present root, unparsable references) fail closed.
         let ctx = context();
         let expr = ConditionExpr::In {
             path: "steps.never-ran.value".to_string(),
             values: vec![serde_json::json!(1)],
         };
-        let error = evaluate_condition(&expr, &ctx)
-            .expect_err("an absent step root must surface a typed fault");
-        assert!(matches!(
-            error,
-            ConditionEvalError::UnresolvedPath(PathResolveError::MissingRoot { .. })
-        ));
+        assert!(
+            !evaluate_condition(&expr, &ctx)
+                .expect("an absent step root must resolve to a definite false, not a fault"),
+            "absent root must compare as not-present (false)"
+        );
+
+        // An absent loop-iteration root (the exact shape the loop-body
+        // conditions reference before the first iteration has run) is likewise
+        // a definite "not present", not a fault.
+        let loop_expr = ConditionExpr::Eq {
+            path: "loops.never.iterations.0.steps.absent.done".to_string(),
+            value: serde_json::json!(true),
+        };
+        assert!(
+            !evaluate_condition(&loop_expr, &ctx)
+                .expect("an absent loop-iteration root must resolve to a definite false"),
+            "absent loop-iteration root must compare as not-present (false)"
+        );
     }
 
     #[test]

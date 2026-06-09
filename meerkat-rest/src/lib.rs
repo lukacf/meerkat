@@ -2369,17 +2369,26 @@ async fn mob_event_stream(
                 .map_err(|e| ApiError::NotFound(e.to_string()))?;
 
             Box::pin(async_stream::stream! {
-                yield Ok(Event::default().event("stream_opened").data(
-                    serde_json::to_string(&json!({
-                        "mob_id": id,
-                        "member": member,
-                    })).unwrap_or_default(),
-                ));
+                match serde_json::to_string(&json!({
+                    "mob_id": id,
+                    "member": member,
+                })) {
+                    Ok(data) => yield Ok(Event::default().event("stream_opened").data(data)),
+                    Err(e) => {
+                        yield Ok(sse_serialization_error_event(&e));
+                        return;
+                    }
+                }
 
                 while let Some(envelope) = futures::StreamExt::next(&mut event_stream).await {
                     let event_type = agent_event_type(&envelope.payload);
-                    let data = serde_json::to_string(&envelope).unwrap_or_default();
-                    yield Ok(Event::default().event(event_type).data(data));
+                    match serde_json::to_string(&envelope) {
+                        Ok(data) => yield Ok(Event::default().event(event_type).data(data)),
+                        Err(e) => {
+                            yield Ok(sse_serialization_error_event(&e));
+                            return;
+                        }
+                    }
                 }
 
                 yield Ok(Event::default().event("done").data("{}"));
@@ -2393,16 +2402,25 @@ async fn mob_event_stream(
                 .map_err(|e| ApiError::NotFound(e.to_string()))?;
 
             Box::pin(async_stream::stream! {
-                yield Ok(Event::default().event("stream_opened").data(
-                    serde_json::to_string(&json!({
-                        "mob_id": id,
-                    })).unwrap_or_default(),
-                ));
+                match serde_json::to_string(&json!({
+                    "mob_id": id,
+                })) {
+                    Ok(data) => yield Ok(Event::default().event("stream_opened").data(data)),
+                    Err(e) => {
+                        yield Ok(sse_serialization_error_event(&e));
+                        return;
+                    }
+                }
 
                 while let Some(attributed) = handle.event_rx.recv().await {
                     let event_type = agent_event_type(&attributed.envelope.payload);
-                    let data = serde_json::to_string(&attributed).unwrap_or_default();
-                    yield Ok(Event::default().event(event_type).data(data));
+                    match serde_json::to_string(&attributed) {
+                        Ok(data) => yield Ok(Event::default().event(event_type).data(data)),
+                        Err(e) => {
+                            yield Ok(sse_serialization_error_event(&e));
+                            return;
+                        }
+                    }
                 }
 
                 yield Ok(Event::default().event("done").data("{}"));
@@ -6253,6 +6271,34 @@ async fn continue_session_inner(
     }
 }
 
+/// SSE event type used to surface a serialization fault to the stream.
+const SSE_SERIALIZATION_ERROR_EVENT: &str = "error";
+
+/// Build the JSON data payload for a serialization-fault SSE error event.
+///
+/// Built from a [`serde_json::Value`] whose `Display` impl always emits valid
+/// JSON, so this is infallible. Carries the typed cause (`message`) rather than
+/// laundering it away.
+fn sse_serialization_error_data(error: &serde_json::Error) -> String {
+    json!({
+        "error": "event_serialization_failed",
+        "message": error.to_string(),
+    })
+    .to_string()
+}
+
+/// Build an SSE `error` event carrying a typed serialization fault.
+///
+/// Used when an authoritative SSE payload (a session event or the
+/// `session_loaded` snapshot) fails to serialize. The fault must surface to the
+/// client as an explicit error rather than be laundered into a fabricated
+/// success-shaped event or an empty data frame.
+fn sse_serialization_error_event(error: &serde_json::Error) -> Event {
+    Event::default()
+        .event(SSE_SERIALIZATION_ERROR_EVENT)
+        .data(sse_serialization_error_data(error))
+}
+
 /// SSE endpoint for streaming session events
 async fn session_events(
     State(state): State<AppState>,
@@ -6275,14 +6321,20 @@ async fn session_events(
 
     // Create a stream that sends agent events as SSE events
     let stream = async_stream::stream! {
-        // Emit a session_loaded event for compatibility
-        let event = Event::default()
-            .event("session_loaded")
-            .data(serde_json::to_string(&json!({
-                "session_id": session_id.to_string(),
-                "message_count": session.messages().len(),
-            })).unwrap_or_default());
-        yield Ok(event);
+        // Emit a session_loaded event for compatibility. A serialization fault
+        // here is authoritative state we cannot fabricate around: surface it as
+        // an SSE `error` event and terminate the stream rather than shipping an
+        // empty/fake payload.
+        match serde_json::to_string(&json!({
+            "session_id": session_id.to_string(),
+            "message_count": session.messages().len(),
+        })) {
+            Ok(data) => yield Ok(Event::default().event("session_loaded").data(data)),
+            Err(e) => {
+                yield Ok(sse_serialization_error_event(&e));
+                return;
+            }
+        }
 
         loop {
             match rx.recv().await {
@@ -6292,16 +6344,17 @@ async fn session_events(
                     }
 
                     let event_type = agent_event_type(&payload.event.payload);
-                    let json = serde_json::to_value(&payload.event).unwrap_or_else(|_| {
-                        json!({
-                            "payload": {"type": "unknown"}
-                        })
-                    });
-
-                    let event = Event::default()
-                        .event(event_type)
-                        .data(serde_json::to_string(&json).unwrap_or_default());
-                    yield Ok(event);
+                    // Serializing the authoritative event must not be laundered
+                    // into a fabricated success payload: a failure surfaces as
+                    // an `error` event carrying the typed cause and ends the
+                    // stream.
+                    match serde_json::to_string(&payload.event) {
+                        Ok(data) => yield Ok(Event::default().event(event_type).data(data)),
+                        Err(e) => {
+                            yield Ok(sse_serialization_error_event(&e));
+                            return;
+                        }
+                    }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     continue;
@@ -6912,6 +6965,42 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use tempfile::TempDir;
+
+    /// Regression: a serialization fault on an authoritative SSE payload must
+    /// surface AS a fault — an `error` event carrying the typed cause — never a
+    /// fabricated success-shaped event (the old `json!({"type":"unknown"})`
+    /// launder) nor an empty data frame (`unwrap_or_default()`).
+    #[test]
+    fn sse_serialization_fault_surfaces_as_error_event_not_fake_success() {
+        // A real serde_json::Error from a failed parse stands in for the
+        // serialization fault the SSE path now propagates.
+        let err = serde_json::from_str::<serde_json::Value>("{not json}")
+            .expect_err("invalid JSON must fail to parse");
+
+        let data = sse_serialization_error_data(&err);
+
+        // Event type is the dedicated error channel, not a session/agent event.
+        assert_eq!(SSE_SERIALIZATION_ERROR_EVENT, "error");
+
+        // Payload is an explicit fault carrying the typed cause...
+        let parsed: serde_json::Value =
+            serde_json::from_str(&data).expect("error payload must be valid JSON");
+        assert_eq!(parsed["error"], "event_serialization_failed");
+        assert!(
+            parsed["message"].as_str().is_some_and(|m| !m.is_empty()),
+            "typed cause must be carried in `message`, got: {data}"
+        );
+
+        // ...and is NOT a fabricated success-shaped event.
+        assert_ne!(
+            parsed["payload"]["type"], "unknown",
+            "must not launder into a fabricated `unknown` success event"
+        );
+        assert!(
+            !data.is_empty(),
+            "must not launder into an empty data frame"
+        );
+    }
 
     async fn runtime_terminated_completion_handle(
         adapter: &meerkat_runtime::meerkat_machine::MeerkatMachine,

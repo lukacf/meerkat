@@ -350,8 +350,10 @@ impl McpConnection {
     /// Call a tool, returning multimodal content blocks.
     ///
     /// MCP servers can return text, image, and other content types. Text and
-    /// image content are captured as [`ContentBlock`] variants; other content
-    /// types (resources, audio, etc.) are silently dropped.
+    /// image content are captured as their typed [`ContentBlock`] variants;
+    /// resource, audio, and resource-link content the agent loop does not model
+    /// are preserved verbatim as [`ContentBlock::Structured`] rather than
+    /// silently dropped.
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<Vec<ContentBlock>, McpError> {
         let arguments = args.as_object().cloned();
 
@@ -369,11 +371,13 @@ impl McpConnection {
                 reason: format!("{e}"),
             })?;
 
-        // Check for tool error
+        // Check for tool error. The MCP server carries the error detail in
+        // `content`; carry it through as the typed reason rather than dropping
+        // it behind a fixed string.
         if result.is_error.unwrap_or(false) {
             return Err(McpError::ToolCallFailed {
                 tool: name.to_string(),
-                reason: "Tool returned error".to_string(),
+                reason: tool_error_reason(&result.content),
             });
         }
 
@@ -431,23 +435,50 @@ fn mcp_auth_error_to_connection_failed(error: McpOAuthError) -> McpError {
     }
 }
 
+/// Derive a typed failure reason from an errored tool result's content.
+///
+/// MCP carries the server-authored error detail in `CallToolResult.content`
+/// when `is_error` is set. Flatten that text (and any unmodeled content) into
+/// the reason rather than laundering it away behind a fixed string.
+fn tool_error_reason(content: &[rmcp::model::Content]) -> String {
+    let blocks = extract_content_blocks(content.to_vec());
+    let text = meerkat_core::types::text_content(&blocks);
+    if text.is_empty() {
+        "tool returned error with no content".to_string()
+    } else {
+        text
+    }
+}
+
 /// Convert MCP [`Content`] items to [`ContentBlock`] variants.
 ///
-/// Text and image content are captured. Other content types (resources,
-/// audio, resource links) are silently dropped since the core agent loop
-/// does not model them.
+/// Text and image content map to their typed [`ContentBlock`] equivalents.
+/// Resource, audio, and resource-link content the core agent loop does not
+/// model are preserved verbatim as [`ContentBlock::Structured`] JSON rather
+/// than silently dropped.
 fn extract_content_blocks(contents: Vec<rmcp::model::Content>) -> Vec<ContentBlock> {
-    contents
-        .into_iter()
-        .filter_map(|c| match c.raw {
-            RawContent::Text(text) => Some(ContentBlock::Text { text: text.text }),
-            RawContent::Image(image) => Some(ContentBlock::Image {
-                media_type: image.mime_type,
-                data: meerkat_core::ImageData::Inline { data: image.data },
-            }),
-            _ => None,
-        })
-        .collect()
+    contents.into_iter().map(content_block_from_raw).collect()
+}
+
+/// Faithfully map a single MCP [`RawContent`] to a [`ContentBlock`].
+///
+/// No variant is silently dropped: unmodeled variants are preserved as
+/// [`ContentBlock::Structured`] carrying the original JSON, falling back to a
+/// debug text projection if the content cannot be serialized.
+fn content_block_from_raw(content: rmcp::model::Content) -> ContentBlock {
+    match content.raw {
+        RawContent::Text(text) => ContentBlock::Text { text: text.text },
+        RawContent::Image(image) => ContentBlock::Image {
+            media_type: image.mime_type,
+            data: meerkat_core::ImageData::Inline { data: image.data },
+        },
+        other => match serde_json::value::to_raw_value(&other) {
+            Ok(data) => ContentBlock::Structured { data },
+            Err(_) => ContentBlock::Text {
+                text: format!("{other:?}"),
+            },
+        },
+    }
 }
 
 #[cfg(test)]
@@ -577,6 +608,48 @@ pub mod tests {
         // Verify text_content projection matches legacy behavior
         let text = meerkat_core::types::text_content(&blocks);
         assert_eq!(text, "Hello, MCP!");
+    }
+
+    /// Regression: an unmodeled content variant (embedded resource) must be
+    /// preserved as `Structured` JSON, never silently dropped (no `_ => None`
+    /// launder). The data the server returned survives the conversion.
+    #[test]
+    fn mcp_call_tool_preserves_unmodeled_variant() {
+        let contents = vec![
+            Content::text("before"),
+            Content::embedded_text("file:///doc.txt", "resource body"),
+        ];
+        let blocks = extract_content_blocks(contents);
+        assert_eq!(blocks.len(), 2, "no content variant may be dropped");
+        assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "before"));
+        match &blocks[1] {
+            ContentBlock::Structured { data } => {
+                let rendered = data.get();
+                assert!(
+                    rendered.contains("resource body"),
+                    "structured passthrough must preserve the resource body verbatim, got: {rendered}"
+                );
+            }
+            other => panic!("expected Structured passthrough, got {other:?}"),
+        }
+    }
+
+    /// Regression: when a tool errors, the typed reason must carry the
+    /// server-authored content detail, not a fixed `"Tool returned error"`
+    /// string that launders the cause away.
+    #[test]
+    fn mcp_tool_error_reason_carries_server_detail() {
+        let content = vec![Content::text("disk quota exceeded")];
+        let reason = tool_error_reason(&content);
+        assert_eq!(reason, "disk quota exceeded");
+    }
+
+    /// An errored result with no content still produces a non-empty, honest
+    /// reason rather than an empty string.
+    #[test]
+    fn mcp_tool_error_reason_handles_empty_content() {
+        let reason = tool_error_reason(&[]);
+        assert_eq!(reason, "tool returned error with no content");
     }
 
     /// Get path to the test server binary

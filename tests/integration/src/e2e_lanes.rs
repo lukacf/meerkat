@@ -4859,7 +4859,14 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
             id: None,
             lane: Lane::Smoke,
             title: "Mob partial resume collaborative joke smoke",
-            timeout_secs: 300,
+            // 3 live LLM agents through spawn + 2 send_and_wait (180s send + 90s
+            // history each ~= 540s of bounded internal waits) + partial resume +
+            // per-member supervisor bridge requests bounded at 60s (raised from
+            // 30s in 992572a9a for RBE registration tolerance). The 300s cap was
+            // below the test's own internal-timeout budget; raised to 900s to
+            // match the sibling live-mob lanes (mob-external-tcp 900s) — no
+            // unbounded waits exist (every await is inner-timeout bounded).
+            timeout_secs: 900,
             required_env: &[&[
                 "RKAT_OPENAI_API_KEY",
                 "OPENAI_API_KEY",

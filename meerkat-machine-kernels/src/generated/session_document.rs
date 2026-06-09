@@ -1096,6 +1096,13 @@ pub struct State {
     pub session_first_turn_phase: std::collections::BTreeMap<SessionId, SessionFirstTurnPhase>,
     pub session_pending_initial_prompt_present: std::collections::BTreeMap<SessionId, bool>,
     pub session_pending_tool_results_count: std::collections::BTreeMap<SessionId, u64>,
+    pub session_staged_present: std::collections::BTreeMap<SessionId, bool>,
+    pub session_compaction_boundary_index: std::collections::BTreeMap<SessionId, u64>,
+    pub session_last_compaction_boundary_present: std::collections::BTreeMap<SessionId, bool>,
+    pub session_last_compaction_boundary_index: std::collections::BTreeMap<SessionId, u64>,
+    pub session_last_compaction_attempt_present: std::collections::BTreeMap<SessionId, bool>,
+    pub session_last_compaction_attempt_boundary_index: std::collections::BTreeMap<SessionId, u64>,
+    pub session_compaction_cadence_seeded: std::collections::BTreeMap<SessionId, bool>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -1305,6 +1312,36 @@ pub mod inputs {
         pub session_id: SessionId,
         pub fork_or_rewrite_directive: TranscriptEditKind,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordSessionStaged {
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordSessionUnstaged {
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveStagedSessionExists {
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordSessionCompactionCadence {
+        pub session_id: SessionId,
+        pub session_boundary_index: u64,
+        pub last_compaction_boundary_present: bool,
+        pub last_compaction_boundary_index: u64,
+        pub last_compaction_attempt_present: bool,
+        pub last_compaction_attempt_boundary_index: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SeedSessionCompactionCadenceFromHistory {
+        pub session_id: SessionId,
+        pub inferred_session_boundary_index: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveSessionCompactionCadence {
+        pub session_id: SessionId,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1341,6 +1378,12 @@ pub enum Input {
     RecoverSessionFromStore(inputs::RecoverSessionFromStore),
     ApplyPendingToolResults(inputs::ApplyPendingToolResults),
     TranscriptEdit(inputs::TranscriptEdit),
+    RecordSessionStaged(inputs::RecordSessionStaged),
+    RecordSessionUnstaged(inputs::RecordSessionUnstaged),
+    ResolveStagedSessionExists(inputs::ResolveStagedSessionExists),
+    RecordSessionCompactionCadence(inputs::RecordSessionCompactionCadence),
+    SeedSessionCompactionCadenceFromHistory(inputs::SeedSessionCompactionCadenceFromHistory),
+    ResolveSessionCompactionCadence(inputs::ResolveSessionCompactionCadence),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -1397,6 +1440,14 @@ impl Input {
             Self::RecoverSessionFromStore(_) => InputKind::RecoverSessionFromStore,
             Self::ApplyPendingToolResults(_) => InputKind::ApplyPendingToolResults,
             Self::TranscriptEdit(_) => InputKind::TranscriptEdit,
+            Self::RecordSessionStaged(_) => InputKind::RecordSessionStaged,
+            Self::RecordSessionUnstaged(_) => InputKind::RecordSessionUnstaged,
+            Self::ResolveStagedSessionExists(_) => InputKind::ResolveStagedSessionExists,
+            Self::RecordSessionCompactionCadence(_) => InputKind::RecordSessionCompactionCadence,
+            Self::SeedSessionCompactionCadenceFromHistory(_) => {
+                InputKind::SeedSessionCompactionCadenceFromHistory
+            }
+            Self::ResolveSessionCompactionCadence(_) => InputKind::ResolveSessionCompactionCadence,
         }
     }
 }
@@ -1434,6 +1485,12 @@ pub enum InputKind {
     RecoverSessionFromStore,
     ApplyPendingToolResults,
     TranscriptEdit,
+    RecordSessionStaged,
+    RecordSessionUnstaged,
+    ResolveStagedSessionExists,
+    RecordSessionCompactionCadence,
+    SeedSessionCompactionCadenceFromHistory,
+    ResolveSessionCompactionCadence,
 }
 
 pub mod effects {
@@ -1554,6 +1611,20 @@ pub mod effects {
         pub kind: TranscriptEditKind,
         pub success: bool,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct StagedSessionExistsResolved {
+        pub session_id: SessionId,
+        pub exists: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionCompactionCadenceResolved {
+        pub session_id: SessionId,
+        pub session_boundary_index: u64,
+        pub last_compaction_boundary_present: bool,
+        pub last_compaction_boundary_index: u64,
+        pub last_compaction_attempt_present: bool,
+        pub last_compaction_attempt_boundary_index: u64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1588,6 +1659,8 @@ pub enum Effect {
     SessionStoreRecoverySourceResolved(effects::SessionStoreRecoverySourceResolved),
     SessionToolResultsApplied(effects::SessionToolResultsApplied),
     TranscriptRewriteCommitted(effects::TranscriptRewriteCommitted),
+    StagedSessionExistsResolved(effects::StagedSessionExistsResolved),
+    SessionCompactionCadenceResolved(effects::SessionCompactionCadenceResolved),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -1617,6 +1690,8 @@ pub enum EffectKind {
     SessionStoreRecoverySourceResolved,
     SessionToolResultsApplied,
     TranscriptRewriteCommitted,
+    StagedSessionExistsResolved,
+    SessionCompactionCadenceResolved,
 }
 
 #[allow(non_camel_case_types)]
@@ -1699,6 +1774,12 @@ pub enum TransitionId {
     ApplyPendingToolResults,
     TranscriptEditFork,
     TranscriptEditRewrite,
+    RecordSessionStaged,
+    RecordSessionUnstaged,
+    ResolveStagedSessionExists,
+    RecordSessionCompactionCadence,
+    SeedSessionCompactionCadenceFromHistory,
+    ResolveSessionCompactionCadence,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1774,5 +1855,12 @@ pub fn initial_state() -> State {
         session_first_turn_phase: Default::default(),
         session_pending_initial_prompt_present: Default::default(),
         session_pending_tool_results_count: Default::default(),
+        session_staged_present: Default::default(),
+        session_compaction_boundary_index: Default::default(),
+        session_last_compaction_boundary_present: Default::default(),
+        session_last_compaction_boundary_index: Default::default(),
+        session_last_compaction_attempt_present: Default::default(),
+        session_last_compaction_attempt_boundary_index: Default::default(),
+        session_compaction_cadence_seeded: Default::default(),
     }
 }

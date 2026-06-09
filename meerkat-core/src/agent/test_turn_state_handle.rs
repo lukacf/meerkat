@@ -28,9 +28,10 @@ use crate::lifecycle::RunId;
 use crate::ops::{AsyncOpRef, OperationId, WaitPolicy};
 use crate::retry::{LlmRetryFailureKind, LlmRetrySchedule};
 use crate::turn_execution_authority::{
-    ContentShape, LlmFailureRecoveryKind, TurnExecutionEffect, TurnExecutionInput,
-    TurnFailureReason, TurnFailureSource, TurnFailureSourceKind, TurnPhase, TurnPrimitiveKind,
-    TurnTerminalCauseKind, TurnTerminalOutcome, terminal_outcome_for_budget_exceeded,
+    CallTimeoutVerdict, ContentShape, LlmFailureRecoveryKind, TurnExecutionEffect,
+    TurnExecutionInput, TurnFailureReason, TurnFailureSource, TurnFailureSourceKind, TurnPhase,
+    TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
+    terminal_outcome_for_budget_exceeded,
 };
 
 fn field_id(slug: &str) -> FieldId {
@@ -458,6 +459,20 @@ fn effect_string(
     }
 }
 
+fn effect_bool(
+    effect: &KernelEffect,
+    field_name: &str,
+    context: &'static str,
+) -> Result<bool, DslTransitionError> {
+    match required_effect_field(effect, field_name, context)? {
+        KernelValue::Bool(value) => Ok(*value),
+        _ => Err(generated_projection_error(
+            context,
+            format!("effect field `{field_name}` was not bool"),
+        )),
+    }
+}
+
 fn effect_enum_variant(
     effect: &KernelEffect,
     field_name: &str,
@@ -530,6 +545,25 @@ fn map_generated_effect(
                     ));
                 }
             },
+        }
+    } else if effect.variant == effect_id("AssistantOutputClassified") {
+        TurnExecutionEffect::AssistantOutputClassified {
+            empty_response_terminal: effect_bool(&effect, "empty_response_terminal", context)?,
+        }
+    } else if effect.variant == effect_id("CallTimeoutClassified") {
+        let verdict = effect_enum_variant(&effect, "verdict", "CallTimeoutVerdict", context)?;
+        TurnExecutionEffect::CallTimeoutClassified {
+            verdict: match verdict.as_str() {
+                "RetryableCallTimeout" => CallTimeoutVerdict::RetryableCallTimeout,
+                "TerminalTurnBudget" => CallTimeoutVerdict::TerminalTurnBudget,
+                other => {
+                    return Err(generated_projection_error(
+                        context,
+                        format!("unknown CallTimeoutVerdict variant `{other}`"),
+                    ));
+                }
+            },
+            timeout_ms: effect_u64(&effect, "timeout_ms", context)?,
         }
     } else {
         return Ok(None);
@@ -846,6 +880,35 @@ impl TurnStateHandle for TestTurnStateHandle {
                     ),
                     ("retry_attempt", KernelValue::U64(u64::from(retry_attempt))),
                     ("max_retries", KernelValue::U64(u64::from(max_retries))),
+                ],
+            ),
+            TurnExecutionInput::ClassifyAssistantOutput {
+                has_visible_or_actionable,
+            } => input(
+                "ClassifyAssistantOutput",
+                [(
+                    "has_visible_or_actionable",
+                    KernelValue::Bool(has_visible_or_actionable),
+                )],
+            ),
+            TurnExecutionInput::ClassifyCallTimeout { source, timeout_ms } => input(
+                "ClassifyCallTimeout",
+                [
+                    (
+                        "source",
+                        enum_value(
+                            "CallTimeoutSource",
+                            match source {
+                                crate::turn_execution_authority::CallTimeoutSource::CallBudget => {
+                                    "CallBudget"
+                                }
+                                crate::turn_execution_authority::CallTimeoutSource::TurnBudget => {
+                                    "TurnBudget"
+                                }
+                            },
+                        ),
+                    ),
+                    ("timeout_ms", KernelValue::U64(timeout_ms)),
                 ],
             ),
             TurnExecutionInput::CancelNow { run_id } => {

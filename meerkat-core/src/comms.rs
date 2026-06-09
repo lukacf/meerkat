@@ -26,6 +26,43 @@ use uuid::Uuid;
 /// core policy rather than owning a local string exemption.
 pub const SUPERVISOR_BRIDGE_INTENT: &str = "supervisor.bridge";
 
+/// Closed request-intent vocabulary for [`CommsCommandRequest::PeerRequest`].
+///
+/// This is the canonical, core-owned set of intents a public `peer_request`
+/// command may carry. Unknown strings fail at the serde deserialization
+/// boundary and cannot fall through to a local match or string default — the
+/// closed set is enforced structurally, not by a runtime string comparison.
+///
+/// The domain envelope [`CommsCommand::PeerRequest`] intentionally keeps a wider
+/// open intent space (it also carries mob topology intents such as
+/// `mob.peer_added`); this enum is the narrow vocabulary admitted at the public
+/// request surface. Surfaces that accept the public comms contract re-import
+/// this type so they share the same fail-closed guarantee.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommsPeerRequestIntent {
+    #[serde(rename = "supervisor.bridge")]
+    SupervisorBridge,
+    #[serde(rename = "checksum_token")]
+    ChecksumToken,
+}
+
+impl CommsPeerRequestIntent {
+    /// Stable wire literal for this intent.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::SupervisorBridge => SUPERVISOR_BRIDGE_INTENT,
+            Self::ChecksumToken => "checksum_token",
+        }
+    }
+}
+
+impl std::fmt::Display for CommsPeerRequestIntent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Canonical runtime identity for a peer.
 ///
 /// `PeerId` is the routing key: the router and trust store key by `PeerId`,
@@ -1362,7 +1399,9 @@ pub enum CommsCommandRequest {
     /// Send a request to a peer.
     PeerRequest {
         to: PeerId,
-        intent: String,
+        /// Closed, structurally-validated request intent. Unknown strings fail
+        /// at the serde boundary rather than projecting through a string match.
+        intent: CommsPeerRequestIntent,
         #[serde(default)]
         params: serde_json::Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1455,7 +1494,12 @@ impl CommsCommandRequest {
                 stream,
             } => CommsCommand::PeerRequest {
                 to: PeerRoute::new(to),
-                intent,
+                // The domain envelope carries a wider, open intent vocabulary
+                // (it also routes mob topology intents such as `mob.peer_added`),
+                // so the closed public-request intent projects to its stable
+                // wire literal here. This is the request -> open-envelope seam,
+                // not a typed -> string downgrade at the public wire boundary.
+                intent: intent.as_str().to_string(),
                 params,
                 blocks,
                 handling_mode: handling_mode.unwrap_or_default(),

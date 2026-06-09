@@ -783,8 +783,11 @@ meerkat_machine_runtime_internal_inputs!(
         AdvanceAgentCompletionCursor,
         AdvanceRuntimeInjectedCompletionCursor,
         AdvanceRuntimeObservedCompletionCursor,
+        AppendRealtimeTranscript,
         BoundaryComplete,
         BoundaryContinue,
+        ClassifyAssistantOutput,
+        ClassifyCallTimeout,
         ClassifyTurnTerminalCauseClass,
         ClassifyTurnTerminality,
         ClearSessionLlmState,
@@ -880,6 +883,7 @@ meerkat_machine_runtime_internal_inputs!(
     ],
     PeerRequestLifecycle => [
         PeerRequestReceived,
+        PeerRequestSendFailed,
         PeerRequestSent,
         PeerRequestTimedOut,
         PeerResponseProgressArrived,
@@ -1734,6 +1738,10 @@ pub struct MeerkatAdmittedInputSnapshot {
     pub request_id: Option<RequestId>,
     pub reservation_key: Option<ReservationKey>,
     pub handling_mode: Option<HandlingMode>,
+    /// #338: machine-owned per-input live-interrupt verdict, carried from the
+    /// admission `RuntimeInputSemantics`. The live-projection consumer reads
+    /// this typed fact instead of re-scanning `handling_mode == Steer`.
+    pub live_interrupt_required: bool,
     pub lifecycle: Option<InputLifecycleState>,
     pub terminal_outcome: Option<InputTerminalOutcome>,
     pub last_run_id: Option<RunId>,

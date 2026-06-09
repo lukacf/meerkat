@@ -134,6 +134,35 @@ impl MachineSchema {
             }
         }
 
+        // Every declared semantic state field MUST carry an explicit
+        // `state.init.fields` initializer (#174, fix (b)). Without this, a
+        // field with no declared initializer falls through to the runtime
+        // type-generic auto-seed (`GeneratedMachineKernel::initial_state`),
+        // and enum-typed fields in particular default to the reserved
+        // `_Unset` sentinel — an untyped, semantically-meaningless placeholder
+        // that launders an absent value into a live field. The fix is to fail
+        // closed at codegen-validation time: a machine that omits an
+        // initializer for any of its `state.fields` is rejected, forcing the
+        // author to declare the typed initial fact (a typed Option-shaped
+        // `None`, an `EmptySet`/`EmptyMap`, or a concrete enum variant) rather
+        // than relying on an unset sentinel. The machine's phase field is
+        // modelled separately (`state.init.phase`) and is excluded from
+        // `state.fields` by the codegen, so it is never subject to this rule.
+        let initialized_fields: IndexSet<&str> = self
+            .state
+            .init
+            .fields
+            .iter()
+            .map(|initializer| initializer.field.as_str())
+            .collect();
+        for field in &self.state.fields {
+            if !initialized_fields.contains(field.name.as_str()) {
+                return Err(MachineSchemaError::MissingInitializer {
+                    field: field.name.as_str().to_owned(),
+                });
+            }
+        }
+
         for surface_only_input in &self.surface_only_inputs {
             if !input_variants
                 .iter()
@@ -1738,6 +1767,7 @@ pub enum MachineSchemaError {
     EmptyName(&'static str),
     UnknownPhase { phase: String },
     UnknownField { field: String },
+    MissingInitializer { field: String },
     UnknownInputVariant { variant: String },
     UnknownSurfaceOnlyInputVariant { variant: String },
     UnknownRuntimeInternalInputVariant { variant: String },
@@ -1766,6 +1796,12 @@ impl fmt::Display for MachineSchemaError {
             Self::EmptyName(kind) => write!(f, "empty {kind} name"),
             Self::UnknownPhase { phase } => write!(f, "unknown phase `{phase}`"),
             Self::UnknownField { field } => write!(f, "unknown field `{field}`"),
+            Self::MissingInitializer { field } => write!(
+                f,
+                "state field `{field}` has no `state.init.fields` initializer; \
+                 declare a typed initial fact (it must not rely on the runtime \
+                 type-generic auto-seed / `_Unset` sentinel)"
+            ),
             Self::UnknownInputVariant { variant } => {
                 write!(f, "unknown input variant `{variant}`")
             }
@@ -1922,6 +1958,40 @@ mod tests {
                 Err(MachineSchemaError::MissingEffectDisposition { .. })
             ),
             "empty dispositions on an effect-declaring machine must fail closed"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_state_field_without_initializer() {
+        // #174 (fix (b)): every declared semantic state field MUST carry an
+        // explicit `state.init.fields` initializer. A field left uninitialized
+        // would otherwise fall through to the runtime type-generic auto-seed
+        // (and, for enum-typed fields, the reserved `_Unset` sentinel). Dropping
+        // the initializer for any declared `state.fields` entry must fail closed
+        // with `MissingInitializer` rather than silently relying on the seed.
+        let mut schema = meerkat_machine();
+        assert_eq!(schema.validate(), Ok(()));
+
+        let dropped = schema
+            .state
+            .fields
+            .first()
+            .expect("MeerkatMachine has at least one semantic state field")
+            .name
+            .as_str()
+            .to_owned();
+        schema
+            .state
+            .init
+            .fields
+            .retain(|initializer| initializer.field.as_str() != dropped);
+
+        assert_eq!(
+            schema.validate(),
+            Err(MachineSchemaError::MissingInitializer {
+                field: dropped.clone(),
+            }),
+            "a declared state field with no initializer must fail closed (field `{dropped}`)"
         );
     }
 

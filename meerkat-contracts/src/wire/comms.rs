@@ -8,16 +8,14 @@
 //! `{ "session_id": "...", "kind": "<variant>", ... }`.
 
 pub use meerkat_core::comms::{
-    CommsCommandError, InputSource, InputStreamMode, PeerAddress, PeerCapabilitySet,
-    PeerDirectoryEntry, PeerDirectoryListing, PeerDirectorySource, PeerId, PeerLifecycleKind,
-    PeerName, PeerSendability, PeerTransport,
+    CommsCommandError, CommsPeerRequestIntent, InputSource, InputStreamMode, PeerAddress,
+    PeerCapabilitySet, PeerDirectoryEntry, PeerDirectoryListing, PeerDirectorySource, PeerId,
+    PeerLifecycleKind, PeerName, PeerSendability, PeerTransport,
 };
 pub use meerkat_core::interaction::ResponseStatus;
 pub use meerkat_core::types::HandlingMode;
 
-use super::supervisor_bridge::{
-    BridgeCommand, BridgePeerSpec, BridgeReply, SUPERVISOR_BRIDGE_INTENT,
-};
+use super::supervisor_bridge::{BridgeCommand, BridgePeerSpec, BridgeReply};
 use serde::{Deserialize, Serialize};
 
 /// Typed params for one-way peer lifecycle notifications.
@@ -42,28 +40,6 @@ pub struct CommsPeerLifecycleParams {
 impl CommsPeerLifecycleParams {
     fn into_json_value(self) -> Result<serde_json::Value, serde_json::Error> {
         serde_json::to_value(self)
-    }
-}
-
-/// Closed public request-intent contract for `peer_request`.
-///
-/// Unknown strings fail during deserialization and cannot fall through to a
-/// local match/default path.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub enum CommsPeerRequestIntent {
-    #[serde(rename = "supervisor.bridge")]
-    SupervisorBridge,
-    #[serde(rename = "checksum_token")]
-    ChecksumToken,
-}
-
-impl CommsPeerRequestIntent {
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::SupervisorBridge => SUPERVISOR_BRIDGE_INTENT,
-            Self::ChecksumToken => "checksum_token",
-        }
     }
 }
 
@@ -323,7 +299,14 @@ impl CommsCommandRequest {
                 }
                 meerkat_core::comms::CommsCommandRequest::PeerRequest {
                     to,
-                    intent: intent.as_str().to_string(),
+                    // The closed intent is now the same core-owned type on both
+                    // sides of this seam, so it passes through typed — no
+                    // string downgrade at the public-wire -> core projection.
+                    // `params` cannot follow yet: its `supervisor.bridge`
+                    // variant wraps the contracts-owned `BridgeCommand`, which
+                    // core cannot reference, so the structurally-validated
+                    // params still serialize to compatibility JSON here.
+                    intent,
                     params: params.into_json_value().map_err(|source| {
                         CommsCommandProjectionError::compatibility_json(
                             "peer_request.params",
@@ -636,6 +619,7 @@ impl From<PeerDirectoryListing> for CommsPeersResult {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use super::super::supervisor_bridge::SUPERVISOR_BRIDGE_INTENT;
     use super::*;
     use serde_json::json;
 

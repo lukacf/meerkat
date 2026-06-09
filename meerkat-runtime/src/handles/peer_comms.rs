@@ -418,6 +418,10 @@ impl PeerCommsHandle for RuntimePeerCommsHandle {
         Ok(PeerIngressAdmission {
             rendered_text: meerkat_core::render_peer_ingress_admitted_text(&facts, &classification),
             classification,
+            // #96/#106: the machine owns the typed `Option<PeerId>` lifecycle
+            // subject; project it to the display-string carried by the core
+            // admission fact at this single boundary (the downstream comms layer
+            // keeps the name-shaped `Option<String>` contract).
             lifecycle_peer: effect.lifecycle_peer,
             request_id: effect.request_id,
         })

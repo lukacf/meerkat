@@ -752,6 +752,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveUserInterruptPublicResultNoopStopped`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
+- `ResolveUserInterruptPublicResultStagedNoopInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+- `ResolveUserInterruptPublicResultStagedNoopIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveUserInterruptPublicResultStagedNoopAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveUserInterruptPublicResultStagedNoopRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+- `ResolveUserInterruptPublicResultStagedNoopRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+- `ResolveUserInterruptPublicResultStagedNoopStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
 - `ResolveUserInterruptPublicResultDestroyedPresentInitializing`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
@@ -3293,6 +3311,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AbandonLiveOpenAdmissionStopped`
   - anchors: `meerkat_machine`
   - scenarios: `retire-reset-destroy`, `session_registration_and_binding`, `input_admission_and_queueing`, `live_topology_and_supervision`
+- `AppendRealtimeTranscriptIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`, `product_turn_streaming`, `recycle_and_compaction`
+- `AppendRealtimeTranscriptAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `AppendRealtimeTranscriptRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `realtime_connection_projection`, `product_turn_streaming`
+- `AppendRealtimeTranscriptRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `realtime_connection_projection`, `product_turn_streaming`, `recycle_and_compaction`
+- `AppendRealtimeTranscriptStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`, `product_turn_streaming`
 - `RecordLiveRefreshQueuedIdle`
   - anchors: `meerkat_machine`
   - scenarios: `recycle_and_compaction`
@@ -4163,6 +4196,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PeerRequestTimedOutStopped`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
+- `PeerRequestSendFailedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `PeerRequestSendFailedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
+- `PeerRequestSendFailedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `PeerRequestSendFailedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `PeerRequestSendFailedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PeerRequestReceivedIdle`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
@@ -4784,6 +4832,42 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyLlmFailureRecoveryFatalRunning`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
+- `ClassifyAssistantOutputEmptyTerminalIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`, `model_routing_and_image_operation`
+- `ClassifyAssistantOutputEmptyTerminalAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`, `model_routing_and_image_operation`
+- `ClassifyAssistantOutputEmptyTerminalRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`, `model_routing_and_image_operation`
+- `ClassifyAssistantOutputProceedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`, `recycle_and_compaction`, `model_routing_and_image_operation`
+- `ClassifyAssistantOutputProceedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `model_routing_and_image_operation`
+- `ClassifyAssistantOutputProceedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`, `model_routing_and_image_operation`
+- `ClassifyCallTimeoutRetryableIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifyCallTimeoutRetryableAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifyCallTimeoutRetryableRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifyCallTimeoutTerminalIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifyCallTimeoutTerminalAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifyCallTimeoutTerminalRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
 - `ResolveTurnSurfaceResultNoneMissingTerminalIdle`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
@@ -4954,6 +5038,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `TurnTerminalityClassified`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
+- `AssistantOutputClassified`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`, `model_routing_and_image_operation`
+- `CallTimeoutClassified`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `LlmFailureRecoveryClassified`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`

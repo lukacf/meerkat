@@ -23,8 +23,8 @@ use crate::session::TranscriptRewriteReason;
 use crate::tokio;
 use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
 use crate::turn_execution_authority::{
-    ContentShape, LlmFailureRecoveryKind, TurnExecutionEffect, TurnExecutionInput,
-    TurnExecutionTransition, TurnFailureSource, TurnPhase, TurnPrimitiveKind,
+    CallTimeoutVerdict, ContentShape, LlmFailureRecoveryKind, TurnExecutionEffect,
+    TurnExecutionInput, TurnExecutionTransition, TurnFailureSource, TurnPhase, TurnPrimitiveKind,
     TurnTerminalCauseKind, TurnTerminalOutcome,
 };
 use crate::types::{
@@ -523,24 +523,25 @@ where
                     {
                         Ok(inner_result) => inner_result,
                         Err(_elapsed) => {
-                            // Timeout fired — classify by pre-selected source.
-                            // TurnBudget is non-retryable (whole-turn expired).
-                            // CallBudget flows through step 5 retry logic below.
-                            match source {
-                                CallTimeoutSource::CallBudget => Err(AgentError::Llm {
+                            // Timeout fired — source is pre-selected shell-side,
+                            // but MeerkatMachine (#323) owns the VERDICT: retryable
+                            // call timeout vs terminal turn-budget. The loop only
+                            // mirrors the emitted verdict into the existing paths.
+                            let timeout_ms = effective_timeout.as_millis() as u64;
+                            match self.classify_call_timeout(source, timeout_ms)? {
+                                CallTimeoutVerdict::RetryableCallTimeout => Err(AgentError::Llm {
                                     provider: self.client.provider(),
                                     reason: crate::error::LlmFailureReason::CallTimeout {
-                                        duration_ms: effective_timeout.as_millis() as u64,
+                                        duration_ms: timeout_ms,
                                     },
                                     message: format!(
                                         "LLM call timed out after {}s",
                                         effective_timeout.as_secs()
                                     ),
                                 }),
-                                CallTimeoutSource::TurnBudget => {
+                                CallTimeoutVerdict::TerminalTurnBudget => {
                                     let exceeded =
                                         self.budget.observe().exceeded().unwrap_or_else(|| {
-                                            let timeout_ms = effective_timeout.as_millis() as u64;
                                             let (elapsed_ms, limit_ms) = self
                                                 .budget
                                                 .time_usage()
@@ -801,6 +802,76 @@ where
             })
     }
 
+    /// #128: mirror MeerkatMachine's empty-assistant-output verdict.
+    ///
+    /// The agent loop computes `has_visible_or_actionable` (this turn's
+    /// assistant message OR any prior visible/actionable output in the run) as
+    /// a pure pre-classifier, then drives the machine's
+    /// `ClassifyAssistantOutput` classifier. MeerkatMachine — not this shell —
+    /// owns whether the empty output is terminal. Fails closed if no verdict.
+    fn classify_assistant_output_terminal(
+        &self,
+        has_visible_or_actionable: bool,
+    ) -> Result<bool, AgentError> {
+        let effects = self.apply_turn_input_via_runtime_handle(
+            &TurnExecutionInput::ClassifyAssistantOutput {
+                has_visible_or_actionable,
+            },
+        )?;
+        effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                TurnExecutionEffect::AssistantOutputClassified {
+                    empty_response_terminal,
+                } => Some(empty_response_terminal),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                AgentError::InternalError(
+                    "MeerkatMachine accepted ClassifyAssistantOutput but emitted no verdict"
+                        .to_string(),
+                )
+            })
+    }
+
+    /// #323: mirror MeerkatMachine's call-timeout verdict.
+    ///
+    /// Source selection stays shell-side (the loop knows which budget fired
+    /// before awaiting); the machine owns whether the timeout is a retryable
+    /// call timeout or a terminal turn-budget exhaustion. Fails closed if no
+    /// verdict.
+    fn classify_call_timeout(
+        &self,
+        source: CallTimeoutSource,
+        timeout_ms: u64,
+    ) -> Result<CallTimeoutVerdict, AgentError> {
+        let dsl_source = match source {
+            CallTimeoutSource::CallBudget => {
+                crate::turn_execution_authority::CallTimeoutSource::CallBudget
+            }
+            CallTimeoutSource::TurnBudget => {
+                crate::turn_execution_authority::CallTimeoutSource::TurnBudget
+            }
+        };
+        let effects =
+            self.apply_turn_input_via_runtime_handle(&TurnExecutionInput::ClassifyCallTimeout {
+                source: dsl_source,
+                timeout_ms,
+            })?;
+        effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                TurnExecutionEffect::CallTimeoutClassified { verdict, .. } => Some(verdict),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                AgentError::InternalError(
+                    "MeerkatMachine accepted ClassifyCallTimeout but emitted no verdict"
+                        .to_string(),
+                )
+            })
+    }
+
     fn started_primitive_run_from_authority(&self) -> Result<Option<RunId>, AgentError> {
         let snapshot = self.runtime_turn_authority_snapshot()?;
         if snapshot.turn_phase != TurnPhase::ApplyingPrimitive {
@@ -905,9 +976,13 @@ where
                 TurnExecutionEffect::RunStarted { .. }
                 | TurnExecutionEffect::BoundaryApplied { .. }
                 | TurnExecutionEffect::CheckCompaction
-                // Mirrored directly by `classify_llm_failure_recovery`; never
-                // routed through turn-effect execution.
-                | TurnExecutionEffect::LlmFailureRecoveryClassified { .. } => {}
+                // Classifier verdicts are mirrored directly at their call
+                // sites (classify_llm_failure_recovery / classify_assistant_output
+                // / classify_call_timeout); never routed through turn-effect
+                // execution.
+                | TurnExecutionEffect::LlmFailureRecoveryClassified { .. }
+                | TurnExecutionEffect::AssistantOutputClassified { .. }
+                | TurnExecutionEffect::CallTimeoutClassified { .. } => {}
             }
             if let TurnExecutionEffect::CheckCompaction = effect {
                 let current_boundary_index = self.compaction_cadence.session_boundary_index;
@@ -1981,25 +2056,33 @@ where
                     let assistant_msg = BlockAssistantMessage::new(blocks, stop_reason);
                     let assistant_text = assistant_msg.to_string();
 
-                    if !assistant_msg.has_visible_or_actionable_output() {
-                        if !run_has_visible_or_actionable_output {
-                            let error = AgentError::llm_empty_response(self.client.provider());
-                            if in_extraction {
-                                return self
-                                    .complete_extraction_failed(
-                                        &run_id,
-                                        turn_count,
-                                        tool_call_count,
-                                        error.to_string(),
-                                        &event_tx,
-                                    )
-                                    .await;
-                            }
-                            self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
-                                .await?;
-                            return Err(error);
+                    // #128: the shell computes the pure pre-classifier (this
+                    // turn's output OR any prior visible/actionable output in the
+                    // run) and MeerkatMachine owns the empty-output terminal
+                    // verdict. The loop mirrors `empty_response_terminal`.
+                    let turn_has_visible_or_actionable =
+                        assistant_msg.has_visible_or_actionable_output();
+                    let has_visible_or_actionable =
+                        turn_has_visible_or_actionable || run_has_visible_or_actionable_output;
+                    if self.classify_assistant_output_terminal(has_visible_or_actionable)? {
+                        let error = AgentError::llm_empty_response(self.client.provider());
+                        if in_extraction {
+                            return self
+                                .complete_extraction_failed(
+                                    &run_id,
+                                    turn_count,
+                                    tool_call_count,
+                                    error.to_string(),
+                                    &event_tx,
+                                )
+                                .await;
                         }
-                    } else if assistant_blocks_have_user_visible_output(&assistant_msg.blocks) {
+                        self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
+                            .await?;
+                        return Err(error);
+                    } else if turn_has_visible_or_actionable
+                        && assistant_blocks_have_user_visible_output(&assistant_msg.blocks)
+                    {
                         run_has_visible_or_actionable_output = true;
                     }
 

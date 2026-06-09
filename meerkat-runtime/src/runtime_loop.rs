@@ -3613,6 +3613,7 @@ mod tests {
                 execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
                 execution_handling_mode: None,
                 peer_response_terminal_apply_intent: None,
+                live_interrupt_required: false,
             },
         )
         .expect("single input metadata cannot conflict");

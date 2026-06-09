@@ -168,6 +168,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_active_channel_by_session`: `Map<String, String>`
 - `live_channel_session_by_channel`: `Map<String, String>`
 - `live_channel_identity_by_channel`: `Map<String, SessionLlmIdentity>`
+- `live_staged_transcript_items`: `Set<String>`
+- `live_staged_transcript_sequence`: `u64`
 - `live_refresh_result_sequence`: `u64`
 - `live_refresh_queue_acceptance_sequence_by_channel`: `Map<String, u64>`
 - `live_refresh_status_by_channel`: `Map<String, LiveRefreshPublicStatus>`
@@ -370,6 +372,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyInputTerminality`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, abandon_reason: Option<InputAbandonReason>)
 - `ClassifyTurnTerminalCauseClass`(cause_kind: Option<TurnTerminalCauseKind>)
 - `ClassifyTurnTerminality`
+- `ClassifyAssistantOutput`(has_visible_or_actionable: Bool)
+- `ClassifyCallTimeout`(source: CallTimeoutSource, timeout_ms: u64)
 - `ClassifyLlmFailureRecovery`(failure_kind: Option<LlmRetryFailureKind>, retry_attempt: u64, max_retries: u64)
 - `ResolveTurnSurfaceResult`(outcome: TurnTerminalOutcome, cause_class: TerminalCauseClass)
 - `AuthorizeStoredInputStateSeed`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<String>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, recovery_lane: Option<InputLane>)
@@ -468,6 +472,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `FinishSurfaceRequestUnpublished`(request_key: String)
 - `ResolveLiveOpenAdmission`(session_id: String, channel_id: String, llm_identity: SessionLlmIdentity)
 - `AbandonLiveOpenAdmission`(session_id: String, channel_id: String)
+- `AppendRealtimeTranscript`(channel_id: String, item_id: String, text: String, role: RealtimeTranscriptRoleKind, lane: RealtimeTranscriptLaneKind)
 - `RecordLiveRefreshQueued`(channel_id: String, queue_acceptance_sequence: u64)
 - `RecordLiveCloseClosed`(session_id: String, channel_id: String, close_observation_sequence: u64)
 - `RecordLiveCommandAccepted`(channel_id: String, command: LiveCommandPublicKind, command_acceptance_sequence: u64)
@@ -520,6 +525,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PeerResponseTerminalArrived`(corr_id: PeerCorrelationId, disposition: PeerTerminalDisposition)
 - `PeerResponseRejected`(corr_id: PeerCorrelationId)
 - `PeerRequestTimedOut`(corr_id: PeerCorrelationId)
+- `PeerRequestSendFailed`(corr_id: PeerCorrelationId)
 - `PeerRequestReceived`(corr_id: PeerCorrelationId, handling_mode: InputLane)
 - `PeerResponseReplied`(corr_id: PeerCorrelationId)
 - `AdvanceSessionContext`(updated_at_ms: u64)
@@ -597,7 +603,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ApplyControlPlaneCommand`
 - `InitiateRecycle`
 - `IngressAccepted`
-- `AdmissionResolved`(input_id: String, policy_version: u64, policy_apply_mode: AdmissionPolicyApplyMode, policy_wake_mode: AdmissionPolicyWakeMode, policy_queue_mode: AdmissionPolicyQueueMode, policy_consume_point: AdmissionPolicyConsumePoint, policy_drain_policy: AdmissionPolicyDrainPolicy, policy_routing_disposition: AdmissionRoutingDisposition, lane: InputLane, plan: AdmissionPlanKind, queue_action: AdmissionQueueActionKind, existing_action: AdmissionExistingQueuedActionKind, existing_input_id: Option<String>, requires_active_pre_admission: Bool, runtime_boundary: AdmissionRunApplyBoundary, runtime_execution_kind: AdmissionRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<AdmissionPeerResponseTerminalApplyIntent>, record_transcript: Bool, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
+- `AdmissionResolved`(input_id: String, policy_version: u64, policy_apply_mode: AdmissionPolicyApplyMode, policy_wake_mode: AdmissionPolicyWakeMode, policy_queue_mode: AdmissionPolicyQueueMode, policy_consume_point: AdmissionPolicyConsumePoint, policy_drain_policy: AdmissionPolicyDrainPolicy, policy_routing_disposition: AdmissionRoutingDisposition, lane: InputLane, plan: AdmissionPlanKind, queue_action: AdmissionQueueActionKind, existing_action: AdmissionExistingQueuedActionKind, existing_input_id: Option<String>, requires_active_pre_admission: Bool, runtime_boundary: AdmissionRunApplyBoundary, runtime_execution_kind: AdmissionRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<AdmissionPeerResponseTerminalApplyIntent>, record_transcript: Bool, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool, execution_handling_mode: Option<InputLane>, live_interrupt_required: Bool)
 - `AdmissionValidationResolved`(input_id: String, result: AdmissionValidationResultKind, reject_reason: Option<AdmissionRejectReasonKind>)
 - `AdmissionIdempotencyResolved`(input_id: String, result: AdmissionIdempotencyResultKind, existing_input_id: Option<String>)
 - `RecoveredInputLifecycleNormalized`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, recovered: Bool, abandoned: Bool, requeued: Bool, history_reason: Option<RecoveredInputNormalizationReasonKind>)
@@ -607,6 +613,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InputBehavioralTerminalityResolved`(input_id: String, terminal: Bool)
 - `TurnTerminalCauseClassResolved`(cause_kind: Option<TurnTerminalCauseKind>, cause_class: TerminalCauseClass)
 - `TurnTerminalityClassified`(terminal: Bool)
+- `AssistantOutputClassified`(empty_response_terminal: Bool)
+- `CallTimeoutClassified`(verdict: CallTimeoutVerdict, timeout_ms: u64)
 - `LlmFailureRecoveryClassified`(recovery: LlmFailureRecoveryKind)
 - `TurnSurfaceResultResolved`(outcome: TurnTerminalOutcome, cause_class: TerminalCauseClass, surface_class: SurfaceResultClass)
 - `StoredInputStateSeedAuthorized`(input_id: String)
@@ -3109,6 +3117,60 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `not_promoting`
   - `noop_state`
+- Emits: `UserInterruptPublicResultResolved`
+- To: `Stopped`
+
+### `ResolveUserInterruptPublicResultStagedNoopInitializing`
+- From: `Initializing`
+- On: `ResolveUserInterruptPublicResult`(observation, target_present, staged_promotion_busy)
+- Guards:
+  - `not_promoting`
+  - `staged_noop_state`
+- Emits: `UserInterruptPublicResultResolved`
+- To: `Initializing`
+
+### `ResolveUserInterruptPublicResultStagedNoopIdle`
+- From: `Idle`
+- On: `ResolveUserInterruptPublicResult`(observation, target_present, staged_promotion_busy)
+- Guards:
+  - `not_promoting`
+  - `staged_noop_state`
+- Emits: `UserInterruptPublicResultResolved`
+- To: `Idle`
+
+### `ResolveUserInterruptPublicResultStagedNoopAttached`
+- From: `Attached`
+- On: `ResolveUserInterruptPublicResult`(observation, target_present, staged_promotion_busy)
+- Guards:
+  - `not_promoting`
+  - `staged_noop_state`
+- Emits: `UserInterruptPublicResultResolved`
+- To: `Attached`
+
+### `ResolveUserInterruptPublicResultStagedNoopRunning`
+- From: `Running`
+- On: `ResolveUserInterruptPublicResult`(observation, target_present, staged_promotion_busy)
+- Guards:
+  - `not_promoting`
+  - `staged_noop_state`
+- Emits: `UserInterruptPublicResultResolved`
+- To: `Running`
+
+### `ResolveUserInterruptPublicResultStagedNoopRetired`
+- From: `Retired`
+- On: `ResolveUserInterruptPublicResult`(observation, target_present, staged_promotion_busy)
+- Guards:
+  - `not_promoting`
+  - `staged_noop_state`
+- Emits: `UserInterruptPublicResultResolved`
+- To: `Retired`
+
+### `ResolveUserInterruptPublicResultStagedNoopStopped`
+- From: `Stopped`
+- On: `ResolveUserInterruptPublicResult`(observation, target_present, staged_promotion_busy)
+- Guards:
+  - `not_promoting`
+  - `staged_noop_state`
 - Emits: `UserInterruptPublicResultResolved`
 - To: `Stopped`
 
@@ -10833,6 +10895,56 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `LiveOpenAdmissionAbandoned`
 - To: `Stopped`
 
+### `AppendRealtimeTranscriptIdle`
+- From: `Idle`
+- On: `AppendRealtimeTranscript`(channel_id, item_id, text, role, lane)
+- Guards:
+  - `channel_id_present`
+  - `item_id_present`
+  - `item_not_already_staged`
+- Emits: `RealtimeTranscriptAppended`
+- To: `Idle`
+
+### `AppendRealtimeTranscriptAttached`
+- From: `Attached`
+- On: `AppendRealtimeTranscript`(channel_id, item_id, text, role, lane)
+- Guards:
+  - `channel_id_present`
+  - `item_id_present`
+  - `item_not_already_staged`
+- Emits: `RealtimeTranscriptAppended`
+- To: `Attached`
+
+### `AppendRealtimeTranscriptRunning`
+- From: `Running`
+- On: `AppendRealtimeTranscript`(channel_id, item_id, text, role, lane)
+- Guards:
+  - `channel_id_present`
+  - `item_id_present`
+  - `item_not_already_staged`
+- Emits: `RealtimeTranscriptAppended`
+- To: `Running`
+
+### `AppendRealtimeTranscriptRetired`
+- From: `Retired`
+- On: `AppendRealtimeTranscript`(channel_id, item_id, text, role, lane)
+- Guards:
+  - `channel_id_present`
+  - `item_id_present`
+  - `item_not_already_staged`
+- Emits: `RealtimeTranscriptAppended`
+- To: `Retired`
+
+### `AppendRealtimeTranscriptStopped`
+- From: `Stopped`
+- On: `AppendRealtimeTranscript`(channel_id, item_id, text, role, lane)
+- Guards:
+  - `channel_id_present`
+  - `item_id_present`
+  - `item_not_already_staged`
+- Emits: `RealtimeTranscriptAppended`
+- To: `Stopped`
+
 ### `RecordLiveRefreshQueuedIdle`
 - From: `Idle`
 - On: `RecordLiveRefreshQueued`(channel_id, queue_acceptance_sequence)
@@ -13953,6 +14065,46 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
 - To: `Stopped`
 
+### `PeerRequestSendFailedIdle`
+- From: `Idle`
+- On: `PeerRequestSendFailed`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Idle`
+
+### `PeerRequestSendFailedAttached`
+- From: `Attached`
+- On: `PeerRequestSendFailed`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Attached`
+
+### `PeerRequestSendFailedRunning`
+- From: `Running`
+- On: `PeerRequestSendFailed`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Running`
+
+### `PeerRequestSendFailedRetired`
+- From: `Retired`
+- On: `PeerRequestSendFailed`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Retired`
+
+### `PeerRequestSendFailedStopped`
+- From: `Stopped`
+- On: `PeerRequestSendFailed`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Stopped`
+
 ### `PeerRequestReceivedIdle`
 - From: `Idle`
 - On: `PeerRequestReceived`(corr_id, handling_mode)
@@ -15832,6 +15984,102 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `failure_kind_not_recoverable`
 - Emits: `LlmFailureRecoveryClassified`
+- To: `Running`
+
+### `ClassifyAssistantOutputEmptyTerminalIdle`
+- From: `Idle`
+- On: `ClassifyAssistantOutput`(has_visible_or_actionable)
+- Guards:
+  - `no_visible_or_actionable_output`
+- Emits: `AssistantOutputClassified`
+- To: `Idle`
+
+### `ClassifyAssistantOutputEmptyTerminalAttached`
+- From: `Attached`
+- On: `ClassifyAssistantOutput`(has_visible_or_actionable)
+- Guards:
+  - `no_visible_or_actionable_output`
+- Emits: `AssistantOutputClassified`
+- To: `Attached`
+
+### `ClassifyAssistantOutputEmptyTerminalRunning`
+- From: `Running`
+- On: `ClassifyAssistantOutput`(has_visible_or_actionable)
+- Guards:
+  - `no_visible_or_actionable_output`
+- Emits: `AssistantOutputClassified`
+- To: `Running`
+
+### `ClassifyAssistantOutputProceedIdle`
+- From: `Idle`
+- On: `ClassifyAssistantOutput`(has_visible_or_actionable)
+- Guards:
+  - `has_visible_or_actionable_output`
+- Emits: `AssistantOutputClassified`
+- To: `Idle`
+
+### `ClassifyAssistantOutputProceedAttached`
+- From: `Attached`
+- On: `ClassifyAssistantOutput`(has_visible_or_actionable)
+- Guards:
+  - `has_visible_or_actionable_output`
+- Emits: `AssistantOutputClassified`
+- To: `Attached`
+
+### `ClassifyAssistantOutputProceedRunning`
+- From: `Running`
+- On: `ClassifyAssistantOutput`(has_visible_or_actionable)
+- Guards:
+  - `has_visible_or_actionable_output`
+- Emits: `AssistantOutputClassified`
+- To: `Running`
+
+### `ClassifyCallTimeoutRetryableIdle`
+- From: `Idle`
+- On: `ClassifyCallTimeout`(source, timeout_ms)
+- Guards:
+  - `call_budget_source`
+- Emits: `CallTimeoutClassified`
+- To: `Idle`
+
+### `ClassifyCallTimeoutRetryableAttached`
+- From: `Attached`
+- On: `ClassifyCallTimeout`(source, timeout_ms)
+- Guards:
+  - `call_budget_source`
+- Emits: `CallTimeoutClassified`
+- To: `Attached`
+
+### `ClassifyCallTimeoutRetryableRunning`
+- From: `Running`
+- On: `ClassifyCallTimeout`(source, timeout_ms)
+- Guards:
+  - `call_budget_source`
+- Emits: `CallTimeoutClassified`
+- To: `Running`
+
+### `ClassifyCallTimeoutTerminalIdle`
+- From: `Idle`
+- On: `ClassifyCallTimeout`(source, timeout_ms)
+- Guards:
+  - `turn_budget_source`
+- Emits: `CallTimeoutClassified`
+- To: `Idle`
+
+### `ClassifyCallTimeoutTerminalAttached`
+- From: `Attached`
+- On: `ClassifyCallTimeout`(source, timeout_ms)
+- Guards:
+  - `turn_budget_source`
+- Emits: `CallTimeoutClassified`
+- To: `Attached`
+
+### `ClassifyCallTimeoutTerminalRunning`
+- From: `Running`
+- On: `ClassifyCallTimeout`(source, timeout_ms)
+- Guards:
+  - `turn_budget_source`
+- Emits: `CallTimeoutClassified`
 - To: `Running`
 
 ### `ResolveTurnSurfaceResultNoneMissingTerminalIdle`

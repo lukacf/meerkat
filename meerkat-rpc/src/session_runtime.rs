@@ -3966,19 +3966,16 @@ impl SessionRuntime {
         if contributing_input_ids.is_empty() {
             return false;
         }
-        // TODO(#338): the SessionTurnAdmission machine now owns the
-        // `LiveInterruptRequired` classification (TurnHandlingMode +
-        // ResolveLiveInterruptRequired), but projecting it per admitted input
-        // requires runtime admission-path wiring (dispatch at admission +
-        // `live_interrupt_required` projected onto MeerkatAdmittedInputSnapshot).
-        // Until that runtime seam lands, the shell reads the already-projected
-        // per-input `handling_mode` rather than re-scanning ad hoc.
+        // #338: the admission transition emits the typed `live_interrupt_required`
+        // verdict, carried end-to-end on the per-input
+        // `MeerkatAdmittedInputSnapshot`. The shell reads the machine-owned fact
+        // directly instead of re-scanning `handling_mode == Steer`.
         self.runtime_adapter
             .meerkat_machine_spine_snapshot(session_id)
             .await
             .is_some_and(|snapshot| {
                 snapshot.inputs.admission_order.iter().any(|input| {
-                    input.handling_mode == Some(meerkat_core::types::HandlingMode::Steer)
+                    input.live_interrupt_required
                         && contributing_input_ids.contains(&input.input_id)
                 })
             })
@@ -6427,7 +6424,14 @@ impl SessionRuntime {
         conflict_state: Option<RuntimeState>,
     ) -> Result<(), RpcError> {
         match result {
-            UserInterruptPublicResult::Interrupted => Ok(()),
+            // #348: both a live cancellation and a staged-session no-op are
+            // non-error successes at this seam. The typed `StagedNoop` is owned
+            // by the machine; surfacing it as a distinct wire `{result:
+            // staged_noop}` is the L-sdks surface-signature change (downstream),
+            // so this runtime->rpc collapse keeps the success contract.
+            UserInterruptPublicResult::Interrupted | UserInterruptPublicResult::StagedNoop => {
+                Ok(())
+            }
             UserInterruptPublicResult::NotFound => Err(RpcError {
                 code: error::SESSION_NOT_FOUND,
                 message: format!("Session not found: {session_id}"),

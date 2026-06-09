@@ -14,6 +14,9 @@ pub enum UserInterruptObservation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserInterruptPublicResult {
     Interrupted,
+    /// #348: a staged (not-yet-promoted) session interrupt is a typed no-op
+    /// terminal, distinct from a real `Interrupted` cancellation.
+    StagedNoop,
     NotFound,
     SessionBusy,
     Conflict,
@@ -81,6 +84,7 @@ pub fn resolve_user_interrupt_public_result(
         dsl::UserInterruptPublicResultKind::Interrupted => {
             Ok(UserInterruptPublicResult::Interrupted)
         }
+        dsl::UserInterruptPublicResultKind::StagedNoop => Ok(UserInterruptPublicResult::StagedNoop),
         dsl::UserInterruptPublicResultKind::NotFound => Ok(UserInterruptPublicResult::NotFound),
         dsl::UserInterruptPublicResultKind::SessionBusy => {
             Ok(UserInterruptPublicResult::SessionBusy)
@@ -106,10 +110,12 @@ mod tests {
 
     #[test]
     fn generated_interrupt_result_classifies_staged_noop_success() {
+        // #348: a staged-session interrupt now resolves to the typed
+        // `StagedNoop` terminal, not `Interrupted` (no live run was cancelled).
         let result =
             resolve_user_interrupt_public_result(UserInterruptObservation::StagedNoop, true, false)
                 .expect("staged noop interrupt result should classify");
-        assert_eq!(result, UserInterruptPublicResult::Interrupted);
+        assert_eq!(result, UserInterruptPublicResult::StagedNoop);
     }
 
     #[test]

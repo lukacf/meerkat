@@ -10,6 +10,7 @@ use meerkat_core::retry::LlmRetrySchedule;
 #[cfg(test)]
 use meerkat_core::turn_execution_authority::TurnFailureSourceKind;
 use meerkat_core::turn_execution_authority::{
+    CallTimeoutSource as TurnCallTimeoutSource, CallTimeoutVerdict as TurnCallTimeoutVerdict,
     ContentShape, LlmFailureRecoveryKind, TurnExecutionEffect, TurnExecutionInput,
     TurnFailureReason, TurnFailureSource, TurnPhase, TurnPrimitiveKind, TurnTerminalCauseKind,
     TurnTerminalOutcome, terminal_outcome_for_budget_exceeded,
@@ -111,6 +112,25 @@ fn map_generated_turn_effect(
                 },
             }
         }
+        mm_dsl::MeerkatMachineEffect::AssistantOutputClassified {
+            empty_response_terminal,
+        } => TurnExecutionEffect::AssistantOutputClassified {
+            empty_response_terminal,
+        },
+        mm_dsl::MeerkatMachineEffect::CallTimeoutClassified {
+            verdict,
+            timeout_ms,
+        } => TurnExecutionEffect::CallTimeoutClassified {
+            verdict: match verdict {
+                mm_dsl::CallTimeoutVerdict::RetryableCallTimeout => {
+                    TurnCallTimeoutVerdict::RetryableCallTimeout
+                }
+                mm_dsl::CallTimeoutVerdict::TerminalTurnBudget => {
+                    TurnCallTimeoutVerdict::TerminalTurnBudget
+                }
+            },
+            timeout_ms,
+        },
         _ => return Ok(None),
     }))
 }
@@ -236,6 +256,20 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
                 retry_attempt: u64::from(retry_attempt),
                 max_retries: u64::from(max_retries),
             },
+            TurnExecutionInput::ClassifyAssistantOutput {
+                has_visible_or_actionable,
+            } => mm_dsl::MeerkatMachineInput::ClassifyAssistantOutput {
+                has_visible_or_actionable,
+            },
+            TurnExecutionInput::ClassifyCallTimeout { source, timeout_ms } => {
+                mm_dsl::MeerkatMachineInput::ClassifyCallTimeout {
+                    source: match source {
+                        TurnCallTimeoutSource::CallBudget => mm_dsl::CallTimeoutSource::CallBudget,
+                        TurnCallTimeoutSource::TurnBudget => mm_dsl::CallTimeoutSource::TurnBudget,
+                    },
+                    timeout_ms,
+                }
+            }
             TurnExecutionInput::CancelNow { run_id } => mm_dsl::MeerkatMachineInput::CancelNow {
                 run_id: mm_dsl::RunId::from_domain(&run_id),
             },

@@ -166,6 +166,15 @@ impl IngressView<'_> {
         self.driver.admitted_handling_mode(input_id)
     }
 
+    /// #338: machine-owned per-input live-interrupt verdict, read from the
+    /// admission `RuntimeInputSemantics`. Defaults to `false` when no admission
+    /// semantics were recorded for the input.
+    pub(crate) fn live_interrupt_required(&self, input_id: &InputId) -> bool {
+        self.driver
+            .admitted_runtime_semantics(input_id)
+            .is_some_and(|semantics| semantics.live_interrupt_required)
+    }
+
     pub(crate) fn runtime_semantics(
         &self,
         input_id: &InputId,
@@ -2361,6 +2370,7 @@ mod tests {
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
+                    live_interrupt_required: false,
                 },
                 &resume_state,
                 &seed,
@@ -2377,6 +2387,7 @@ mod tests {
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
+                    live_interrupt_required: false,
                 },
                 &prompt_state,
                 &seed,
@@ -2427,6 +2438,7 @@ mod tests {
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
+                    live_interrupt_required: false,
                 },
                 &prefix_state,
                 &seed,
@@ -2443,6 +2455,7 @@ mod tests {
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
+                    live_interrupt_required: false,
                 },
                 &prompt_state,
                 &seed,
@@ -2516,6 +2529,7 @@ mod tests {
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
+                    live_interrupt_required: false,
                 },
                 &event_state,
                 &seed,
@@ -2532,6 +2546,7 @@ mod tests {
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
+                    live_interrupt_required: false,
                 },
                 &prompt_state,
                 &seed,
@@ -2576,6 +2591,7 @@ mod tests {
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
+                    live_interrupt_required: false,
                 },
                 &state,
                 &seed,
@@ -2620,6 +2636,7 @@ mod tests {
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
+                    live_interrupt_required: false,
                 },
                 &state,
                 &seed,

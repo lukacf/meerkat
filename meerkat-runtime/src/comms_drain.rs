@@ -3776,6 +3776,13 @@ mod tests {
             Ok(())
         }
 
+        fn request_send_failed(
+            &self,
+            _corr_id: meerkat_core::PeerCorrelationId,
+        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            Ok(())
+        }
+
         fn classify_response_reply(
             &self,
             status: meerkat_core::ResponseStatus,

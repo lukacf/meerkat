@@ -1061,6 +1061,106 @@ impl std::fmt::Display for AgentRuntimeId {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum CallTimeoutSource {
+    #[default]
+    #[serde(rename = "CallBudget")]
+    CallBudget,
+    #[serde(rename = "TurnBudget")]
+    TurnBudget,
+}
+impl CallTimeoutSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CallBudget => "CallBudget",
+            Self::TurnBudget => "TurnBudget",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for CallTimeoutSource {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "CallBudget" => Ok(Self::CallBudget),
+            "TurnBudget" => Ok(Self::TurnBudget),
+            other => Err(format!("invalid CallTimeoutSource value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for CallTimeoutSource {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for CallTimeoutSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum CallTimeoutVerdict {
+    #[default]
+    #[serde(rename = "RetryableCallTimeout")]
+    RetryableCallTimeout,
+    #[serde(rename = "TerminalTurnBudget")]
+    TerminalTurnBudget,
+}
+impl CallTimeoutVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RetryableCallTimeout => "RetryableCallTimeout",
+            Self::TerminalTurnBudget => "TerminalTurnBudget",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for CallTimeoutVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RetryableCallTimeout" => Ok(Self::RetryableCallTimeout),
+            "TerminalTurnBudget" => Ok(Self::TerminalTurnBudget),
+            other => Err(format!("invalid CallTimeoutVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for CallTimeoutVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for CallTimeoutVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -9779,6 +9879,8 @@ pub enum UserInterruptPublicResultKind {
     #[default]
     #[serde(rename = "Interrupted")]
     Interrupted,
+    #[serde(rename = "StagedNoop")]
+    StagedNoop,
     #[serde(rename = "NotFound")]
     NotFound,
     #[serde(rename = "SessionBusy")]
@@ -9790,6 +9892,7 @@ impl UserInterruptPublicResultKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Interrupted => "Interrupted",
+            Self::StagedNoop => "StagedNoop",
             Self::NotFound => "NotFound",
             Self::SessionBusy => "SessionBusy",
             Self::Conflict => "Conflict",
@@ -9801,6 +9904,7 @@ impl std::convert::TryFrom<&str> for UserInterruptPublicResultKind {
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
             "Interrupted" => Ok(Self::Interrupted),
+            "StagedNoop" => Ok(Self::StagedNoop),
             "NotFound" => Ok(Self::NotFound),
             "SessionBusy" => Ok(Self::SessionBusy),
             "Conflict" => Ok(Self::Conflict),
@@ -10233,6 +10337,8 @@ pub struct State {
     pub live_active_channel_by_session: std::collections::BTreeMap<String, String>,
     pub live_channel_session_by_channel: std::collections::BTreeMap<String, String>,
     pub live_channel_identity_by_channel: std::collections::BTreeMap<String, SessionLlmIdentity>,
+    pub live_staged_transcript_items: std::collections::BTreeSet<String>,
+    pub live_staged_transcript_sequence: u64,
     pub live_refresh_result_sequence: u64,
     pub live_refresh_queue_acceptance_sequence_by_channel: std::collections::BTreeMap<String, u64>,
     pub live_refresh_status_by_channel: std::collections::BTreeMap<String, LiveRefreshPublicStatus>,
@@ -10831,6 +10937,15 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyTurnTerminality {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyAssistantOutput {
+        pub has_visible_or_actionable: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyCallTimeout {
+        pub source: CallTimeoutSource,
+        pub timeout_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyLlmFailureRecovery {
         pub failure_kind: Option<LlmRetryFailureKind>,
         pub retry_attempt: u64,
@@ -11374,6 +11489,14 @@ pub mod inputs {
         pub channel_id: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AppendRealtimeTranscript {
+        pub channel_id: String,
+        pub item_id: String,
+        pub text: String,
+        pub role: RealtimeTranscriptRoleKind,
+        pub lane: RealtimeTranscriptLaneKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordLiveRefreshQueued {
         pub channel_id: String,
         pub queue_acceptance_sequence: u64,
@@ -11642,6 +11765,10 @@ pub mod inputs {
         pub corr_id: PeerCorrelationId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PeerRequestSendFailed {
+        pub corr_id: PeerCorrelationId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerRequestReceived {
         pub corr_id: PeerCorrelationId,
         pub handling_mode: InputLane,
@@ -11890,6 +12017,8 @@ pub enum Input {
     ClassifyInputTerminality(inputs::ClassifyInputTerminality),
     ClassifyTurnTerminalCauseClass(inputs::ClassifyTurnTerminalCauseClass),
     ClassifyTurnTerminality(inputs::ClassifyTurnTerminality),
+    ClassifyAssistantOutput(inputs::ClassifyAssistantOutput),
+    ClassifyCallTimeout(inputs::ClassifyCallTimeout),
     ClassifyLlmFailureRecovery(inputs::ClassifyLlmFailureRecovery),
     ResolveTurnSurfaceResult(inputs::ResolveTurnSurfaceResult),
     AuthorizeStoredInputStateSeed(inputs::AuthorizeStoredInputStateSeed),
@@ -11993,6 +12122,7 @@ pub enum Input {
     FinishSurfaceRequestUnpublished(inputs::FinishSurfaceRequestUnpublished),
     ResolveLiveOpenAdmission(inputs::ResolveLiveOpenAdmission),
     AbandonLiveOpenAdmission(inputs::AbandonLiveOpenAdmission),
+    AppendRealtimeTranscript(inputs::AppendRealtimeTranscript),
     RecordLiveRefreshQueued(inputs::RecordLiveRefreshQueued),
     RecordLiveCloseClosed(inputs::RecordLiveCloseClosed),
     RecordLiveCommandAccepted(inputs::RecordLiveCommandAccepted),
@@ -12046,6 +12176,7 @@ pub enum Input {
     PeerResponseTerminalArrived(inputs::PeerResponseTerminalArrived),
     PeerResponseRejected(inputs::PeerResponseRejected),
     PeerRequestTimedOut(inputs::PeerRequestTimedOut),
+    PeerRequestSendFailed(inputs::PeerRequestSendFailed),
     PeerRequestReceived(inputs::PeerRequestReceived),
     PeerResponseReplied(inputs::PeerResponseReplied),
     AdvanceSessionContext(inputs::AdvanceSessionContext),
@@ -12191,6 +12322,8 @@ impl Input {
             Self::ClassifyInputTerminality(_) => InputKind::ClassifyInputTerminality,
             Self::ClassifyTurnTerminalCauseClass(_) => InputKind::ClassifyTurnTerminalCauseClass,
             Self::ClassifyTurnTerminality(_) => InputKind::ClassifyTurnTerminality,
+            Self::ClassifyAssistantOutput(_) => InputKind::ClassifyAssistantOutput,
+            Self::ClassifyCallTimeout(_) => InputKind::ClassifyCallTimeout,
             Self::ClassifyLlmFailureRecovery(_) => InputKind::ClassifyLlmFailureRecovery,
             Self::ResolveTurnSurfaceResult(_) => InputKind::ResolveTurnSurfaceResult,
             Self::AuthorizeStoredInputStateSeed(_) => InputKind::AuthorizeStoredInputStateSeed,
@@ -12310,6 +12443,7 @@ impl Input {
             Self::FinishSurfaceRequestUnpublished(_) => InputKind::FinishSurfaceRequestUnpublished,
             Self::ResolveLiveOpenAdmission(_) => InputKind::ResolveLiveOpenAdmission,
             Self::AbandonLiveOpenAdmission(_) => InputKind::AbandonLiveOpenAdmission,
+            Self::AppendRealtimeTranscript(_) => InputKind::AppendRealtimeTranscript,
             Self::RecordLiveRefreshQueued(_) => InputKind::RecordLiveRefreshQueued,
             Self::RecordLiveCloseClosed(_) => InputKind::RecordLiveCloseClosed,
             Self::RecordLiveCommandAccepted(_) => InputKind::RecordLiveCommandAccepted,
@@ -12375,6 +12509,7 @@ impl Input {
             Self::PeerResponseTerminalArrived(_) => InputKind::PeerResponseTerminalArrived,
             Self::PeerResponseRejected(_) => InputKind::PeerResponseRejected,
             Self::PeerRequestTimedOut(_) => InputKind::PeerRequestTimedOut,
+            Self::PeerRequestSendFailed(_) => InputKind::PeerRequestSendFailed,
             Self::PeerRequestReceived(_) => InputKind::PeerRequestReceived,
             Self::PeerResponseReplied(_) => InputKind::PeerResponseReplied,
             Self::AdvanceSessionContext(_) => InputKind::AdvanceSessionContext,
@@ -12505,6 +12640,8 @@ pub enum InputKind {
     ClassifyInputTerminality,
     ClassifyTurnTerminalCauseClass,
     ClassifyTurnTerminality,
+    ClassifyAssistantOutput,
+    ClassifyCallTimeout,
     ClassifyLlmFailureRecovery,
     ResolveTurnSurfaceResult,
     AuthorizeStoredInputStateSeed,
@@ -12608,6 +12745,7 @@ pub enum InputKind {
     FinishSurfaceRequestUnpublished,
     ResolveLiveOpenAdmission,
     AbandonLiveOpenAdmission,
+    AppendRealtimeTranscript,
     RecordLiveRefreshQueued,
     RecordLiveCloseClosed,
     RecordLiveCommandAccepted,
@@ -12661,6 +12799,7 @@ pub enum InputKind {
     PeerResponseTerminalArrived,
     PeerResponseRejected,
     PeerRequestTimedOut,
+    PeerRequestSendFailed,
     PeerRequestReceived,
     PeerResponseReplied,
     AdvanceSessionContext,
@@ -12956,6 +13095,8 @@ pub mod effects {
         pub request_immediate_processing: bool,
         pub interrupt_yielding: bool,
         pub wake_if_idle: bool,
+        pub execution_handling_mode: Option<InputLane>,
+        pub live_interrupt_required: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdmissionValidationResolved {
@@ -13007,6 +13148,15 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct TurnTerminalityClassified {
         pub terminal: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AssistantOutputClassified {
+        pub empty_response_terminal: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CallTimeoutClassified {
+        pub verdict: CallTimeoutVerdict,
+        pub timeout_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LlmFailureRecoveryClassified {
@@ -13621,6 +13771,8 @@ pub enum Effect {
     InputBehavioralTerminalityResolved(effects::InputBehavioralTerminalityResolved),
     TurnTerminalCauseClassResolved(effects::TurnTerminalCauseClassResolved),
     TurnTerminalityClassified(effects::TurnTerminalityClassified),
+    AssistantOutputClassified(effects::AssistantOutputClassified),
+    CallTimeoutClassified(effects::CallTimeoutClassified),
     LlmFailureRecoveryClassified(effects::LlmFailureRecoveryClassified),
     TurnSurfaceResultResolved(effects::TurnSurfaceResultResolved),
     StoredInputStateSeedAuthorized(effects::StoredInputStateSeedAuthorized),
@@ -13777,6 +13929,8 @@ pub enum EffectKind {
     InputBehavioralTerminalityResolved,
     TurnTerminalCauseClassResolved,
     TurnTerminalityClassified,
+    AssistantOutputClassified,
+    CallTimeoutClassified,
     LlmFailureRecoveryClassified,
     TurnSurfaceResultResolved,
     StoredInputStateSeedAuthorized,
@@ -14129,6 +14283,12 @@ pub enum TransitionId {
     ResolveUserInterruptPublicResultNoopRunning,
     ResolveUserInterruptPublicResultNoopRetired,
     ResolveUserInterruptPublicResultNoopStopped,
+    ResolveUserInterruptPublicResultStagedNoopInitializing,
+    ResolveUserInterruptPublicResultStagedNoopIdle,
+    ResolveUserInterruptPublicResultStagedNoopAttached,
+    ResolveUserInterruptPublicResultStagedNoopRunning,
+    ResolveUserInterruptPublicResultStagedNoopRetired,
+    ResolveUserInterruptPublicResultStagedNoopStopped,
     ResolveUserInterruptPublicResultDestroyedPresentInitializing,
     ResolveUserInterruptPublicResultDestroyedPresentIdle,
     ResolveUserInterruptPublicResultDestroyedPresentAttached,
@@ -14976,6 +15136,11 @@ pub enum TransitionId {
     AbandonLiveOpenAdmissionRunning,
     AbandonLiveOpenAdmissionRetired,
     AbandonLiveOpenAdmissionStopped,
+    AppendRealtimeTranscriptIdle,
+    AppendRealtimeTranscriptAttached,
+    AppendRealtimeTranscriptRunning,
+    AppendRealtimeTranscriptRetired,
+    AppendRealtimeTranscriptStopped,
     RecordLiveRefreshQueuedIdle,
     RecordLiveRefreshQueuedAttached,
     RecordLiveRefreshQueuedRunning,
@@ -15266,6 +15431,11 @@ pub enum TransitionId {
     PeerRequestTimedOutRunning,
     PeerRequestTimedOutRetired,
     PeerRequestTimedOutStopped,
+    PeerRequestSendFailedIdle,
+    PeerRequestSendFailedAttached,
+    PeerRequestSendFailedRunning,
+    PeerRequestSendFailedRetired,
+    PeerRequestSendFailedStopped,
     PeerRequestReceivedIdle,
     PeerRequestReceivedAttached,
     PeerRequestReceivedRunning,
@@ -15473,6 +15643,18 @@ pub enum TransitionId {
     ClassifyLlmFailureRecoveryFatalIdle,
     ClassifyLlmFailureRecoveryFatalAttached,
     ClassifyLlmFailureRecoveryFatalRunning,
+    ClassifyAssistantOutputEmptyTerminalIdle,
+    ClassifyAssistantOutputEmptyTerminalAttached,
+    ClassifyAssistantOutputEmptyTerminalRunning,
+    ClassifyAssistantOutputProceedIdle,
+    ClassifyAssistantOutputProceedAttached,
+    ClassifyAssistantOutputProceedRunning,
+    ClassifyCallTimeoutRetryableIdle,
+    ClassifyCallTimeoutRetryableAttached,
+    ClassifyCallTimeoutRetryableRunning,
+    ClassifyCallTimeoutTerminalIdle,
+    ClassifyCallTimeoutTerminalAttached,
+    ClassifyCallTimeoutTerminalRunning,
     ResolveTurnSurfaceResultNoneMissingTerminalIdle,
     ResolveTurnSurfaceResultCompletedSuccessIdle,
     ResolveTurnSurfaceResultCompletedFailureIdle,
@@ -15717,6 +15899,8 @@ pub fn initial_state() -> State {
         live_active_channel_by_session: Default::default(),
         live_channel_session_by_channel: Default::default(),
         live_channel_identity_by_channel: Default::default(),
+        live_staged_transcript_items: Default::default(),
+        live_staged_transcript_sequence: 0,
         live_refresh_result_sequence: 0,
         live_refresh_queue_acceptance_sequence_by_channel: Default::default(),
         live_refresh_status_by_channel: Default::default(),

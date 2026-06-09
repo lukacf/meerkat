@@ -344,6 +344,30 @@ pub enum SessionDocumentInput {
         session_id: SessionDocumentKey,
         fork_or_rewrite_directive: TranscriptEditKind,
     },
+    RecordSessionStaged {
+        session_id: SessionDocumentKey,
+    },
+    RecordSessionUnstaged {
+        session_id: SessionDocumentKey,
+    },
+    ResolveStagedSessionExists {
+        session_id: SessionDocumentKey,
+    },
+    RecordSessionCompactionCadence {
+        session_id: SessionDocumentKey,
+        session_boundary_index: u64,
+        last_compaction_boundary_present: bool,
+        last_compaction_boundary_index: u64,
+        last_compaction_attempt_present: bool,
+        last_compaction_attempt_boundary_index: u64,
+    },
+    SeedSessionCompactionCadenceFromHistory {
+        session_id: SessionDocumentKey,
+        inferred_session_boundary_index: u64,
+    },
+    ResolveSessionCompactionCadence {
+        session_id: SessionDocumentKey,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -437,6 +461,18 @@ pub enum SessionDocumentEffect {
         kind: TranscriptEditKind,
         success: bool,
     },
+    StagedSessionExistsResolved {
+        session_id: SessionDocumentKey,
+        exists: bool,
+    },
+    SessionCompactionCadenceResolved {
+        session_id: SessionDocumentKey,
+        session_boundary_index: u64,
+        last_compaction_boundary_present: bool,
+        last_compaction_boundary_index: u64,
+        last_compaction_attempt_present: bool,
+        last_compaction_attempt_boundary_index: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -475,6 +511,13 @@ pub struct SessionDocumentMachineState {
     session_first_turn_phase: BTreeMap<SessionDocumentKey, SessionFirstTurnPhase>,
     session_pending_initial_prompt_present: BTreeMap<SessionDocumentKey, bool>,
     session_pending_tool_results_count: BTreeMap<SessionDocumentKey, u64>,
+    session_staged_present: BTreeMap<SessionDocumentKey, bool>,
+    session_compaction_boundary_index: BTreeMap<SessionDocumentKey, u64>,
+    session_last_compaction_boundary_present: BTreeMap<SessionDocumentKey, bool>,
+    session_last_compaction_boundary_index: BTreeMap<SessionDocumentKey, u64>,
+    session_last_compaction_attempt_present: BTreeMap<SessionDocumentKey, bool>,
+    session_last_compaction_attempt_boundary_index: BTreeMap<SessionDocumentKey, u64>,
+    session_compaction_cadence_seeded: BTreeMap<SessionDocumentKey, bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -556,6 +599,12 @@ enum SessionDocumentTransition {
     ApplyPendingToolResults,
     TranscriptEditFork,
     TranscriptEditRewrite,
+    RecordSessionStaged,
+    RecordSessionUnstaged,
+    ResolveStagedSessionExists,
+    RecordSessionCompactionCadence,
+    SeedSessionCompactionCadenceFromHistory,
+    ResolveSessionCompactionCadence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -571,6 +620,13 @@ impl SessionDocumentMachineAuthority {
         state.session_first_turn_phase = BTreeMap::new();
         state.session_pending_initial_prompt_present = BTreeMap::new();
         state.session_pending_tool_results_count = BTreeMap::new();
+        state.session_staged_present = BTreeMap::new();
+        state.session_compaction_boundary_index = BTreeMap::new();
+        state.session_last_compaction_boundary_present = BTreeMap::new();
+        state.session_last_compaction_boundary_index = BTreeMap::new();
+        state.session_last_compaction_attempt_present = BTreeMap::new();
+        state.session_last_compaction_attempt_boundary_index = BTreeMap::new();
+        state.session_compaction_cadence_seeded = BTreeMap::new();
         Self { state }
     }
 
@@ -642,6 +698,162 @@ impl SessionDocumentMachineAuthority {
             .copied()
             .ok_or(SessionDocumentError {
                 op: "session_pending_tool_results_count",
+            })
+    }
+
+    #[must_use]
+    pub fn session_staged_present_for(&self, key: &SessionDocumentKey) -> Option<bool> {
+        self.state.session_staged_present.get(key).copied()
+    }
+
+    fn session_staged_present_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<bool, SessionDocumentError> {
+        self.state
+            .session_staged_present
+            .get(key)
+            .copied()
+            .ok_or(SessionDocumentError {
+                op: "session_staged_present",
+            })
+    }
+
+    #[must_use]
+    pub fn session_compaction_boundary_index_for(&self, key: &SessionDocumentKey) -> Option<u64> {
+        self.state
+            .session_compaction_boundary_index
+            .get(key)
+            .copied()
+    }
+
+    fn session_compaction_boundary_index_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<u64, SessionDocumentError> {
+        self.state
+            .session_compaction_boundary_index
+            .get(key)
+            .copied()
+            .ok_or(SessionDocumentError {
+                op: "session_compaction_boundary_index",
+            })
+    }
+
+    #[must_use]
+    pub fn session_last_compaction_boundary_present_for(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Option<bool> {
+        self.state
+            .session_last_compaction_boundary_present
+            .get(key)
+            .copied()
+    }
+
+    fn session_last_compaction_boundary_present_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<bool, SessionDocumentError> {
+        self.state
+            .session_last_compaction_boundary_present
+            .get(key)
+            .copied()
+            .ok_or(SessionDocumentError {
+                op: "session_last_compaction_boundary_present",
+            })
+    }
+
+    #[must_use]
+    pub fn session_last_compaction_boundary_index_for(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Option<u64> {
+        self.state
+            .session_last_compaction_boundary_index
+            .get(key)
+            .copied()
+    }
+
+    fn session_last_compaction_boundary_index_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<u64, SessionDocumentError> {
+        self.state
+            .session_last_compaction_boundary_index
+            .get(key)
+            .copied()
+            .ok_or(SessionDocumentError {
+                op: "session_last_compaction_boundary_index",
+            })
+    }
+
+    #[must_use]
+    pub fn session_last_compaction_attempt_present_for(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Option<bool> {
+        self.state
+            .session_last_compaction_attempt_present
+            .get(key)
+            .copied()
+    }
+
+    fn session_last_compaction_attempt_present_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<bool, SessionDocumentError> {
+        self.state
+            .session_last_compaction_attempt_present
+            .get(key)
+            .copied()
+            .ok_or(SessionDocumentError {
+                op: "session_last_compaction_attempt_present",
+            })
+    }
+
+    #[must_use]
+    pub fn session_last_compaction_attempt_boundary_index_for(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Option<u64> {
+        self.state
+            .session_last_compaction_attempt_boundary_index
+            .get(key)
+            .copied()
+    }
+
+    fn session_last_compaction_attempt_boundary_index_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<u64, SessionDocumentError> {
+        self.state
+            .session_last_compaction_attempt_boundary_index
+            .get(key)
+            .copied()
+            .ok_or(SessionDocumentError {
+                op: "session_last_compaction_attempt_boundary_index",
+            })
+    }
+
+    #[must_use]
+    pub fn session_compaction_cadence_seeded_for(&self, key: &SessionDocumentKey) -> Option<bool> {
+        self.state
+            .session_compaction_cadence_seeded
+            .get(key)
+            .copied()
+    }
+
+    fn session_compaction_cadence_seeded_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<bool, SessionDocumentError> {
+        self.state
+            .session_compaction_cadence_seeded
+            .get(key)
+            .copied()
+            .ok_or(SessionDocumentError {
+                op: "session_compaction_cadence_seeded",
             })
     }
 
@@ -2571,6 +2783,219 @@ impl SessionDocumentMachineAuthority {
                     }),
                 }
             }
+            SessionDocumentInput::RecordSessionStaged { session_id } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready) {
+                    matches.push(SessionDocumentTransition::RecordSessionStaged);
+                }
+                let transition = Self::single_transition(matches, "RecordSessionStaged")?;
+                match transition {
+                    SessionDocumentTransition::RecordSessionStaged => {
+                        self.state
+                            .session_staged_present
+                            .insert(session_id.clone(), true);
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::StagedSessionExistsResolved {
+                            session_id: session_id.clone(),
+                            exists: true,
+                        }])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "RecordSessionStaged_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::RecordSessionUnstaged { session_id } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready) {
+                    matches.push(SessionDocumentTransition::RecordSessionUnstaged);
+                }
+                let transition = Self::single_transition(matches, "RecordSessionUnstaged")?;
+                match transition {
+                    SessionDocumentTransition::RecordSessionUnstaged => {
+                        self.state
+                            .session_staged_present
+                            .insert(session_id.clone(), false);
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::StagedSessionExistsResolved {
+                            session_id: session_id.clone(),
+                            exists: false,
+                        }])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "RecordSessionUnstaged_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::ResolveStagedSessionExists { session_id } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready) {
+                    matches.push(SessionDocumentTransition::ResolveStagedSessionExists);
+                }
+                let transition = Self::single_transition(matches, "ResolveStagedSessionExists")?;
+                match transition {
+                    SessionDocumentTransition::ResolveStagedSessionExists => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::StagedSessionExistsResolved {
+                            session_id: session_id.clone(),
+                            exists: (self.state.session_staged_present.contains_key(&session_id))
+                                && (self.session_staged_present_value(&session_id)? == true),
+                        }])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "ResolveStagedSessionExists_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::RecordSessionCompactionCadence {
+                session_id,
+                session_boundary_index,
+                last_compaction_boundary_present,
+                last_compaction_boundary_index,
+                last_compaction_attempt_present,
+                last_compaction_attempt_boundary_index,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready) {
+                    matches.push(SessionDocumentTransition::RecordSessionCompactionCadence);
+                }
+                let transition =
+                    Self::single_transition(matches, "RecordSessionCompactionCadence")?;
+                match transition {
+                    SessionDocumentTransition::RecordSessionCompactionCadence => {
+                        self.state
+                            .session_compaction_boundary_index
+                            .insert(session_id.clone(), session_boundary_index);
+                        self.state
+                            .session_last_compaction_boundary_present
+                            .insert(session_id.clone(), last_compaction_boundary_present);
+                        self.state
+                            .session_last_compaction_boundary_index
+                            .insert(session_id.clone(), last_compaction_boundary_index);
+                        self.state
+                            .session_last_compaction_attempt_present
+                            .insert(session_id.clone(), last_compaction_attempt_present);
+                        self.state
+                            .session_last_compaction_attempt_boundary_index
+                            .insert(session_id.clone(), last_compaction_attempt_boundary_index);
+                        self.state
+                            .session_compaction_cadence_seeded
+                            .insert(session_id.clone(), true);
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::SessionCompactionCadenceResolved {
+                                session_id: session_id.clone(),
+                                session_boundary_index: session_boundary_index,
+                                last_compaction_boundary_present: last_compaction_boundary_present,
+                                last_compaction_boundary_index: last_compaction_boundary_index,
+                                last_compaction_attempt_present: last_compaction_attempt_present,
+                                last_compaction_attempt_boundary_index:
+                                    last_compaction_attempt_boundary_index,
+                            },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "RecordSessionCompactionCadence_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::SeedSessionCompactionCadenceFromHistory {
+                session_id,
+                inferred_session_boundary_index,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (!(self
+                        .state
+                        .session_compaction_cadence_seeded
+                        .contains_key(&session_id)))
+                {
+                    matches
+                        .push(SessionDocumentTransition::SeedSessionCompactionCadenceFromHistory);
+                }
+                let transition =
+                    Self::single_transition(matches, "SeedSessionCompactionCadenceFromHistory")?;
+                match transition {
+                    SessionDocumentTransition::SeedSessionCompactionCadenceFromHistory => {
+                        self.state
+                            .session_compaction_boundary_index
+                            .insert(session_id.clone(), inferred_session_boundary_index);
+                        self.state
+                            .session_last_compaction_boundary_present
+                            .insert(session_id.clone(), false);
+                        self.state
+                            .session_last_compaction_boundary_index
+                            .insert(session_id.clone(), 0);
+                        self.state
+                            .session_last_compaction_attempt_present
+                            .insert(session_id.clone(), false);
+                        self.state
+                            .session_last_compaction_attempt_boundary_index
+                            .insert(session_id.clone(), 0);
+                        self.state
+                            .session_compaction_cadence_seeded
+                            .insert(session_id.clone(), true);
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::SessionCompactionCadenceResolved {
+                                session_id: session_id.clone(),
+                                session_boundary_index: inferred_session_boundary_index,
+                                last_compaction_boundary_present: false,
+                                last_compaction_boundary_index: 0,
+                                last_compaction_attempt_present: false,
+                                last_compaction_attempt_boundary_index: 0,
+                            },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "SeedSessionCompactionCadenceFromHistory_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::ResolveSessionCompactionCadence { session_id } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (self
+                        .state
+                        .session_compaction_cadence_seeded
+                        .contains_key(&session_id))
+                {
+                    matches.push(SessionDocumentTransition::ResolveSessionCompactionCadence);
+                }
+                let transition =
+                    Self::single_transition(matches, "ResolveSessionCompactionCadence")?;
+                match transition {
+                    SessionDocumentTransition::ResolveSessionCompactionCadence => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::SessionCompactionCadenceResolved {
+                                session_id: session_id.clone(),
+                                session_boundary_index: self
+                                    .session_compaction_boundary_index_value(&session_id)?,
+                                last_compaction_boundary_present: self
+                                    .session_last_compaction_boundary_present_value(&session_id)?,
+                                last_compaction_boundary_index: self
+                                    .session_last_compaction_boundary_index_value(&session_id)?,
+                                last_compaction_attempt_present: self
+                                    .session_last_compaction_attempt_present_value(&session_id)?,
+                                last_compaction_attempt_boundary_index: self
+                                    .session_last_compaction_attempt_boundary_index_value(
+                                        &session_id,
+                                    )?,
+                            },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "ResolveSessionCompactionCadence_transition",
+                    }),
+                }
+            }
         }
     }
 
@@ -3000,6 +3425,66 @@ impl SessionDocumentMachineAuthority {
             session_id,
             fork_or_rewrite_directive,
         })
+    }
+
+    pub fn record_session_staged(
+        &mut self,
+        session_id: SessionDocumentKey,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::RecordSessionStaged { session_id })
+    }
+
+    pub fn record_session_unstaged(
+        &mut self,
+        session_id: SessionDocumentKey,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::RecordSessionUnstaged { session_id })
+    }
+
+    pub fn resolve_staged_session_exists(
+        &mut self,
+        session_id: SessionDocumentKey,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::ResolveStagedSessionExists { session_id })
+    }
+
+    pub fn record_session_compaction_cadence(
+        &mut self,
+        session_id: SessionDocumentKey,
+        session_boundary_index: u64,
+        last_compaction_boundary_present: bool,
+        last_compaction_boundary_index: u64,
+        last_compaction_attempt_present: bool,
+        last_compaction_attempt_boundary_index: u64,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::RecordSessionCompactionCadence {
+            session_id,
+            session_boundary_index,
+            last_compaction_boundary_present,
+            last_compaction_boundary_index,
+            last_compaction_attempt_present,
+            last_compaction_attempt_boundary_index,
+        })
+    }
+
+    pub fn seed_session_compaction_cadence_from_history(
+        &mut self,
+        session_id: SessionDocumentKey,
+        inferred_session_boundary_index: u64,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(
+            SessionDocumentInput::SeedSessionCompactionCadenceFromHistory {
+                session_id,
+                inferred_session_boundary_index,
+            },
+        )
+    }
+
+    pub fn resolve_session_compaction_cadence(
+        &mut self,
+        session_id: SessionDocumentKey,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::ResolveSessionCompactionCadence { session_id })
     }
 }
 

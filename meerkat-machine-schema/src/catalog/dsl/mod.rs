@@ -776,6 +776,11 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "RetryableProviderError",
                 ],
             ),
+            NamedTypeBinding::string_enum("CallTimeoutSource", &["CallBudget", "TurnBudget"]),
+            NamedTypeBinding::string_enum(
+                "CallTimeoutVerdict",
+                &["RetryableCallTimeout", "TerminalTurnBudget"],
+            ),
             NamedTypeBinding::string_enum(
                 "LiveOpenAdmissionRejection",
                 &["AlreadyBound", "ChannelAlreadyBound"],
@@ -1322,7 +1327,13 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "UserInterruptPublicResultKind",
-                &["Interrupted", "NotFound", "SessionBusy", "Conflict"],
+                &[
+                    "Interrupted",
+                    "StagedNoop",
+                    "NotFound",
+                    "SessionBusy",
+                    "Conflict",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "RuntimeCompletionResultClass",
@@ -1611,6 +1622,7 @@ runtime_internal_inputs!(
         AcknowledgeTerminal,
         AddDirectPeerEndpoint,
         AdvanceSessionContext,
+        AppendRealtimeTranscript,
         ApplyMobPeerOverlay,
         AttachMobIngress,
         AttachSessionIngress,
@@ -1663,6 +1675,7 @@ runtime_internal_inputs!(
         OpsBarrierSatisfied,
         PeerReadyOp,
         PeerRequestReceived,
+        PeerRequestSendFailed,
         PeerRequestSent,
         PeerRequestTimedOut,
         PeerResponseProgressArrived,
@@ -1756,6 +1769,8 @@ runtime_internal_inputs!(
         BeginDeferredSessionArchive,
         BeginDeferredSessionPromotion,
         CancelSurfaceRequest,
+        ClassifyAssistantOutput,
+        ClassifyCallTimeout,
         ClassifyInputTerminality,
         ClassifyOperationTerminality,
         ClassifyOperationPublicResult,

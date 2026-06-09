@@ -370,6 +370,7 @@ fn runtime_prompt_semantics_from_machine(input: &Input) -> ingress_types::Runtim
                 runtime_boundary,
                 runtime_execution_kind,
                 runtime_peer_response_terminal_apply_intent,
+                live_interrupt_required,
                 ..
             } => Some(ingress_types::RuntimeInputSemantics {
                 boundary: runtime_boundary.into(),
@@ -377,6 +378,7 @@ fn runtime_prompt_semantics_from_machine(input: &Input) -> ingress_types::Runtim
                 execution_handling_mode: None,
                 peer_response_terminal_apply_intent: runtime_peer_response_terminal_apply_intent
                     .map(Into::into),
+                live_interrupt_required,
             }),
             _ => None,
         })

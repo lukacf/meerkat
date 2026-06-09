@@ -473,7 +473,9 @@ fn project_peer_request_command(
     };
     Ok(CommsCommand::PeerRequest {
         to,
-        intent,
+        // #101: downgrade the typed closed public-request intent to the domain
+        // envelope's wider open `String` intent vocabulary at this boundary.
+        intent: intent.as_str().to_string(),
         params,
         blocks,
         handling_mode: handling_mode.unwrap_or_default(),

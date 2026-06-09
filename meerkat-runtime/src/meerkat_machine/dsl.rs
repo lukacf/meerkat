@@ -1758,6 +1758,25 @@ pub enum LlmFailureRecoveryKind {
     Exhausted,
 }
 
+/// #323: pre-selected call-timeout source carried into the machine's
+/// `ClassifyCallTimeout` classifier. Source selection is shell-side; the
+/// machine owns the retryable-vs-terminal verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum CallTimeoutSource {
+    #[default]
+    CallBudget,
+    TurnBudget,
+}
+
+/// #323: machine-owned call-timeout verdict emitted by `ClassifyCallTimeout`.
+/// The agent loop mirrors this into the existing retry / budget-terminal paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum CallTimeoutVerdict {
+    #[default]
+    RetryableCallTimeout,
+    TerminalTurnBudget,
+}
+
 /// Raw failure source fact carried by runtime run-failure handoff.
 /// MeerkatMachine maps this to terminal outcome/cause before public
 /// projection.
@@ -2086,6 +2105,9 @@ pub enum UserInterruptObservationKind {
 pub enum UserInterruptPublicResultKind {
     #[default]
     Interrupted,
+    /// #348: a staged (not-yet-promoted) session interrupt is a typed no-op
+    /// terminal — distinct from `Interrupted` (a live run was cancelled).
+    StagedNoop,
     NotFound,
     SessionBusy,
     Conflict,

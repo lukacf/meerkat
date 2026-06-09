@@ -773,6 +773,7 @@ impl MeerkatMachine {
                 request_id: ingress.request_id(&input_id),
                 reservation_key: ingress.reservation_key(&input_id),
                 handling_mode: ingress.handling_mode(&input_id),
+                live_interrupt_required: ingress.live_interrupt_required(&input_id),
                 lifecycle: driver.input_phase(&input_id),
                 terminal_outcome: driver.input_terminal_outcome(&input_id),
                 last_run_id: driver.input_last_run_id(&input_id),

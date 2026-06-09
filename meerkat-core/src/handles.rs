@@ -1907,6 +1907,14 @@ pub trait PeerInteractionHandle: Send + Sync {
     /// effect is emitted; subsequent fires fail the guard.
     fn request_timed_out(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
 
+    /// Fire `PeerRequestSendFailed { corr_id }` (#291).
+    ///
+    /// Distinct from `request_timed_out`: the outbound request never reached the
+    /// peer (transport/send failure), versus a genuine elapsed-deadline timeout.
+    /// Emits `OutboundPeerRequestState::Failed` and removes the pending entry,
+    /// mirroring the `PeerResponseRejected` failure disposition.
+    fn request_send_failed(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
+
     /// Fire `PeerRequestReceived { corr_id, handling_mode }` (inbound).
     ///
     /// Guard: `corr_id` is not already in `inbound_peer_requests`.

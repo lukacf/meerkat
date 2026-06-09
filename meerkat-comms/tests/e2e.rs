@@ -204,6 +204,16 @@ impl meerkat_core::handles::PeerInteractionHandle for TestPeerInteractionHandle 
         Ok(())
     }
 
+    fn request_send_failed(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
+        if self.outbound.lock().remove(&corr_id).is_none() {
+            return Err(Self::rejection(
+                "PeerInteractionHandle::request_send_failed",
+                corr_id,
+            ));
+        }
+        Ok(())
+    }
+
     fn request_received(
         &self,
         corr_id: PeerCorrelationId,

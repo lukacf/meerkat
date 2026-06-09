@@ -79,6 +79,12 @@ pub struct RuntimeInputSemantics {
     pub(crate) execution_kind: RuntimeExecutionKind,
     pub(crate) execution_handling_mode: Option<HandlingMode>,
     pub(crate) peer_response_terminal_apply_intent: Option<PeerResponseTerminalApplyIntent>,
+    /// #338: machine-owned verdict that this admitted input requires a live
+    /// channel interrupt (true iff the admitted lane is `Steer`). Carried
+    /// end-to-end so the live-projection consumer reads the typed fact instead
+    /// of re-scanning `handling_mode == Steer`.
+    #[serde(default)]
+    pub(crate) live_interrupt_required: bool,
 }
 
 /// Admitted conversation projection for one input.

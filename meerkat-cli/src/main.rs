@@ -11117,6 +11117,16 @@ async fn interrupt_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()>
                 );
                 Ok(())
             }
+            // #348: a staged session has no live run to cancel — report the
+            // typed no-op honestly instead of claiming an interruption.
+            meerkat_runtime::UserInterruptPublicResult::StagedNoop => {
+                println!("Session staged; no active run to interrupt: {session_id}");
+                println!(
+                    "Session Ref: {}",
+                    format_session_ref(&scope.locator.realm, &session_id)
+                );
+                Ok(())
+            }
             meerkat_runtime::UserInterruptPublicResult::NotFound => Err(anyhow::anyhow!(
                 "Failed to interrupt session: session not found"
             )),
@@ -16388,8 +16398,11 @@ default_model = "gemma"
     fn test_parse_comms_send_payload_peer_request_accepts_reserve_interaction_stream() {
         let session_id = SessionId::new();
         let to = uuid::Uuid::new_v4();
+        // #101: `intent` is the closed-set `CommsPeerRequestIntent`; `"help"`
+        // is no longer a valid public-request intent (fail-closed at the typed
+        // serde boundary), so the fixture uses the closed-set `checksum_token`.
         let payload = format!(
-            r#"{{"kind":"peer_request","to":"{to}","intent":"help","params":{{"topic":"x"}},"handling_mode":"queue","stream":"reserve_interaction"}}"#,
+            r#"{{"kind":"peer_request","to":"{to}","intent":"checksum_token","params":{{"topic":"x"}},"handling_mode":"queue","stream":"reserve_interaction"}}"#,
         );
         let cmd = parse_comms_send_payload(&payload, &session_id)
             .expect("peer request reserve_interaction stream should be accepted");

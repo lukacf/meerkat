@@ -800,7 +800,7 @@ impl CoreCommsRuntime for CommsRuntime {
                         InteractionStreamReservationAuthority::Machine(stream_handle),
                     )
                 {
-                    let _ = peer_handle.request_timed_out(corr_id);
+                    let _ = peer_handle.request_send_failed(corr_id);
                     return Err(err);
                 }
 
@@ -828,7 +828,7 @@ impl CoreCommsRuntime for CommsRuntime {
                         // timeout receipt. The DSL cleanup below removes the
                         // pending entry; the authoritative send-failure
                         // disposition is owned by the typed error returned here.
-                        let _ = peer_handle.request_timed_out(corr_id);
+                        let _ = peer_handle.request_send_failed(corr_id);
                         return Err(e);
                     }
                 };
@@ -1016,7 +1016,7 @@ impl CoreCommsRuntime for CommsRuntime {
                     interaction_id,
                     InteractionStreamReservationAuthority::Machine(stream_handle),
                 ) {
-                    let _ = peer_handle.request_timed_out(corr_id);
+                    let _ = peer_handle.request_send_failed(corr_id);
                     return Err(SendAndStreamError::Send(err));
                 }
 
@@ -1039,7 +1039,7 @@ impl CoreCommsRuntime for CommsRuntime {
                         // Send failure returns the typed `SendError` verbatim;
                         // it is never laundered into a timeout receipt. DSL
                         // cleanup removes the pending entry.
-                        let _ = peer_handle.request_timed_out(corr_id);
+                        let _ = peer_handle.request_send_failed(corr_id);
                         return Err(SendAndStreamError::Send(e));
                     }
                 };
@@ -4589,6 +4589,20 @@ mod tests {
             if self.outbound.lock().remove(&corr_id).is_none() {
                 return Err(Self::guard_rejected(
                     "PeerInteractionHandle::request_timed_out",
+                    corr_id,
+                ));
+            }
+            self.notify_cleanup(corr_id);
+            Ok(())
+        }
+
+        fn request_send_failed(
+            &self,
+            corr_id: meerkat_core::PeerCorrelationId,
+        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            if self.outbound.lock().remove(&corr_id).is_none() {
+                return Err(Self::guard_rejected(
+                    "PeerInteractionHandle::request_send_failed",
                     corr_id,
                 ));
             }

@@ -5030,6 +5030,13 @@ async fn interrupt_session(
             "session_id": session_id.to_string(),
             "interrupted": true
         }))),
+        // #348: a staged-session interrupt is a typed no-op terminal — report it
+        // honestly rather than claiming a live run was interrupted.
+        meerkat_runtime::UserInterruptPublicResult::StagedNoop => Ok(Json(json!({
+            "session_id": session_id.to_string(),
+            "interrupted": false,
+            "result": "staged_noop"
+        }))),
         meerkat_runtime::UserInterruptPublicResult::NotFound => {
             Err(ApiError::NotFound(format!("Session not found: {id}")))
         }

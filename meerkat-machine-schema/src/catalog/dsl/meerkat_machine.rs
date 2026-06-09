@@ -1031,6 +1031,13 @@ pub enum UserInterruptObservationKind {
 pub enum UserInterruptPublicResultKind {
     #[default]
     Interrupted,
+    // A staged (not-yet-promoted) session received an interrupt that found no
+    // active run to cancel. Distinct from `Interrupted`: the machine observed a
+    // `StagedNoop` and the public surface reports a typed staged-noop rather than
+    // claiming a real interruption occurred. `IdleNoop`/`AttachedNoop` still
+    // collapse into `Interrupted` (an attached/idle session is interruptible
+    // even when no run is in flight); only the staged-noop case is split out.
+    StagedNoop,
     NotFound,
     SessionBusy,
     Conflict,
@@ -1421,6 +1428,31 @@ pub enum LlmRetryFailureKind {
     NetworkTimeout,
     CallTimeout,
     RetryableProviderError,
+}
+
+/// #323: pre-selected timeout source carried into `ClassifyCallTimeout`. Closed
+/// mirror of the shell's `CallTimeoutSource`: the LLM-await loop selects the
+/// source BEFORE awaiting (hard per-call budget vs whole-turn time budget), so
+/// the classification is deterministic, not inferred from a merged elapsed
+/// duration. Source selection stays shell-side; the machine owns only the
+/// retryable-vs-terminal verdict derived from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum CallTimeoutSource {
+    #[default]
+    CallBudget,
+    TurnBudget,
+}
+
+/// #323: machine-owned verdict for a fired LLM-call timeout. `RetryableCallTimeout`
+/// flows through the existing retry path as a recoverable
+/// `LlmFailureReason::CallTimeout`; `TerminalTurnBudget` is a non-retryable
+/// whole-turn time-budget terminal. The machine — not the in-loop `match` — owns
+/// which fired timeout is retryable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum CallTimeoutVerdict {
+    #[default]
+    RetryableCallTimeout,
+    TerminalTurnBudget,
 }
 
 /// Typed admission-signal classifier for the `PostAdmissionSignal` effect.
@@ -2608,6 +2640,22 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_channel_session_by_channel: Map<String, String>,
             live_channel_identity_by_channel: Map<String, SessionLlmIdentity>,
 
+            // #51: machine-owned realtime transcript staging. The explicit-commit
+            // text-input path in the OpenAI realtime adapter stages a user text
+            // item (sent via `ConversationItemCreate`) while the turn is open,
+            // awaiting `commit_turn_with_modality`. Pre-#51 this staged turn lived
+            // only in the adapter as `pending_explicit_commit_text_items:
+            // Vec<StagedTextTurn>`, so a crash/cancel between stage and commit
+            // could orphan an untracked pending text item. The staged item ids
+            // are now a machine-owned set: a committed turn proves a real staged
+            // turn, and the staged set is recoverable rather than living in
+            // adapter memory. `item_id` is the opaque synthetic provider item id
+            // (globally unique), so a flat set suffices.
+            // `live_staged_transcript_sequence` orders staging within the channel
+            // (same convention as the surrounding Live-region sequence counters).
+            live_staged_transcript_items: Set<String>,
+            live_staged_transcript_sequence: u64,
+
             // `live/refresh` observes adapter command-queue acceptance in the
             // shell, then submits that observation here. The generated effect
             // below owns the public `Queued` result class and the compatibility
@@ -3000,6 +3048,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_active_channel_by_session = EmptyMap,
             live_channel_session_by_channel = EmptyMap,
             live_channel_identity_by_channel = EmptyMap,
+            live_staged_transcript_items = EmptySet,
+            live_staged_transcript_sequence = 0,
             live_refresh_queue_acceptance_sequence_by_channel = EmptyMap,
             live_refresh_status_by_channel = EmptyMap,
             live_close_result_sequence = 0,
@@ -3425,6 +3475,32 @@ macro_rules! meerkat_catalog_machine_dsl {
             // the recovered machine state and mirrors the emitted
             // TurnTerminalityClassified.terminal, failing closed.
             ClassifyTurnTerminality {},
+            // #128: empty-assistant-output terminal verdict. The agent loop
+            // EXTRACTS a single pure pre-classification bit — whether the
+            // assistant output (combined across the current message and the
+            // run-accumulated visible/actionable history) carries any visible or
+            // actionable output — via the free fn
+            // `assistant_blocks_have_visible_or_actionable_output`, then drives
+            // this input. THIS machine — not the shell — owns the policy that an
+            // assistant turn with no visible or actionable output is an
+            // empty-response terminal (the `llm_empty_response` fatal cause). The
+            // loop mirrors the emitted verdict: `empty_response_terminal` drives
+            // the existing fatal `llm_empty_response` path; otherwise the turn
+            // proceeds. Pure classification — Idle self-loops, no state mutation.
+            ClassifyAssistantOutput { has_visible_or_actionable: bool },
+            // #323: fired-LLM-call-timeout classification. The LLM-await loop
+            // pre-selects the timeout `source` BEFORE awaiting (hard per-call
+            // budget vs whole-turn time budget) and, when the timeout fires,
+            // drives this input with the pre-selected source and the elapsed
+            // `timeout_ms`. THIS machine — not the in-loop `match` — owns whether
+            // a fired timeout is the retryable `LlmFailureReason::CallTimeout`
+            // (CallBudget) or the non-retryable whole-turn time-budget terminal
+            // (TurnBudget). The loop mirrors the emitted verdict: source
+            // selection stays shell-side. `timeout_ms` rides for the
+            // diagnostic/duration payload the shell constructs on the verdict;
+            // the verdict itself depends only on `source`. Pure classification —
+            // Idle self-loops, no state mutation.
+            ClassifyCallTimeout { source: Enum<CallTimeoutSource>, timeout_ms: u64 },
             // P0 Dogma Invariant 1: LLM-failure recovery classification. The
             // recoverable-vs-fatal AND exhaustion verdict for an LLM call
             // failure is a machine-owned conclusion, not a unilateral shell
@@ -3722,6 +3798,19 @@ macro_rules! meerkat_catalog_machine_dsl {
                 llm_identity: SessionLlmIdentity,
             },
             AbandonLiveOpenAdmission { session_id: String, channel_id: String },
+            // #51: stage a realtime transcript item under machine authority. The
+            // realtime adapter drives this BEFORE the explicit-commit text item is
+            // sent (the former direct `pending_explicit_commit_text_items.push`),
+            // so the staged item is a machine-owned fact, not adapter memory. The
+            // machine records the staged `item_id` under the channel and emits the
+            // `RealtimeTranscriptAppended` staging fact; the adapter mirrors it.
+            AppendRealtimeTranscript {
+                channel_id: String,
+                item_id: String,
+                text: String,
+                role: Enum<RealtimeTranscriptRoleKind>,
+                lane: Enum<RealtimeTranscriptLaneKind>,
+            },
             RecordLiveRefreshQueued { channel_id: String, queue_acceptance_sequence: u64 },
             RecordLiveCloseClosed { session_id: String, channel_id: String, close_observation_sequence: u64 },
             RecordLiveCommandAccepted {
@@ -3877,6 +3966,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             PeerResponseTerminalArrived { corr_id: PeerCorrelationId, disposition: PeerTerminalDisposition },
             PeerResponseRejected { corr_id: PeerCorrelationId },
             PeerRequestTimedOut { corr_id: PeerCorrelationId },
+            // Outbound peer request failed to be sent (transport rejected the
+            // dispatch, e.g. PeerOffline). Distinct from `PeerRequestTimedOut`:
+            // a send failure is a terminal failure, not an elapsed-deadline
+            // timeout. The shell drives this input at the send-failure sites
+            // (was previously laundered through `request_timed_out`) so the
+            // outbound state advances to the typed `Failed` terminal.
+            PeerRequestSendFailed { corr_id: PeerCorrelationId },
             PeerRequestReceived { corr_id: PeerCorrelationId, handling_mode: Enum<InputLane> },
             PeerResponseReplied { corr_id: PeerCorrelationId },
             // Session-context advancement input (W2-E). Shell fires this at every
@@ -4191,6 +4287,24 @@ macro_rules! meerkat_catalog_machine_dsl {
                 request_immediate_processing: bool,
                 interrupt_yielding: bool,
                 wake_if_idle: bool,
+                // #24: machine-owned idle-steer execution-handling-mode
+                // normalization. A peer-initiated Steer/Immediate input that
+                // arrives while the runtime is IDLE has no active turn to steer
+                // into, so its fresh turn must run on the queue-compatible
+                // session-service path (`Queue`). Inputs that carry explicit
+                // runtime hints (operator prompts, flow steps, external events)
+                // or that are not idle/peer-steer keep no override (`None`). The
+                // machine emits this typed mode directly instead of the shell
+                // post-step `idle_steer_execution_handling_mode` reclassifying
+                // the projected admission. `None` is the typed "no override"
+                // fact (Option-shaped, not a sentinel lane).
+                execution_handling_mode: Option<Enum<InputLane>>,
+                // #338: machine-owned per-input live-interrupt-required verdict.
+                // True iff this input's admitted lane is `Steer` (a steer-lane
+                // admission requires a live interrupt at the active boundary).
+                // The shell reads this typed fact instead of re-scanning admitted
+                // inputs for `HandlingMode::Steer`.
+                live_interrupt_required: bool,
             },
             AdmissionValidationResolved {
                 input_id: String,
@@ -4229,6 +4343,20 @@ macro_rules! meerkat_catalog_machine_dsl {
                 cause_class: Enum<TerminalCauseClass>,
             },
             TurnTerminalityClassified { terminal: bool },
+            // #128: machine-owned empty-assistant-output terminal verdict. The
+            // agent loop mirrors `empty_response_terminal`: true drives the
+            // existing fatal `llm_empty_response` path; false lets the turn
+            // proceed. The shell decides nothing — it only feeds the pure
+            // visible/actionable pre-classification bit.
+            AssistantOutputClassified { empty_response_terminal: bool },
+            // #323: machine-owned fired-call-timeout verdict. The agent loop
+            // mirrors `verdict`: `RetryableCallTimeout` flows through the
+            // existing retry path as a recoverable `LlmFailureReason::CallTimeout`
+            // built with `timeout_ms`; `TerminalTurnBudget` takes the existing
+            // non-retryable whole-turn time-budget terminal path. `timeout_ms`
+            // echoes the elapsed deadline for the shell's diagnostic/duration
+            // payload.
+            CallTimeoutClassified { verdict: Enum<CallTimeoutVerdict>, timeout_ms: u64 },
             // P0 Dogma Invariant 1: machine-owned LLM-failure recovery verdict.
             // The agent loop mirrors this: `Recover` drives the existing
             // RecoverableFailure/RetryRequested path; `Exhausted` / `Fatal`
@@ -4701,6 +4829,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition TurnTerminalCauseClassResolved => local seam SurfaceResultAlignment,
         disposition LlmFailureRecoveryClassified => local seam SurfaceResultAlignment,
         disposition TurnTerminalityClassified => local seam SurfaceResultAlignment,
+        disposition AssistantOutputClassified => local seam SurfaceResultAlignment,
+        disposition CallTimeoutClassified => local seam SurfaceResultAlignment,
         disposition TurnSurfaceResultResolved => local seam SurfaceResultAlignment,
         disposition StoredInputStateSeedAuthorized => local seam NoOwnerRealization,
         disposition RuntimeLifecycleStateClassified => local seam SurfaceResultAlignment,
@@ -7389,12 +7519,30 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "noop_state" {
                 observation == UserInterruptObservationKind::IdleNoop
                 || observation == UserInterruptObservationKind::AttachedNoop
-                || observation == UserInterruptObservationKind::StagedNoop
             }
             update {}
             to Idle
             emit UserInterruptPublicResultResolved {
                 result: UserInterruptPublicResultKind::Interrupted
+            }
+        }
+
+        // Staged-noop is split out from the idle/attached noop arm: an interrupt
+        // against a staged (not-yet-promoted) session that has no active run is a
+        // distinct public result. The machine owns the verdict; surfaces map the
+        // typed `StagedNoop` result to their transport shape rather than
+        // laundering it into a success-looking `Interrupted`.
+        transition ResolveUserInterruptPublicResultStagedNoop {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveUserInterruptPublicResult { observation, target_present, staged_promotion_busy }
+            guard "not_promoting" { staged_promotion_busy == false }
+            guard "staged_noop_state" {
+                observation == UserInterruptObservationKind::StagedNoop
+            }
+            update {}
+            to Idle
+            emit UserInterruptPublicResultResolved {
+                result: UserInterruptPublicResultKind::StagedNoop
             }
         }
 
@@ -10275,7 +10423,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 record_transcript: true,
                 request_immediate_processing: false,
                 interrupt_yielding: false,
-                wake_if_idle: without_wake == false
+                wake_if_idle: without_wake == false,
+                execution_handling_mode: None,
+                live_interrupt_required: false
             }
         }
 
@@ -10327,7 +10477,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 record_transcript: true,
                 request_immediate_processing: true,
                 interrupt_yielding: false,
-                wake_if_idle: false
+                wake_if_idle: false,
+                execution_handling_mode: if runtime_running == false {
+                    Some(InputLane::Queue)
+                } else {
+                    None
+                },
+                live_interrupt_required: true
             }
         }
 
@@ -10391,7 +10547,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 wake_if_idle: without_wake == false
                     && silent_intent_match == false
                     && runtime_running == false
-                    && active_turn_boundary_available == false
+                    && active_turn_boundary_available == false,
+                execution_handling_mode: None,
+                live_interrupt_required: false
             }
         }
 
@@ -10449,7 +10607,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 record_transcript: input_kind != AdmissionInputKind::Continuation && input_kind != AdmissionInputKind::Operation,
                 request_immediate_processing: true,
                 interrupt_yielding: false,
-                wake_if_idle: false
+                wake_if_idle: false,
+                execution_handling_mode: if (input_kind == AdmissionInputKind::PeerMessage
+                    || input_kind == AdmissionInputKind::PeerRequest)
+                    && runtime_running == false
+                {
+                    Some(InputLane::Queue)
+                } else {
+                    None
+                },
+                live_interrupt_required: true
             }
         }
 
@@ -10507,7 +10674,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 interrupt_yielding: false,
                 wake_if_idle: without_wake == false
                     && runtime_running == false
-                    && active_turn_boundary_available == false
+                    && active_turn_boundary_available == false,
+                execution_handling_mode: None,
+                live_interrupt_required: false
             }
         }
 
@@ -10565,7 +10734,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 wake_if_idle: without_wake == false
                     && silent_intent_match == false
                     && runtime_running == false
-                    && active_turn_boundary_available == false
+                    && active_turn_boundary_available == false,
+                execution_handling_mode: None,
+                live_interrupt_required: false
             }
         }
 
@@ -10617,7 +10788,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 record_transcript: true,
                 request_immediate_processing: false,
                 interrupt_yielding: false,
-                wake_if_idle: false
+                wake_if_idle: false,
+                execution_handling_mode: if runtime_running == false {
+                    Some(InputLane::Queue)
+                } else {
+                    None
+                },
+                live_interrupt_required: true
             }
         }
 
@@ -10661,7 +10838,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 record_transcript: true,
                 request_immediate_processing: false,
                 interrupt_yielding: false,
-                wake_if_idle: without_wake == false
+                wake_if_idle: without_wake == false,
+                execution_handling_mode: None,
+                live_interrupt_required: false
             }
         }
 
@@ -10717,7 +10896,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                     && (runtime_running == true || active_turn_boundary_available == true),
                 wake_if_idle: without_wake == false
                     && runtime_running == false
-                    && active_turn_boundary_available == false
+                    && active_turn_boundary_available == false,
+                execution_handling_mode: None,
+                live_interrupt_required: true
             }
         }
 
@@ -10779,7 +10960,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 interrupt_yielding: false,
                 wake_if_idle: without_wake == false
                     && runtime_running == false
-                    && active_turn_boundary_available == false
+                    && active_turn_boundary_available == false,
+                execution_handling_mode: None,
+                live_interrupt_required: false
             }
         }
 
@@ -10823,7 +11006,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 record_transcript: false,
                 request_immediate_processing: false,
                 interrupt_yielding: false,
-                wake_if_idle: false
+                wake_if_idle: false,
+                execution_handling_mode: None,
+                live_interrupt_required: false
             }
         }
 
@@ -16745,6 +16930,33 @@ macro_rules! meerkat_catalog_machine_dsl {
         // refresh handoff. The shell observes queue acceptance but cannot
         // construct `status: queued` or the compatibility
         // `refresh_enqueued` fact without this generated effect.
+        // #51: AppendRealtimeTranscript — machine-owned realtime transcript
+        // staging seam. The realtime adapter drives this when it stages an
+        // explicit-commit text item; the machine records the staged `item_id`
+        // and emits the `RealtimeTranscriptAppended` staging fact so a committed
+        // turn proves a real staged turn. Guards reject an empty channel/item id
+        // and a duplicate staging of the same item.
+        transition AppendRealtimeTranscript {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input AppendRealtimeTranscript { channel_id, item_id, text, role, lane }
+            guard "channel_id_present" { channel_id != "" }
+            guard "item_id_present" { item_id != "" }
+            guard "item_not_already_staged" { !self.live_staged_transcript_items.contains(item_id) }
+            update {
+                self.live_staged_transcript_sequence += 1;
+                self.live_staged_transcript_items.insert(item_id);
+            }
+            to Idle
+            emit RealtimeTranscriptAppended {
+                channel_id: channel_id,
+                item_id: item_id,
+                text: text,
+                role: role,
+                lane: lane,
+                sequence: self.live_staged_transcript_sequence
+            }
+        }
+
         transition RecordLiveRefreshQueued {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input RecordLiveRefreshQueued { channel_id, queue_acceptance_sequence }
@@ -18412,6 +18624,18 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit PeerInteractionCleanup { corr_id: corr_id }
         }
 
+        transition PeerRequestSendFailed {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input PeerRequestSendFailed { corr_id }
+            guard "pending_exists" { self.pending_peer_requests.contains_key(corr_id) }
+            update {
+                self.pending_peer_requests.remove(corr_id);
+            }
+            to Idle
+            emit PeerInteractionStateChanged { corr_id: corr_id, new_state: OutboundPeerRequestState::Failed }
+            emit PeerInteractionCleanup { corr_id: corr_id }
+        }
+
         transition PeerRequestReceived {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input PeerRequestReceived { corr_id, handling_mode }
@@ -19625,6 +19849,63 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {}
             to Idle
             emit LlmFailureRecoveryClassified { recovery: LlmFailureRecoveryKind::Fatal }
+        }
+
+        // #128: ClassifyAssistantOutput — MeerkatMachine owns the empty-output
+        // terminal verdict. The shell feeds the pure visible/actionable
+        // pre-classification bit (combined current-message OR run-accumulated);
+        // the machine maps absence of visible/actionable output to an
+        // empty-response terminal and presence to a proceeding turn. Reproduces
+        // the former shell branch EXACTLY: `!has_visible_or_actionable` ->
+        // `empty_response_terminal: true` (the `llm_empty_response` fatal path);
+        // otherwise `false`. Idle self-loops: pure classification.
+        transition ClassifyAssistantOutputEmptyTerminal {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyAssistantOutput { has_visible_or_actionable }
+            guard "no_visible_or_actionable_output" { has_visible_or_actionable == false }
+            update {}
+            to Idle
+            emit AssistantOutputClassified { empty_response_terminal: true }
+        }
+
+        transition ClassifyAssistantOutputProceed {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyAssistantOutput { has_visible_or_actionable }
+            guard "has_visible_or_actionable_output" { has_visible_or_actionable == true }
+            update {}
+            to Idle
+            emit AssistantOutputClassified { empty_response_terminal: false }
+        }
+
+        // #323: ClassifyCallTimeout — MeerkatMachine owns the retryable-vs-terminal
+        // verdict for a fired LLM-call timeout. Reproduces the former in-loop
+        // `match source` EXACTLY: `CallBudget` -> `RetryableCallTimeout` (the
+        // recoverable `LlmFailureReason::CallTimeout` retry path); `TurnBudget` ->
+        // `TerminalTurnBudget` (the non-retryable whole-turn time-budget terminal).
+        // `timeout_ms` rides through to the emitted verdict for the shell's
+        // duration/diagnostic payload. Idle self-loops: pure classification.
+        transition ClassifyCallTimeoutRetryable {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyCallTimeout { source, timeout_ms }
+            guard "call_budget_source" { source == CallTimeoutSource::CallBudget }
+            update {}
+            to Idle
+            emit CallTimeoutClassified {
+                verdict: CallTimeoutVerdict::RetryableCallTimeout,
+                timeout_ms: timeout_ms
+            }
+        }
+
+        transition ClassifyCallTimeoutTerminal {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyCallTimeout { source, timeout_ms }
+            guard "turn_budget_source" { source == CallTimeoutSource::TurnBudget }
+            update {}
+            to Idle
+            emit CallTimeoutClassified {
+                verdict: CallTimeoutVerdict::TerminalTurnBudget,
+                timeout_ms: timeout_ms
+            }
         }
 
         // ResolveTurnSurfaceResult: generated surface-result classification

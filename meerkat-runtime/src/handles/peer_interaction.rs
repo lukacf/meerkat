@@ -243,6 +243,15 @@ impl PeerInteractionHandle for RuntimePeerInteractionHandle {
         )
     }
 
+    fn request_send_failed(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
+        self.apply_input_and_dispatch_cleanup(
+            mm_dsl::MeerkatMachineInput::PeerRequestSendFailed {
+                corr_id: corr_id.into(),
+            },
+            "PeerInteractionHandle::request_send_failed",
+        )
+    }
+
     fn request_received(
         &self,
         corr_id: PeerCorrelationId,

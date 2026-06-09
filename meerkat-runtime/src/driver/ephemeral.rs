@@ -2610,6 +2610,8 @@ impl EphemeralRuntimeDriver {
                 request_immediate_processing,
                 interrupt_yielding,
                 wake_if_idle,
+                execution_handling_mode,
+                live_interrupt_required,
             } => Some((
                 input_id,
                 policy_version,
@@ -2632,6 +2634,8 @@ impl EphemeralRuntimeDriver {
                 request_immediate_processing,
                 interrupt_yielding,
                 wake_if_idle,
+                execution_handling_mode,
+                live_interrupt_required,
             )),
             _ => None,
         }) else {
@@ -2662,6 +2666,8 @@ impl EphemeralRuntimeDriver {
             request_immediate_processing,
             interrupt_yielding,
             wake_if_idle,
+            execution_handling_mode,
+            live_interrupt_required,
         ) = effect;
 
         if input_id != authority.input_id() {
@@ -2685,13 +2691,14 @@ impl EphemeralRuntimeDriver {
         let runtime_semantics = RuntimeInputSemantics {
             boundary: runtime_boundary.into(),
             execution_kind: runtime_execution_kind.into(),
-            execution_handling_mode: crate::policy_table::idle_steer_execution_handling_mode(
-                input.kind(),
-                self.runtime_phase_snapshot() != RuntimeState::Running,
-                policy.routing_disposition,
-            ),
+            // #24: the machine emits the idle-steer normalization directly as a
+            // typed `Option<InputLane>`; project to `HandlingMode` via the
+            // existing lane mapping. The shell normalizer is deleted.
+            execution_handling_mode: execution_handling_mode
+                .map(Self::handling_mode_from_admission_lane),
             peer_response_terminal_apply_intent: runtime_peer_response_terminal_apply_intent
                 .map(Into::into),
+            live_interrupt_required,
         };
         let handling_mode = Self::handling_mode_from_admission_lane(lane);
         let admission_plan = Self::admission_plan_from_machine_effect(

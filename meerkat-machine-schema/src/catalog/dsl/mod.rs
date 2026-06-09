@@ -1622,7 +1622,6 @@ runtime_internal_inputs!(
         AcknowledgeTerminal,
         AddDirectPeerEndpoint,
         AdvanceSessionContext,
-        AppendRealtimeTranscript,
         ApplyMobPeerOverlay,
         AttachMobIngress,
         AttachSessionIngress,

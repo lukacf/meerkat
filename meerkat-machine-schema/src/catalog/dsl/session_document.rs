@@ -354,46 +354,12 @@ machine! {
             session_first_turn_phase: Map<SessionId, Enum<SessionFirstTurnPhase>>,
             session_pending_initial_prompt_present: Map<SessionId, bool>,
             session_pending_tool_results_count: Map<SessionId, u64>,
-            // #97: registry-scoped staged-session existence. The staged-session
-            // registry (`meerkat::staged_sessions::StagedSessionRegistry`) holds
-            // the AgentBuildConfig payload slots; the EXISTENCE fact ("is a slot
-            // staged for session X") is machine-owned here so RPC callsites stop
-            // testing HashMap membership. The set tracks staged session ids; the
-            // registry stages/unstages payloads and drives the matching machine
-            // input so the existence fact is authoritative, not a shell map read.
-            // Modeled as the file's existing `Map<SessionId, bool>` presence
-            // idiom: a session id absent from the map (or mapped to `false`) is
-            // not staged.
-            session_staged_present: Map<SessionId, bool>,
-            // #276: machine-owned session compaction cadence. Folds the
-            // `SessionCompactionCadence` previously stored as optional JSON in
-            // session metadata (silently `.ok()`-dropped on deserialization
-            // failure, falling back to a transcript scan). Cadence is now a
-            // non-optional machine-owned fact: `session_compaction_boundary_index`
-            // is the per-session boundary count; the last-compaction and
-            // last-attempt boundary indices are `Option`-shaped facts modeled as
-            // a present flag + value (a session with no compaction yet carries
-            // `present == false`). A session id absent from these maps has never
-            // recorded cadence and must be seeded by the one-time migration input.
-            session_compaction_boundary_index: Map<SessionId, u64>,
-            session_last_compaction_boundary_present: Map<SessionId, bool>,
-            session_last_compaction_boundary_index: Map<SessionId, u64>,
-            session_last_compaction_attempt_present: Map<SessionId, bool>,
-            session_last_compaction_attempt_boundary_index: Map<SessionId, u64>,
-            session_compaction_cadence_seeded: Map<SessionId, bool>,
         }
 
         init(Ready) {
             session_first_turn_phase = EmptyMap,
             session_pending_initial_prompt_present = EmptyMap,
             session_pending_tool_results_count = EmptyMap,
-            session_staged_present = EmptyMap,
-            session_compaction_boundary_index = EmptyMap,
-            session_last_compaction_boundary_present = EmptyMap,
-            session_last_compaction_boundary_index = EmptyMap,
-            session_last_compaction_attempt_present = EmptyMap,
-            session_last_compaction_attempt_boundary_index = EmptyMap,
-            session_compaction_cadence_seeded = EmptyMap,
         }
 
         terminal []
@@ -685,48 +651,6 @@ machine! {
                 session_id: SessionId,
                 fork_or_rewrite_directive: Enum<TranscriptEditKind>,
             },
-
-            // -----------------------------------------------------------
-            // #97: registry-scoped staged-session existence. The staged-session
-            // registry stages/unstages AgentBuildConfig payloads; these inputs
-            // record the EXISTENCE fact so RPC callsites read a machine-owned
-            // verdict instead of `StagedSessionRegistry::contains` HashMap
-            // membership. `RecordSessionStaged` / `RecordSessionUnstaged` follow
-            // the registry's stage/unstage operations; `ResolveStagedSessionExists`
-            // is the read query the shell drives in place of `.contains(...)`.
-            // -----------------------------------------------------------
-            RecordSessionStaged { session_id: SessionId },
-            RecordSessionUnstaged { session_id: SessionId },
-            ResolveStagedSessionExists { session_id: SessionId },
-
-            // -----------------------------------------------------------
-            // #276: machine-owned session compaction cadence. Replaces the
-            // optional `SessionCompactionCadence` JSON in session metadata. The
-            // compaction flow drives `RecordSessionCompactionCadence` after each
-            // boundary advance / compaction / attempt; the cadence is read back
-            // via `ResolveSessionCompactionCadence`. The transcript-derived
-            // inference fallback is gated behind the explicit one-time
-            // `SeedSessionCompactionCadenceFromHistory` migration input (it
-            // applies ONLY when the session has never recorded cadence), so the
-            // fallback can no longer silently stand in for a deserialization
-            // fault — a malformed persisted cadence is a typed shell error, not
-            // an `.ok()` drop, and an unseeded read matches no `Resolve`
-            // transition (surfaces as `Err`) rather than fabricating a count.
-            // `last_compaction_*` are `Option`-shaped facts carried as a present
-            // flag + value.
-            RecordSessionCompactionCadence {
-                session_id: SessionId,
-                session_boundary_index: u64,
-                last_compaction_boundary_present: bool,
-                last_compaction_boundary_index: u64,
-                last_compaction_attempt_present: bool,
-                last_compaction_attempt_boundary_index: u64,
-            },
-            SeedSessionCompactionCadenceFromHistory {
-                session_id: SessionId,
-                inferred_session_boundary_index: u64,
-            },
-            ResolveSessionCompactionCadence { session_id: SessionId },
         }
 
         effect SessionDocumentEffect {
@@ -864,30 +788,6 @@ machine! {
             TranscriptRewriteCommitted {
                 kind: Enum<TranscriptEditKind>,
                 success: bool,
-            },
-
-            // #97: registry-scoped staged-session existence verdict. The shell
-            // mirrors `exists` in place of `StagedSessionRegistry::contains`.
-            // Emitted on the read query and (vacuously) on the record inputs so
-            // the staged/unstaged transition has an observable witness.
-            StagedSessionExistsResolved {
-                session_id: SessionId,
-                exists: bool,
-            },
-
-            // #276: machine-owned session compaction cadence. The compaction flow
-            // mirrors these typed facts onto its `SessionCompactionCadence`
-            // (the meerkat-core struct becomes the shell projection of this
-            // authority). `last_compaction_*` are Option-shaped (present flag +
-            // value). Emitted on the read query and (vacuously) on the
-            // record/seed inputs.
-            SessionCompactionCadenceResolved {
-                session_id: SessionId,
-                session_boundary_index: u64,
-                last_compaction_boundary_present: bool,
-                last_compaction_boundary_index: u64,
-                last_compaction_attempt_present: bool,
-                last_compaction_attempt_boundary_index: u64,
             },
         }
 
@@ -1098,8 +998,6 @@ machine! {
         disposition SessionStoreRecoverySourceResolved => local seam NoOwnerRealization,
         disposition SessionToolResultsApplied => local seam NoOwnerRealization,
         disposition TranscriptRewriteCommitted => local seam NoOwnerRealization,
-        disposition StagedSessionExistsResolved => local seam NoOwnerRealization,
-        disposition SessionCompactionCadenceResolved => local seam NoOwnerRealization,
 
         // ---------------------------------------------------------------
         // MarkSessionInitialTurnPending
@@ -3088,127 +2986,5 @@ machine! {
             }
         }
 
-        // -----------------------------------------------------------
-        // #97: registry-scoped staged-session existence.
-        // -----------------------------------------------------------
-        transition RecordSessionStaged {
-            on input RecordSessionStaged { session_id }
-            guard { self.lifecycle_phase == Phase::Ready }
-            update {
-                self.session_staged_present.insert(session_id, true);
-            }
-            to Ready
-            emit StagedSessionExistsResolved { session_id: session_id, exists: true }
-        }
-
-        transition RecordSessionUnstaged {
-            on input RecordSessionUnstaged { session_id }
-            guard { self.lifecycle_phase == Phase::Ready }
-            update {
-                self.session_staged_present.insert(session_id, false);
-            }
-            to Ready
-            emit StagedSessionExistsResolved { session_id: session_id, exists: false }
-        }
-
-        transition ResolveStagedSessionExists {
-            on input ResolveStagedSessionExists { session_id }
-            guard { self.lifecycle_phase == Phase::Ready }
-            update {}
-            to Ready
-            emit StagedSessionExistsResolved {
-                session_id: session_id,
-                exists: self.session_staged_present.contains_key(session_id)
-                    && self.session_staged_present.get_copied(session_id).get("value") == true
-            }
-        }
-
-        // -----------------------------------------------------------
-        // #276: machine-owned session compaction cadence.
-        // -----------------------------------------------------------
-        transition RecordSessionCompactionCadence {
-            on input RecordSessionCompactionCadence {
-                session_id,
-                session_boundary_index,
-                last_compaction_boundary_present,
-                last_compaction_boundary_index,
-                last_compaction_attempt_present,
-                last_compaction_attempt_boundary_index
-            }
-            guard { self.lifecycle_phase == Phase::Ready }
-            update {
-                self.session_compaction_boundary_index.insert(session_id, session_boundary_index);
-                self.session_last_compaction_boundary_present.insert(session_id, last_compaction_boundary_present);
-                self.session_last_compaction_boundary_index.insert(session_id, last_compaction_boundary_index);
-                self.session_last_compaction_attempt_present.insert(session_id, last_compaction_attempt_present);
-                self.session_last_compaction_attempt_boundary_index.insert(session_id, last_compaction_attempt_boundary_index);
-                self.session_compaction_cadence_seeded.insert(session_id, true);
-            }
-            to Ready
-            emit SessionCompactionCadenceResolved {
-                session_id: session_id,
-                session_boundary_index: session_boundary_index,
-                last_compaction_boundary_present: last_compaction_boundary_present,
-                last_compaction_boundary_index: last_compaction_boundary_index,
-                last_compaction_attempt_present: last_compaction_attempt_present,
-                last_compaction_attempt_boundary_index: last_compaction_attempt_boundary_index
-            }
-        }
-
-        // One-time migration: seed cadence from the transcript-derived inferred
-        // boundary index ONLY when the session has never recorded cadence. A
-        // session that already carries cadence matches no guard here (the
-        // fallback cannot silently overwrite real cadence), so the
-        // transcript-scan inference is gated behind this explicit input rather
-        // than being an implicit `unwrap_or_else` fallback in the loader.
-        transition SeedSessionCompactionCadenceFromHistory {
-            on input SeedSessionCompactionCadenceFromHistory {
-                session_id,
-                inferred_session_boundary_index
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && !self.session_compaction_cadence_seeded.contains_key(session_id)
-            }
-            update {
-                self.session_compaction_boundary_index.insert(session_id, inferred_session_boundary_index);
-                self.session_last_compaction_boundary_present.insert(session_id, false);
-                self.session_last_compaction_boundary_index.insert(session_id, 0);
-                self.session_last_compaction_attempt_present.insert(session_id, false);
-                self.session_last_compaction_attempt_boundary_index.insert(session_id, 0);
-                self.session_compaction_cadence_seeded.insert(session_id, true);
-            }
-            to Ready
-            emit SessionCompactionCadenceResolved {
-                session_id: session_id,
-                session_boundary_index: inferred_session_boundary_index,
-                last_compaction_boundary_present: false,
-                last_compaction_boundary_index: 0,
-                last_compaction_attempt_present: false,
-                last_compaction_attempt_boundary_index: 0
-            }
-        }
-
-        // Read query: emits the recorded cadence. A session that has never
-        // recorded or been seeded matches no guard (surfaces as `Err`), so the
-        // shell must seed via the migration input before reading rather than
-        // receiving a fabricated zero-count.
-        transition ResolveSessionCompactionCadence {
-            on input ResolveSessionCompactionCadence { session_id }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && self.session_compaction_cadence_seeded.contains_key(session_id)
-            }
-            update {}
-            to Ready
-            emit SessionCompactionCadenceResolved {
-                session_id: session_id,
-                session_boundary_index: self.session_compaction_boundary_index.get_copied(session_id).get("value"),
-                last_compaction_boundary_present: self.session_last_compaction_boundary_present.get_copied(session_id).get("value"),
-                last_compaction_boundary_index: self.session_last_compaction_boundary_index.get_copied(session_id).get("value"),
-                last_compaction_attempt_present: self.session_last_compaction_attempt_present.get_copied(session_id).get("value"),
-                last_compaction_attempt_boundary_index: self.session_last_compaction_attempt_boundary_index.get_copied(session_id).get("value")
-            }
-        }
     }
 }

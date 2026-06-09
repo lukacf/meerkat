@@ -165,16 +165,37 @@ fn infer_session_boundary_index(messages: &[Message]) -> u64 {
 
 /// Load persisted compaction cadence from session metadata, falling back to
 /// transcript-derived history for pre-migration sessions.
+///
+/// Two cases are distinguished explicitly:
+/// - **Absent** (metadata key missing): a pre-migration session that never
+///   recorded cadence. Infer from transcript history. This is the normal path.
+/// - **Present-but-corrupt** (key present but does not deserialize): a fault.
+///   A silent `.ok()` drop would launder a corrupt persisted cadence into the
+///   "absent" path and silently re-infer a *fresh* count, masking the
+///   corruption. Instead the parse failure is surfaced via `tracing::warn!`,
+///   then recovered (gracefully, but explicitly) by inferring.
 pub fn load_compaction_cadence(session: &Session) -> SessionCompactionCadence {
-    session
-        .metadata()
-        .get(SESSION_COMPACTION_CADENCE_KEY)
-        .and_then(|value| serde_json::from_value::<SessionCompactionCadence>(value.clone()).ok())
-        .unwrap_or_else(|| SessionCompactionCadence {
-            session_boundary_index: infer_session_boundary_index(session.messages()),
-            last_compaction_boundary_index: None,
-            last_compaction_attempt_boundary_index: None,
-        })
+    let inferred = || SessionCompactionCadence {
+        session_boundary_index: infer_session_boundary_index(session.messages()),
+        last_compaction_boundary_index: None,
+        last_compaction_attempt_boundary_index: None,
+    };
+    match session.metadata().get(SESSION_COMPACTION_CADENCE_KEY) {
+        None => inferred(),
+        Some(value) => match serde_json::from_value::<SessionCompactionCadence>(value.clone()) {
+            Ok(cadence) => cadence,
+            Err(error) => {
+                tracing::warn!(
+                    target: "meerkat_core::compact",
+                    session_id = %session.id(),
+                    %error,
+                    "persisted session compaction cadence is corrupt; \
+                     recovering by inferring boundary index from transcript"
+                );
+                inferred()
+            }
+        },
+    }
 }
 
 /// Persist compaction cadence so reused/resumed sessions preserve their

@@ -10,13 +10,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `session_first_turn_phase`: `Map<SessionId, SessionFirstTurnPhase>`
 - `session_pending_initial_prompt_present`: `Map<SessionId, Bool>`
 - `session_pending_tool_results_count`: `Map<SessionId, u64>`
-- `session_staged_present`: `Map<SessionId, Bool>`
-- `session_compaction_boundary_index`: `Map<SessionId, u64>`
-- `session_last_compaction_boundary_present`: `Map<SessionId, Bool>`
-- `session_last_compaction_boundary_index`: `Map<SessionId, u64>`
-- `session_last_compaction_attempt_present`: `Map<SessionId, Bool>`
-- `session_last_compaction_attempt_boundary_index`: `Map<SessionId, u64>`
-- `session_compaction_cadence_seeded`: `Map<SessionId, Bool>`
 
 ## Inputs
 - `MarkSessionInitialTurnPending`(session_id: SessionId)
@@ -51,12 +44,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverSessionFromStore`(session_id: SessionId, has_metadata: Bool, has_build_state: Bool)
 - `ApplyPendingToolResults`(session_id: SessionId, result_count: u64)
 - `TranscriptEdit`(session_id: SessionId, fork_or_rewrite_directive: TranscriptEditKind)
-- `RecordSessionStaged`(session_id: SessionId)
-- `RecordSessionUnstaged`(session_id: SessionId)
-- `ResolveStagedSessionExists`(session_id: SessionId)
-- `RecordSessionCompactionCadence`(session_id: SessionId, session_boundary_index: u64, last_compaction_boundary_present: Bool, last_compaction_boundary_index: u64, last_compaction_attempt_present: Bool, last_compaction_attempt_boundary_index: u64)
-- `SeedSessionCompactionCadenceFromHistory`(session_id: SessionId, inferred_session_boundary_index: u64)
-- `ResolveSessionCompactionCadence`(session_id: SessionId)
 
 ## Signals
 
@@ -87,8 +74,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SessionStoreRecoverySourceResolved`(recoverable: Bool)
 - `SessionToolResultsApplied`(session_id: SessionId, applied_count: u64)
 - `TranscriptRewriteCommitted`(kind: TranscriptEditKind, success: Bool)
-- `StagedSessionExistsResolved`(session_id: SessionId, exists: Bool)
-- `SessionCompactionCadenceResolved`(session_id: SessionId, session_boundary_index: u64, last_compaction_boundary_present: Bool, last_compaction_boundary_index: u64, last_compaction_attempt_present: Bool, last_compaction_attempt_boundary_index: u64)
 
 ## Helpers
 - `phase_allows_initial_turn_overrides`(phase: SessionFirstTurnPhase) -> `Bool`
@@ -723,46 +708,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - ``
 - Emits: `TranscriptRewriteCommitted`
-- To: `Ready`
-
-### `RecordSessionStaged`
-- From: `Ready`
-- On: `RecordSessionStaged`(session_id)
-- Emits: `StagedSessionExistsResolved`
-- To: `Ready`
-
-### `RecordSessionUnstaged`
-- From: `Ready`
-- On: `RecordSessionUnstaged`(session_id)
-- Emits: `StagedSessionExistsResolved`
-- To: `Ready`
-
-### `ResolveStagedSessionExists`
-- From: `Ready`
-- On: `ResolveStagedSessionExists`(session_id)
-- Emits: `StagedSessionExistsResolved`
-- To: `Ready`
-
-### `RecordSessionCompactionCadence`
-- From: `Ready`
-- On: `RecordSessionCompactionCadence`(session_id, session_boundary_index, last_compaction_boundary_present, last_compaction_boundary_index, last_compaction_attempt_present, last_compaction_attempt_boundary_index)
-- Emits: `SessionCompactionCadenceResolved`
-- To: `Ready`
-
-### `SeedSessionCompactionCadenceFromHistory`
-- From: `Ready`
-- On: `SeedSessionCompactionCadenceFromHistory`(session_id, inferred_session_boundary_index)
-- Guards:
-  - ``
-- Emits: `SessionCompactionCadenceResolved`
-- To: `Ready`
-
-### `ResolveSessionCompactionCadence`
-- From: `Ready`
-- On: `ResolveSessionCompactionCadence`(session_id)
-- Guards:
-  - ``
-- Emits: `SessionCompactionCadenceResolved`
 - To: `Ready`
 
 ## Coverage

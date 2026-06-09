@@ -10337,8 +10337,6 @@ pub struct State {
     pub live_active_channel_by_session: std::collections::BTreeMap<String, String>,
     pub live_channel_session_by_channel: std::collections::BTreeMap<String, String>,
     pub live_channel_identity_by_channel: std::collections::BTreeMap<String, SessionLlmIdentity>,
-    pub live_staged_transcript_items: std::collections::BTreeSet<String>,
-    pub live_staged_transcript_sequence: u64,
     pub live_refresh_result_sequence: u64,
     pub live_refresh_queue_acceptance_sequence_by_channel: std::collections::BTreeMap<String, u64>,
     pub live_refresh_status_by_channel: std::collections::BTreeMap<String, LiveRefreshPublicStatus>,
@@ -11489,14 +11487,6 @@ pub mod inputs {
         pub channel_id: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct AppendRealtimeTranscript {
-        pub channel_id: String,
-        pub item_id: String,
-        pub text: String,
-        pub role: RealtimeTranscriptRoleKind,
-        pub lane: RealtimeTranscriptLaneKind,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordLiveRefreshQueued {
         pub channel_id: String,
         pub queue_acceptance_sequence: u64,
@@ -12122,7 +12112,6 @@ pub enum Input {
     FinishSurfaceRequestUnpublished(inputs::FinishSurfaceRequestUnpublished),
     ResolveLiveOpenAdmission(inputs::ResolveLiveOpenAdmission),
     AbandonLiveOpenAdmission(inputs::AbandonLiveOpenAdmission),
-    AppendRealtimeTranscript(inputs::AppendRealtimeTranscript),
     RecordLiveRefreshQueued(inputs::RecordLiveRefreshQueued),
     RecordLiveCloseClosed(inputs::RecordLiveCloseClosed),
     RecordLiveCommandAccepted(inputs::RecordLiveCommandAccepted),
@@ -12443,7 +12432,6 @@ impl Input {
             Self::FinishSurfaceRequestUnpublished(_) => InputKind::FinishSurfaceRequestUnpublished,
             Self::ResolveLiveOpenAdmission(_) => InputKind::ResolveLiveOpenAdmission,
             Self::AbandonLiveOpenAdmission(_) => InputKind::AbandonLiveOpenAdmission,
-            Self::AppendRealtimeTranscript(_) => InputKind::AppendRealtimeTranscript,
             Self::RecordLiveRefreshQueued(_) => InputKind::RecordLiveRefreshQueued,
             Self::RecordLiveCloseClosed(_) => InputKind::RecordLiveCloseClosed,
             Self::RecordLiveCommandAccepted(_) => InputKind::RecordLiveCommandAccepted,
@@ -12745,7 +12733,6 @@ pub enum InputKind {
     FinishSurfaceRequestUnpublished,
     ResolveLiveOpenAdmission,
     AbandonLiveOpenAdmission,
-    AppendRealtimeTranscript,
     RecordLiveRefreshQueued,
     RecordLiveCloseClosed,
     RecordLiveCommandAccepted,
@@ -15136,11 +15123,6 @@ pub enum TransitionId {
     AbandonLiveOpenAdmissionRunning,
     AbandonLiveOpenAdmissionRetired,
     AbandonLiveOpenAdmissionStopped,
-    AppendRealtimeTranscriptIdle,
-    AppendRealtimeTranscriptAttached,
-    AppendRealtimeTranscriptRunning,
-    AppendRealtimeTranscriptRetired,
-    AppendRealtimeTranscriptStopped,
     RecordLiveRefreshQueuedIdle,
     RecordLiveRefreshQueuedAttached,
     RecordLiveRefreshQueuedRunning,
@@ -15899,8 +15881,6 @@ pub fn initial_state() -> State {
         live_active_channel_by_session: Default::default(),
         live_channel_session_by_channel: Default::default(),
         live_channel_identity_by_channel: Default::default(),
-        live_staged_transcript_items: Default::default(),
-        live_staged_transcript_sequence: 0,
         live_refresh_result_sequence: 0,
         live_refresh_queue_acceptance_sequence_by_channel: Default::default(),
         live_refresh_status_by_channel: Default::default(),

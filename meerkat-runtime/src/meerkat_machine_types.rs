@@ -783,7 +783,6 @@ meerkat_machine_runtime_internal_inputs!(
         AdvanceAgentCompletionCursor,
         AdvanceRuntimeInjectedCompletionCursor,
         AdvanceRuntimeObservedCompletionCursor,
-        AppendRealtimeTranscript,
         BoundaryComplete,
         BoundaryContinue,
         ClassifyAssistantOutput,

@@ -253,24 +253,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `TranscriptEditRewrite`
   - anchors: `session_document_authority`
   - scenarios: `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`
-- `RecordSessionStaged`
-  - anchors: `session_document_authority`
-  - scenarios: `session_realtime_transcript_materialize_and_restore`
-- `RecordSessionUnstaged`
-  - anchors: `session_document_authority`
-  - scenarios: `session_realtime_transcript_materialize_and_restore`
-- `ResolveStagedSessionExists`
-  - anchors: `session_document_authority`
-  - scenarios: `session_first_turn_pending_consume`, `session_initial_inputs_stage`, `session_first_turn_restore_recover`, `session_system_context_append_resolve`, `session_system_context_apply_discard`, `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`
-- `RecordSessionCompactionCadence`
-  - anchors: `session_document_authority`
-  - scenarios: `session_realtime_transcript_materialize_and_restore`
-- `SeedSessionCompactionCadenceFromHistory`
-  - anchors: `session_document_authority`
-  - scenarios: `session_initial_inputs_stage`, `session_first_turn_restore_recover`, `session_system_context_append_resolve`, `session_system_context_apply_discard`, `session_realtime_transcript_event_resolve`, `session_durable_config_authorize_restore`
-- `ResolveSessionCompactionCadence`
-  - anchors: `session_document_authority`
-  - scenarios: `session_first_turn_pending_consume`, `session_initial_inputs_stage`, `session_first_turn_restore_recover`, `session_system_context_append_resolve`, `session_system_context_apply_discard`, `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`
 
 ### Effects
 - `SessionFirstTurnPhaseResolved`
@@ -351,12 +333,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `TranscriptRewriteCommitted`
   - anchors: `session_document_authority`
   - scenarios: `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`
-- `StagedSessionExistsResolved`
-  - anchors: `session_document_authority`
-  - scenarios: `session_first_turn_pending_consume`, `session_initial_inputs_stage`, `session_first_turn_restore_recover`, `session_system_context_append_resolve`, `session_system_context_apply_discard`, `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`
-- `SessionCompactionCadenceResolved`
-  - anchors: `session_document_authority`
-  - scenarios: `session_first_turn_pending_consume`, `session_initial_inputs_stage`, `session_first_turn_restore_recover`, `session_system_context_append_resolve`, `session_system_context_apply_discard`, `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`
 
 ### Invariants
 - `(none)`

@@ -2640,22 +2640,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_channel_session_by_channel: Map<String, String>,
             live_channel_identity_by_channel: Map<String, SessionLlmIdentity>,
 
-            // #51: machine-owned realtime transcript staging. The explicit-commit
-            // text-input path in the OpenAI realtime adapter stages a user text
-            // item (sent via `ConversationItemCreate`) while the turn is open,
-            // awaiting `commit_turn_with_modality`. Pre-#51 this staged turn lived
-            // only in the adapter as `pending_explicit_commit_text_items:
-            // Vec<StagedTextTurn>`, so a crash/cancel between stage and commit
-            // could orphan an untracked pending text item. The staged item ids
-            // are now a machine-owned set: a committed turn proves a real staged
-            // turn, and the staged set is recoverable rather than living in
-            // adapter memory. `item_id` is the opaque synthetic provider item id
-            // (globally unique), so a flat set suffices.
-            // `live_staged_transcript_sequence` orders staging within the channel
-            // (same convention as the surrounding Live-region sequence counters).
-            live_staged_transcript_items: Set<String>,
-            live_staged_transcript_sequence: u64,
-
             // `live/refresh` observes adapter command-queue acceptance in the
             // shell, then submits that observation here. The generated effect
             // below owns the public `Queued` result class and the compatibility
@@ -3048,8 +3032,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_active_channel_by_session = EmptyMap,
             live_channel_session_by_channel = EmptyMap,
             live_channel_identity_by_channel = EmptyMap,
-            live_staged_transcript_items = EmptySet,
-            live_staged_transcript_sequence = 0,
             live_refresh_queue_acceptance_sequence_by_channel = EmptyMap,
             live_refresh_status_by_channel = EmptyMap,
             live_close_result_sequence = 0,
@@ -3798,19 +3780,6 @@ macro_rules! meerkat_catalog_machine_dsl {
                 llm_identity: SessionLlmIdentity,
             },
             AbandonLiveOpenAdmission { session_id: String, channel_id: String },
-            // #51: stage a realtime transcript item under machine authority. The
-            // realtime adapter drives this BEFORE the explicit-commit text item is
-            // sent (the former direct `pending_explicit_commit_text_items.push`),
-            // so the staged item is a machine-owned fact, not adapter memory. The
-            // machine records the staged `item_id` under the channel and emits the
-            // `RealtimeTranscriptAppended` staging fact; the adapter mirrors it.
-            AppendRealtimeTranscript {
-                channel_id: String,
-                item_id: String,
-                text: String,
-                role: Enum<RealtimeTranscriptRoleKind>,
-                lane: Enum<RealtimeTranscriptLaneKind>,
-            },
             RecordLiveRefreshQueued { channel_id: String, queue_acceptance_sequence: u64 },
             RecordLiveCloseClosed { session_id: String, channel_id: String, close_observation_sequence: u64 },
             RecordLiveCommandAccepted {
@@ -16930,33 +16899,6 @@ macro_rules! meerkat_catalog_machine_dsl {
         // refresh handoff. The shell observes queue acceptance but cannot
         // construct `status: queued` or the compatibility
         // `refresh_enqueued` fact without this generated effect.
-        // #51: AppendRealtimeTranscript — machine-owned realtime transcript
-        // staging seam. The realtime adapter drives this when it stages an
-        // explicit-commit text item; the machine records the staged `item_id`
-        // and emits the `RealtimeTranscriptAppended` staging fact so a committed
-        // turn proves a real staged turn. Guards reject an empty channel/item id
-        // and a duplicate staging of the same item.
-        transition AppendRealtimeTranscript {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input AppendRealtimeTranscript { channel_id, item_id, text, role, lane }
-            guard "channel_id_present" { channel_id != "" }
-            guard "item_id_present" { item_id != "" }
-            guard "item_not_already_staged" { !self.live_staged_transcript_items.contains(item_id) }
-            update {
-                self.live_staged_transcript_sequence += 1;
-                self.live_staged_transcript_items.insert(item_id);
-            }
-            to Idle
-            emit RealtimeTranscriptAppended {
-                channel_id: channel_id,
-                item_id: item_id,
-                text: text,
-                role: role,
-                lane: lane,
-                sequence: self.live_staged_transcript_sequence
-            }
-        }
-
         transition RecordLiveRefreshQueued {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input RecordLiveRefreshQueued { channel_id, queue_acceptance_sequence }

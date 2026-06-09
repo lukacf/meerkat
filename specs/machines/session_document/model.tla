@@ -25,9 +25,9 @@ SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THE
 RECURSIVE SeqRemoveAll(_, _)
 SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-VARIABLES phase, model_step_count, session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded
+VARIABLES phase, model_step_count, session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count
 
-vars == << phase, model_step_count, session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+vars == << phase, model_step_count, session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 store_projection_can_recover_authority(has_metadata, has_build_state) == (IF has_metadata THEN TRUE ELSE has_build_state)
 resume_provider_recompute_from_model(model_override_present, provider_override_present) == (model_override_present /\ (provider_override_present = FALSE))
@@ -56,13 +56,6 @@ Init ==
     /\ session_first_turn_phase = [x \in {} |-> None]
     /\ session_pending_initial_prompt_present = [x \in {} |-> None]
     /\ session_pending_tool_results_count = [x \in {} |-> None]
-    /\ session_staged_present = [x \in {} |-> None]
-    /\ session_compaction_boundary_index = [x \in {} |-> None]
-    /\ session_last_compaction_boundary_present = [x \in {} |-> None]
-    /\ session_last_compaction_boundary_index = [x \in {} |-> None]
-    /\ session_last_compaction_attempt_present = [x \in {} |-> None]
-    /\ session_last_compaction_attempt_boundary_index = [x \in {} |-> None]
-    /\ session_compaction_cadence_seeded = [x \in {} |-> None]
 
 MarkSessionInitialTurnPendingInactiveOrPending(session_id) ==
     /\ phase = "Ready"
@@ -70,7 +63,7 @@ MarkSessionInitialTurnPendingInactiveOrPending(session_id) ==
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_first_turn_phase' = MapSet(session_first_turn_phase, session_id, "Pending")
-    /\ UNCHANGED << session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 MarkSessionInitialTurnPendingConsumed(session_id) ==
@@ -78,7 +71,7 @@ MarkSessionInitialTurnPendingConsumed(session_id) ==
     /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Consumed")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 StartSessionInitialTurnPending(session_id) ==
@@ -87,7 +80,7 @@ StartSessionInitialTurnPending(session_id) ==
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_first_turn_phase' = MapSet(session_first_turn_phase, session_id, "Consumed")
-    /\ UNCHANGED << session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 StartSessionInitialTurnInactive(session_id) ==
@@ -95,7 +88,7 @@ StartSessionInitialTurnInactive(session_id) ==
     /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Inactive")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 StartSessionInitialTurnConsumed(session_id) ==
@@ -103,7 +96,7 @@ StartSessionInitialTurnConsumed(session_id) ==
     /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Consumed")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveSessionFirstTurnOverridesAllowed(session_id) ==
@@ -111,7 +104,7 @@ ResolveSessionFirstTurnOverridesAllowed(session_id) ==
     /\ phase_allows_initial_turn_overrides((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveSessionFirstTurnOverridesDenied(session_id) ==
@@ -119,7 +112,7 @@ ResolveSessionFirstTurnOverridesDenied(session_id) ==
     /\ (phase_allows_initial_turn_overrides((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None)) = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 StageSessionInitialPromptStore(session_id, prompt_has_content) ==
@@ -128,7 +121,7 @@ StageSessionInitialPromptStore(session_id, prompt_has_content) ==
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, TRUE)
-    /\ UNCHANGED << session_first_turn_phase, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_tool_results_count >>
 
 
 StageSessionInitialPromptClear(session_id, prompt_has_content) ==
@@ -137,7 +130,7 @@ StageSessionInitialPromptClear(session_id, prompt_has_content) ==
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, FALSE)
-    /\ UNCHANGED << session_first_turn_phase, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_tool_results_count >>
 
 
 StageSessionToolResults(session_id, result_count) ==
@@ -146,7 +139,7 @@ StageSessionToolResults(session_id, result_count) ==
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, result_count)
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present >>
 
 
 ConsumeSessionDeferredInputsPending(session_id) ==
@@ -157,7 +150,6 @@ ConsumeSessionDeferredInputsPending(session_id) ==
     /\ session_first_turn_phase' = MapSet(session_first_turn_phase, session_id, "Consumed")
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, FALSE)
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, 0)
-    /\ UNCHANGED << session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
 
 
 ConsumeSessionDeferredInputsInactive(session_id) ==
@@ -167,7 +159,7 @@ ConsumeSessionDeferredInputsInactive(session_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, FALSE)
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, 0)
-    /\ UNCHANGED << session_first_turn_phase, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase >>
 
 
 ConsumeSessionDeferredInputsConsumed(session_id) ==
@@ -177,7 +169,7 @@ ConsumeSessionDeferredInputsConsumed(session_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, FALSE)
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, 0)
-    /\ UNCHANGED << session_first_turn_phase, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase >>
 
 
 RestoreSessionConsumedInputs(session_id, restore_first_turn_pending, pending_initial_prompt_present, pending_tool_result_message_count) ==
@@ -188,7 +180,6 @@ RestoreSessionConsumedInputs(session_id, restore_first_turn_pending, pending_ini
     /\ session_first_turn_phase' = MapSet(session_first_turn_phase, session_id, "Pending")
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, pending_initial_prompt_present)
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, pending_tool_result_message_count)
-    /\ UNCHANGED << session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
 
 
 RestoreSessionConsumedInputsNoPhaseRollback(session_id, restore_first_turn_pending, pending_initial_prompt_present, pending_tool_result_message_count) ==
@@ -198,7 +189,7 @@ RestoreSessionConsumedInputsNoPhaseRollback(session_id, restore_first_turn_pendi
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, pending_initial_prompt_present)
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, pending_tool_result_message_count)
-    /\ UNCHANGED << session_first_turn_phase, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase >>
 
 
 RecoverSessionFirstTurnPhase(session_id, arg_phase, pending_initial_prompt_present, pending_tool_result_message_count) ==
@@ -209,7 +200,6 @@ RecoverSessionFirstTurnPhase(session_id, arg_phase, pending_initial_prompt_prese
     /\ session_first_turn_phase' = MapSet(session_first_turn_phase, session_id, arg_phase)
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, pending_initial_prompt_present)
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, pending_tool_result_message_count)
-    /\ UNCHANGED << session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
 
 
 ResolveSystemContextAppendEmpty(trimmed_text_byte_count, idempotency_key_present, existing_key_matches, existing_key_conflicts, active_turn_scoped) ==
@@ -217,7 +207,7 @@ ResolveSystemContextAppendEmpty(trimmed_text_byte_count, idempotency_key_present
     /\ append_is_empty(trimmed_text_byte_count)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveSystemContextAppendConflict(trimmed_text_byte_count, idempotency_key_present, existing_key_matches, existing_key_conflicts, active_turn_scoped) ==
@@ -225,7 +215,7 @@ ResolveSystemContextAppendConflict(trimmed_text_byte_count, idempotency_key_pres
     /\ ((append_is_empty(trimmed_text_byte_count) = FALSE) /\ append_is_conflict(idempotency_key_present, existing_key_conflicts))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveSystemContextAppendDuplicate(trimmed_text_byte_count, idempotency_key_present, existing_key_matches, existing_key_conflicts, active_turn_scoped) ==
@@ -233,7 +223,7 @@ ResolveSystemContextAppendDuplicate(trimmed_text_byte_count, idempotency_key_pre
     /\ ((append_is_empty(trimmed_text_byte_count) = FALSE) /\ append_is_duplicate(idempotency_key_present, existing_key_matches, existing_key_conflicts))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveSystemContextAppendNew(trimmed_text_byte_count, idempotency_key_present, existing_key_matches, existing_key_conflicts, active_turn_scoped) ==
@@ -241,7 +231,7 @@ ResolveSystemContextAppendNew(trimmed_text_byte_count, idempotency_key_present, 
     /\ ((append_is_empty(trimmed_text_byte_count) = FALSE) /\ append_is_new(idempotency_key_present, existing_key_matches, existing_key_conflicts))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveSystemContextPersistAppendAdmissionAdmit(has_previous, content_identical, content_extends_previous, appended_starts_with_separator, incoming_is_runtime_context_append) ==
@@ -249,7 +239,7 @@ ResolveSystemContextPersistAppendAdmissionAdmit(has_previous, content_identical,
     /\ persist_append_is_admissible(has_previous, content_identical, content_extends_previous, appended_starts_with_separator, incoming_is_runtime_context_append)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveSystemContextPersistAppendAdmissionReject(has_previous, content_identical, content_extends_previous, appended_starts_with_separator, incoming_is_runtime_context_append) ==
@@ -257,7 +247,7 @@ ResolveSystemContextPersistAppendAdmissionReject(has_previous, content_identical
     /\ (persist_append_is_admissible(has_previous, content_identical, content_extends_previous, appended_starts_with_separator, incoming_is_runtime_context_append) = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveSystemContextPendingApplyItemRuntimeSteer(source_kind) ==
@@ -265,7 +255,7 @@ ResolveSystemContextPendingApplyItemRuntimeSteer(source_kind) ==
     /\ (source_kind = "RuntimeSteer")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveSystemContextPendingApplyItemNormal(source_kind) ==
@@ -273,7 +263,7 @@ ResolveSystemContextPendingApplyItemNormal(source_kind) ==
     /\ (source_kind = "Normal")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveSystemContextSteerCleanupItemRuntimeSteer(source_kind) ==
@@ -281,7 +271,7 @@ ResolveSystemContextSteerCleanupItemRuntimeSteer(source_kind) ==
     /\ (source_kind = "RuntimeSteer")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveSystemContextSteerCleanupItemNormal(source_kind) ==
@@ -289,7 +279,7 @@ ResolveSystemContextSteerCleanupItemNormal(source_kind) ==
     /\ (source_kind = "Normal")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 RestoreSystemContextSnapshot(active_keys_have_known_pending_or_seen, seen_keys_match_known_appends) ==
@@ -297,7 +287,7 @@ RestoreSystemContextSnapshot(active_keys_have_known_pending_or_seen, seen_keys_m
     /\ (active_keys_have_known_pending_or_seen /\ seen_keys_match_known_appends)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeItemObservedDiscardedAssistant(role, response_discarded) ==
@@ -305,7 +295,7 @@ ResolveRealtimeItemObservedDiscardedAssistant(role, response_discarded) ==
     /\ ((role = "Assistant") /\ response_discarded)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeItemObservedPresent(role, response_discarded) ==
@@ -313,14 +303,14 @@ ResolveRealtimeItemObservedPresent(role, response_discarded) ==
     /\ (IF (role # "Assistant") THEN TRUE ELSE (response_discarded = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeItemSkipped ==
     /\ phase = "Ready"
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeUserTranscriptFinalEmpty(text_present, segment_empty, segment_matches) ==
@@ -328,7 +318,7 @@ ResolveRealtimeUserTranscriptFinalEmpty(text_present, segment_empty, segment_mat
     /\ (text_present = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeUserTranscriptFinalStore(text_present, segment_empty, segment_matches) ==
@@ -336,7 +326,7 @@ ResolveRealtimeUserTranscriptFinalStore(text_present, segment_empty, segment_mat
     /\ (text_present /\ segment_empty)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeUserTranscriptFinalReplayOrConflict(text_present, segment_empty, segment_matches) ==
@@ -344,7 +334,7 @@ ResolveRealtimeUserTranscriptFinalReplayOrConflict(text_present, segment_empty, 
     /\ (text_present /\ (segment_empty = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeAssistantDeltaInvalidOrDuplicate(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present) ==
@@ -352,7 +342,7 @@ ResolveRealtimeAssistantDeltaInvalidOrDuplicate(response_id_valid, response_disc
     /\ (IF (response_id_valid = FALSE) THEN TRUE ELSE realtime_delta_is_duplicate(delta_id_present, delta_id_seen))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeAssistantDeltaDiscarded(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present) ==
@@ -360,7 +350,7 @@ ResolveRealtimeAssistantDeltaDiscarded(response_id_valid, response_discarded, de
     /\ (response_id_valid /\ response_discarded)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeAssistantDeltaLaneConflict(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present) ==
@@ -368,7 +358,7 @@ ResolveRealtimeAssistantDeltaLaneConflict(response_id_valid, response_discarded,
     /\ (response_id_valid /\ (response_discarded = FALSE) /\ (realtime_delta_is_duplicate(delta_id_present, delta_id_seen) = FALSE) /\ (realtime_lane_accepts(item_has_text, current_lane, requested_lane) = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeAssistantDeltaAccepted(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present) ==
@@ -376,7 +366,7 @@ ResolveRealtimeAssistantDeltaAccepted(response_id_valid, response_discarded, del
     /\ (response_id_valid /\ (response_discarded = FALSE) /\ (realtime_delta_is_duplicate(delta_id_present, delta_id_seen) = FALSE) /\ realtime_lane_accepts(item_has_text, current_lane, requested_lane))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeAssistantReplacementInvalid(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present) ==
@@ -384,7 +374,7 @@ ResolveRealtimeAssistantReplacementInvalid(response_id_valid, response_discarded
     /\ (response_id_valid = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeAssistantReplacementDiscarded(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present) ==
@@ -392,7 +382,7 @@ ResolveRealtimeAssistantReplacementDiscarded(response_id_valid, response_discard
     /\ (response_id_valid /\ response_discarded)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeAssistantReplacementLocked(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present) ==
@@ -400,7 +390,7 @@ ResolveRealtimeAssistantReplacementLocked(response_id_valid, response_discarded,
     /\ (response_id_valid /\ (response_discarded = FALSE) /\ item_materialized)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeAssistantReplacementLaneConflict(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present) ==
@@ -408,7 +398,7 @@ ResolveRealtimeAssistantReplacementLaneConflict(response_id_valid, response_disc
     /\ (response_id_valid /\ (response_discarded = FALSE) /\ (item_materialized = FALSE) /\ (realtime_lane_accepts(item_has_text, current_lane, requested_lane) = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeAssistantReplacementAccepted(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present) ==
@@ -416,7 +406,7 @@ ResolveRealtimeAssistantReplacementAccepted(response_id_valid, response_discarde
     /\ (response_id_valid /\ (response_discarded = FALSE) /\ (item_materialized = FALSE) /\ realtime_lane_accepts(item_has_text, current_lane, requested_lane))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeAssistantTurnCompletedInvalid(response_id_valid, response_discarded, stop_reason) ==
@@ -424,7 +414,7 @@ ResolveRealtimeAssistantTurnCompletedInvalid(response_id_valid, response_discard
     /\ (response_id_valid = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeAssistantTurnCompletedDiscard(response_id_valid, response_discarded, stop_reason) ==
@@ -432,7 +422,7 @@ ResolveRealtimeAssistantTurnCompletedDiscard(response_id_valid, response_discard
     /\ (response_id_valid /\ (IF response_discarded THEN TRUE ELSE realtime_stop_reason_discards(stop_reason)))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeAssistantTurnCompletedToolUse(response_id_valid, response_discarded, stop_reason) ==
@@ -440,7 +430,7 @@ ResolveRealtimeAssistantTurnCompletedToolUse(response_id_valid, response_discard
     /\ (response_id_valid /\ (response_discarded = FALSE) /\ realtime_stop_reason_removes_completion(stop_reason))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeAssistantTurnCompletedRecord(response_id_valid, response_discarded, stop_reason) ==
@@ -448,7 +438,7 @@ ResolveRealtimeAssistantTurnCompletedRecord(response_id_valid, response_discarde
     /\ (response_id_valid /\ (response_discarded = FALSE) /\ realtime_stop_reason_records_completion(stop_reason))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeAssistantTurnInterruptedInvalid(response_id_valid) ==
@@ -456,7 +446,7 @@ ResolveRealtimeAssistantTurnInterruptedInvalid(response_id_valid) ==
     /\ (response_id_valid = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeAssistantTurnInterruptedValid(response_id_valid) ==
@@ -464,7 +454,7 @@ ResolveRealtimeAssistantTurnInterruptedValid(response_id_valid) ==
     /\ response_id_valid
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeMaterializeAlreadyDone(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
@@ -472,7 +462,7 @@ ResolveRealtimeMaterializeAlreadyDone(item_materialized, predecessor_materialize
     /\ item_materialized
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeMaterializeWaitForPredecessor(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
@@ -480,7 +470,7 @@ ResolveRealtimeMaterializeWaitForPredecessor(item_materialized, predecessor_mate
     /\ ((item_materialized = FALSE) /\ (predecessor_materialized = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeMaterializeSkipped(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
@@ -488,7 +478,7 @@ ResolveRealtimeMaterializeSkipped(item_materialized, predecessor_materialized, i
     /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ item_skipped)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeMaterializeWaitForReadyText(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
@@ -496,7 +486,7 @@ ResolveRealtimeMaterializeWaitForReadyText(item_materialized, predecessor_materi
     /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ (item_skipped = FALSE) /\ (IF (item_ready = FALSE) THEN TRUE ELSE (item_text_present = FALSE)))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeMaterializeUser(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
@@ -504,7 +494,7 @@ ResolveRealtimeMaterializeUser(item_materialized, predecessor_materialized, item
     /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ (item_skipped = FALSE) /\ item_ready /\ item_text_present /\ (role = "User"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeMaterializeAssistant(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
@@ -512,7 +502,7 @@ ResolveRealtimeMaterializeAssistant(item_materialized, predecessor_materialized,
     /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ (item_skipped = FALSE) /\ item_ready /\ item_text_present /\ (role = "Assistant") /\ response_id_present /\ completion_present)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolveRealtimeMaterializeAssistantMissingCompletion(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
@@ -520,7 +510,7 @@ ResolveRealtimeMaterializeAssistantMissingCompletion(item_materialized, predeces
     /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ (item_skipped = FALSE) /\ item_ready /\ item_text_present /\ (role = "Assistant") /\ (IF (response_id_present = FALSE) THEN TRUE ELSE (completion_present = FALSE)))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 AuthorizeRestoreRealtimeTranscriptState(item_count, first_seen_count, first_seen_unique_count, every_item_has_order_entry, every_order_entry_has_item, all_identity_fields_valid, all_delta_ids_valid, all_completion_response_ids_valid, all_discarded_response_ids_valid, all_materialized_items_were_ready_or_skipped, all_assistant_items_have_response_unless_skipped, all_ready_assistant_items_have_completion_or_are_skipped, all_materialized_assistant_completions_consumed, all_completed_assistant_text_items_are_ready_or_materialized_or_skipped, all_discarded_assistant_items_are_skipped_or_materialized) ==
@@ -528,7 +518,7 @@ AuthorizeRestoreRealtimeTranscriptState(item_count, first_seen_count, first_seen
     /\ ((item_count = first_seen_count) /\ (first_seen_count = first_seen_unique_count) /\ every_item_has_order_entry /\ every_order_entry_has_item /\ all_identity_fields_valid /\ all_delta_ids_valid /\ all_completion_response_ids_valid /\ all_discarded_response_ids_valid /\ all_materialized_items_were_ready_or_skipped /\ all_assistant_items_have_response_unless_skipped /\ all_ready_assistant_items_have_completion_or_are_skipped /\ all_materialized_assistant_completions_consumed /\ all_completed_assistant_text_items_are_ready_or_materialized_or_skipped /\ all_discarded_assistant_items_are_skipped_or_materialized)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 AuthorizeSessionMetadataPersist(schema_version, model_present) ==
@@ -536,7 +526,7 @@ AuthorizeSessionMetadataPersist(schema_version, model_present) ==
     /\ ((schema_version > 0) /\ (model_present = TRUE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 AuthorizeSessionBuildStatePersist(mob_tool_authority_context_present, mob_tool_authority_context_generated) ==
@@ -544,14 +534,14 @@ AuthorizeSessionBuildStatePersist(mob_tool_authority_context_present, mob_tool_a
     /\ (IF (mob_tool_authority_context_present = FALSE) THEN TRUE ELSE (mob_tool_authority_context_generated = TRUE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 RestoreSessionBuildState ==
     /\ phase = "Ready"
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 AuthorizeSystemPromptMutation(source, prompt_present, prompt_byte_count, replacing_existing) ==
@@ -559,7 +549,7 @@ AuthorizeSystemPromptMutation(source, prompt_present, prompt_byte_count, replaci
     /\ (IF (prompt_present = TRUE) THEN TRUE ELSE (prompt_byte_count = 0))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolvePendingContinuationWithBoundary(session_tail, staged_tool_result_count) ==
@@ -567,7 +557,7 @@ ResolvePendingContinuationWithBoundary(session_tail, staged_tool_result_count) =
     /\ has_effective_pending_boundary(session_tail, staged_tool_result_count)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ResolvePendingContinuationWithoutBoundary(session_tail, staged_tool_result_count) ==
@@ -575,7 +565,7 @@ ResolvePendingContinuationWithoutBoundary(session_tail, staged_tool_result_count
     /\ (has_effective_pending_boundary(session_tail, staged_tool_result_count) = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 AuthorizeSessionResumeOverridesRejectProviderRequiresModel(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) ==
@@ -583,7 +573,7 @@ AuthorizeSessionResumeOverridesRejectProviderRequiresModel(provider_override_pre
     /\ resume_reject_provider_requires_model(provider_override_present, model_override_present)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) ==
@@ -591,7 +581,7 @@ AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn(provider_override_p
     /\ ((resume_reject_provider_requires_model(provider_override_present, model_override_present) = FALSE) /\ resume_reject_build_only_after_first_turn(has_build_only_overrides, first_turn_phase))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 AuthorizeSessionResumeOverridesAcceptRecomputeProvider(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) ==
@@ -599,7 +589,7 @@ AuthorizeSessionResumeOverridesAcceptRecomputeProvider(provider_override_present
     /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ resume_provider_recompute_from_model(model_override_present, provider_override_present))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 AuthorizeSessionResumeOverridesAcceptUseOverride(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) ==
@@ -607,7 +597,7 @@ AuthorizeSessionResumeOverridesAcceptUseOverride(provider_override_present, mode
     /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ (resume_provider_recompute_from_model(model_override_present, provider_override_present) = FALSE) /\ provider_override_present)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 AuthorizeSessionResumeOverridesAcceptRetainStored(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) ==
@@ -615,7 +605,7 @@ AuthorizeSessionResumeOverridesAcceptRetainStored(provider_override_present, mod
     /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ (resume_provider_recompute_from_model(model_override_present, provider_override_present) = FALSE) /\ (provider_override_present = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ClassifyLiveSessionAuthorityLive(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, stored_is_archived) ==
@@ -623,7 +613,7 @@ ClassifyLiveSessionAuthorityLive(stored_transcript_diverged, live_has_uncommitte
     /\ ((stored_transcript_diverged = FALSE) /\ (live_has_uncommitted_transcript = FALSE) /\ (runtime_system_context_diverged = FALSE) /\ (stored_is_archived = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ClassifyLiveSessionAuthorityDurableArchived(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, stored_is_archived) ==
@@ -631,7 +621,7 @@ ClassifyLiveSessionAuthorityDurableArchived(stored_transcript_diverged, live_has
     /\ (stored_is_archived = TRUE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ClassifyLiveSessionAuthorityDurableUncommitted(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, stored_is_archived) ==
@@ -639,7 +629,7 @@ ClassifyLiveSessionAuthorityDurableUncommitted(stored_transcript_diverged, live_
     /\ ((stored_is_archived = FALSE) /\ (live_has_uncommitted_transcript = TRUE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ClassifyLiveSessionAuthorityDurableSystemContext(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, stored_is_archived) ==
@@ -647,7 +637,7 @@ ClassifyLiveSessionAuthorityDurableSystemContext(stored_transcript_diverged, liv
     /\ ((stored_is_archived = FALSE) /\ (live_has_uncommitted_transcript = FALSE) /\ (runtime_system_context_diverged = TRUE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ClassifyLiveSessionAuthorityDurableRevision(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, stored_is_archived) ==
@@ -655,7 +645,7 @@ ClassifyLiveSessionAuthorityDurableRevision(stored_transcript_diverged, live_has
     /\ ((stored_is_archived = FALSE) /\ (live_has_uncommitted_transcript = FALSE) /\ (runtime_system_context_diverged = FALSE) /\ (stored_transcript_diverged = TRUE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 RecoverSessionFromStoreAuthorized(session_id, has_metadata, has_build_state) ==
@@ -663,7 +653,7 @@ RecoverSessionFromStoreAuthorized(session_id, has_metadata, has_build_state) ==
     /\ store_projection_can_recover_authority(has_metadata, has_build_state)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 RecoverSessionFromStoreUnrecoverable(session_id, has_metadata, has_build_state) ==
@@ -671,14 +661,14 @@ RecoverSessionFromStoreUnrecoverable(session_id, has_metadata, has_build_state) 
     /\ (store_projection_can_recover_authority(has_metadata, has_build_state) = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 ApplyPendingToolResults(session_id, result_count) ==
     /\ phase = "Ready"
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 TranscriptEditFork(session_id, fork_or_rewrite_directive) ==
@@ -686,7 +676,7 @@ TranscriptEditFork(session_id, fork_or_rewrite_directive) ==
     /\ (fork_or_rewrite_directive = "Fork")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 TranscriptEditRewrite(session_id, fork_or_rewrite_directive) ==
@@ -694,65 +684,7 @@ TranscriptEditRewrite(session_id, fork_or_rewrite_directive) ==
     /\ (fork_or_rewrite_directive = "Rewrite")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
-
-
-RecordSessionStaged(session_id) ==
-    /\ phase = "Ready"
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ session_staged_present' = MapSet(session_staged_present, session_id, TRUE)
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
-
-
-RecordSessionUnstaged(session_id) ==
-    /\ phase = "Ready"
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ session_staged_present' = MapSet(session_staged_present, session_id, FALSE)
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
-
-
-ResolveStagedSessionExists(session_id) ==
-    /\ phase = "Ready"
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
-
-
-RecordSessionCompactionCadence(session_id, session_boundary_index, last_compaction_boundary_present, last_compaction_boundary_index, last_compaction_attempt_present, last_compaction_attempt_boundary_index) ==
-    /\ phase = "Ready"
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ session_compaction_boundary_index' = MapSet(session_compaction_boundary_index, session_id, session_boundary_index)
-    /\ session_last_compaction_boundary_present' = MapSet(session_last_compaction_boundary_present, session_id, last_compaction_boundary_present)
-    /\ session_last_compaction_boundary_index' = MapSet(session_last_compaction_boundary_index, session_id, last_compaction_boundary_index)
-    /\ session_last_compaction_attempt_present' = MapSet(session_last_compaction_attempt_present, session_id, last_compaction_attempt_present)
-    /\ session_last_compaction_attempt_boundary_index' = MapSet(session_last_compaction_attempt_boundary_index, session_id, last_compaction_attempt_boundary_index)
-    /\ session_compaction_cadence_seeded' = MapSet(session_compaction_cadence_seeded, session_id, TRUE)
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present >>
-
-
-SeedSessionCompactionCadenceFromHistory(session_id, inferred_session_boundary_index) ==
-    /\ phase = "Ready"
-    /\ ~((session_id \in DOMAIN session_compaction_cadence_seeded))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ session_compaction_boundary_index' = MapSet(session_compaction_boundary_index, session_id, inferred_session_boundary_index)
-    /\ session_last_compaction_boundary_present' = MapSet(session_last_compaction_boundary_present, session_id, FALSE)
-    /\ session_last_compaction_boundary_index' = MapSet(session_last_compaction_boundary_index, session_id, 0)
-    /\ session_last_compaction_attempt_present' = MapSet(session_last_compaction_attempt_present, session_id, FALSE)
-    /\ session_last_compaction_attempt_boundary_index' = MapSet(session_last_compaction_attempt_boundary_index, session_id, 0)
-    /\ session_compaction_cadence_seeded' = MapSet(session_compaction_cadence_seeded, session_id, TRUE)
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present >>
-
-
-ResolveSessionCompactionCadence(session_id) ==
-    /\ phase = "Ready"
-    /\ (session_id \in DOMAIN session_compaction_cadence_seeded)
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_staged_present, session_compaction_boundary_index, session_last_compaction_boundary_present, session_last_compaction_boundary_index, session_last_compaction_attempt_present, session_last_compaction_attempt_boundary_index, session_compaction_cadence_seeded >>
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
 Next ==
@@ -833,16 +765,10 @@ Next ==
     \/ \E session_id \in SessionIdValues : \E result_count \in 0..2 : ApplyPendingToolResults(session_id, result_count)
     \/ \E session_id \in SessionIdValues : \E fork_or_rewrite_directive \in TranscriptEditKindValues : TranscriptEditFork(session_id, fork_or_rewrite_directive)
     \/ \E session_id \in SessionIdValues : \E fork_or_rewrite_directive \in TranscriptEditKindValues : TranscriptEditRewrite(session_id, fork_or_rewrite_directive)
-    \/ \E session_id \in SessionIdValues : RecordSessionStaged(session_id)
-    \/ \E session_id \in SessionIdValues : RecordSessionUnstaged(session_id)
-    \/ \E session_id \in SessionIdValues : ResolveStagedSessionExists(session_id)
-    \/ \E session_id \in SessionIdValues : \E session_boundary_index \in 0..2 : \E last_compaction_boundary_present \in BOOLEAN : \E last_compaction_boundary_index \in 0..2 : \E last_compaction_attempt_present \in BOOLEAN : \E last_compaction_attempt_boundary_index \in 0..2 : RecordSessionCompactionCadence(session_id, session_boundary_index, last_compaction_boundary_present, last_compaction_boundary_index, last_compaction_attempt_present, last_compaction_attempt_boundary_index)
-    \/ \E session_id \in SessionIdValues : \E inferred_session_boundary_index \in 0..2 : SeedSessionCompactionCadenceFromHistory(session_id, inferred_session_boundary_index)
-    \/ \E session_id \in SessionIdValues : ResolveSessionCompactionCadence(session_id)
 
 
-CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(DOMAIN session_first_turn_phase) <= 1 /\ Cardinality(DOMAIN session_pending_initial_prompt_present) <= 1 /\ Cardinality(DOMAIN session_pending_tool_results_count) <= 1 /\ Cardinality(DOMAIN session_staged_present) <= 1 /\ Cardinality(DOMAIN session_compaction_boundary_index) <= 1 /\ Cardinality(DOMAIN session_last_compaction_boundary_present) <= 1 /\ Cardinality(DOMAIN session_last_compaction_boundary_index) <= 1 /\ Cardinality(DOMAIN session_last_compaction_attempt_present) <= 1 /\ Cardinality(DOMAIN session_last_compaction_attempt_boundary_index) <= 1 /\ Cardinality(DOMAIN session_compaction_cadence_seeded) <= 1
-DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(DOMAIN session_first_turn_phase) <= 2 /\ Cardinality(DOMAIN session_pending_initial_prompt_present) <= 2 /\ Cardinality(DOMAIN session_pending_tool_results_count) <= 2 /\ Cardinality(DOMAIN session_staged_present) <= 2 /\ Cardinality(DOMAIN session_compaction_boundary_index) <= 2 /\ Cardinality(DOMAIN session_last_compaction_boundary_present) <= 2 /\ Cardinality(DOMAIN session_last_compaction_boundary_index) <= 2 /\ Cardinality(DOMAIN session_last_compaction_attempt_present) <= 2 /\ Cardinality(DOMAIN session_last_compaction_attempt_boundary_index) <= 2 /\ Cardinality(DOMAIN session_compaction_cadence_seeded) <= 2
+CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(DOMAIN session_first_turn_phase) <= 1 /\ Cardinality(DOMAIN session_pending_initial_prompt_present) <= 1 /\ Cardinality(DOMAIN session_pending_tool_results_count) <= 1
+DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(DOMAIN session_first_turn_phase) <= 2 /\ Cardinality(DOMAIN session_pending_initial_prompt_present) <= 2 /\ Cardinality(DOMAIN session_pending_tool_results_count) <= 2
 
 Spec == Init /\ [][Next]_vars
 

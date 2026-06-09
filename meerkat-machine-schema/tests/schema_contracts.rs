@@ -151,16 +151,16 @@ fn no_canonical_machine_is_a_stateless_classifier() {
 
 /// Witness-purity ratchet (LUC-524, P0 Dogma Invariant 1): the
 /// `SessionPersistenceVersionAuthorityMachine` is a NON-canonical generated
-/// WITNESS — a pure version encoder/decoder. It stamps a constant current
-/// version and accepts a persisted version iff it equals the current or the
-/// single legacy default (a pure equality), then returns the current constant.
-/// It must never silently grow into session lifecycle / per-session authority:
-/// that would smuggle a semantic reducer behind a "witness" that no canonical
-/// TLA proof covers.
+/// WITNESS — a pure fail-closed version decoder. It accepts a persisted
+/// version iff it equals the current constant (a pure equality), then returns
+/// the current constant; everything else is rejected. There is no legacy
+/// default and no stamp lane. It must never silently grow into session
+/// lifecycle / per-session authority: that would smuggle a semantic reducer
+/// behind a "witness" that no canonical TLA proof covers.
 ///
 /// This ratchet pins the witness to its pure shape so any future edit that adds
 /// a per-session `Map` registry, a second lifecycle phase, a non-self-loop
-/// transition, or an effect beyond the two pure version verdicts fails loudly
+/// transition, or an effect beyond the single pure restore verdict fails loudly
 /// and forces an explicit re-classification (fold into a canonical machine, or
 /// keep as a witness with a justified ratchet update).
 #[test]
@@ -179,8 +179,8 @@ fn session_persistence_version_witness_stays_a_pure_version_encoder() {
 
     let schema = persistence_version_machine();
 
-    // (1) No per-entity registry state. A version encoder owns only the
-    // scalar current/legacy version constants — never a per-session `Map`
+    // (1) No per-entity registry state. A version decoder owns only the
+    // scalar current version constants — never a per-session `Map`
     // lifecycle registry. This is the structural line between a witness and a
     // canonical per-session authority.
     assert!(
@@ -196,7 +196,7 @@ fn session_persistence_version_witness_stays_a_pure_version_encoder() {
 
     // (2) Single lifecycle phase with an empty terminal set and every
     // transition self-looping: no lifecycle progression, no terminality. A
-    // pure encoder has no states to move between.
+    // pure decoder has no states to move between.
     assert_eq!(
         schema.state.phase.variants.len(),
         1,
@@ -214,25 +214,22 @@ fn session_persistence_version_witness_stays_a_pure_version_encoder() {
         "persistence-version witness transitions must all self-loop (no lifecycle progression)"
     );
 
-    // (3) The emitted decision set is EXACTLY the two pure version verdicts:
-    // a constant-version stamp and an equality-checked restore. No admission,
-    // mint, or lifecycle effect may appear — those would be facts->conclusion
-    // reductions that belong in a canonical machine.
-    let mut effect_names = schema
+    // (3) The emitted decision set is EXACTLY the single pure version verdict:
+    // an equality-checked, fail-closed restore. No stamp, admission, mint, or
+    // lifecycle effect may appear — a re-grown stamp/legacy lane or any other
+    // effect is a facts->conclusion reduction that belongs in a canonical
+    // machine.
+    let effect_names = schema
         .effects
         .variants
         .iter()
         .map(|variant| variant.name.as_str().to_owned())
         .collect::<Vec<_>>();
-    effect_names.sort();
     assert_eq!(
         effect_names,
-        vec![
-            "VersionRestoreAuthorized".to_string(),
-            "VersionStampAuthorized".to_string(),
-        ],
-        "persistence-version witness must emit only the two pure version verdicts \
-         (constant stamp + equality-checked restore); any other effect is a \
+        vec!["VersionRestoreAuthorized".to_string()],
+        "persistence-version witness must emit only the single pure version verdict \
+         (equality-checked fail-closed restore); any other effect is a \
          semantic reduction that must move to a canonical machine"
     );
 }

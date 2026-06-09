@@ -735,10 +735,10 @@ class MobTurnStartParams:
     """Request payload for `mob/turn_start`.
 
 `provider_params` and `auth_binding` carry the canonical Inherit/Set/Clear
-tri-state via [`WireTurnMetadataOverride`]. The legacy split wire form
-(`provider_params` + `clear_provider_params: bool`) is still accepted at the
-serde boundary and folded into the tri-state, rejecting a `set + clear`
-payload there."""
+tri-state via [`WireTurnMetadataOverride`]; unknown fields (including the
+retired `clear_*` split wire form) fail closed at the serde boundary via
+`deny_unknown_fields`, which also keeps the emitted JSON Schema's
+`additionalProperties: false` aligned with the deserializer."""
     agent_identity: str
     mob_id: str
     prompt: WireContentInput

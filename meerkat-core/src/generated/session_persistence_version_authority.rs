@@ -3,14 +3,9 @@
 
 use std::fmt;
 
-use serde_json::{Map, Value, json};
-
 pub const SESSION_VERSION: u32 = 2;
 pub const STORED_INPUT_STATE_VERSION: u32 = 2;
 pub const SESSION_METADATA_SCHEMA_VERSION: u32 = 2;
-const LEGACY_SESSION_VERSION: u32 = 1;
-const LEGACY_STORED_INPUT_STATE_VERSION: u32 = 1;
-const LEGACY_SESSION_METADATA_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionPersistenceVersionField {
@@ -19,116 +14,39 @@ pub enum SessionPersistenceVersionField {
     SessionMetadataSchema,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AuthorizedSessionPersistenceVersionStamp {
-    field: SessionPersistenceVersionField,
-    key: &'static str,
-    version: u32,
-    legacy_default: u32,
-}
-
-impl AuthorizedSessionPersistenceVersionStamp {
-    #[must_use]
-    pub fn field(&self) -> SessionPersistenceVersionField {
-        self.field
-    }
-
-    #[must_use]
-    pub fn key(&self) -> &'static str {
-        self.key
-    }
-
-    #[must_use]
-    pub fn version(&self) -> u32 {
-        self.version
-    }
-
-    #[must_use]
-    pub fn legacy_default(&self) -> u32 {
-        self.legacy_default
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionPersistenceVersionAuthorityError {
     field: SessionPersistenceVersionField,
     current: u32,
-    legacy: u32,
-    observed: Option<u32>,
+    observed: u32,
 }
 
 impl fmt::Display for SessionPersistenceVersionAuthorityError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.observed {
-            Some(observed) => write!(
-                f,
-                "generated session persistence version authority rejected {:?}: expected current {} or legacy {}, got {}",
-                self.field, self.current, self.legacy, observed
-            ),
-            None => write!(
-                f,
-                "generated session persistence version authority rejected {:?}: expected current {} or legacy {}, got a non-u32 version",
-                self.field, self.current, self.legacy
-            ),
-        }
+        write!(
+            f,
+            "generated session persistence version authority rejected {:?}: expected current {}, got {}",
+            self.field, self.current, self.observed
+        )
     }
 }
 
 impl std::error::Error for SessionPersistenceVersionAuthorityError {}
 
-fn authorize_version_stamp(
-    field: SessionPersistenceVersionField,
-    key: &'static str,
-    version: u32,
-    legacy_default: u32,
-) -> AuthorizedSessionPersistenceVersionStamp {
-    AuthorizedSessionPersistenceVersionStamp {
-        field,
-        key,
-        version,
-        legacy_default,
-    }
-}
-
 fn restore_version(
     field: SessionPersistenceVersionField,
     observed: u32,
     current: u32,
-    legacy: u32,
 ) -> Result<u32, SessionPersistenceVersionAuthorityError> {
-    if observed == current || observed == legacy {
+    if observed == current {
         Ok(current)
     } else {
         Err(SessionPersistenceVersionAuthorityError {
             field,
             current,
-            legacy,
-            observed: Some(observed),
+            observed,
         })
     }
-}
-
-fn observed_version_from_json(
-    stamp: AuthorizedSessionPersistenceVersionStamp,
-    value: Option<&Value>,
-) -> Result<u32, SessionPersistenceVersionAuthorityError> {
-    let Some(value) = value else {
-        return Ok(stamp.legacy_default());
-    };
-    let Some(raw) = value.as_u64() else {
-        return Err(SessionPersistenceVersionAuthorityError {
-            field: stamp.field(),
-            current: stamp.version(),
-            legacy: stamp.legacy_default(),
-            observed: None,
-        });
-    };
-    u32::try_from(raw).map_err(|_| SessionPersistenceVersionAuthorityError {
-        field: stamp.field(),
-        current: stamp.version(),
-        legacy: stamp.legacy_default(),
-        observed: None,
-    })
 }
 
 #[must_use]
@@ -146,49 +64,6 @@ pub fn session_metadata_schema_version() -> u32 {
     SESSION_METADATA_SCHEMA_VERSION
 }
 
-#[must_use]
-pub fn legacy_session_envelope_version() -> u32 {
-    LEGACY_SESSION_VERSION
-}
-
-#[must_use]
-pub fn legacy_stored_input_state_version() -> u32 {
-    LEGACY_STORED_INPUT_STATE_VERSION
-}
-
-#[must_use]
-pub fn legacy_session_metadata_schema_version() -> u32 {
-    LEGACY_SESSION_METADATA_SCHEMA_VERSION
-}
-
-pub fn authorize_session_envelope_version_stamp() -> AuthorizedSessionPersistenceVersionStamp {
-    authorize_version_stamp(
-        SessionPersistenceVersionField::SessionEnvelope,
-        "version",
-        SESSION_VERSION,
-        LEGACY_SESSION_VERSION,
-    )
-}
-
-pub fn authorize_stored_input_state_version_stamp() -> AuthorizedSessionPersistenceVersionStamp {
-    authorize_version_stamp(
-        SessionPersistenceVersionField::StoredInputState,
-        "stored_input_state_version",
-        STORED_INPUT_STATE_VERSION,
-        LEGACY_STORED_INPUT_STATE_VERSION,
-    )
-}
-
-pub fn authorize_session_metadata_schema_version_stamp() -> AuthorizedSessionPersistenceVersionStamp
-{
-    authorize_version_stamp(
-        SessionPersistenceVersionField::SessionMetadataSchema,
-        "schema_version",
-        SESSION_METADATA_SCHEMA_VERSION,
-        LEGACY_SESSION_METADATA_SCHEMA_VERSION,
-    )
-}
-
 pub fn restore_session_envelope_version(
     observed: u32,
 ) -> Result<u32, SessionPersistenceVersionAuthorityError> {
@@ -196,7 +71,6 @@ pub fn restore_session_envelope_version(
         SessionPersistenceVersionField::SessionEnvelope,
         observed,
         SESSION_VERSION,
-        LEGACY_SESSION_VERSION,
     )
 }
 
@@ -207,7 +81,6 @@ pub fn restore_stored_input_state_version(
         SessionPersistenceVersionField::StoredInputState,
         observed,
         STORED_INPUT_STATE_VERSION,
-        LEGACY_STORED_INPUT_STATE_VERSION,
     )
 }
 
@@ -218,21 +91,5 @@ pub fn restore_session_metadata_schema_version(
         SessionPersistenceVersionField::SessionMetadataSchema,
         observed,
         SESSION_METADATA_SCHEMA_VERSION,
-        LEGACY_SESSION_METADATA_SCHEMA_VERSION,
     )
-}
-
-pub fn stamp_authorized_version(
-    object: &mut Map<String, Value>,
-    stamp: AuthorizedSessionPersistenceVersionStamp,
-) -> Result<(), SessionPersistenceVersionAuthorityError> {
-    let observed = observed_version_from_json(stamp, object.get(stamp.key()))?;
-    restore_version(
-        stamp.field(),
-        observed,
-        stamp.version(),
-        stamp.legacy_default(),
-    )?;
-    object.insert(stamp.key().to_string(), json!(stamp.version()));
-    Ok(())
 }

@@ -20033,8 +20033,7 @@ mod tests {
             "output_schema": {"type": "object"},
             "structured_output_retries": 3,
             "provider_params": {"thinking": true},
-            "clear_provider_params": false,
-            "clear_auth_binding": true
+            "auth_binding": {"action": "clear"}
         });
         let params: StartTurnParams = serde_json::from_value(json).unwrap();
         assert_eq!(params.session_id, "test-id");
@@ -20046,8 +20045,8 @@ mod tests {
         assert_eq!(params.system_prompt.as_deref(), Some("You are helpful"));
         assert!(params.output_schema.is_some());
         assert_eq!(params.structured_output_retries, Some(3));
-        // Legacy split form folds into the tri-state: provider_params (no clear)
-        // becomes Set, and clear_auth_binding: true becomes Clear.
+        // Canonical tri-state: an untagged value is a Set; the tagged clear
+        // is a Clear.
         assert_eq!(
             params.provider_params.as_ref().and_then(|o| o.as_set()),
             Some(&serde_json::json!({"thinking": true}))
@@ -20057,6 +20056,35 @@ mod tests {
             Some(TurnMetadataOverride::Clear)
         ));
         assert_eq!(params.auth_binding, Some(TurnMetadataOverride::Clear));
+    }
+
+    /// The retired legacy split `clear_*` wire fields FAIL CLOSED as unknown
+    /// fields — the wire carries only the canonical tri-state override.
+    #[test]
+    fn turn_start_params_reject_retired_split_clear_fields() {
+        use crate::handlers::turn::StartTurnParams;
+
+        let err = serde_json::from_value::<StartTurnParams>(serde_json::json!({
+            "session_id": "test-id",
+            "prompt": "hello",
+            "clear_provider_params": true,
+        }))
+        .expect_err("retired clear_provider_params must fail closed");
+        assert!(
+            err.to_string().contains("clear_provider_params"),
+            "unexpected error: {err}"
+        );
+
+        let err = serde_json::from_value::<StartTurnParams>(serde_json::json!({
+            "session_id": "test-id",
+            "prompt": "hello",
+            "clear_auth_binding": true,
+        }))
+        .expect_err("retired clear_auth_binding must fail closed");
+        assert!(
+            err.to_string().contains("clear_auth_binding"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

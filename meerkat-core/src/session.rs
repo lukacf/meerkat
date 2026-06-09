@@ -32,25 +32,16 @@ use std::sync::Arc;
 
 /// Current session format version.
 ///
-/// Version history:
-/// - v1 — pre-wave-c. `SessionMetadata.auth_binding` inner fields were
-///   untyped strings (`realm_id`, `binding_id`, `profile`); no per-entity
-///   schema version byte on `SessionMetadata`.
-/// - v2 — wave-c C-3. `AuthBindingRef` inner fields are typed
-///   `RealmId`/`BindingId`/`ProfileId` newtypes; `SessionMetadata` carries
-///   a `schema_version` byte. Opportunistic upgrade-on-read —
-///   `meerkat_session::persistent::migrations::migrate` rewrites v1 rows
-///   into v2 shape; the next `save()` persists v2.
+/// The persisted `version` byte is mandatory and fail-closed: a stored row
+/// with a missing or non-current version (including pre-typed-owner v0/v1
+/// rows) is rejected at the serde boundary by the generated persistence
+/// version authority — it never silently defaults or upgrades on read.
 pub use crate::generated::session_persistence_version_authority::SESSION_VERSION;
 
 /// Current `SessionMetadata` schema version. Distinct from `SESSION_VERSION`
 /// so `SessionMetadata` can evolve independently of the Session envelope.
 ///
-/// - v1 — pre-wave-c. Default on read for rows written before the byte
-///   was introduced.
-/// - v2 — wave-c C-3. Typed `AuthBindingRef` inner fields; any future
-///   `SessionMetadata`-local shape change bumps this without moving
-///   `SESSION_VERSION`.
+/// Mandatory and fail-closed on read, same contract as `SESSION_VERSION`.
 pub use crate::generated::session_persistence_version_authority::SESSION_METADATA_SCHEMA_VERSION;
 
 /// Current session format version accepted by generated persistence authority.
@@ -693,7 +684,8 @@ fn sha256_json_digest<T: Serialize + ?Sized>(value: &T) -> Result<String, serde_
 /// Uses Arc<Vec<Message>> internally for efficient forking (copy-on-write).
 #[derive(Debug, Clone)]
 pub struct Session {
-    /// Format version for migrations
+    /// Persisted envelope format version, validated fail-closed on read by
+    /// the generated persistence version authority.
     version: u32,
     /// Unique identifier
     id: SessionId,
@@ -713,7 +705,6 @@ pub struct Session {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct SessionSerde {
-    #[serde(default = "default_version")]
     version: u32,
     id: SessionId,
     messages: Vec<Message>,
@@ -763,10 +754,6 @@ impl<'de> Deserialize<'de> for Session {
             usage: serde_repr.usage,
         })
     }
-}
-
-fn default_version() -> u32 {
-    session_persistence_version_authority::legacy_session_envelope_version()
 }
 
 /// Metadata key used to store durable system-context control state.
@@ -3742,10 +3729,10 @@ pub struct SessionMeta {
 pub struct SessionMetadata {
     /// Per-entity schema version byte.
     ///
-    /// Defaults to `1` on read so pre-wave-c rows without the field
-    /// deserialize cleanly; rewritten as `SESSION_METADATA_SCHEMA_VERSION`
-    /// on the next `save()` after a successful migration pass.
-    #[serde(default = "default_session_metadata_schema_version")]
+    /// Mandatory on read: a persisted row missing the byte (or carrying a
+    /// non-current value) fails closed through the generated persistence
+    /// version authority instead of silently defaulting. Stamped with the
+    /// current `SESSION_METADATA_SCHEMA_VERSION` on every persist.
     pub schema_version: u32,
     pub model: String,
     pub max_tokens: u32,
@@ -3804,10 +3791,6 @@ pub struct SessionMetadata {
     /// "no typed binding" rather than failing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mob_member_binding: Option<crate::MobMemberBinding>,
-}
-
-fn default_session_metadata_schema_version() -> u32 {
-    session_persistence_version_authority::legacy_session_metadata_schema_version()
 }
 
 /// Canonical durable LLM identity for a session.

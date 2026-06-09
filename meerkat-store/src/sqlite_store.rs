@@ -134,7 +134,7 @@ fn load_session_snapshot_in_txn(
     )
     .optional()?
     .map(|bytes| {
-        meerkat_core::session_migrations::deserialize_session_migrating(&bytes)
+        serde_json::from_slice::<Session>(&bytes)
             .map_err(|err| StoreError::Internal(err.to_string()))
     })
     .transpose()
@@ -187,7 +187,7 @@ impl SqliteSessionStore {
             )
             .optional()?
             .map(|bytes| {
-                meerkat_core::session_migrations::deserialize_session_migrating(&bytes)
+                serde_json::from_slice::<Session>(&bytes)
                     .map_err(|err| StoreError::Internal(err.to_string()))
             })
             .transpose()

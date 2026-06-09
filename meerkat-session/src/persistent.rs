@@ -79,11 +79,6 @@ use crate::ephemeral::{EphemeralSessionService, SessionAgentBuilder};
 use crate::event_store::EventStore;
 use crate::projector::SessionProjector;
 
-/// Re-export of the crate-root `migrations` module so the canonical
-/// path `meerkat_session::persistent::migrations` (as named in the
-/// wave-c plan) resolves unchanged.
-pub use crate::migrations;
-
 fn runtime_driver_error_to_session_error(err: meerkat_runtime::RuntimeDriverError) -> SessionError {
     SessionError::Agent(AgentError::InternalError(err.to_string()))
 }
@@ -2060,13 +2055,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 )))
             })?
             .map(|bytes| {
-                meerkat_core::session_migrations::deserialize_session_migrating(&bytes).map_err(
-                    |err| {
-                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                            format!("failed to deserialize runtime session snapshot: {err}"),
-                        ))
-                    },
-                )
+                serde_json::from_slice::<Session>(&bytes).map_err(|err| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                        "failed to deserialize runtime session snapshot: {err}"
+                    )))
+                })
             })
             .transpose()
     }

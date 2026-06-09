@@ -1342,7 +1342,8 @@ where
 /// `for_input(&Input)` constructor. Other code paths that previously built
 /// a `RuntimeTurnMetadata` literal are updated to call `for_input` or be
 /// deleted.
-#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeTurnMetadata {
     /// Handling mode for staged ordinary work when admitted through runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1387,81 +1388,6 @@ pub struct RuntimeTurnMetadata {
     /// machine at admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_response_terminal_apply_intent: Option<PeerResponseTerminalApplyIntent>,
-}
-
-#[derive(Deserialize)]
-struct RuntimeTurnMetadataFields {
-    #[serde(default)]
-    handling_mode: Option<HandlingMode>,
-    #[serde(default)]
-    skill_references: Option<Vec<SkillKey>>,
-    #[serde(default)]
-    flow_tool_overlay: Option<TurnToolOverlay>,
-    #[serde(default)]
-    additional_instructions: Option<Vec<TurnInstruction>>,
-    #[serde(default)]
-    model: Option<ModelId>,
-    #[serde(default)]
-    provider: Option<Provider>,
-    #[serde(default)]
-    provider_params: Option<TurnMetadataOverride<ProviderParamsOverride>>,
-    #[serde(default)]
-    auth_binding: Option<TurnMetadataOverride<AuthBindingRef>>,
-    #[serde(default)]
-    keep_alive: Option<KeepAlivePolicy>,
-    #[serde(default)]
-    render_metadata: Option<RenderMetadata>,
-    #[serde(default)]
-    execution_kind: Option<RuntimeExecutionKind>,
-    #[serde(default)]
-    peer_response_terminal_apply_intent: Option<PeerResponseTerminalApplyIntent>,
-}
-
-impl<'de> Deserialize<'de> for RuntimeTurnMetadata {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let mut raw = serde_json::Value::deserialize(deserializer)?;
-        let (clear_provider_params, clear_auth_binding) = if let Some(object) = raw.as_object_mut()
-        {
-            (
-                take_legacy_clear_bool(object, "clear_provider_params", &[])?,
-                take_legacy_clear_bool(object, "clear_auth_binding", &[])?,
-            )
-        } else {
-            (false, false)
-        };
-        let fields: RuntimeTurnMetadataFields =
-            serde_json::from_value(raw).map_err(de::Error::custom)?;
-        let provider_params = legacy_override_from_split_fields(
-            fields.provider_params,
-            clear_provider_params,
-            "provider_params",
-            "clear_provider_params",
-        )?;
-        let auth_binding = legacy_override_from_split_fields(
-            fields.auth_binding,
-            clear_auth_binding,
-            "auth_binding",
-            "clear_auth_binding",
-        )?;
-
-        Ok(Self {
-            handling_mode: fields.handling_mode,
-            skill_references: fields.skill_references,
-            flow_tool_overlay: fields.flow_tool_overlay,
-            additional_instructions: fields.additional_instructions,
-            model: fields.model,
-            provider: fields.provider,
-            provider_params,
-            auth_binding,
-            keep_alive: fields.keep_alive,
-            render_metadata: fields.render_metadata,
-            execution_kind: fields.execution_kind,
-            peer_response_terminal_apply_intent: fields.peer_response_terminal_apply_intent,
-        })
-    }
 }
 
 impl RuntimeTurnMetadata {
@@ -1585,69 +1511,6 @@ fn merge_override<T: PartialEq>(
             reason: "one input sets the field while another clears it",
         }),
     }
-}
-
-/// Fold a legacy `(Option<TurnMetadataOverride<T>>, clear: bool)` split — the
-/// pre-tri-state wire shape — into a single `Option<TurnMetadataOverride<T>>`,
-/// rejecting the illegal `set + clear` fourth state at the serde boundary.
-///
-/// This is the canonical legacy-override boundary helper shared by every seam
-/// that historically carried a `clear_*: bool` alongside an `Option<T>` value
-/// (see `RuntimeTurnMetadata`, `SessionLlmReconfigureRequest`, RPC
-/// `StartTurnParams`). New callers should accept `Option<TurnMetadataOverride>`
-/// directly and only invoke this from a custom `Deserialize` that still admits
-/// the legacy split wire form.
-pub fn legacy_override_from_split_fields<T, E>(
-    set_value: Option<TurnMetadataOverride<T>>,
-    clear: bool,
-    set_field: &'static str,
-    clear_field: &'static str,
-) -> Result<Option<TurnMetadataOverride<T>>, E>
-where
-    E: de::Error,
-{
-    if clear && set_value.is_some() {
-        return Err(E::custom(format!(
-            "{clear_field} cannot be combined with {set_field}"
-        )));
-    }
-    if clear {
-        Ok(Some(TurnMetadataOverride::Clear))
-    } else {
-        Ok(set_value)
-    }
-}
-
-/// Remove a legacy `clear_*: bool` field (plus any compatibility aliases) from
-/// a raw JSON object during a custom `Deserialize`, returning its boolean value
-/// (default `false`). Used together with [`legacy_override_from_split_fields`]
-/// to admit the pre-tri-state wire shape without keeping a `clear_*` field on
-/// the typed struct.
-pub fn take_legacy_clear_bool<E>(
-    object: &mut serde_json::Map<String, serde_json::Value>,
-    field: &'static str,
-    aliases: &[&'static str],
-) -> Result<bool, E>
-where
-    E: de::Error,
-{
-    let mut seen = None;
-    for key in std::iter::once(field).chain(aliases.iter().copied()) {
-        match object.remove(key) {
-            None => {}
-            Some(serde_json::Value::Bool(value)) => match seen {
-                None => seen = Some(value),
-                Some(previous) if previous == value => {}
-                Some(_) => {
-                    return Err(E::custom(format!(
-                        "{field} and its compatibility aliases disagree"
-                    )));
-                }
-            },
-            Some(_) => return Err(E::custom(format!("{key} must be a boolean"))),
-        }
-    }
-    Ok(seen.unwrap_or(false))
 }
 
 mod duration_seconds {

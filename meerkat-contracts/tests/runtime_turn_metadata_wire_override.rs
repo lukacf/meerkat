@@ -78,18 +78,17 @@ fn wire_metadata_clear_overrides_round_trip() {
 }
 
 #[test]
-fn wire_metadata_legacy_clear_only_deserializes_as_clear_overrides() {
-    let parsed: WireRuntimeTurnMetadata = serde_json::from_value(serde_json::json!({
+fn wire_metadata_legacy_clear_only_payloads_are_rejected_fail_closed() {
+    let err = serde_json::from_value::<WireRuntimeTurnMetadata>(serde_json::json!({
         "clear_provider_params": true,
         "clear_auth_binding": true,
     }))
-    .expect("legacy clear-only payloads remain accepted");
-
-    assert_eq!(
-        parsed.provider_params,
-        Some(WireTurnMetadataOverride::Clear)
+    .expect_err("retired legacy split clear_* payloads must fail closed");
+    let message = err.to_string();
+    assert!(
+        message.contains("unknown field") && message.contains("clear_"),
+        "unexpected error: {err}"
     );
-    assert_eq!(parsed.auth_binding, Some(WireTurnMetadataOverride::Clear));
 }
 
 #[test]
@@ -98,7 +97,7 @@ fn wire_metadata_legacy_set_and_clear_payloads_fail_at_boundary() {
         "provider_params": { "temperature": 0.2 },
         "clear_provider_params": true,
     }))
-    .expect_err("provider_params set plus legacy clear must fail");
+    .expect_err("retired clear_provider_params field must fail closed");
     assert!(
         err.to_string().contains("clear_provider_params"),
         "unexpected error: {err}"
@@ -111,7 +110,7 @@ fn wire_metadata_legacy_set_and_clear_payloads_fail_at_boundary() {
         },
         "clear_auth_binding": true,
     }))
-    .expect_err("auth_binding set plus legacy clear must fail");
+    .expect_err("retired clear_auth_binding field must fail closed");
     assert!(
         err.to_string().contains("clear_auth_binding"),
         "unexpected error: {err}"

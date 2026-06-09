@@ -69,32 +69,25 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
         &runtime_id.0
     }
 
-    /// Deserialize a persisted session-snapshot row through the session
-    /// migration path so v0/v1-shaped rows transparently upgrade, mirroring
-    /// `SqliteSessionStore`'s use of `deserialize_session_migrating`. The
-    /// runtime store previously read these rows with raw `from_slice`, which
-    /// bypassed the migrators and would hard-fail (or silently mis-type) a
-    /// legacy row.
+    /// Deserialize a persisted session-snapshot row through typed serde.
+    /// `Session::deserialize` validates the mandatory envelope version against
+    /// the generated persistence version authority, so a missing or
+    /// non-current (v0/v1) row fails closed here instead of silently
+    /// defaulting or upgrading on read.
     fn deserialize_persisted_session(
         bytes: &[u8],
     ) -> Result<meerkat_core::Session, RuntimeStoreError> {
-        meerkat_core::session_migrations::deserialize_session_migrating(bytes)
-            .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+        serde_json::from_slice(bytes).map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
     }
 
-    /// Deserialize a persisted `StoredInputState` row through the input-state
-    /// migration path (parse to `Value` → migrate → `from_value`) so legacy
-    /// pre-version input rows transparently upgrade rather than failing a raw
-    /// `from_slice`.
+    /// Deserialize a persisted `StoredInputState` row through typed serde.
+    /// `StoredInputState::deserialize` validates the mandatory
+    /// `stored_input_state_version` byte against the generated persistence
+    /// version authority, so a missing or non-current row fails closed.
     fn deserialize_persisted_input_state(
         bytes: &[u8],
     ) -> Result<StoredInputState, RuntimeStoreError> {
-        let value: serde_json::Value = serde_json::from_slice(bytes)
-            .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
-        let migrated = meerkat_core::session_migrations::migrate_input_state_value(value)
-            .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
-        serde_json::from_value(migrated)
-            .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+        serde_json::from_slice(bytes).map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
     }
 
     /// Encode a `u64` boundary-receipt sequence into the durable `INTEGER`
@@ -1616,100 +1609,69 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             );
         }
 
-        /// A v0-shaped session blob (no envelope `version`, no metadata
-        /// `schema_version`) must deserialize through the runtime-store read
-        /// helper, which routes through `deserialize_session_migrating` — the
-        /// same migrator the `SessionStore` read path uses. The migrator stamps
-        /// the metadata schema version forward; raw `from_slice::<Session>`
-        /// would leave the opaque metadata untouched.
+        /// A session blob without the mandatory envelope `version` byte (the
+        /// pre-typed-owner v0 shape) must FAIL CLOSED through the runtime-store
+        /// read helper — it never silently defaults or upgrades on read.
         #[test]
-        fn deserialize_persisted_session_routes_through_migrator() {
+        fn deserialize_persisted_session_rejects_missing_version_row() {
             let v0_blob = serde_json::json!({
                 "id": "00000000-0000-0000-0000-000000000012",
                 "messages": [],
                 "created_at": { "secs_since_epoch": 1727784000, "nanos_since_epoch": 0 },
                 "updated_at": { "secs_since_epoch": 1727784000, "nanos_since_epoch": 0 },
-                "metadata": {
-                    "session_metadata": {
-                        "model": "gpt-4o-mini",
-                        "max_tokens": 4096,
-                        "provider": "openai",
-                        "tooling": {},
-                        "comms_name": null,
-                        "provider_params": {
-                            "thinking": {"type": "enabled", "budget_tokens": 32000}
-                        }
-                    }
-                }
+                "metadata": {}
             });
             let bytes = serde_json::to_vec(&v0_blob).unwrap();
 
-            // Raw deserialize leaves the metadata opaque: no `schema_version`
-            // is stamped onto the nested session metadata.
-            let raw: Session = serde_json::from_slice(&bytes).unwrap();
+            let err = deserialize_persisted_session(&bytes)
+                .expect_err("missing-version session row must fail closed");
             assert!(
-                raw.metadata()
-                    .get("session_metadata")
-                    .and_then(|m| m.get("schema_version"))
-                    .is_none(),
-                "raw from_slice must not stamp the metadata schema version"
+                err.to_string().contains("version"),
+                "unexpected error: {err}"
             );
+        }
 
-            // The migrating read helper stamps the schema version forward and
-            // preserves the provider-params canary.
-            let migrated = deserialize_persisted_session(&bytes)
-                .expect("v0 runtime-store session row must migrate on read");
-            assert_eq!(
-                migrated
-                    .metadata()
-                    .get("session_metadata")
-                    .and_then(|m| m.get("schema_version"))
-                    .and_then(serde_json::Value::as_u64),
-                Some(u64::from(
-                    meerkat_core::generated::session_persistence_version_authority::session_metadata_schema_version()
-                )),
-                "migrating read must stamp the metadata schema version forward"
-            );
-            assert_eq!(
-                migrated
-                    .metadata()
-                    .get("session_metadata")
-                    .and_then(|m| m.get("provider_params"))
-                    .and_then(|p| p.get("thinking"))
-                    .and_then(|t| t.get("budget_tokens"))
-                    .and_then(serde_json::Value::as_u64),
-                Some(32000),
-                "provider-params canary must survive the migrating read"
+        /// A session blob carrying the retired legacy envelope version (v1)
+        /// must FAIL CLOSED with the typed generated-authority rejection.
+        #[test]
+        fn deserialize_persisted_session_rejects_legacy_v1_version_row() {
+            let v1_blob = serde_json::json!({
+                "version": 1,
+                "id": "00000000-0000-0000-0000-000000000012",
+                "messages": [],
+                "created_at": { "secs_since_epoch": 1727784000, "nanos_since_epoch": 0 },
+                "updated_at": { "secs_since_epoch": 1727784000, "nanos_since_epoch": 0 },
+                "metadata": {}
+            });
+            let bytes = serde_json::to_vec(&v1_blob).unwrap();
+
+            let err = deserialize_persisted_session(&bytes)
+                .expect_err("legacy v1 session row must fail closed");
+            assert!(
+                err.to_string()
+                    .contains("generated session persistence version authority rejected"),
+                "unexpected error: {err}"
             );
         }
 
         /// End-to-end: a raw v0 session row written directly into the
-        /// `runtime_session_snapshots` table must load through the runtime-store
+        /// `runtime_session_snapshots` table must FAIL the runtime-store
         /// `previous`-snapshot read path (here exercised by
-        /// `commit_session_snapshot`) without a `ReadFailed` — proving the read
-        /// path no longer uses raw `from_slice::<Session>`.
+        /// `commit_session_snapshot`) — the read path never silently accepts a
+        /// pre-version row.
         #[tokio::test]
-        async fn runtime_store_read_path_loads_v0_session_row() {
+        async fn runtime_store_read_path_rejects_v0_session_row() {
             let (_dir, store) = temp_store();
             let runtime_id = runtime_id();
 
-            // Write a v0-shaped row (no envelope `version`, no metadata
-            // `schema_version`) directly into the durable table.
+            // Write a v0-shaped row (no envelope `version`) directly into the
+            // durable table.
             let v0_blob = serde_json::json!({
                 "id": "00000000-0000-0000-0000-000000000012",
                 "messages": [],
                 "created_at": { "secs_since_epoch": 1727784000, "nanos_since_epoch": 0 },
                 "updated_at": { "secs_since_epoch": 1727784000, "nanos_since_epoch": 0 },
-                "metadata": {
-                    "session_metadata": {
-                        "model": "gpt-4o-mini",
-                        "max_tokens": 4096,
-                        "provider": "openai",
-                        "tooling": {},
-                        "comms_name": null,
-                        "provider_params": {}
-                    }
-                }
+                "metadata": {}
             });
             let v0_bytes = serde_json::to_vec(&v0_blob).unwrap();
             {
@@ -1719,12 +1681,11 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                 tx.commit().unwrap();
             }
 
-            // A subsequent boundary commit must read the persisted v0 row
-            // through the migrator (not raw from_slice) and accept the
-            // append-extension without a read failure.
-            let mut incoming: Session = deserialize_persisted_session(&v0_bytes).unwrap();
+            // A subsequent boundary commit reads the persisted previous row;
+            // the v0 row must surface a read failure, not a silent default.
+            let mut incoming = Session::new();
             incoming.push(Message::User(UserMessage::text("hello".to_string())));
-            store
+            let err = store
                 .commit_session_snapshot(
                     &runtime_id,
                     SessionDelta {
@@ -1732,22 +1693,25 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                     },
                 )
                 .await
-                .expect("v0 previous row must read through the migrating path");
+                .expect_err("v0 previous row must fail the read path closed");
+            assert!(
+                err.to_string().contains("version"),
+                "unexpected error: {err}"
+            );
         }
 
-        /// A v0-shaped `StoredInputState` row (no `stored_input_state_version`
-        /// byte) written directly into `runtime_input_states` must load through
-        /// the migrating input-state read path.
+        /// A `StoredInputState` row without the mandatory
+        /// `stored_input_state_version` byte (the pre-version v0 shape) written
+        /// directly into `runtime_input_states` must FAIL CLOSED on read.
         #[tokio::test]
-        async fn runtime_store_read_path_loads_v0_input_state_row() {
+        async fn runtime_store_read_path_rejects_v0_input_state_row() {
             let (_dir, store) = temp_store();
             let runtime_id = runtime_id();
 
             let input_id = InputId::new();
             let bundle = StoredInputState::new_accepted(input_id.clone());
             let mut row = serde_json::to_value(&bundle).unwrap();
-            // Drop the version byte to simulate a pre-version (v0) row; the
-            // migrator stamps the legacy default and `from_value` accepts it.
+            // Drop the version byte to simulate a pre-version (v0) row.
             row.as_object_mut()
                 .unwrap()
                 .remove("stored_input_state_version");
@@ -1770,16 +1734,23 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                 tx.commit().unwrap();
             }
 
-            let loaded = store
+            let err = store
                 .load_input_state(&runtime_id, &input_id)
                 .await
-                .expect("v0 input-state row must read through the migrating path")
-                .expect("input-state row must be present");
-            assert_eq!(loaded.state.input_id, input_id);
+                .expect_err("v0 input-state row must fail the read path closed");
+            assert!(
+                err.to_string().contains("stored_input_state_version"),
+                "unexpected error: {err}"
+            );
 
-            let all = store.load_input_states(&runtime_id).await.unwrap();
-            assert_eq!(all.len(), 1);
-            assert_eq!(all[0].state.input_id, input_id);
+            let err = store
+                .load_input_states(&runtime_id)
+                .await
+                .expect_err("v0 input-state row must fail the bulk read path closed");
+            assert!(
+                err.to_string().contains("stored_input_state_version"),
+                "unexpected error: {err}"
+            );
         }
     }
 }

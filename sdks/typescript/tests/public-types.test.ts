@@ -241,15 +241,22 @@ const publicMobTurnStartOptions: MobTurnStartOptions = {
   systemPrompt: "system",
   outputSchema: { type: "object" },
   structuredOutputRetries: 2,
-  providerParams: { temperature: 0.2 },
-  authBinding: { realm: "dev", binding: "default_openai" },
+  providerParams: { action: "set", value: { temperature: 0.2 } },
+  authBinding: { action: "set", value: { realm: "dev", binding: "default_openai" } },
 };
 
 const publicMobTurnStartOptionsClear: MobTurnStartOptions = {
-  clearProviderParams: true,
-  clearAuthBinding: true,
+  providerParams: { action: "clear" },
+  authBinding: { action: "clear" },
 };
 void publicMobTurnStartOptionsClear;
+
+const publicMobTurnStartOptionsWithRetiredSplitClear: MobTurnStartOptions = {
+  model: "gpt-test",
+  // @ts-expect-error the retired split clear_* option form fails closed.
+  clearProviderParams: true,
+};
+void publicMobTurnStartOptionsWithRetiredSplitClear;
 
 const publicMobTurnStartOptionsWithUnknown: MobTurnStartOptions = {
   model: "gpt-test",

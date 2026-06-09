@@ -290,7 +290,6 @@ impl InputState {
 
 #[derive(Serialize, Deserialize)]
 struct InputStateSerde {
-    #[serde(default = "default_stored_input_state_version")]
     stored_input_state_version: u32,
     input_id: InputId,
     current_state: InputLifecycleState,
@@ -324,11 +323,6 @@ struct InputStateSerde {
     recovery_lane: Option<HandlingMode>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
-}
-
-fn default_stored_input_state_version() -> u32 {
-    meerkat_core::generated::session_persistence_version_authority::legacy_stored_input_state_version(
-    )
 }
 
 impl Serialize for StoredInputState {

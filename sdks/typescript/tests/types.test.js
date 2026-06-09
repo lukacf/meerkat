@@ -2536,8 +2536,11 @@ describe("Parity wrappers", () => {
         systemPrompt: "system",
         outputSchema: { type: "object" },
         structuredOutputRetries: 2,
-        providerParams: { temperature: 0.2 },
-        authBinding: { realm: "dev", binding: "default_openai" },
+        providerParams: { action: "set", value: { temperature: 0.2 } },
+        authBinding: {
+          action: "set",
+          value: { realm: "dev", binding: "default_openai" },
+        },
       },
     );
     const append = await client.appendMobSystemContext("mob-1", "worker-1", "remember this");
@@ -2634,7 +2637,7 @@ describe("Parity wrappers", () => {
     assert.equal(calls[4].params.limit, 5);
   });
 
-  it("lowers mob_turn_start clear_* overrides to the tagged tri-state", async () => {
+  it("passes mob_turn_start tri-state overrides through unchanged", async () => {
     const client = new MeerkatClient();
     const calls = [];
     client.request = async (method, params) => {
@@ -2642,10 +2645,10 @@ describe("Parity wrappers", () => {
       return { status: "started" };
     };
 
-    // Clear coverage: `clear*` lowers to the tagged `clear` override.
+    // Clear coverage: the tagged `clear` override passes through unchanged.
     await client.mobTurnStart("mob-1", "worker-1", "continue", {
-      clearProviderParams: true,
-      clearAuthBinding: true,
+      providerParams: { action: "clear" },
+      authBinding: { action: "clear" },
     });
     assert.deepEqual(calls[0].params, {
       mob_id: "mob-1",
@@ -2655,21 +2658,10 @@ describe("Parity wrappers", () => {
       auth_binding: { action: "clear" },
     });
 
-    // Inherit coverage: neither value nor clear -> the field is omitted.
+    // Inherit coverage: omitted -> the field is omitted on the wire.
     await client.mobTurnStart("mob-1", "worker-1", "continue");
     assert.equal(calls[1].params.provider_params, undefined);
     assert.equal(calls[1].params.auth_binding, undefined);
-
-    // The illegal set + clear combination is rejected at the wrapper boundary,
-    // mirroring the wire serde boundary.
-    await assert.rejects(
-      () =>
-        client.mobTurnStart("mob-1", "worker-1", "continue", {
-          providerParams: { temperature: 0.2 },
-          clearProviderParams: true,
-        }),
-      (error) => error instanceof MeerkatError && error.code === "INVALID_ARGS",
-    );
   });
 
   it("rejects malformed mob spawn_many result envelopes", async () => {

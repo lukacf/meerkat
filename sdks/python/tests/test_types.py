@@ -2774,7 +2774,7 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
 
     client._request = fake_request  # type: ignore[method-assign]
 
-    # Set coverage: a concrete value lowers to the tagged `set` override.
+    # Set coverage: the canonical tagged tri-state passes through unchanged.
     await client.mob_turn_start(
         "mob-1",
         "worker-1",
@@ -2794,8 +2794,11 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
         system_prompt="system",
         output_schema={"type": "object"},
         structured_output_retries=2,
-        provider_params={"temperature": 0.2},
-        auth_binding={"realm": "dev", "binding": "default_openai"},
+        provider_params={"action": "set", "value": {"temperature": 0.2}},
+        auth_binding={
+            "action": "set",
+            "value": {"realm": "dev", "binding": "default_openai"},
+        },
     )
 
     assert calls == [
@@ -2836,14 +2839,14 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
         )
     ]
 
-    # Clear coverage: `clear_*=True` lowers to the tagged `clear` override.
+    # Clear coverage: the tagged `clear` override passes through unchanged.
     calls.clear()
     await client.mob_turn_start(
         "mob-1",
         "worker-1",
         "continue",
-        clear_provider_params=True,
-        clear_auth_binding=True,
+        provider_params={"action": "clear"},
+        auth_binding={"action": "clear"},
     )
     assert calls == [
         (
@@ -2858,21 +2861,28 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
         )
     ]
 
-    # Inherit coverage: neither value nor clear -> the field is omitted.
+    # Inherit coverage: omitted -> the field is omitted on the wire.
     calls.clear()
     await client.mob_turn_start("mob-1", "worker-1", "continue")
     assert "provider_params" not in calls[0][1]
     assert "auth_binding" not in calls[0][1]
 
-    # The illegal set + clear combination is rejected at the wrapper boundary,
-    # mirroring the wire serde boundary.
-    with pytest.raises(MeerkatError):
+    # The retired split `clear_*` keyword form is gone from the wrapper —
+    # callers carry the canonical tri-state directly.
+    with pytest.raises(TypeError):
         await client.mob_turn_start(
             "mob-1",
             "worker-1",
             "continue",
-            provider_params={"temperature": 0.2},
             clear_provider_params=True,
+        )
+
+    with pytest.raises(TypeError):
+        await client.mob_turn_start(
+            "mob-1",
+            "worker-1",
+            "continue",
+            clear_auth_binding=True,
         )
 
     with pytest.raises(TypeError):

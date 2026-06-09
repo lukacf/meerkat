@@ -13739,7 +13739,7 @@
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "Request payload for `mob/turn_start`.\n\n`provider_params` and `auth_binding` carry the canonical Inherit/Set/Clear\ntri-state via [`WireTurnMetadataOverride`]. The legacy split wire form\n(`provider_params` + `clear_provider_params: bool`) is still accepted at the\nserde boundary and folded into the tri-state, rejecting a `set + clear`\npayload there.",
+    "description": "Request payload for `mob/turn_start`.\n\n`provider_params` and `auth_binding` carry the canonical Inherit/Set/Clear\ntri-state via [`WireTurnMetadataOverride`]; unknown fields (including the\nretired `clear_*` split wire form) fail closed at the serde boundary via\n`deny_unknown_fields`, which also keeps the emitted JSON Schema's\n`additionalProperties: false` aligned with the deserializer.",
     "properties": {
       "additional_instructions": {
         "items": {

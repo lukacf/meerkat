@@ -195,22 +195,36 @@ fn set_overrides_round_trip_with_explicit_action() {
 }
 
 #[test]
-fn legacy_clear_only_payloads_deserialize_as_clear_overrides() {
-    let parsed: RuntimeTurnMetadata = serde_json::from_value(serde_json::json!({
+fn legacy_clear_only_payloads_are_rejected_fail_closed() {
+    let err = serde_json::from_value::<RuntimeTurnMetadata>(serde_json::json!({
         "clear_provider_params": true,
         "clear_auth_binding": true,
     }))
-    .expect("legacy clear-only payloads remain accepted");
+    .expect_err("retired legacy split clear_* payloads must fail closed");
+    let message = err.to_string();
+    assert!(
+        message.contains("unknown field") && message.contains("clear_"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn tagged_clear_overrides_round_trip() {
+    let parsed: RuntimeTurnMetadata = serde_json::from_value(serde_json::json!({
+        "provider_params": { "action": "clear" },
+        "auth_binding": { "action": "clear" },
+    }))
+    .expect("canonical tagged clear overrides deserialize");
 
     assert_eq!(
         parsed.provider_params,
         Some(TurnMetadataOverride::Clear),
-        "legacy provider clear must become a clear override"
+        "tagged provider clear must become a clear override"
     );
     assert_eq!(
         parsed.auth_binding,
         Some(TurnMetadataOverride::Clear),
-        "legacy connection clear must become a clear override"
+        "tagged auth-binding clear must become a clear override"
     );
 }
 
@@ -220,7 +234,7 @@ fn legacy_set_and_clear_payloads_fail_at_boundary() {
         "provider_params": { "temperature": 0.2 },
         "clear_provider_params": true,
     }))
-    .expect_err("provider_params set plus legacy clear must fail");
+    .expect_err("retired clear_provider_params field must fail closed");
     assert!(
         err.to_string().contains("clear_provider_params"),
         "unexpected error: {err}"
@@ -233,7 +247,7 @@ fn legacy_set_and_clear_payloads_fail_at_boundary() {
         },
         "clear_auth_binding": true,
     }))
-    .expect_err("auth_binding set plus legacy clear must fail");
+    .expect_err("retired clear_auth_binding field must fail closed");
     assert!(
         err.to_string().contains("clear_auth_binding"),
         "unexpected error: {err}"

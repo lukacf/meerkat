@@ -133,13 +133,21 @@ def main() -> int:
         return 1
 
     method_overview_text = method_overview_match.group(1)
-    docs_methods = {
-        m
-        for m in re.findall(
-            r"\|\s*`([^`]+)`\s*\|\s*[^|]+\s*\|",
-            method_overview_text,
-        )
-    }
+    # Parse the overview table row-wise: split each row on unescaped pipes and
+    # take the first cell as the method name. (A naive "backticked token
+    # followed by a pipe" regex would also match the typed Params/Result
+    # columns.)
+    docs_methods: set[str] = set()
+    for line in method_overview_text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [c.strip() for c in re.split(r"(?<!\\)\|", stripped)[1:-1]]
+        if not cells or cells[0] == "Method" or set(cells[0]) <= set("-: "):
+            continue
+        cell_match = re.match(r"^`([^`]+)`$", cells[0])
+        if cell_match:
+            docs_methods.add(cell_match.group(1))
 
     failures = {
         "Router methods missing from rpc_catalog.rs:": sorted(

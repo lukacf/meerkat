@@ -591,6 +591,41 @@ impl InprocRegistry {
         .await
     }
 
+    /// Namespace-scoped variant of
+    /// [`Self::send_to_pubkey_any_namespace_with_id_wait`]: the destination is
+    /// resolved exactly once, *inside* `namespace`, and that resolved sender is
+    /// the delivery target.
+    ///
+    /// This is the single-resolution send for namespace-isolated routers. The
+    /// namespace is the delivery authority, so the destination must not be
+    /// re-derived from the global registry between an isolation check and the
+    /// inbox handoff — a second any-namespace lookup would open a window where
+    /// the peer re-registers elsewhere and delivery crosses the namespace
+    /// boundary.
+    pub(crate) async fn send_to_pubkey_in_namespace_with_id_wait(
+        &self,
+        namespace: &str,
+        from_keypair: &Keypair,
+        to_pubkey: &PubKey,
+        envelope_id: Uuid,
+        kind: MessageKind,
+        sign_envelope: bool,
+    ) -> Result<uuid::Uuid, InprocSendError> {
+        let sender = self
+            .get_by_pubkey_in_namespace(namespace, to_pubkey)
+            .ok_or_else(|| InprocSendError::PeerNotFound(to_pubkey.to_peer_id().to_string()))?;
+
+        Self::deliver_to_sender_wait(
+            from_keypair,
+            *to_pubkey,
+            sender,
+            envelope_id,
+            kind,
+            sign_envelope,
+        )
+        .await
+    }
+
     /// Send a message directly to an inproc peer within a namespace.
     pub fn send_with_signature_in_namespace(
         &self,

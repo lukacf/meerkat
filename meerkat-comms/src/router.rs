@@ -538,15 +538,19 @@ impl Router {
     ///
     /// `CoreCommsConfig.inproc_namespace` is the namespace-isolation OPT-IN.
     /// When it is configured (`Some(ns)`) the namespace is the delivery
-    /// authority: the destination pubkey must have a live inproc owner *in that
-    /// namespace* or we fail closed with [`SendError::PeerNotFound`] rather than
-    /// crossing namespaces (#242 — no cross-namespace delivery). When it is NOT
-    /// configured (`None`) no isolation was promised, so none is imposed — the
-    /// legacy any-namespace resolution stands. Coercing an absent namespace to a
-    /// synthetic `""` namespace here would wrongly partition default-namespace
-    /// peers that legitimately share a process (e.g. an in-process mob member
-    /// and its runtime bridge), so the typed `None` is respected as
-    /// "unconstrained", not as a distinct namespace.
+    /// authority: the destination is resolved exactly once, *inside* that
+    /// namespace, and that resolution is the delivery target — or we fail
+    /// closed with [`SendError::PeerNotFound`] rather than crossing namespaces
+    /// (#242 — no cross-namespace delivery). Resolution is not re-derived from
+    /// the global registry after the namespace check (a second any-namespace
+    /// lookup would open a re-registration window where delivery crosses the
+    /// boundary the check just enforced). When it is NOT configured (`None`)
+    /// no isolation was promised, so none is imposed — the legacy
+    /// any-namespace resolution stands, failing closed on ambiguity. Coercing
+    /// an absent namespace to a synthetic `""` namespace here would wrongly
+    /// partition default-namespace peers that legitimately share a process
+    /// (e.g. an in-process mob member and its runtime bridge), so the typed
+    /// `None` is respected as "unconstrained", not as a distinct namespace.
     async fn send_inproc_in_namespace(
         &self,
         peer: &TrustedPeer,
@@ -554,27 +558,29 @@ impl Router {
         dest: PeerId,
     ) -> Result<SendOutcome, SendError> {
         let registry = InprocRegistry::global();
-        if let Some(namespace) = self.inproc_namespace.as_deref()
-            && registry
-                .get_by_pubkey_in_namespace(namespace, &peer.pubkey)
-                .is_none()
-        {
-            return Err(SendError::PeerNotFound(dest));
-        }
-        // The pubkey is confirmed live in our namespace. Delivery itself still
-        // fails closed if the canonical identity is ambiguously live across
-        // namespaces (see `get_by_pubkey_any_namespace`), so no cross-namespace
-        // misdelivery is possible.
-        let envelope_id = registry
-            .send_to_pubkey_any_namespace_with_id_wait(
-                &self.keypair,
-                &peer.pubkey,
-                envelope.id,
-                envelope.kind,
-                self.require_peer_auth,
-            )
-            .await
-            .map_err(|err| map_inproc_send_error(err, dest))?;
+        let envelope_id = match self.inproc_namespace.as_deref() {
+            Some(namespace) => registry
+                .send_to_pubkey_in_namespace_with_id_wait(
+                    namespace,
+                    &self.keypair,
+                    &peer.pubkey,
+                    envelope.id,
+                    envelope.kind,
+                    self.require_peer_auth,
+                )
+                .await
+                .map_err(|err| map_inproc_send_error(err, dest))?,
+            None => registry
+                .send_to_pubkey_any_namespace_with_id_wait(
+                    &self.keypair,
+                    &peer.pubkey,
+                    envelope.id,
+                    envelope.kind,
+                    self.require_peer_auth,
+                )
+                .await
+                .map_err(|err| map_inproc_send_error(err, dest))?,
+        };
         // Inproc delivery is a direct inbox handoff: there is no ACK round-trip,
         // so we never claim the envelope was acked.
         Ok(SendOutcome {
@@ -880,6 +886,97 @@ mod tests {
 
         // Clean up only our own registration; never `clear()` the shared
         // process-global registry.
+        registry.unregister_in_namespace(&namespace_b, &receiver_pubkey);
+    }
+
+    /// Single-resolution invariant: when the router is namespace-scoped, the
+    /// destination is resolved exactly once *inside* that namespace and that
+    /// resolution is the delivery target. A peer whose pubkey is live in OUR
+    /// namespace AND in a foreign namespace must receive the envelope on the
+    /// in-namespace inbox (and never on the foreign one). The former
+    /// precheck-then-re-resolve shape failed closed on this ambiguity and
+    /// opened a re-registration window between check and delivery.
+    #[tokio::test]
+    async fn inproc_send_delivers_to_own_namespace_when_pubkey_live_elsewhere_too() {
+        use crate::classify::test_support;
+
+        let registry = InprocRegistry::global();
+        let suffix = Uuid::new_v4().simple().to_string();
+        let namespace_a = format!("realm-a-{suffix}");
+        let namespace_b = format!("realm-b-{suffix}");
+
+        // ONE keypair registered in BOTH namespaces with distinct inboxes.
+        let receiver_kp = Keypair::generate();
+        let receiver_pubkey = receiver_kp.public_key();
+        let receiver_pubkey_bytes = *receiver_pubkey.as_bytes();
+        let (mut inbox_a, sender_a) = Inbox::new_classified(test_support::classification_context(
+            TrustedPeers::new(),
+            false,
+        ));
+        let (mut inbox_b, sender_b) = Inbox::new_classified(test_support::classification_context(
+            TrustedPeers::new(),
+            false,
+        ));
+        registry.register_with_meta_in_namespace(
+            &namespace_a,
+            "receiver-a",
+            receiver_pubkey,
+            sender_a,
+            PeerMeta::default(),
+        );
+        registry.register_with_meta_in_namespace(
+            &namespace_b,
+            "receiver-b",
+            receiver_pubkey,
+            sender_b,
+            PeerMeta::default(),
+        );
+
+        let (_inbox, inbox_sender) = Inbox::new();
+        let router = Router::new(
+            Keypair::generate(),
+            TrustedPeers::new(),
+            CommsConfig::default(),
+            inbox_sender,
+            false,
+        )
+        .with_inproc_namespace(Some(namespace_a.clone()));
+
+        let peer_id = PeerId::from_ed25519_pubkey(&receiver_pubkey_bytes);
+        router
+            .add_trusted_peer_with_peer_id(
+                peer_id,
+                peer("receiver", receiver_pubkey_bytes, "inproc://receiver"),
+                GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection,
+                false,
+            )
+            .expect("trust add");
+
+        let result = router
+            .send(
+                peer_id,
+                MessageKind::Message {
+                    body: "deliver in-namespace".to_string(),
+                    blocks: None,
+                    handling_mode: None,
+                },
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "namespace-scoped send must deliver via the in-namespace resolution \
+             even when the pubkey is also live elsewhere, got {result:?}"
+        );
+        assert!(
+            !inbox_a.try_drain_classified().is_empty(),
+            "envelope must arrive on the in-namespace inbox"
+        );
+        assert!(
+            inbox_b.try_drain_classified().is_empty(),
+            "envelope must never arrive on the foreign-namespace inbox"
+        );
+
+        registry.unregister_in_namespace(&namespace_a, &receiver_pubkey);
         registry.unregister_in_namespace(&namespace_b, &receiver_pubkey);
     }
 

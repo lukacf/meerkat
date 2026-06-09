@@ -68,11 +68,17 @@ pub struct ArchiveSessionParams {
 }
 
 /// Parameters for `session/inject_context`.
+///
+/// The injected body is the typed [`CoreRenderable`] owner rather than a bare
+/// `text` string: surfaces parse their inbound payload into the renderable at
+/// the ingress boundary and the handler threads it straight through to
+/// `AppendSystemContextRequest.content`. A plain-text client payload still
+/// deserializes via `CoreRenderable`'s tagged `text` variant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct InjectSystemContextParams {
     pub session_id: String,
-    pub text: String,
+    pub content: meerkat_core::lifecycle::run_primitive::CoreRenderable,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

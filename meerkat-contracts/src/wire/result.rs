@@ -91,6 +91,76 @@ impl From<RunResult> for WireRunResult {
     }
 }
 
+/// A single external tool call the agent is blocked on while
+/// [`WireCallbackPending`] is in effect.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WirePendingToolCall {
+    /// Name of the external tool the agent is waiting on.
+    pub tool_name: String,
+    /// Raw arguments the agent passed to the tool.
+    #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
+    pub args: serde_json::Value,
+}
+
+/// Canonical typed contract for a turn that suspended on external tool
+/// callbacks (`AgentError::CallbackPending`).
+///
+/// Pending state is a terminal-control fact, not a successful run: the agent
+/// is parked awaiting tool results that the caller must supply before
+/// resuming. Surfaces (CLI, MCP) serialize this contract instead of
+/// hand-building a success-looking JSON envelope, so the `status` discriminant
+/// and pending-tool list are schema-emitted and consistent across surfaces.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireCallbackPending {
+    /// Stable discriminant for callers that route on a flat status string.
+    /// Always serializes to `"pending_tool_call"`.
+    pub status: WireCallbackPendingStatus,
+    /// Session the pending turn belongs to.
+    pub session_id: SessionId,
+    /// Resolved external session reference, when the surface assigns one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_ref: Option<String>,
+    /// Whether the session was created by the request that suspended.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub session_created: bool,
+    /// Whether the session can be resumed once tool results are supplied.
+    pub resumable: bool,
+    /// The external tool calls the agent is blocked on.
+    pub pending_tool_calls: Vec<WirePendingToolCall>,
+}
+
+impl WireCallbackPending {
+    /// Build a pending contract for a single blocked tool call.
+    pub fn single(
+        session_id: SessionId,
+        session_ref: Option<String>,
+        session_created: bool,
+        resumable: bool,
+        tool_name: String,
+        args: serde_json::Value,
+    ) -> Self {
+        Self {
+            status: WireCallbackPendingStatus::PendingToolCall,
+            session_id,
+            session_ref,
+            session_created,
+            resumable,
+            pending_tool_calls: vec![WirePendingToolCall { tool_name, args }],
+        }
+    }
+}
+
+/// Discriminant for [`WireCallbackPending`]. A dedicated enum so the wire
+/// `status` field is a typed closed value rather than a free-form string.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireCallbackPendingStatus {
+    PendingToolCall,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

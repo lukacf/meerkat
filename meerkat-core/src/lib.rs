@@ -149,9 +149,10 @@ pub use completion_feed::{
     CompletionFeed, CompletionSeq,
 };
 pub use config::{
-    AgentConfig, BudgetConfig, CallTimeoutOverride, CommsAuthMode, CommsRuntimeConfig,
-    CommsRuntimeMode, Config, ConfigDelta, ConfigError, ConfigScope, HookEntryConfig,
-    HookRunOverrides, HookRuntimeConfig, HookRuntimeKind, HooksConfig, LimitsConfig, ModelDefaults,
+    AgentConfig, BudgetConfig, CallTimeoutOverride, CommandRuntimeConfig, CommsAuthMode,
+    CommsRuntimeConfig, CommsRuntimeMode, Config, ConfigDelta, ConfigError, ConfigScope,
+    HookAdapterConfig, HookEntryConfig, HookInProcessHandlerId, HookInProcessRuntimeConfig,
+    HookRunOverrides, HookRuntimeKind, HooksConfig, HttpRuntimeConfig, LimitsConfig, ModelDefaults,
     PlainEventSource, ProviderToolsConfig, RetryConfig, SelfHostedApiStyle, SelfHostedConfig,
     SelfHostedModelConfig, SelfHostedServerConfig, SelfHostedTransport, ShellDefaults,
     StorageConfig, StoreConfig, ToolsConfig,
@@ -169,10 +170,11 @@ pub use error::{AgentError, ToolError};
 pub use event::{
     AgentErrorClass, AgentErrorReport, AgentEvent, AssistantImageEvent, BudgetType,
     CompactionFailureReason, EventEnvelope, EventSourceIdentity, ExternalToolDelta,
-    ExternalToolDeltaPhase, ScopedAgentEvent, SkillResolutionFailureReason, StreamScopeFrame,
-    ToolCallArguments, ToolCallArgumentsError, ToolConfigChangeOperation, ToolConfigChangeStatus,
-    ToolConfigChangedPayload, TurnErrorMetadata, VerboseEventConfig, agent_event_type,
-    compare_event_envelopes, format_verbose_event, format_verbose_event_with_config,
+    ExternalToolDeltaPhase, InteractionFailureReason, ScopedAgentEvent,
+    SkillResolutionFailureReason, StreamScopeFrame, ToolCallArguments, ToolCallArgumentsError,
+    ToolConfigChangeOperation, ToolConfigChangeStatus, ToolConfigChangedPayload, TurnErrorMetadata,
+    VerboseEventConfig, agent_event_type, compare_event_envelopes, format_verbose_event,
+    format_verbose_event_with_config,
 };
 pub use event_injector::{EventInjector, EventInjectorError};
 pub use event_tap::{
@@ -191,9 +193,9 @@ pub use handles::{
 };
 pub use hooks::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookExecutionMode,
-    HookExecutionReport, HookFailurePolicy, HookId, HookInvocation, HookLlmRequest,
-    HookLlmResponse, HookOutcome, HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode,
-    HookRevision, HookToolCall, HookToolResult, default_failure_policy,
+    HookExecutionReport, HookFailurePolicy, HookFailureReason, HookId, HookInvocation,
+    HookLlmRequest, HookLlmResponse, HookOutcome, HookPatch, HookPatchEnvelope, HookPoint,
+    HookReasonCode, HookRevision, HookToolCall, HookToolResult, default_failure_policy,
 };
 pub use image_content::{
     MissingBlobBehavior, collect_blob_ids_from_blocks, collect_blob_ids_from_messages,
@@ -320,8 +322,8 @@ pub use types::{
     ArtifactRef, AssistantBlock, AssistantMessage, BlockAssistantMessage, CommsNoticeKind,
     ContentBlock, ContentInput, ExtractionError, HandlingMode, ImageData, MemoryIndexExclusion,
     MemoryIndexableContent, Message, OutputSchema, ProviderMeta, RunResult,
-    SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, SessionId, StopReason, SystemMessage,
-    SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage,
+    SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, ServerToolKind, SessionId, StopReason,
+    SystemMessage, SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage,
     SystemNoticePeer, SystemPromptMutationKind, ToolCall, ToolCallIter, ToolCallView, ToolDef,
     ToolIdentity, ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind,
     TranscriptSource, TranscriptUserRole, Usage, UserMessage, VideoData,

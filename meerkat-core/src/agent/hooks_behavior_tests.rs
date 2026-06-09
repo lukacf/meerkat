@@ -292,7 +292,7 @@ impl HookEngine for TestHookEngine {
                 decision: decision.clone(),
                 patches: Vec::new(),
                 published_patches: vec![],
-                error: None,
+                failure_reason: None,
                 duration_ms: Some(0),
             }]
         };

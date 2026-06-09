@@ -333,7 +333,7 @@ impl HookEngine for DenyNextPreLlmHookEngine {
                 decision: Some(decision.clone()),
                 patches: Vec::new(),
                 published_patches: Vec::new(),
-                error: None,
+                failure_reason: None,
                 duration_ms: None,
             }],
             decision: Some(decision),
@@ -1677,7 +1677,9 @@ async fn test_append_system_context_stages_dedupes_and_conflicts_per_session() {
         .clone();
 
     let request = AppendSystemContextRequest {
-        text: "Observe the orchestrator handoff.".to_string(),
+        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+            "Observe the orchestrator handoff.".to_string(),
+        ),
         source: Some("mob".to_string()),
         idempotency_key: Some("ctx-1".to_string()),
         source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -1700,7 +1702,9 @@ async fn test_append_system_context_stages_dedupes_and_conflicts_per_session() {
         .append_system_context(
             &session_id,
             AppendSystemContextRequest {
-                text: "Different content".to_string(),
+                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                    "Different content".to_string(),
+                ),
                 source: Some("mob".to_string()),
                 idempotency_key: Some("ctx-1".to_string()),
                 source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -1758,7 +1762,9 @@ async fn test_staged_system_context_applies_at_next_llm_boundary() {
         .append_system_context(
             &session_id,
             AppendSystemContextRequest {
-                text: "You are coordinating with an external orchestrator.".to_string(),
+                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                    "You are coordinating with an external orchestrator.".to_string(),
+                ),
                 source: Some("mob".to_string()),
                 idempotency_key: Some("ctx-boundary".to_string()),
                 source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -1851,7 +1857,9 @@ async fn test_staged_system_context_is_not_replayed_on_later_turns() {
         .append_system_context(
             &session_id,
             AppendSystemContextRequest {
-                text: "You are coordinating with an external orchestrator.".to_string(),
+                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                    "You are coordinating with an external orchestrator.".to_string(),
+                ),
                 source: Some("mob".to_string()),
                 idempotency_key: Some("ctx-boundary-replay".to_string()),
                 source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -1928,7 +1936,9 @@ async fn test_staged_system_context_appended_during_active_turn_waits_for_next_t
         .append_system_context(
             &session_id,
             AppendSystemContextRequest {
-                text: "Late staged context".to_string(),
+                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                    "Late staged context".to_string(),
+                ),
                 source: Some("mob".to_string()),
                 idempotency_key: Some("ctx-during-active-turn".to_string()),
                 source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -1994,7 +2004,9 @@ async fn test_pre_llm_denied_turn_does_not_consume_staged_system_context() {
         .append_system_context(
             &session_id,
             AppendSystemContextRequest {
-                text: "You are coordinating with an external orchestrator.".to_string(),
+                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                    "You are coordinating with an external orchestrator.".to_string(),
+                ),
                 source: Some("mob".to_string()),
                 idempotency_key: Some("ctx-pre-llm-deny".to_string()),
                 source_kind: meerkat_core::session::SystemContextSource::Normal,

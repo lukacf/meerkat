@@ -160,6 +160,10 @@ enum SessionCommand {
         appends: Vec<PendingSystemContextAppend>,
         reply_tx: oneshot::Sender<()>,
     },
+    RecordLiveTerminalError {
+        cause: meerkat_core::live_adapter::LiveAdapterErrorCode,
+        reply_tx: oneshot::Sender<()>,
+    },
     AppendExternalUserContent {
         content: ContentInput,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
@@ -1496,7 +1500,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .map(|append| {
                 (
                     AppendSystemContextRequest {
-                        text: append.text,
+                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                            append.text,
+                        ),
                         source: append.source,
                         idempotency_key: append.idempotency_key,
                         source_kind: append.source_kind,
@@ -1599,6 +1605,40 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         handle
             .command_tx
             .send(SessionCommand::PublishRuntimeSystemContextEvents { appends, reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx.await.map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "Session task dropped the reply channel".to_string(),
+            ))
+        })
+    }
+
+    /// Record a typed live-adapter terminal error onto the session's owned
+    /// event stream.
+    ///
+    /// Routes the typed [`LiveAdapterErrorCode`] through the session task so it
+    /// is stamped and broadcast as a terminal `RunFailed` event to session
+    /// subscribers, instead of being laundered into a warning log + `Ok(())`.
+    ///
+    /// [`LiveAdapterErrorCode`]: meerkat_core::live_adapter::LiveAdapterErrorCode
+    pub async fn record_live_terminal_error(
+        &self,
+        id: &SessionId,
+        cause: meerkat_core::live_adapter::LiveAdapterErrorCode,
+    ) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::RecordLiveTerminalError { cause, reply_tx })
             .await
             .map_err(|_| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(
@@ -3117,6 +3157,29 @@ fn stamp_event_envelope(
     EventEnvelope::new_with_source(source.clone(), *next_seq, None, event)
 }
 
+/// Render a typed [`LiveAdapterErrorCode`] into the human-readable display
+/// projection carried by the `RunFailed` event's `error`/`message` fields.
+///
+/// The typed cause remains authoritative on the wire (it is the source of this
+/// projection); this is purely the display mirror, never the routing fact.
+fn render_live_terminal_error_message(
+    cause: &meerkat_core::live_adapter::LiveAdapterErrorCode,
+) -> String {
+    use meerkat_core::live_adapter::LiveAdapterErrorCode as Code;
+    match cause {
+        Code::ConnectionFailed => "live channel connection failed".to_string(),
+        Code::ConnectionLost => "live channel connection lost".to_string(),
+        Code::ConfigRejected { reason } => {
+            format!("live channel configuration rejected: {reason}")
+        }
+        Code::ProviderError => "live channel provider error".to_string(),
+        Code::AuthenticationFailed => "live channel authentication failed".to_string(),
+        Code::InternalError => "live channel internal error".to_string(),
+        Code::Other { raw } => format!("live channel error: {raw}"),
+        _ => "live channel terminal error".to_string(),
+    }
+}
+
 fn render_runtime_system_context_event_prompt(
     appends: &[PendingSystemContextAppend],
 ) -> Option<String> {
@@ -4060,6 +4123,26 @@ async fn session_task<A: SessionAgent>(
                 );
                 let _ = reply_tx.send(());
             }
+            SessionCommand::RecordLiveTerminalError { cause, reply_tx } => {
+                let message = render_live_terminal_error_message(&cause);
+                let failed = stamp_event_envelope(
+                    &mut next_seq,
+                    &source,
+                    AgentEvent::RunFailed {
+                        session_id: agent.session_id(),
+                        error_class: meerkat_core::event::AgentErrorClass::Terminal,
+                        error: message.clone(),
+                        terminal_cause_kind: None,
+                        error_report: Some(meerkat_core::event::AgentErrorReport {
+                            class: meerkat_core::event::AgentErrorClass::Terminal,
+                            reason: None,
+                            message,
+                        }),
+                    },
+                );
+                let _ = control.session_event_tx.send(failed);
+                let _ = reply_tx.send(());
+            }
             SessionCommand::AppendExternalUserContent { content, reply_tx } => {
                 let result = agent.append_external_user_content(content);
                 if result.is_ok() {
@@ -4741,7 +4824,9 @@ mod runtime_turn_metadata_tests {
                 self.system_context_state
                     .stage_append_with_snapshot(
                         &meerkat_core::service::AppendSystemContextRequest {
-                            text: append.text.clone(),
+                            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                                append.text.clone(),
+                            ),
                             source: append.source.clone(),
                             idempotency_key: append.idempotency_key.clone(),
                             source_kind: append.source_kind,

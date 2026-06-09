@@ -718,8 +718,8 @@ mod tests {
     use super::*;
     use meerkat_core::{
         AssistantImageId, AssistantMessage, BlobId, BlobRef, BlockAssistantMessage, ImageData,
-        MediaType, ProviderImageMetadata, RevisedPromptDisposition, SystemMessage, ToolCall,
-        ToolResult, UserMessage,
+        MediaType, ProviderImageMetadata, RevisedPromptDisposition, ServerToolKind, SystemMessage,
+        ToolCall, ToolResult, UserMessage,
     };
 
     fn sys(text: &str) -> Message {
@@ -779,7 +779,7 @@ mod tests {
                     },
                     AssistantBlock::ServerToolContent {
                         id: None,
-                        name: "web_search".to_string(),
+                        kind: ServerToolKind::WebSearch,
                         content: serde_json::json!({"type": "web_search_call"}),
                         meta: None,
                     },

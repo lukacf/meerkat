@@ -10,7 +10,9 @@ use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
 use meerkat_core::memory::{MemorySearchScope, MemoryStore, MemoryStoreError};
-use meerkat_core::types::{ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind};
+use meerkat_core::types::{
+    ContentBlock, ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind,
+};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -151,16 +153,20 @@ impl AgentToolDispatcher for MemorySearchDispatcher {
                 entry
             })
             .collect();
-        // Bare-array wire shape: the tool returns a list of result objects,
-        // and every test in this module expects `Vec<Value>` via
-        // `serde_json::from_str`. The `0c9acc473` wave-d baseline wrapped
-        // items in `{"results": items}` but that wrapper isn't consumed by
-        // any production caller (only test fixtures that parse as Vec),
-        // and MCP-style tool outputs conventionally emit the list directly
-        // when the result is a list.
-        let payload = Value::Array(items).to_string();
+        // Bare-array wire shape: the tool returns a list of result objects.
+        // Emitted as a typed `ContentBlock::Structured` so the canonical
+        // transcript carries the JSON array shape rather than a stringified
+        // `Text` block. The model-facing text projection is derived from the
+        // JSON, never the other way around. Tests still parse the projection
+        // as `Vec<Value>`. The `0c9acc473` wave-d baseline wrapped items in
+        // `{"results": items}` but that wrapper isn't consumed by any
+        // production caller, and MCP-style tool outputs conventionally emit
+        // the list directly when the result is a list.
+        let block = ContentBlock::structured(&items).map_err(|e| ToolError::ExecutionFailed {
+            message: format!("failed to encode memory_search results: {e}"),
+        })?;
         Ok(meerkat_core::ops::ToolDispatchOutcome::from(
-            ToolResult::new(call.id.to_string(), payload, false),
+            ToolResult::with_blocks(call.id.to_string(), vec![block], false),
         ))
     }
 }

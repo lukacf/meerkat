@@ -3,7 +3,9 @@
 use crate::agent::{Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
 use crate::error::AgentError;
 use crate::event::AgentEvent;
-use crate::hooks::{HookDecision, HookEngineError, HookExecutionReport, HookInvocation};
+use crate::hooks::{
+    HookDecision, HookEngineError, HookExecutionReport, HookFailureReason, HookInvocation,
+};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use tokio::sync::mpsc;
@@ -65,14 +67,15 @@ where
         report.published_patches.append(&mut published);
 
         for outcome in &report.outcomes {
-            if let Some(error) = &outcome.error {
+            if let Some(reason) = &outcome.failure_reason {
                 crate::event_tap::tap_emit(
                     &self.event_tap,
                     event_tx,
                     AgentEvent::HookFailed {
                         hook_id: outcome.hook_id.clone(),
                         point: outcome.point,
-                        error: error.clone(),
+                        reason: reason.clone(),
+                        error: reason.to_string(),
                     },
                 )
                 .await;
@@ -131,6 +134,7 @@ where
                 AgentEvent::HookFailed {
                     hook_id: hook_id.clone(),
                     point: invocation.point,
+                    reason: HookFailureReason::from_engine_error(err),
                     error: err.to_string(),
                 },
             )

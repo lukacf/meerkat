@@ -65,6 +65,7 @@ pub use meerkat_core::{
     ContextStrategy,
     ForkBranch,
     ForkBudgetPolicy,
+    HookAdapterConfig,
     HookCapability,
     HookDecision,
     HookEngine,
@@ -82,7 +83,6 @@ pub use meerkat_core::{
     HookReasonCode,
     HookRevision,
     HookRunOverrides,
-    HookRuntimeConfig,
     HookRuntimeKind,
     HooksConfig,
     // Interaction types

@@ -317,7 +317,7 @@ function handleEvent(event: AgentEvent): string {
     case 'hook_completed':
       return `${event.hook_id}:${event.duration_ms}`;
     case 'hook_failed':
-      return event.error;
+      return event.reason.reason_code;
     case 'hook_denied':
       return `${event.reason_code}:${event.message}`;
     case 'text_delta':
@@ -361,7 +361,7 @@ function handleEvent(event: AgentEvent): string {
     case 'interaction_callback_pending':
       return `${event.tool_name}:${event.interaction_id}`;
     case 'interaction_failed':
-      return event.error;
+      return event.reason.kind;
     case 'stream_truncated':
       return event.reason;
     case 'tool_config_changed':
@@ -377,7 +377,7 @@ function handleEvent(event: AgentEvent): string {
     case 'extraction_failed':
       return event.reason;
     case 'server_tool_content':
-      return event.name;
+      return event.kind.kind;
     case 'assistant_image_appended':
       return event.type;
     case 'transcript_rewrite_committed':

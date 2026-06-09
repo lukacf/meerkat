@@ -20,7 +20,7 @@ use meerkat::{
     MachineSessionArchiveProtocol, OutputSchema, PersistenceBundle, PersistentSessionService,
     ScheduleService, ScheduleToolDispatcher, ToolError, ToolResult,
 };
-use meerkat_contracts::SkillsParams;
+use meerkat_contracts::{RequestLifecycle, SkillsParams};
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::service::{
     CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, ResumeOverrideMask,
@@ -1412,18 +1412,31 @@ fn format_agent_result(
             wrap_tool_payload(payload)
         }
         Err(SessionError::Agent(meerkat::AgentError::CallbackPending { tool_name, args })) => {
-            let payload = json!({
-                "content": [{
-                    "type": "text",
-                    "text": "Agent is waiting for tool results"
-                }],
-                "session_id": session_id.to_string(),
-                "status": "pending_tool_call",
-                "pending_tool_calls": [{
-                    "tool_name": tool_name,
-                    "args": args
-                }]
-            });
+            // Pending state is a typed terminal-control fact, not a success
+            // envelope. Serialize the canonical `WireCallbackPending` contract
+            // rather than hand-building a success-looking JSON object so the
+            // `status` discriminant + pending-tool list stay schema-aligned
+            // across surfaces. The MCP human-readable `content` rides alongside
+            // the contract fields.
+            let pending = meerkat_contracts::WireCallbackPending::single(
+                session_id.clone(),
+                None,
+                false,
+                true,
+                tool_name,
+                args,
+            );
+            let mut payload = serde_json::to_value(&pending)
+                .map_err(|err| format!("Failed to serialize callback pending contract: {err}"))?;
+            if let Value::Object(map) = &mut payload {
+                map.insert(
+                    "content".to_string(),
+                    json!([{
+                        "type": "text",
+                        "text": "Agent is waiting for tool results"
+                    }]),
+                );
+            }
             wrap_tool_payload(payload)
         }
         Err(e) => Err(format!("Agent error: {e}")),
@@ -1537,112 +1550,189 @@ const DEFAULT_STREAM_READ_TIMEOUT_MS: u64 = 5;
 #[cfg(not(test))]
 const DEFAULT_STREAM_READ_TIMEOUT_MS: u64 = 5_000;
 
-fn base_tools_list() -> Vec<Value> {
+/// Typed descriptor for a Meerkat MCP tool.
+///
+/// The descriptor is the single owner of every fact about a base tool:
+/// its wire `name`, the human-readable `description`, the `input_schema`
+/// builder, and — co-located here rather than in a separate string-keyed
+/// catalog — its [`RequestLifecycle`] classification. The rendered
+/// `tools/list` JSON (see [`base_tools_list`]) and the lifecycle lookup (see
+/// [`mcp_tool_request_lifecycle`]) are both read-only projections of this
+/// single typed table, so a tool's lifecycle can never drift from where its
+/// name/description/schema are declared.
+pub struct BaseToolDescriptor {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub input_schema: fn() -> Value,
+    pub request_lifecycle: RequestLifecycle,
+}
+
+/// Empty input schema for tools that take no arguments.
+fn empty_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {},
+        "required": []
+    })
+}
+
+/// The typed descriptor table for the base (always-present) MCP tools.
+///
+/// This is the authority for both the advertised descriptor JSON and the
+/// per-tool request lifecycle. Tools contributed by other crates
+/// (`schedule_tools_list`, `workgraph_tools_list`, the mob/comms surfaces)
+/// are not listed here and therefore resolve to
+/// [`RequestLifecycle::LongRunningObservation`] via
+/// [`mcp_tool_request_lifecycle`].
+fn base_tool_descriptors() -> Vec<BaseToolDescriptor> {
     vec![
-        json!({
-            "name": "meerkat_run",
-            "description": "Run a new Meerkat agent with the given prompt. Returns the agent's response. If tools are provided and the agent requests a tool call, the response will include pending_tool_calls that must be fulfilled via meerkat_resume.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatRunInput>()
-        }),
-        json!({
-            "name": "meerkat_resume",
-            "description": "Resume an existing Meerkat session. Use this to continue a conversation or provide tool results for pending tool calls.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatResumeInput>()
-        }),
-        json!({
-            "name": "meerkat_help",
-            "description": "Ask how to use Meerkat. Runs a help session with the embedded meerkat-platform skill and returns the answer.",
-            "inputSchema": meerkat_tools::schema_for::<meerkat_contracts::HelpRequest>()
-        }),
-        json!({
-            "name": "meerkat_config",
-            "description": "Get or update Meerkat config for this MCP server instance.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatConfigInput>()
-        }),
-        json!({
-            "name": "meerkat_capabilities",
-            "description": "Get the list of capabilities available in this Meerkat runtime.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }),
-        json!({
-            "name": "meerkat_models_catalog",
-            "description": "Get the catalog of supported LLM models with provider grouping, tiers, and parameter schemas.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }),
-        json!({
-            "name": "meerkat_skills",
-            "description": "List or inspect available skills. Use action 'list' to see all skills, or 'inspect' with a typed skill_key and optional source UUID selector to see full content.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSkillsInput>()
-        }),
-        json!({
-            "name": "meerkat_read",
-            "description": "Read current session state.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionIdInput>()
-        }),
-        json!({
-            "name": "meerkat_sessions",
-            "description": "List sessions in the active realm.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionListInput>()
-        }),
-        json!({
-            "name": "meerkat_history",
-            "description": "Read a session's full history.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionHistoryInput>()
-        }),
-        json!({
-            "name": "meerkat_blob_get",
-            "description": "Fetch raw blob bytes and metadata by blob id.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatBlobGetInput>()
-        }),
-        json!({
-            "name": "meerkat_interrupt",
-            "description": "Interrupt an in-flight turn for a session.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionIdInput>()
-        }),
-        json!({
-            "name": "meerkat_archive",
-            "description": "Archive (remove) a session.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionIdInput>()
-        }),
-        json!({
-            "name": "meerkat_mcp_add",
-            "description": "Stage a live MCP server add operation on an active session.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatMcpAddInput>()
-        }),
-        json!({
-            "name": "meerkat_mcp_remove",
-            "description": "Stage a live MCP server removal on an active session.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatMcpRemoveInput>()
-        }),
-        json!({
-            "name": "meerkat_mcp_reload",
-            "description": "Stage a live MCP server reload on an active session.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatMcpReloadInput>()
-        }),
-        json!({
-            "name": "meerkat_event_stream_open",
-            "description": "Open a session-level agent event stream.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionEventStreamOpenInput>()
-        }),
-        json!({
-            "name": "meerkat_event_stream_read",
-            "description": "Read the next item from an open session-level event stream.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionEventStreamReadInput>()
-        }),
-        json!({
-            "name": "meerkat_event_stream_close",
-            "description": "Close a previously opened session-level event stream.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionEventStreamCloseInput>()
-        }),
+        BaseToolDescriptor {
+            name: "meerkat_run",
+            description: "Run a new Meerkat agent with the given prompt. Returns the agent's response. If tools are provided and the agent requests a tool call, the response will include pending_tool_calls that must be fulfilled via meerkat_resume.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatRunInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningPublishOnSuccess,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_resume",
+            description: "Resume an existing Meerkat session. Use this to continue a conversation or provide tool results for pending tool calls.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatResumeInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningPublishOnSuccess,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_help",
+            description: "Ask how to use Meerkat. Runs a help session with the embedded meerkat-platform skill and returns the answer.",
+            input_schema: || meerkat_tools::schema_for::<meerkat_contracts::HelpRequest>(),
+            request_lifecycle: RequestLifecycle::LongRunningPublishOnSuccess,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_config",
+            description: "Get or update Meerkat config for this MCP server instance.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatConfigInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_capabilities",
+            description: "Get the list of capabilities available in this Meerkat runtime.",
+            input_schema: empty_input_schema,
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_models_catalog",
+            description: "Get the catalog of supported LLM models with provider grouping, tiers, and parameter schemas.",
+            input_schema: empty_input_schema,
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_skills",
+            description: "List or inspect available skills. Use action 'list' to see all skills, or 'inspect' with a typed skill_key and optional source UUID selector to see full content.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatSkillsInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_read",
+            description: "Read current session state.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatSessionIdInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_sessions",
+            description: "List sessions in the active realm.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatSessionListInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_history",
+            description: "Read a session's full history.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatSessionHistoryInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_blob_get",
+            description: "Fetch raw blob bytes and metadata by blob id.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatBlobGetInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_interrupt",
+            description: "Interrupt an in-flight turn for a session.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatSessionIdInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_archive",
+            description: "Archive (remove) a session.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatSessionIdInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_mcp_add",
+            description: "Stage a live MCP server add operation on an active session.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatMcpAddInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_mcp_remove",
+            description: "Stage a live MCP server removal on an active session.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatMcpRemoveInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_mcp_reload",
+            description: "Stage a live MCP server reload on an active session.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatMcpReloadInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_event_stream_open",
+            description: "Open a session-level agent event stream.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatSessionEventStreamOpenInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_event_stream_read",
+            description: "Read the next item from an open session-level event stream.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatSessionEventStreamReadInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
+        BaseToolDescriptor {
+            name: "meerkat_event_stream_close",
+            description: "Close a previously opened session-level event stream.",
+            input_schema: || meerkat_tools::schema_for::<MeerkatSessionEventStreamCloseInput>(),
+            request_lifecycle: RequestLifecycle::LongRunningObservation,
+        },
     ]
+}
+
+fn base_tools_list() -> Vec<Value> {
+    base_tool_descriptors()
+        .into_iter()
+        .map(|descriptor| {
+            json!({
+                "name": descriptor.name,
+                "description": descriptor.description,
+                "inputSchema": (descriptor.input_schema)(),
+            })
+        })
+        .collect()
+}
+
+/// Default lifecycle for any MCP tool whose name is not declared in the typed
+/// [`base_tool_descriptors`] table (e.g. schedule/workgraph/mob/comms tools).
+const MCP_TOOL_DEFAULT_LIFECYCLE: RequestLifecycle = RequestLifecycle::LongRunningObservation;
+
+/// Resolve the [`RequestLifecycle`] for a tools/call by name.
+///
+/// Owner-of-record for MCP tool lifecycle: the classification is read directly
+/// off the typed [`BaseToolDescriptor`] co-located with the tool's
+/// name/description/schema, falling back to [`MCP_TOOL_DEFAULT_LIFECYCLE`] for
+/// tools contributed by other surfaces. This replaces the former string-keyed
+/// `meerkat_contracts::MCP_TOOL_REQUEST_LIFECYCLE_CATALOG`.
+pub fn mcp_tool_request_lifecycle(tool_name: &str) -> RequestLifecycle {
+    base_tool_descriptors()
+        .into_iter()
+        .find(|descriptor| descriptor.name == tool_name)
+        .map(|descriptor| descriptor.request_lifecycle)
+        .unwrap_or(MCP_TOOL_DEFAULT_LIFECYCLE)
 }
 
 #[cfg(feature = "mob")]
@@ -4869,6 +4959,54 @@ mod tests {
         {
             assert!(tool_names.contains(&"meerkat_comms_send"));
             assert!(tool_names.contains(&"meerkat_comms_peers"));
+        }
+    }
+
+    #[test]
+    fn base_tool_descriptor_owns_request_lifecycle() {
+        // The typed descriptor table is the single owner of MCP tool lifecycle:
+        // the resolver reads the classification straight off the descriptor
+        // co-located with name/description/schema, and unknown (other-surface)
+        // tools fall back to the default observation lifecycle.
+        assert_eq!(
+            mcp_tool_request_lifecycle("meerkat_help"),
+            RequestLifecycle::LongRunningPublishOnSuccess
+        );
+        assert_eq!(
+            mcp_tool_request_lifecycle("meerkat_run"),
+            RequestLifecycle::LongRunningPublishOnSuccess
+        );
+        assert_eq!(
+            mcp_tool_request_lifecycle("meerkat_resume"),
+            RequestLifecycle::LongRunningPublishOnSuccess
+        );
+        assert_eq!(
+            mcp_tool_request_lifecycle("meerkat_sessions"),
+            RequestLifecycle::LongRunningObservation
+        );
+        // A tool contributed by another surface (not in the typed table) and an
+        // outright-unknown name both resolve to the default.
+        assert_eq!(
+            mcp_tool_request_lifecycle("meerkat_schedule_create"),
+            MCP_TOOL_DEFAULT_LIFECYCLE
+        );
+        assert_eq!(
+            mcp_tool_request_lifecycle("definitely_not_a_tool"),
+            MCP_TOOL_DEFAULT_LIFECYCLE
+        );
+    }
+
+    #[test]
+    fn base_tools_list_projects_every_descriptor() {
+        // The advertised JSON is a faithful projection of the typed descriptor
+        // table — same count, same names, and each carries its schema.
+        let descriptors = base_tool_descriptors();
+        let tools = base_tools_list();
+        assert_eq!(tools.len(), descriptors.len());
+        for (descriptor, tool) in descriptors.iter().zip(tools.iter()) {
+            assert_eq!(tool["name"], descriptor.name);
+            assert_eq!(tool["description"], descriptor.description);
+            assert!(tool["inputSchema"].is_object());
         }
     }
 

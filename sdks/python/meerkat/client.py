@@ -1052,7 +1052,7 @@ class MeerkatClient:
         """Inject system context into a session."""
         params = {
             "session_id": session_id,
-            "text": text,
+            "content": {"type": "text", "text": text},
         }
         if source:
             params["source"] = source

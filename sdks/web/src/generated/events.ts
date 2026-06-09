@@ -124,6 +124,9 @@ export type ContentBlock = {
 } | {
   data: string;
   source: "inline";
+} | {
+  data: unknown;
+  type: "structured";
 };
 
 export type ContentInput = string | ContentBlock[];
@@ -142,11 +145,34 @@ export type GeminiImageMetadata = {
   target_model: string;
 };
 
+export type HookFailureReason = {
+  reason_code: "timeout";
+  timeout_ms: number;
+} | {
+  message: string;
+  reason_code: "execution_failed";
+} | {
+  message: string;
+  reason_code: "config_invalid";
+} | {
+  reason_code: "observe_only_violation";
+};
+
 export type HookId = string;
 
 export type HookPoint = "run_started" | "run_completed" | "run_failed" | "pre_llm_request" | "post_llm_response" | "pre_tool_execution" | "post_tool_execution" | "turn_boundary";
 
 export type HookReasonCode = "policy_violation" | "safety_violation" | "schema_violation" | "timeout" | "runtime_error";
+
+export type InteractionFailureReason = {
+  kind: "cancelled";
+} | {
+  detail: string;
+  kind: "abandoned";
+} | {
+  detail: string;
+  kind: "finalization_failed";
+};
 
 export type InteractionId = string;
 
@@ -214,6 +240,15 @@ export interface SchemaWarning {
   path: string;
   provider: Provider;
 }
+
+export type ServerToolKind = {
+  kind: "web_search";
+} | {
+  kind: "google_search";
+} | {
+  kind: "provider_native";
+  name: string;
+};
 
 export type SessionId = string;
 
@@ -416,9 +451,10 @@ export interface HookCompletedEvent {
 }
 
 export interface HookFailedEvent {
-  error: string;
+  error?: string;
   hook_id: HookId;
   point: HookPoint;
+  reason: HookFailureReason;
   type: "hook_failed";
 }
 
@@ -459,7 +495,7 @@ export interface TextCompleteEvent {
 export interface ServerToolContentEvent {
   content: unknown;
   id?: string | null;
-  name: string;
+  kind: ServerToolKind;
   type: "server_tool_content";
 }
 
@@ -577,8 +613,9 @@ export interface InteractionCallbackPendingEvent {
 }
 
 export interface InteractionFailedEvent {
-  error: string;
+  error?: string;
   interaction_id: InteractionId;
+  reason: InteractionFailureReason;
   type: "interaction_failed";
 }
 

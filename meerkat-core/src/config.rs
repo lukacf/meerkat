@@ -15,7 +15,6 @@ use schemars::JsonSchema;
 use serde::de::Deserializer;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -1704,7 +1703,7 @@ pub struct HookEntryConfig {
     pub failure_policy: Option<HookFailurePolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
-    pub runtime: HookRuntimeConfig,
+    pub runtime: HookAdapterConfig,
 }
 
 impl Default for HookEntryConfig {
@@ -1718,10 +1717,7 @@ impl Default for HookEntryConfig {
             priority: 100,
             failure_policy: None,
             timeout_ms: None,
-            runtime: HookRuntimeConfig::in_process("noop").unwrap_or(HookRuntimeConfig {
-                kind: HookRuntimeKind::InProcess,
-                config: None,
-            }),
+            runtime: HookAdapterConfig::in_process("noop"),
         }
     }
 }
@@ -1790,10 +1786,12 @@ impl Default for HookInProcessRuntimeConfig {
     }
 }
 
-/// Closed set of hook runtime adapters the engine can dispatch to.
+/// Discriminant naming the runtime adapter a [`HookAdapterConfig`] selects.
 ///
-/// Wire format uses snake_case (`in_process`, `command`, `http`) under the
-/// `type` field on [`HookRuntimeConfig`] for backwards compatibility.
+/// This is a pure derivation of the [`HookAdapterConfig`] variant
+/// ([`HookAdapterConfig::kind`]); it carries no payload and exists only for
+/// wire/logging labels and for the `(kind, value)` convenience constructor
+/// [`HookAdapterConfig::from_kind_and_value`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HookRuntimeKind {
     InProcess,
@@ -1828,167 +1826,119 @@ impl std::fmt::Display for HookRuntimeKind {
     }
 }
 
-/// Runtime configuration used by hook adapters.
+/// Typed payload for a [`HookRuntimeKind::Command`] adapter.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct CommandRuntimeConfig {
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
+}
+
+fn default_http_method() -> String {
+    "POST".to_string()
+}
+
+/// Typed payload for a [`HookRuntimeKind::Http`] adapter.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct HttpRuntimeConfig {
+    pub url: String,
+    #[serde(default = "default_http_method")]
+    pub method: String,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: HashMap<String, String>,
+}
+
+/// Closed, typed set of hook runtime adapters the engine can dispatch to.
 ///
-/// The dispatch kind is typed. In-process handlers use
-/// [`HookInProcessRuntimeConfig`]; command and HTTP runtimes keep their
-/// adapter-specific payloads opaque at this boundary.
-#[derive(Debug, Clone)]
-pub struct HookRuntimeConfig {
-    pub kind: HookRuntimeKind,
-    #[allow(clippy::box_collection)]
-    pub config: Option<Box<RawValue>>,
+/// This is the single typed owner of "which runtime adapter and its config".
+/// It is deserialized once at the config-layering boundary; the hook engine
+/// reads the typed variant directly rather than re-parsing an opaque JSON
+/// payload on every execution. A malformed command/HTTP payload therefore fails
+/// closed at config-deserialization time, not at hook-execution time.
+///
+/// Wire format is internally tagged on `type` (`in_process`, `command`,
+/// `http`), with the variant payload flattened alongside the tag, e.g.
+/// `{"type":"command","command":"sh","args":["-c","..."]}`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HookAdapterConfig {
+    InProcess(HookInProcessRuntimeConfig),
+    Command(CommandRuntimeConfig),
+    Http(HttpRuntimeConfig),
 }
 
-impl PartialEq for HookRuntimeConfig {
-    fn eq(&self, other: &Self) -> bool {
-        self.kind == other.kind
-            && self.config.as_ref().map(|raw| raw.get())
-                == other.config.as_ref().map(|raw| raw.get())
-    }
-}
-
-impl HookRuntimeConfig {
-    pub fn new(kind: HookRuntimeKind, config: Option<Value>) -> Result<Self, serde_json::Error> {
-        let config = match config {
-            Some(value) => Some(raw_json_from_value(value)?),
-            None => None,
-        };
-        Ok(Self { kind, config })
+impl HookAdapterConfig {
+    /// Build an in-process adapter referencing a registered handler id.
+    pub fn in_process(handler: impl Into<HookInProcessHandlerId>) -> Self {
+        Self::InProcess(HookInProcessRuntimeConfig::new(handler))
     }
 
-    pub fn in_process(
-        handler: impl Into<HookInProcessHandlerId>,
+    /// Build a command adapter.
+    pub fn command(
+        command: impl Into<String>,
+        args: Vec<String>,
+        env: HashMap<String, String>,
+    ) -> Self {
+        Self::Command(CommandRuntimeConfig {
+            command: command.into(),
+            args,
+            env,
+        })
+    }
+
+    /// Build an HTTP adapter.
+    pub fn http(
+        url: impl Into<String>,
+        method: impl Into<String>,
+        headers: HashMap<String, String>,
+    ) -> Self {
+        Self::Http(HttpRuntimeConfig {
+            url: url.into(),
+            method: method.into(),
+            headers,
+        })
+    }
+
+    /// Deserialize a `(kind, flattened-payload)` pair into the typed adapter.
+    ///
+    /// The payload is the variant's fields without the `type` tag (e.g.
+    /// `{"command":"sh"}` for [`HookRuntimeKind::Command`]); a `None`/`Null`
+    /// payload is treated as an empty object so defaulted fields apply. The
+    /// payload is validated here, at the config boundary, and fails closed on
+    /// an unknown/malformed shape.
+    pub fn from_kind_and_value(
+        kind: HookRuntimeKind,
+        config: Option<Value>,
     ) -> Result<Self, serde_json::Error> {
-        serde_json::to_value(HookInProcessRuntimeConfig::new(handler))
-            .and_then(|config| Self::new(HookRuntimeKind::InProcess, Some(config)))
+        let mut obj = match config {
+            Some(Value::Object(obj)) => obj,
+            Some(Value::Null) | None => Map::new(),
+            Some(other) => {
+                let mut obj = Map::new();
+                obj.insert("config".to_string(), other);
+                obj
+            }
+        };
+        obj.insert("type".to_string(), Value::String(kind.as_str().to_string()));
+        serde_json::from_value(Value::Object(obj))
     }
 
-    pub fn in_process_config(
-        &self,
-    ) -> Result<Option<HookInProcessRuntimeConfig>, serde_json::Error> {
-        if self.kind != HookRuntimeKind::InProcess {
-            return Ok(None);
-        }
-
-        self.config_value()
-            .and_then(serde_json::from_value::<HookInProcessRuntimeConfig>)
-            .map(Some)
-    }
-
-    pub fn config_value(&self) -> Result<Value, serde_json::Error> {
-        match &self.config {
-            Some(raw) => serde_json::from_str(raw.get()),
-            None => Ok(Value::Null),
+    /// Pure-derivation discriminant of this adapter.
+    pub fn kind(&self) -> HookRuntimeKind {
+        match self {
+            Self::InProcess(_) => HookRuntimeKind::InProcess,
+            Self::Command(_) => HookRuntimeKind::Command,
+            Self::Http(_) => HookRuntimeKind::Http,
         }
     }
 }
 
-impl Default for HookRuntimeConfig {
+impl Default for HookAdapterConfig {
     fn default() -> Self {
-        Self::in_process("noop").unwrap_or(Self {
-            kind: HookRuntimeKind::InProcess,
-            config: None,
-        })
+        Self::in_process("noop")
     }
-}
-
-impl Serialize for HookRuntimeConfig {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut map = Map::new();
-        map.insert(
-            "type".to_string(),
-            Value::String(self.kind.as_str().to_string()),
-        );
-
-        if let Some(raw) = &self.config {
-            let parsed: Value =
-                serde_json::from_str(raw.get()).map_err(serde::ser::Error::custom)?;
-            match parsed {
-                Value::Object(obj) => {
-                    for (key, value) in obj {
-                        map.insert(key, value);
-                    }
-                }
-                other => {
-                    map.insert("config".to_string(), other);
-                }
-            }
-        }
-
-        Value::Object(map).serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for HookRuntimeConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = Value::deserialize(deserializer)?;
-        let mut obj = value
-            .as_object()
-            .cloned()
-            .ok_or_else(|| serde::de::Error::custom("hook runtime must be an object"))?;
-
-        let kind_str = obj
-            .remove("type")
-            .and_then(|value| value.as_str().map(ToOwned::to_owned))
-            .ok_or_else(|| {
-                serde::de::Error::custom("hook runtime missing required field 'type'")
-            })?;
-        let kind = HookRuntimeKind::parse(&kind_str).ok_or_else(|| {
-            serde::de::Error::custom(format!("unsupported hook runtime '{kind_str}'"))
-        })?;
-
-        let config_value = if let Some(explicit) = obj.remove("config") {
-            if obj.is_empty() {
-                explicit
-            } else {
-                obj.insert("config".to_string(), explicit);
-                Value::Object(obj)
-            }
-        } else if obj.is_empty() {
-            Value::Null
-        } else {
-            Value::Object(obj)
-        };
-
-        let config = if config_value.is_null() {
-            None
-        } else {
-            Some(raw_json_from_value(config_value).map_err(serde::de::Error::custom)?)
-        };
-
-        Ok(Self { kind, config })
-    }
-}
-
-impl JsonSchema for HookRuntimeConfig {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "HookRuntimeConfig".into()
-    }
-
-    fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({
-            "type": "object",
-            "required": ["type"],
-            "properties": {
-                "type": { "type": "string" },
-                "handler": { "type": "string" },
-                "name": { "type": "string", "deprecated": true },
-                "config": {}
-            },
-            "additionalProperties": true
-        })
-    }
-}
-
-fn raw_json_from_value(value: Value) -> Result<Box<RawValue>, serde_json::Error> {
-    RawValue::from_string(serde_json::to_string(&value)?)
 }
 
 /// Config scope for persisted settings.

@@ -1288,6 +1288,13 @@ pub enum PeerLifecycleKind {
     PeerRetired,
     #[serde(rename = "mob.peer_unwired")]
     PeerUnwired,
+    /// Supervisor-directed dismissal: a typed terminal lifecycle signal that
+    /// retires a live executor. The dismissal authority is the supervisor /
+    /// runtime drain-lifecycle owner, never a peer-authored message body — a
+    /// "DISMISS" string in a peer message is ordinary content, not a control
+    /// signal.
+    #[serde(rename = "mob.dismiss")]
+    Dismiss,
 }
 
 impl PeerLifecycleKind {
@@ -1296,6 +1303,7 @@ impl PeerLifecycleKind {
             Self::PeerAdded => "mob.peer_added",
             Self::PeerRetired => "mob.peer_retired",
             Self::PeerUnwired => "mob.peer_unwired",
+            Self::Dismiss => "mob.dismiss",
         }
     }
 }

@@ -5,7 +5,7 @@
 use crate::error::{
     AgentError, LlmFailureReason, LlmProviderErrorKind, LlmProviderErrorRetryability,
 };
-use crate::hooks::{HookId, HookPoint, HookReasonCode};
+use crate::hooks::{HookFailureReason, HookId, HookPoint, HookReasonCode};
 use crate::interaction::InteractionId;
 use crate::ops_lifecycle::OperationTerminalOutcome;
 use crate::retry::LlmRetrySchedule;
@@ -13,7 +13,7 @@ use crate::session::TranscriptRewriteRecord;
 use crate::skills::{CapabilityId, SkillError, SkillKey};
 use crate::time_compat::SystemTime;
 use crate::turn_execution_authority::{TurnTerminalCauseKind, TurnTerminalOutcome};
-use crate::types::{ContentBlock, ContentInput, SessionId, StopReason, Usage};
+use crate::types::{ContentBlock, ContentInput, ServerToolKind, SessionId, StopReason, Usage};
 use serde::de::{self, DeserializeOwned};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
@@ -1526,6 +1526,61 @@ impl std::fmt::Display for CompactionFailureReason {
     }
 }
 
+/// Typed reason an interaction-scoped run failed (terminal event for tap
+/// subscribers).
+///
+/// Mirrors [`CompactionFailureReason`]: the variant is the typed owner of the
+/// failure cause; the human-readable string is a [`Display`] derivation that
+/// the `InteractionFailed` event carries as a fused mirror, never as the
+/// authoritative cause.
+///
+/// [`Display`]: std::fmt::Display
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum InteractionFailureReason {
+    /// The interaction was cancelled before completing.
+    Cancelled,
+    /// The interaction was abandoned (runtime terminated, dropped, or abandoned
+    /// with an error) before completing.
+    Abandoned {
+        /// Display projection of the abandonment detail.
+        detail: String,
+    },
+    /// The interaction's main run completed but turn finalization failed.
+    FinalizationFailed {
+        /// Display projection of the finalization error.
+        detail: String,
+    },
+}
+
+impl InteractionFailureReason {
+    /// Abandonment failure carrying the display detail.
+    pub fn abandoned(detail: impl Into<String>) -> Self {
+        Self::Abandoned {
+            detail: detail.into(),
+        }
+    }
+
+    /// Finalization failure carrying the display detail.
+    pub fn finalization_failed(detail: impl Into<String>) -> Self {
+        Self::FinalizationFailed {
+            detail: detail.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for InteractionFailureReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => write!(f, "cancelled"),
+            Self::Abandoned { detail } => write!(f, "{detail}"),
+            Self::FinalizationFailed { detail } => write!(f, "{detail}"),
+        }
+    }
+}
+
 /// Events emitted during agent execution
 ///
 /// These events form the streaming API for consumers.
@@ -1601,6 +1656,11 @@ pub enum AgentEvent {
     HookFailed {
         hook_id: HookId,
         point: HookPoint,
+        /// Typed failure cause.
+        reason: HookFailureReason,
+        /// Display projection of `reason`. Fused mirror retained for consumers
+        /// still reading a string error.
+        #[serde(default)]
         error: String,
     },
 
@@ -1634,7 +1694,11 @@ pub enum AgentEvent {
     ServerToolContent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
-        name: String,
+        /// Typed provider server-tool kind, carried as a nested tagged object
+        /// (`{"kind":"web_search"}`, or `{"kind":"provider_native","name":...}`
+        /// for the verbatim escape hatch). Nested (not flattened) so SDK
+        /// codegen emits a typed `kind` field instead of an inlined enum.
+        kind: ServerToolKind,
         content: Value,
     },
 
@@ -1776,6 +1840,11 @@ pub enum AgentEvent {
     /// An interaction failed (terminal event for tap subscribers).
     InteractionFailed {
         interaction_id: crate::interaction::InteractionId,
+        /// Typed failure cause.
+        reason: InteractionFailureReason,
+        /// Display projection of `reason`. Fused mirror retained for consumers
+        /// still reading a string error.
+        #[serde(default)]
         error: String,
     },
 
@@ -2586,6 +2655,7 @@ mod tests {
             },
             AgentEvent::InteractionFailed {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+                reason: InteractionFailureReason::abandoned("LLM failure"),
                 error: "LLM failure".to_string(),
             },
             AgentEvent::StreamTruncated {
@@ -3044,6 +3114,7 @@ mod tests {
             AgentEvent::HookFailed {
                 hook_id: HookId::new("hook-1"),
                 point: HookPoint::RunStarted,
+                reason: HookFailureReason::execution_failed("failed"),
                 error: "failed".to_string(),
             },
             AgentEvent::HookDenied {
@@ -3162,6 +3233,7 @@ mod tests {
             },
             AgentEvent::InteractionFailed {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+                reason: InteractionFailureReason::abandoned("failed"),
                 error: "failed".to_string(),
             },
             AgentEvent::StreamTruncated {

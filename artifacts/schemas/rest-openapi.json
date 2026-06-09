@@ -2028,6 +2028,23 @@
               "duration_ms"
             ],
             "type": "object"
+          },
+          {
+            "description": "Structured JSON content returned by a tool, preserved as JSON rather\nthan laundered through a stringified `Text` block.\n\nTools whose result is structured data (lists, records) emit this so the\ncanonical transcript carries the typed JSON shape. The payload is opaque\npass-through JSON (`Box<RawValue>`, the allow-listed §3 pattern shared\nwith `ToolUse` args): Meerkat does not impose a closed schema on\narbitrary tool output. The model-facing text projection is *derived*\nfrom this JSON, never the other way around.",
+            "properties": {
+              "data": {
+                "description": "Provider-opaque structured JSON, parsed at most once by consumers."
+              },
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -3514,12 +3531,21 @@
       },
       "PeerLifecycleKind": {
         "description": "One-way peer lifecycle notification kind.\n\nThese notifications are control-plane topology updates, not correlated\npeer work requests. They intentionally do not create request/response\nlifecycles and must never require an LLM-authored reply.",
-        "enum": [
-          "mob.peer_added",
-          "mob.peer_retired",
-          "mob.peer_unwired"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "mob.peer_added",
+              "mob.peer_retired",
+              "mob.peer_unwired"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "mob.dismiss",
+            "description": "Supervisor-directed dismissal: a typed terminal lifecycle signal that\nretires a live executor. The dismissal authority is the supervisor /\nruntime drain-lifecycle owner, never a peer-authored message body — a\n\"DISMISS\" string in a peer message is ordinary content, not a control\nsignal.",
+            "type": "string"
+          }
+        ]
       },
       "PeerMeta": {
         "description": "Supplementary metadata attached to a peer for discovery.\n\nThe peer's routing name lives in `TrustedPeer.name` / `comms_name`.\n`PeerMeta` carries additional context: what the agent does and\narbitrary key/value labels.\n\n# Serde\n\nBoth fields use `skip_serializing_if`, so `PeerMeta::default()`\nserializes to `{}`.",
@@ -3788,18 +3814,31 @@
       },
       "RestAppendSystemContextRequest": {
         "properties": {
+          "content": {
+            "additionalProperties": true,
+            "description": "Typed CoreRenderable body (tagged by `type`). A plain-text payload is `{\"type\":\"text\",\"text\":\"...\"}`.",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
           "idempotency_key": {
             "type": "string"
           },
           "source": {
             "type": "string"
-          },
-          "text": {
-            "type": "string"
           }
         },
         "required": [
-          "text"
+          "content"
         ],
         "type": "object"
       },
@@ -6274,6 +6313,9 @@
                       "null"
                     ]
                   },
+                  "kind": {
+                    "$ref": "#/components/schemas/WireServerToolKind"
+                  },
                   "meta": {
                     "anyOf": [
                       {
@@ -6283,13 +6325,10 @@
                         "type": "null"
                       }
                     ]
-                  },
-                  "name": {
-                    "type": "string"
                   }
                 },
                 "required": [
-                  "name",
+                  "kind",
                   "content"
                 ],
                 "type": "object"
@@ -6738,6 +6777,21 @@
               "type",
               "media_type",
               "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Structured JSON tool output, materialized as inline JSON for SDK\nconsumers (the core side keeps it as opaque `Box<RawValue>`).",
+            "properties": {
+              "data": true,
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
             ],
             "type": "object"
           },
@@ -7466,6 +7520,67 @@
           "destroyed"
         ],
         "type": "string"
+      },
+      "WireServerToolKind": {
+        "description": "Wire projection of `meerkat_core::ServerToolKind`.\n\nMirrors the typed semantic owner of a provider-executed tool. The core enum\nis `#[non_exhaustive]`; a future semantic kind that lacks an explicit arm in\nthe forward `From` surfaces as `Unknown { debug }` rather than silently\ncollapsing into a plausible-but-wrong kind. SDK consumers route on the\n`kind` discriminator and treat `unknown` as unrecognized.\n\n**When a new core variant is added, add an explicit arm in the forward\n`From` impl above the wildcard — `Unknown` is the floor, not the\ndestination.**",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "web_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "google_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "provider_native",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "debug": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "debug"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WireSessionHistory": {
         "description": "Full session history in canonical wire format.\n\nNot `PartialEq`: `messages` carries `WireSessionMessage` which\ntransitively holds opaque tool-call args; compare via serialization\nround-trip rather than field equality.",

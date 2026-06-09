@@ -27,7 +27,7 @@ use meerkat_core::comms::{
     PeerSendability, SendError, SendReceipt, TrustedPeerDescriptor,
 };
 use meerkat_core::error::ToolError;
-use meerkat_core::event::{AgentEvent, EventEnvelope};
+use meerkat_core::event::{AgentEvent, EventEnvelope, InteractionFailureReason};
 use meerkat_core::interaction::InteractionId;
 use meerkat_core::ops::ToolDispatchOutcome;
 use meerkat_core::service::{
@@ -2242,6 +2242,7 @@ impl SubscribableInjector for CountingInjector {
             let event = if fail {
                 AgentEvent::InteractionFailed {
                     interaction_id: interaction_id_for_task,
+                    reason: InteractionFailureReason::abandoned("mock flow turn failure"),
                     error: "mock flow turn failure".to_string(),
                 }
             } else {
@@ -27501,7 +27502,9 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
                 self.append_system_context(
                     session_id,
                     AppendSystemContextRequest {
-                        text: append.text,
+                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                            append.text,
+                        ),
                         source: append.source,
                         idempotency_key: append.idempotency_key,
                         source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -27594,7 +27597,9 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
                 appends
                     .into_iter()
                     .map(|append| AppendSystemContextRequest {
-                        text: append.text,
+                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                            append.text,
+                        ),
                         source: append.source,
                         idempotency_key: append.idempotency_key,
                         source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -27626,7 +27631,9 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             self.append_system_context(
                 session_id,
                 AppendSystemContextRequest {
-                    text: append.text,
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        append.text,
+                    ),
                     source: append.source,
                     idempotency_key: append.idempotency_key,
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -28668,7 +28675,7 @@ async fn test_running_peer_message_to_autonomous_member_live_injects_during_curr
                 .skip(baseline_context_appends)
                 .any(|append| {
                     append
-                        .text
+                        .text()
                         .contains("body: second peer message while running")
                 })
             {
@@ -28810,7 +28817,7 @@ async fn test_active_autonomous_direct_steer_ack_waits_for_live_admission_not_tu
     let appends = service.applied_runtime_context_appends(&sid_worker).await;
     assert!(
         appends.iter().skip(context_baseline).any(|append| append
-            .text
+            .text()
             .contains("second direct steer must stage before ack")),
         "active direct steer ack should imply the steer was staged for the live boundary; appends={appends:?}"
     );
@@ -28918,7 +28925,7 @@ async fn test_active_internal_submit_work_steer_live_injects_for_identity_bridge
     let appends = service.applied_runtime_context_appends(&sid_worker).await;
     assert!(
         appends.iter().skip(context_baseline).any(|append| append
-            .text
+            .text()
             .contains("internal identity bridge steer must stage live")),
         "internal active steer should stage for the live boundary; appends={appends:?}"
     );
@@ -29032,7 +29039,7 @@ async fn test_turn_driven_submit_work_steer_admits_while_active_runtime_apply_bl
     let appends = service.applied_runtime_context_appends(&sid_worker).await;
     assert!(
         appends.iter().skip(context_baseline).any(|append| append
-            .text
+            .text()
             .contains("turn-driven active steer must stage while apply is blocked")),
         "turn-driven active steer should stage for the live boundary before the active apply releases; appends={appends:?}"
     );
@@ -29130,7 +29137,7 @@ async fn test_member_send_steer_admits_while_active_runtime_apply_blocks() {
     let appends = service.applied_runtime_context_appends(&sid_worker).await;
     assert!(
         appends.iter().skip(context_baseline).any(|append| append
-            .text
+            .text()
             .contains("member send active steer must stage while apply is blocked")),
         "member-send active steer should stage for the live boundary before the active apply releases; appends={appends:?}"
     );
@@ -29267,7 +29274,7 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
                 .iter()
                 .skip(requester_context_baseline)
                 .any(|append| {
-                    let text = append.text.as_str();
+                    let text = append.text();
                     let source = append.source.as_deref().unwrap_or_default();
                     let idempotency_key = append.idempotency_key.as_deref().unwrap_or_default();
                     let expected_source =
@@ -29595,9 +29602,9 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
                 .iter()
                 .skip(requester_context_baseline)
                 .any(|append| {
-                    append.text.contains("Peer terminal response from")
-                        && append.text.contains(&format!("Request ID: {request_id}"))
-                        && append.text.contains("\"message\": \"pong\"")
+                    append.text().contains("Peer terminal response from")
+                        && append.text().contains(&format!("Request ID: {request_id}"))
+                        && append.text().contains("\"message\": \"pong\"")
                 })
             {
                 break;
@@ -29763,17 +29770,19 @@ async fn test_mcp_send_request_response_terminal_steer_is_visible_to_requester()
                 .iter()
                 .skip(requester_context_baseline)
                 .find(|append| {
-                    append.text.contains("Peer terminal response from")
-                        && append.text.contains("from test-mob/worker/w-mcp-responder")
-                        && append.text.contains(&format!("Request ID: {request_id}"))
-                        && append.text.contains("Status: completed")
+                    append.text().contains("Peer terminal response from")
                         && append
-                            .text
+                            .text()
+                            .contains("from test-mob/worker/w-mcp-responder")
+                        && append.text().contains(&format!("Request ID: {request_id}"))
+                        && append.text().contains("Status: completed")
+                        && append
+                            .text()
                             .contains("\"request_intent\": \"checksum_token\"")
                         && append
-                            .text
+                            .text()
                             .contains("\"request_subject\": \"alpha beta gamma\"")
-                        && append.text.contains("\"token\": \"birch seventeen\"")
+                        && append.text().contains("\"token\": \"birch seventeen\"")
                 })
                 .cloned()
             {

@@ -17,7 +17,7 @@ use meerkat_core::comms::{
     CommsCommand, CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult,
     PeerId, PeerRoute, SendError, TrustedPeerDescriptor,
 };
-use meerkat_core::event::AgentEvent;
+use meerkat_core::event::{AgentEvent, InteractionFailureReason};
 use meerkat_core::interaction::{
     InteractionContent, PeerIngressFact, PeerInputCandidate, PeerInputClass,
 };
@@ -3288,20 +3288,24 @@ fn interaction_terminal_event(
         }
         CompletionOutcome::Cancelled => AgentEvent::InteractionFailed {
             interaction_id,
+            reason: InteractionFailureReason::Cancelled,
             error: "cancelled".to_string(),
         },
         CompletionOutcome::Abandoned { reason, .. }
         | CompletionOutcome::AbandonedWithError { reason, .. }
         | CompletionOutcome::RuntimeTerminated { reason, .. } => AgentEvent::InteractionFailed {
             interaction_id,
+            reason: InteractionFailureReason::abandoned(reason.clone()),
             error: reason,
         },
         CompletionOutcome::CompletedWithFinalizationFailure { error, .. } => {
+            let detail = error
+                .detail
+                .unwrap_or_else(|| "turn finalization failed".to_string());
             AgentEvent::InteractionFailed {
                 interaction_id,
-                error: error
-                    .detail
-                    .unwrap_or_else(|| "turn finalization failed".to_string()),
+                reason: InteractionFailureReason::finalization_failed(detail.clone()),
+                error: detail,
             }
         }
     }

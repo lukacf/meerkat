@@ -788,7 +788,7 @@ pub async fn handle_inject_context(
     };
 
     let req = meerkat_core::AppendSystemContextRequest {
-        text: params.text,
+        content: params.content,
         source: params.source,
         idempotency_key: params.idempotency_key,
         source_kind: meerkat_core::session::SystemContextSource::Normal,

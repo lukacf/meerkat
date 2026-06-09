@@ -7,7 +7,7 @@ pub mod transport;
 
 use crate::event::AgentEvent;
 use crate::event::EventEnvelope;
-use crate::lifecycle::run_primitive::{ConversationAppend, RuntimeTurnMetadata};
+use crate::lifecycle::run_primitive::{ConversationAppend, CoreRenderable, RuntimeTurnMetadata};
 use crate::session::{PendingSystemContextAppend, SystemContextStageError};
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
@@ -1208,7 +1208,14 @@ pub struct StartTurnRequest {
 // `serde_json::Value` render payload, which is `PartialEq` but not `Eq`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppendSystemContextRequest {
-    pub text: String,
+    /// Typed renderable content to append.
+    ///
+    /// This is the single owner of the append body. Surfaces parse their
+    /// inbound payload into a [`CoreRenderable`] at the ingress boundary; the
+    /// stringly `text` field that previously flattened the body here is gone.
+    /// Consumers that need the plain-text projection call
+    /// [`CoreRenderable::render_text`].
+    pub content: CoreRenderable,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1230,6 +1237,30 @@ pub struct AppendSystemContextRequest {
     /// instead of re-parsing the flattened prompt `text`/`source` string.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_response_terminal: Option<crate::handles::PeerResponseTerminalFact>,
+}
+
+impl AppendSystemContextRequest {
+    /// Build a plain-text system-context append.
+    ///
+    /// Text-only convenience for the common surface case (CLI/REST/RPC inject
+    /// a bare string). Richer producers construct the request directly with a
+    /// multimodal / system-notice [`CoreRenderable`].
+    #[must_use]
+    pub fn from_text(text: impl Into<String>) -> Self {
+        Self {
+            content: CoreRenderable::text(text),
+            source: None,
+            idempotency_key: None,
+            source_kind: crate::session::SystemContextSource::Normal,
+            peer_response_terminal: None,
+        }
+    }
+
+    /// Plain-text projection of the typed append content.
+    #[must_use]
+    pub fn text(&self) -> String {
+        self.content.render_text()
+    }
 }
 
 /// Result of appending runtime system context to a session.
@@ -1693,6 +1724,28 @@ pub trait SessionService: Send + Sync {
     /// Services that do not support this capability return `StreamError::NotFound`.
     async fn subscribe_session_events(&self, id: &SessionId) -> Result<EventStream, StreamError> {
         Err(StreamError::NotFound(format!("session {id}")))
+    }
+
+    /// Record a typed live-adapter terminal error against a session.
+    ///
+    /// A live (realtime) channel can terminalize for reasons that are not
+    /// themselves Meerkat run outcomes (connection lost, provider error, auth
+    /// failure, local config rejection). The live projection surface must route
+    /// the typed [`LiveAdapterErrorCode`] cause here instead of laundering it
+    /// into a warning log and an `Ok(())` — the fault is then observable on the
+    /// session's owned event stream rather than only in tracing.
+    ///
+    /// Returns `Unsupported` by default; runtime-backed services that own a
+    /// live session event stream override this. Non-runtime impls inherit the
+    /// graceful default.
+    async fn record_live_terminal_error(
+        &self,
+        _id: &SessionId,
+        _cause: crate::live_adapter::LiveAdapterErrorCode,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(
+            "record_live_terminal_error".to_string(),
+        ))
     }
 }
 

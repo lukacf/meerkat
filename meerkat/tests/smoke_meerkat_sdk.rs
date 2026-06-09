@@ -720,7 +720,7 @@ mod scenario_06_hooks {
                     priority: 100,
                     failure_policy: None,
                     timeout_ms: None,
-                    runtime: HookRuntimeConfig::new(
+                    runtime: HookAdapterConfig::from_kind_and_value(
                         HookRuntimeKind::InProcess,
                         Some(serde_json::json!({"name": "observer"})),
                     )
@@ -735,7 +735,7 @@ mod scenario_06_hooks {
                     priority: 90,
                     failure_policy: None,
                     timeout_ms: None,
-                    runtime: HookRuntimeConfig::new(
+                    runtime: HookAdapterConfig::from_kind_and_value(
                         HookRuntimeKind::InProcess,
                         Some(serde_json::json!({"name": "guardrail"})),
                     )
@@ -750,7 +750,7 @@ mod scenario_06_hooks {
                     priority: 80,
                     failure_policy: None,
                     timeout_ms: None,
-                    runtime: HookRuntimeConfig::new(
+                    runtime: HookAdapterConfig::from_kind_and_value(
                         HookRuntimeKind::InProcess,
                         Some(serde_json::json!({"name": "post_llm_observer"})),
                     )

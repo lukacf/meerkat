@@ -33,12 +33,12 @@ inventory::submit! {
 
 use chrono::Utc;
 use futures::StreamExt;
-use meerkat_core::config::HookInProcessRuntimeConfig;
+use meerkat_core::config::HookAdapterConfig;
 use meerkat_core::time_compat::Duration;
 use meerkat_core::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookEntryConfig, HookExecutionMode,
-    HookExecutionReport, HookId, HookInvocation, HookOutcome, HookPatch, HookPatchEnvelope,
-    HookRevision, HookRunOverrides, HookRuntimeKind, HooksConfig, SessionId,
+    HookExecutionReport, HookFailureReason, HookId, HookInvocation, HookOutcome, HookPatch,
+    HookPatchEnvelope, HookRevision, HookRunOverrides, HooksConfig, SessionId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -66,108 +66,6 @@ pub struct RuntimeHookResponse {
     /// non-empty legacy semantic patch payloads fail deserialization.
     #[serde(default)]
     pub patches: Vec<HookPatch>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct CommandRuntimeConfig {
-    command: String,
-    #[serde(default)]
-    args: Vec<String>,
-    #[serde(default)]
-    env: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct HttpRuntimeConfig {
-    url: String,
-    #[serde(default = "default_http_method")]
-    method: String,
-    #[serde(default)]
-    headers: HashMap<String, String>,
-}
-
-fn default_http_method() -> String {
-    "POST".to_string()
-}
-
-/// Closed, typed set of resolved hook runtime adapters.
-///
-/// The engine resolves every configured hook entry into one of these typed
-/// variants once, at the engine-construction boundary (and at the run-override
-/// boundary), rather than re-parsing opaque `runtime_config` JSON on every
-/// execution. Malformed command/HTTP adapter payloads therefore fail closed at
-/// resolution time with a typed [`HookEngineError`], and the hot
-/// `invoke_runtime` path reads the typed variant directly — no
-/// `serde_json::from_value` at execution time.
-///
-/// `meerkat-core` owns the wire-level `HookRuntimeConfig`; this enum is the
-/// engine-side typed projection of that config. Folding the opaque
-/// `HookRuntimeConfig.config: Option<Box<RawValue>>` into a core-owned tagged
-/// `HookAdapterConfig` enum is the remaining cross-crate half of remediation
-/// row #231.
-#[derive(Debug, Clone)]
-enum HookAdapterConfig {
-    InProcess(HookInProcessRuntimeConfig),
-    Command(CommandRuntimeConfig),
-    Http(HttpRuntimeConfig),
-}
-
-impl HookAdapterConfig {
-    /// Resolve the typed adapter for one hook entry at the config boundary.
-    ///
-    /// Returns a typed [`HookEngineError::ExecutionFailed`] when the adapter
-    /// payload is malformed so resolution fails closed instead of deferring the
-    /// parse to the execution path.
-    fn resolve(entry: &HookEntryConfig) -> Result<Self, HookEngineError> {
-        match entry.runtime.kind {
-            HookRuntimeKind::InProcess => {
-                let cfg = entry
-                    .runtime
-                    .in_process_config()
-                    .map_err(|err| HookEngineError::ExecutionFailed {
-                        hook_id: entry.id.clone(),
-                        reason: format!("invalid in_process runtime config: {err}"),
-                    })?
-                    .ok_or_else(|| HookEngineError::ExecutionFailed {
-                        hook_id: entry.id.clone(),
-                        reason: "runtime kind is not in_process".to_string(),
-                    })?;
-                Ok(Self::InProcess(cfg))
-            }
-            HookRuntimeKind::Command => {
-                let runtime_config = entry.runtime.config_value().map_err(|err| {
-                    HookEngineError::ExecutionFailed {
-                        hook_id: entry.id.clone(),
-                        reason: format!("invalid runtime config payload: {err}"),
-                    }
-                })?;
-                let cfg: CommandRuntimeConfig =
-                    serde_json::from_value(runtime_config).map_err(|err| {
-                        HookEngineError::ExecutionFailed {
-                            hook_id: entry.id.clone(),
-                            reason: format!("invalid command runtime config: {err}"),
-                        }
-                    })?;
-                Ok(Self::Command(cfg))
-            }
-            HookRuntimeKind::Http => {
-                let runtime_config = entry.runtime.config_value().map_err(|err| {
-                    HookEngineError::ExecutionFailed {
-                        hook_id: entry.id.clone(),
-                        reason: format!("invalid runtime config payload: {err}"),
-                    }
-                })?;
-                let cfg: HttpRuntimeConfig =
-                    serde_json::from_value(runtime_config).map_err(|err| {
-                        HookEngineError::ExecutionFailed {
-                            hook_id: entry.id.clone(),
-                            reason: format!("invalid http runtime config: {err}"),
-                        }
-                    })?;
-                Ok(Self::Http(cfg))
-            }
-        }
-    }
 }
 
 /// Typed owner for hook execution policy (ordering, timeout, and background
@@ -466,15 +364,11 @@ impl DefaultHookEngine {
         // error so every subsequent `execute`/`matching_hooks` call fails
         // closed with a typed `InvalidConfiguration` rather than re-parsing JSON
         // on the execution path.
-        let (base_adapters, base_validation_error) = match Self::resolve_base(&config.entries)
-            .and_then(|()| {
-                Self::resolve_adapters(&config.entries).map_err(|err| {
-                    // Fold a malformed-adapter failure into the engine-wide
-                    // configuration error so it is rejected at config load.
-                    HookEngineError::InvalidConfiguration(err.to_string())
-                })
-            }) {
-            Ok(adapters) => (adapters, None),
+        let (base_adapters, base_validation_error) = match Self::resolve_base(&config.entries) {
+            // Adapters are the typed `HookAdapterConfig` already deserialized at
+            // the config boundary (row #231), so building the lookup table is
+            // an infallible projection — no JSON re-parse, no failure mode here.
+            Ok(()) => (Self::resolve_adapters(&config.entries), None),
             // Construction still succeeds but the engine fails closed on
             // first use; an empty adapter map is never read past the
             // validation-error short-circuit.
@@ -520,16 +414,16 @@ impl DefaultHookEngine {
         Ok(())
     }
 
-    /// Resolve the typed adapter for every entry, keyed by hook id. Called at
-    /// the config-layering boundary, never on the per-execution path.
-    fn resolve_adapters(
-        entries: &[HookEntryConfig],
-    ) -> Result<HashMap<HookId, HookAdapterConfig>, HookEngineError> {
-        let mut adapters = HashMap::with_capacity(entries.len());
-        for entry in entries {
-            adapters.insert(entry.id.clone(), HookAdapterConfig::resolve(entry)?);
-        }
-        Ok(adapters)
+    /// Project the typed adapter for every entry into a by-id lookup table.
+    ///
+    /// `entry.runtime` is already the typed [`HookAdapterConfig`] deserialized
+    /// once at the config boundary (row #231), so this is a pure clone-into-map
+    /// projection — no JSON parse, no failure mode.
+    fn resolve_adapters(entries: &[HookEntryConfig]) -> HashMap<HookId, HookAdapterConfig> {
+        entries
+            .iter()
+            .map(|entry| (entry.id.clone(), entry.runtime.clone()))
+            .collect()
     }
 
     pub fn with_in_process_handler(
@@ -655,7 +549,7 @@ impl DefaultHookEngine {
             entries.extend(overrides.entries.clone());
 
             Self::resolve_base(&entries)?;
-            let adapters = Self::resolve_adapters(&entries)?;
+            let adapters = Self::resolve_adapters(&entries);
 
             return Ok(ResolvedEntries::owned(entries, adapters));
         }
@@ -732,7 +626,7 @@ impl DefaultHookEngine {
             decision: None,
             patches: Vec::new(),
             published_patches: Vec::new(),
-            error: None,
+            failure_reason: None,
             duration_ms: None,
         };
 
@@ -759,7 +653,7 @@ impl DefaultHookEngine {
                 if !outcome.patches.is_empty()
                     || matches!(outcome.decision, Some(HookDecision::Deny { .. }))
                 {
-                    outcome.error = Some("pre_* background hooks are observe-only".to_string());
+                    outcome.failure_reason = Some(HookFailureReason::ObserveOnlyViolation);
                 }
                 outcome.patches.clear();
                 outcome.decision = None;
@@ -1208,20 +1102,22 @@ impl HookEngine for DefaultHookEngine {
                             return;
                         }
                     };
-                    if let Some(error) = &outcome.error {
+                    if let Some(failure_reason) = &outcome.failure_reason {
                         // A produced-error background outcome drops its publish;
                         // record a typed dropped signal (remediation row #35).
+                        // The ledger carries the derived display string.
+                        let reason = failure_reason.to_string();
                         engine
                             .background_dispatch_ledger
                             .record(BackgroundDispatchSignal::Dropped {
                                 hook_id: outcome.hook_id.clone(),
-                                reason: error.clone(),
+                                reason: reason.clone(),
                             })
                             .await;
                         tracing::warn!(
                             hook_id = %outcome.hook_id,
                             point = ?outcome.point,
-                            error = %error,
+                            error = %reason,
                             "background hook execution produced an error"
                         );
                     }
@@ -1262,10 +1158,8 @@ impl HookEngine for DefaultHookEngine {
 )]
 mod tests {
     use super::*;
-    use meerkat_core::{
-        HookFailurePolicy, HookLlmRequest, HookPoint, HookReasonCode, HookRuntimeConfig,
-        HookRuntimeKind, SessionId,
-    };
+    use meerkat_core::config::HookRuntimeKind;
+    use meerkat_core::{HookFailurePolicy, HookLlmRequest, HookPoint, HookReasonCode, SessionId};
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     fn static_handler(response: RuntimeHookResponse) -> InProcessHookHandler {
@@ -1285,8 +1179,8 @@ mod tests {
         })
     }
 
-    fn runtime_in_process(name: &str) -> HookRuntimeConfig {
-        HookRuntimeConfig::in_process(name).unwrap_or_default()
+    fn runtime_in_process(name: &str) -> HookAdapterConfig {
+        HookAdapterConfig::in_process(name)
     }
 
     #[test]
@@ -1538,7 +1432,7 @@ mod tests {
             id: HookId::new("legacy-patch-command"),
             point: HookPoint::PreLlmRequest,
             capability: HookCapability::Rewrite,
-            runtime: HookRuntimeConfig::new(
+            runtime: HookAdapterConfig::from_kind_and_value(
                 HookRuntimeKind::Command,
                 Some(serde_json::json!({
                     "command": "sh",
@@ -2033,7 +1927,7 @@ mod tests {
         config.entries = vec![HookEntryConfig {
             id: HookId::new("command-hook"),
             point: HookPoint::PreToolExecution,
-            runtime: HookRuntimeConfig::new(
+            runtime: HookAdapterConfig::from_kind_and_value(
                 HookRuntimeKind::Command,
                 Some(serde_json::json!({
                     "command": "sh",
@@ -2068,9 +1962,9 @@ mod tests {
             .unwrap();
         assert_eq!(report.outcomes.len(), 1);
         assert!(
-            report.outcomes[0].error.is_none(),
+            report.outcomes[0].failure_reason.is_none(),
             "command runtime error: {:?}",
-            report.outcomes[0].error
+            report.outcomes[0].failure_reason
         );
     }
 
@@ -2110,7 +2004,7 @@ mod tests {
         config.entries = vec![HookEntryConfig {
             id: HookId::new("http-hook"),
             point: HookPoint::PreToolExecution,
-            runtime: HookRuntimeConfig::new(
+            runtime: HookAdapterConfig::from_kind_and_value(
                 HookRuntimeKind::Http,
                 Some(serde_json::json!({
                     "url": format!("http://{}/hook", addr),
@@ -2145,9 +2039,9 @@ mod tests {
             .unwrap();
         assert_eq!(report.outcomes.len(), 1);
         assert!(
-            report.outcomes[0].error.is_none(),
+            report.outcomes[0].failure_reason.is_none(),
             "http runtime error: {:?}",
-            report.outcomes[0].error
+            report.outcomes[0].failure_reason
         );
     }
 
@@ -2342,69 +2236,48 @@ mod tests {
     }
 
     // Gate for remediation row #231 (part 1): a malformed command adapter
-    // config is rejected at config load with a typed error.
-    #[tokio::test]
-    async fn malformed_command_adapter_config_rejected_at_config_load() {
-        let mut config = HooksConfig::default();
-        config.entries = vec![HookEntryConfig {
-            id: HookId::new("bad-command"),
-            point: HookPoint::PreToolExecution,
-            // Missing the required `command` field for the command adapter.
-            runtime: HookRuntimeConfig::new(
-                HookRuntimeKind::Command,
-                Some(serde_json::json!({ "args": ["x"] })),
-            )
-            .unwrap_or_default(),
-            ..Default::default()
-        }];
+    // config is rejected at the config-deserialization boundary — the single
+    // typed owner `HookAdapterConfig` is parsed once at config load, so a
+    // missing required field fails closed there rather than being deferred to a
+    // per-execution JSON re-parse.
+    #[test]
+    fn malformed_command_adapter_config_rejected_at_config_load() {
+        // Missing the required `command` field for the command adapter.
+        let err = serde_json::from_value::<HookAdapterConfig>(serde_json::json!({
+            "type": "command",
+            "args": ["x"]
+        }))
+        .expect_err("malformed command adapter must fail closed at deserialize");
+        assert!(
+            err.to_string().contains("command"),
+            "unexpected error: {err}"
+        );
 
-        let engine = DefaultHookEngine::new(config);
-        // Rejected at the construction/config-load boundary: every use fails
-        // closed with a typed InvalidConfiguration.
-        let matching = engine
-            .matching_hooks(
-                &invocation(HookPoint::PreToolExecution, SessionId::new()),
-                None,
-            )
-            .expect_err("malformed command adapter must fail closed");
-        assert!(matches!(matching, HookEngineError::InvalidConfiguration(_)));
-
-        let executed = engine
-            .execute(
-                invocation(HookPoint::PreToolExecution, SessionId::new()),
-                None,
-            )
-            .await
-            .expect_err("malformed command adapter must fail closed at execute");
-        assert!(matches!(executed, HookEngineError::InvalidConfiguration(_)));
+        // The same failure surfaces when the whole entry is deserialized from a
+        // config document (the real config-load path).
+        let entry_err = serde_json::from_value::<HookEntryConfig>(serde_json::json!({
+            "id": "bad-command",
+            "point": "pre_tool_execution",
+            "runtime": { "type": "command", "args": ["x"] }
+        }))
+        .expect_err("malformed command adapter entry must fail closed at deserialize");
+        assert!(
+            entry_err.to_string().contains("command"),
+            "unexpected error: {entry_err}"
+        );
     }
 
-    // Gate for remediation row #231 (part 2): a malformed HTTP adapter config
-    // is likewise rejected at config load with a typed error.
-    #[tokio::test]
-    async fn malformed_http_adapter_config_rejected_at_config_load() {
-        let mut config = HooksConfig::default();
-        config.entries = vec![HookEntryConfig {
-            id: HookId::new("bad-http"),
-            point: HookPoint::PreToolExecution,
-            // Missing the required `url` field for the HTTP adapter.
-            runtime: HookRuntimeConfig::new(
-                HookRuntimeKind::Http,
-                Some(serde_json::json!({ "method": "POST" })),
-            )
-            .unwrap_or_default(),
-            ..Default::default()
-        }];
-
-        let engine = DefaultHookEngine::new(config);
-        let err = engine
-            .execute(
-                invocation(HookPoint::PreToolExecution, SessionId::new()),
-                None,
-            )
-            .await
-            .expect_err("malformed http adapter must fail closed");
-        assert!(matches!(err, HookEngineError::InvalidConfiguration(_)));
+    // Gate for remediation row #231 (part 2): a malformed HTTP adapter config is
+    // likewise rejected at the config-deserialization boundary.
+    #[test]
+    fn malformed_http_adapter_config_rejected_at_config_load() {
+        // Missing the required `url` field for the HTTP adapter.
+        let err = serde_json::from_value::<HookAdapterConfig>(serde_json::json!({
+            "type": "http",
+            "method": "POST"
+        }))
+        .expect_err("malformed http adapter must fail closed at deserialize");
+        assert!(err.to_string().contains("url"), "unexpected error: {err}");
     }
 
     // Gate for remediation row #35 (part 1): a full background queue produces a

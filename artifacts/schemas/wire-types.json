@@ -597,6 +597,8 @@
             "description": "Hook invocation failed.",
             "properties": {
               "error": {
+                "default": "",
+                "description": "Display projection of `reason`. Fused mirror retained for consumers\nstill reading a string error.",
                 "type": "string"
               },
               "hook_id": {
@@ -604,6 +606,10 @@
               },
               "point": {
                 "$ref": "#/$defs/HookPoint"
+              },
+              "reason": {
+                "$ref": "#/$defs/HookFailureReason",
+                "description": "Typed failure cause."
               },
               "type": {
                 "const": "hook_failed",
@@ -614,7 +620,7 @@
               "type",
               "hook_id",
               "point",
-              "error"
+              "reason"
             ],
             "type": "object"
           },
@@ -745,8 +751,9 @@
                   "null"
                 ]
               },
-              "name": {
-                "type": "string"
+              "kind": {
+                "$ref": "#/$defs/ServerToolKind",
+                "description": "Typed provider server-tool kind, carried as a nested tagged object\n(`{\"kind\":\"web_search\"}`, or `{\"kind\":\"provider_native\",\"name\":...}`\nfor the verbatim escape hatch). Nested (not flattened) so SDK\ncodegen emits a typed `kind` field instead of an inlined enum."
               },
               "type": {
                 "const": "server_tool_content",
@@ -755,7 +762,7 @@
             },
             "required": [
               "type",
-              "name",
+              "kind",
               "content"
             ],
             "type": "object"
@@ -1228,10 +1235,16 @@
             "description": "An interaction failed (terminal event for tap subscribers).",
             "properties": {
               "error": {
+                "default": "",
+                "description": "Display projection of `reason`. Fused mirror retained for consumers\nstill reading a string error.",
                 "type": "string"
               },
               "interaction_id": {
                 "$ref": "#/$defs/InteractionId"
+              },
+              "reason": {
+                "$ref": "#/$defs/InteractionFailureReason",
+                "description": "Typed failure cause."
               },
               "type": {
                 "const": "interaction_failed",
@@ -1241,7 +1254,7 @@
             "required": [
               "type",
               "interaction_id",
-              "error"
+              "reason"
             ],
             "type": "object"
           },
@@ -1636,6 +1649,23 @@
               "duration_ms"
             ],
             "type": "object"
+          },
+          {
+            "description": "Structured JSON content returned by a tool, preserved as JSON rather\nthan laundered through a stringified `Text` block.\n\nTools whose result is structured data (lists, records) emit this so the\ncanonical transcript carries the typed JSON shape. The payload is opaque\npass-through JSON (`Box<RawValue>`, the allow-listed §3 pattern shared\nwith `ToolUse` args): Meerkat does not impose a closed schema on\narbitrary tool output. The model-facing text projection is *derived*\nfrom this JSON, never the other way around.",
+            "properties": {
+              "data": {
+                "description": "Provider-opaque structured JSON, parsed at most once by consumers."
+              },
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -1794,6 +1824,79 @@
         ],
         "type": "object"
       },
+      "HookFailureReason": {
+        "description": "Typed reason a hook execution failed (engine-level fault, not a guardrail\ndenial).\n\nMirrors the [`HookReasonCode`] precedent: the variant is the typed owner of\nthe failure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-stored field.\n\n[`Display`]: std::fmt::Display",
+        "oneOf": [
+          {
+            "description": "The hook runtime did not complete within its configured timeout.",
+            "properties": {
+              "reason_code": {
+                "const": "timeout",
+                "type": "string"
+              },
+              "timeout_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "reason_code",
+              "timeout_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The hook runtime executed but failed.",
+            "properties": {
+              "message": {
+                "description": "Display projection of the underlying execution error.",
+                "type": "string"
+              },
+              "reason_code": {
+                "const": "execution_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_code",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The hook configuration was rejected.",
+            "properties": {
+              "message": {
+                "description": "Display projection of the configuration error.",
+                "type": "string"
+              },
+              "reason_code": {
+                "const": "config_invalid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_code",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A `pre_*` background hook attempted a non-observe action (patch or deny),\nwhich is not permitted for observe-only background hooks.",
+            "properties": {
+              "reason_code": {
+                "const": "observe_only_violation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_code"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "HookId": {
         "description": "Stable identifier for a configured hook.",
         "type": "string"
@@ -1822,6 +1925,60 @@
           "runtime_error"
         ],
         "type": "string"
+      },
+      "InteractionFailureReason": {
+        "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation that\nthe `InteractionFailed` event carries as a fused mirror, never as the\nauthoritative cause.\n\n[`Display`]: std::fmt::Display",
+        "oneOf": [
+          {
+            "description": "The interaction was cancelled before completing.",
+            "properties": {
+              "kind": {
+                "const": "cancelled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The interaction was abandoned (runtime terminated, dropped, or abandoned\nwith an error) before completing.",
+            "properties": {
+              "detail": {
+                "description": "Display projection of the abandonment detail.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "abandoned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The interaction's main run completed but turn finalization failed.",
+            "properties": {
+              "detail": {
+                "description": "Display projection of the finalization error.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "finalization_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "InteractionId": {
         "description": "Unique identifier for an interaction.",
@@ -2132,6 +2289,54 @@
           "message"
         ],
         "type": "object"
+      },
+      "ServerToolKind": {
+        "description": "Typed semantic kind of a provider-executed (server-side) tool.\n\nThis is the single typed owner of the server-tool identity. Each provider\nadapter parses its native discriminator into this enum once at the streaming\nboundary, so downstream consumers never re-classify by matching a\n`name: String`. Provider-native sub-event detail (e.g. OpenAI's\n`web_search_call` vs `web_search_result`) is preserved in the accompanying\n`content` JSON, not in this kind.\n\n`ProviderNative` is the verbatim escape hatch for dynamic provider tool\nnames (Anthropic `server_tool_use` carries an arbitrary tool name that must\nround-trip exactly on replay). It is the only variant carrying a string,\nand that string IS the typed fact — not a re-derivable label.",
+        "oneOf": [
+          {
+            "description": "Provider-hosted web search (Anthropic `web_search*`, OpenAI\n`web_search*`). Sub-event detail lives in the evidence `content`.",
+            "properties": {
+              "kind": {
+                "const": "web_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Gemini grounding via Google Search (grounding metadata block).",
+            "properties": {
+              "kind": {
+                "const": "google_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A provider-native server tool whose exact name must round-trip verbatim\n(Anthropic `server_tool_use` dynamic name and any unrecognized future\nserver tool). The `name` is provider-owned and replayed unchanged.",
+            "properties": {
+              "kind": {
+                "const": "provider_native",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "SessionId": {
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",
@@ -6471,6 +6676,23 @@
               "duration_ms"
             ],
             "type": "object"
+          },
+          {
+            "description": "Structured JSON content returned by a tool, preserved as JSON rather\nthan laundered through a stringified `Text` block.\n\nTools whose result is structured data (lists, records) emit this so the\ncanonical transcript carries the typed JSON shape. The payload is opaque\npass-through JSON (`Box<RawValue>`, the allow-listed §3 pattern shared\nwith `ToolUse` args): Meerkat does not impose a closed schema on\narbitrary tool output. The model-facing text projection is *derived*\nfrom this JSON, never the other way around.",
+            "properties": {
+              "data": {
+                "description": "Provider-opaque structured JSON, parsed at most once by consumers."
+              },
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -7213,6 +7435,23 @@
               "type",
               "media_type",
               "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Structured JSON content returned by a tool, preserved as JSON rather\nthan laundered through a stringified `Text` block.\n\nTools whose result is structured data (lists, records) emit this so the\ncanonical transcript carries the typed JSON shape. The payload is opaque\npass-through JSON (`Box<RawValue>`, the allow-listed §3 pattern shared\nwith `ToolUse` args): Meerkat does not impose a closed schema on\narbitrary tool output. The model-facing text projection is *derived*\nfrom this JSON, never the other way around.",
+            "properties": {
+              "data": {
+                "description": "Provider-opaque structured JSON, parsed at most once by consumers."
+              },
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
             ],
             "type": "object"
           }
@@ -9979,6 +10218,23 @@
               "duration_ms"
             ],
             "type": "object"
+          },
+          {
+            "description": "Structured JSON content returned by a tool, preserved as JSON rather\nthan laundered through a stringified `Text` block.\n\nTools whose result is structured data (lists, records) emit this so the\ncanonical transcript carries the typed JSON shape. The payload is opaque\npass-through JSON (`Box<RawValue>`, the allow-listed §3 pattern shared\nwith `ToolUse` args): Meerkat does not impose a closed schema on\narbitrary tool output. The model-facing text projection is *derived*\nfrom this JSON, never the other way around.",
+            "properties": {
+              "data": {
+                "description": "Provider-opaque structured JSON, parsed at most once by consumers."
+              },
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -10042,12 +10298,21 @@
       },
       "PeerLifecycleKind": {
         "description": "One-way peer lifecycle notification kind.\n\nThese notifications are control-plane topology updates, not correlated\npeer work requests. They intentionally do not create request/response\nlifecycles and must never require an LLM-authored reply.",
-        "enum": [
-          "mob.peer_added",
-          "mob.peer_retired",
-          "mob.peer_unwired"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "mob.peer_added",
+              "mob.peer_retired",
+              "mob.peer_unwired"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "mob.dismiss",
+            "description": "Supervisor-directed dismissal: a typed terminal lifecycle signal that\nretires a live executor. The dismissal authority is the supervisor /\nruntime drain-lifecycle owner, never a peer-authored message body — a\n\"DISMISS\" string in a peer message is ordinary content, not a control\nsignal.",
+            "type": "string"
+          }
+        ]
       },
       "ResponseStatus": {
         "description": "Typed status for response interactions.\n\nMirrors `CommsStatus` from `meerkat-comms` — the comms runtime converts at the boundary.",
@@ -11022,6 +11287,23 @@
               "type",
               "media_type",
               "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Structured JSON content returned by a tool, preserved as JSON rather\nthan laundered through a stringified `Text` block.\n\nTools whose result is structured data (lists, records) emit this so the\ncanonical transcript carries the typed JSON shape. The payload is opaque\npass-through JSON (`Box<RawValue>`, the allow-listed §3 pattern shared\nwith `ToolUse` args): Meerkat does not impose a closed schema on\narbitrary tool output. The model-facing text projection is *derived*\nfrom this JSON, never the other way around.",
+            "properties": {
+              "data": {
+                "description": "Provider-opaque structured JSON, parsed at most once by consumers."
+              },
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
             ],
             "type": "object"
           }
@@ -12598,6 +12880,8 @@
             "description": "Hook invocation failed.",
             "properties": {
               "error": {
+                "default": "",
+                "description": "Display projection of `reason`. Fused mirror retained for consumers\nstill reading a string error.",
                 "type": "string"
               },
               "hook_id": {
@@ -12605,6 +12889,10 @@
               },
               "point": {
                 "$ref": "#/$defs/HookPoint"
+              },
+              "reason": {
+                "$ref": "#/$defs/HookFailureReason",
+                "description": "Typed failure cause."
               },
               "type": {
                 "const": "hook_failed",
@@ -12615,7 +12903,7 @@
               "type",
               "hook_id",
               "point",
-              "error"
+              "reason"
             ],
             "type": "object"
           },
@@ -12746,8 +13034,9 @@
                   "null"
                 ]
               },
-              "name": {
-                "type": "string"
+              "kind": {
+                "$ref": "#/$defs/ServerToolKind",
+                "description": "Typed provider server-tool kind, carried as a nested tagged object\n(`{\"kind\":\"web_search\"}`, or `{\"kind\":\"provider_native\",\"name\":...}`\nfor the verbatim escape hatch). Nested (not flattened) so SDK\ncodegen emits a typed `kind` field instead of an inlined enum."
               },
               "type": {
                 "const": "server_tool_content",
@@ -12756,7 +13045,7 @@
             },
             "required": [
               "type",
-              "name",
+              "kind",
               "content"
             ],
             "type": "object"
@@ -13229,10 +13518,16 @@
             "description": "An interaction failed (terminal event for tap subscribers).",
             "properties": {
               "error": {
+                "default": "",
+                "description": "Display projection of `reason`. Fused mirror retained for consumers\nstill reading a string error.",
                 "type": "string"
               },
               "interaction_id": {
                 "$ref": "#/$defs/InteractionId"
+              },
+              "reason": {
+                "$ref": "#/$defs/InteractionFailureReason",
+                "description": "Typed failure cause."
               },
               "type": {
                 "const": "interaction_failed",
@@ -13242,7 +13537,7 @@
             "required": [
               "type",
               "interaction_id",
-              "error"
+              "reason"
             ],
             "type": "object"
           },
@@ -13637,6 +13932,23 @@
               "duration_ms"
             ],
             "type": "object"
+          },
+          {
+            "description": "Structured JSON content returned by a tool, preserved as JSON rather\nthan laundered through a stringified `Text` block.\n\nTools whose result is structured data (lists, records) emit this so the\ncanonical transcript carries the typed JSON shape. The payload is opaque\npass-through JSON (`Box<RawValue>`, the allow-listed §3 pattern shared\nwith `ToolUse` args): Meerkat does not impose a closed schema on\narbitrary tool output. The model-facing text projection is *derived*\nfrom this JSON, never the other way around.",
+            "properties": {
+              "data": {
+                "description": "Provider-opaque structured JSON, parsed at most once by consumers."
+              },
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -13859,6 +14171,79 @@
         ],
         "type": "object"
       },
+      "HookFailureReason": {
+        "description": "Typed reason a hook execution failed (engine-level fault, not a guardrail\ndenial).\n\nMirrors the [`HookReasonCode`] precedent: the variant is the typed owner of\nthe failure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-stored field.\n\n[`Display`]: std::fmt::Display",
+        "oneOf": [
+          {
+            "description": "The hook runtime did not complete within its configured timeout.",
+            "properties": {
+              "reason_code": {
+                "const": "timeout",
+                "type": "string"
+              },
+              "timeout_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "reason_code",
+              "timeout_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The hook runtime executed but failed.",
+            "properties": {
+              "message": {
+                "description": "Display projection of the underlying execution error.",
+                "type": "string"
+              },
+              "reason_code": {
+                "const": "execution_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_code",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The hook configuration was rejected.",
+            "properties": {
+              "message": {
+                "description": "Display projection of the configuration error.",
+                "type": "string"
+              },
+              "reason_code": {
+                "const": "config_invalid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_code",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A `pre_*` background hook attempted a non-observe action (patch or deny),\nwhich is not permitted for observe-only background hooks.",
+            "properties": {
+              "reason_code": {
+                "const": "observe_only_violation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_code"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "HookId": {
         "description": "Stable identifier for a configured hook.",
         "type": "string"
@@ -13887,6 +14272,60 @@
           "runtime_error"
         ],
         "type": "string"
+      },
+      "InteractionFailureReason": {
+        "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation that\nthe `InteractionFailed` event carries as a fused mirror, never as the\nauthoritative cause.\n\n[`Display`]: std::fmt::Display",
+        "oneOf": [
+          {
+            "description": "The interaction was cancelled before completing.",
+            "properties": {
+              "kind": {
+                "const": "cancelled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The interaction was abandoned (runtime terminated, dropped, or abandoned\nwith an error) before completing.",
+            "properties": {
+              "detail": {
+                "description": "Display projection of the abandonment detail.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "abandoned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The interaction's main run completed but turn finalization failed.",
+            "properties": {
+              "detail": {
+                "description": "Display projection of the finalization error.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "finalization_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "InteractionId": {
         "description": "Unique identifier for an interaction.",
@@ -14206,6 +14645,54 @@
           "message"
         ],
         "type": "object"
+      },
+      "ServerToolKind": {
+        "description": "Typed semantic kind of a provider-executed (server-side) tool.\n\nThis is the single typed owner of the server-tool identity. Each provider\nadapter parses its native discriminator into this enum once at the streaming\nboundary, so downstream consumers never re-classify by matching a\n`name: String`. Provider-native sub-event detail (e.g. OpenAI's\n`web_search_call` vs `web_search_result`) is preserved in the accompanying\n`content` JSON, not in this kind.\n\n`ProviderNative` is the verbatim escape hatch for dynamic provider tool\nnames (Anthropic `server_tool_use` carries an arbitrary tool name that must\nround-trip exactly on replay). It is the only variant carrying a string,\nand that string IS the typed fact — not a re-derivable label.",
+        "oneOf": [
+          {
+            "description": "Provider-hosted web search (Anthropic `web_search*`, OpenAI\n`web_search*`). Sub-event detail lives in the evidence `content`.",
+            "properties": {
+              "kind": {
+                "const": "web_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Gemini grounding via Google Search (grounding metadata block).",
+            "properties": {
+              "kind": {
+                "const": "google_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A provider-native server tool whose exact name must round-trip verbatim\n(Anthropic `server_tool_use` dynamic name and any unrecognized future\nserver tool). The `name` is provider-owned and replayed unchanged.",
+            "properties": {
+              "kind": {
+                "const": "provider_native",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "SessionId": {
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",
@@ -21138,6 +21625,21 @@
             "type": "object"
           },
           {
+            "description": "Structured JSON tool output, materialized as inline JSON for SDK\nconsumers (the core side keeps it as opaque `Box<RawValue>`).",
+            "properties": {
+              "data": true,
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Forward-compatibility for unknown block types.",
             "properties": {
               "type": {
@@ -22195,6 +22697,21 @@
             "type": "object"
           },
           {
+            "description": "Structured JSON tool output, materialized as inline JSON for SDK\nconsumers (the core side keeps it as opaque `Box<RawValue>`).",
+            "properties": {
+              "data": true,
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Forward-compatibility for unknown block types.",
             "properties": {
               "type": {
@@ -22816,6 +23333,21 @@
               "type",
               "media_type",
               "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Structured JSON tool output, materialized as inline JSON for SDK\nconsumers (the core side keeps it as opaque `Box<RawValue>`).",
+            "properties": {
+              "data": true,
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
             ],
             "type": "object"
           },
@@ -26178,6 +26710,23 @@
               "duration_ms"
             ],
             "type": "object"
+          },
+          {
+            "description": "Structured JSON content returned by a tool, preserved as JSON rather\nthan laundered through a stringified `Text` block.\n\nTools whose result is structured data (lists, records) emit this so the\ncanonical transcript carries the typed JSON shape. The payload is opaque\npass-through JSON (`Box<RawValue>`, the allow-listed §3 pattern shared\nwith `ToolUse` args): Meerkat does not impose a closed schema on\narbitrary tool output. The model-facing text projection is *derived*\nfrom this JSON, never the other way around.",
+            "properties": {
+              "data": {
+                "description": "Provider-opaque structured JSON, parsed at most once by consumers."
+              },
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -27437,6 +27986,23 @@
               "type",
               "media_type",
               "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Structured JSON content returned by a tool, preserved as JSON rather\nthan laundered through a stringified `Text` block.\n\nTools whose result is structured data (lists, records) emit this so the\ncanonical transcript carries the typed JSON shape. The payload is opaque\npass-through JSON (`Box<RawValue>`, the allow-listed §3 pattern shared\nwith `ToolUse` args): Meerkat does not impose a closed schema on\narbitrary tool output. The model-facing text projection is *derived*\nfrom this JSON, never the other way around.",
+            "properties": {
+              "data": {
+                "description": "Provider-opaque structured JSON, parsed at most once by consumers."
+              },
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
             ],
             "type": "object"
           }
@@ -28712,6 +29278,23 @@
               "type",
               "media_type",
               "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Structured JSON content returned by a tool, preserved as JSON rather\nthan laundered through a stringified `Text` block.\n\nTools whose result is structured data (lists, records) emit this so the\ncanonical transcript carries the typed JSON shape. The payload is opaque\npass-through JSON (`Box<RawValue>`, the allow-listed §3 pattern shared\nwith `ToolUse` args): Meerkat does not impose a closed schema on\narbitrary tool output. The model-facing text projection is *derived*\nfrom this JSON, never the other way around.",
+            "properties": {
+              "data": {
+                "description": "Provider-opaque structured JSON, parsed at most once by consumers."
+              },
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
             ],
             "type": "object"
           }
@@ -30135,6 +30718,21 @@
             "type": "object"
           },
           {
+            "description": "Structured JSON tool output, materialized as inline JSON for SDK\nconsumers (the core side keeps it as opaque `Box<RawValue>`).",
+            "properties": {
+              "data": true,
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Forward-compatibility for unknown block types.",
             "properties": {
               "type": {
@@ -31130,6 +31728,23 @@
               "duration_ms"
             ],
             "type": "object"
+          },
+          {
+            "description": "Structured JSON content returned by a tool, preserved as JSON rather\nthan laundered through a stringified `Text` block.\n\nTools whose result is structured data (lists, records) emit this so the\ncanonical transcript carries the typed JSON shape. The payload is opaque\npass-through JSON (`Box<RawValue>`, the allow-listed §3 pattern shared\nwith `ToolUse` args): Meerkat does not impose a closed schema on\narbitrary tool output. The model-facing text projection is *derived*\nfrom this JSON, never the other way around.",
+            "properties": {
+              "data": {
+                "description": "Provider-opaque structured JSON, parsed at most once by consumers."
+              },
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -32002,6 +32617,9 @@
                       "null"
                     ]
                   },
+                  "kind": {
+                    "$ref": "#/$defs/WireServerToolKind"
+                  },
                   "meta": {
                     "anyOf": [
                       {
@@ -32011,13 +32629,10 @@
                         "type": "null"
                       }
                     ]
-                  },
-                  "name": {
-                    "type": "string"
                   }
                 },
                 "required": [
-                  "name",
+                  "kind",
                   "content"
                 ],
                 "type": "object"
@@ -32205,6 +32820,21 @@
             "type": "object"
           },
           {
+            "description": "Structured JSON tool output, materialized as inline JSON for SDK\nconsumers (the core side keeps it as opaque `Box<RawValue>`).",
+            "properties": {
+              "data": true,
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Forward-compatibility for unknown block types.",
             "properties": {
               "type": {
@@ -32337,6 +32967,67 @@
             },
             "required": [
               "provider"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireServerToolKind": {
+        "description": "Wire projection of `meerkat_core::ServerToolKind`.\n\nMirrors the typed semantic owner of a provider-executed tool. The core enum\nis `#[non_exhaustive]`; a future semantic kind that lacks an explicit arm in\nthe forward `From` surfaces as `Unknown { debug }` rather than silently\ncollapsing into a plausible-but-wrong kind. SDK consumers route on the\n`kind` discriminator and treat `unknown` as unrecognized.\n\n**When a new core variant is added, add an explicit arm in the forward\n`From` impl above the wildcard — `Unknown` is the floor, not the\ndestination.**",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "web_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "google_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "provider_native",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "debug": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "debug"
             ],
             "type": "object"
           }
@@ -32963,6 +33654,67 @@
           }
         ]
       },
+      "WireServerToolKind": {
+        "description": "Wire projection of `meerkat_core::ServerToolKind`.\n\nMirrors the typed semantic owner of a provider-executed tool. The core enum\nis `#[non_exhaustive]`; a future semantic kind that lacks an explicit arm in\nthe forward `From` surfaces as `Unknown { debug }` rather than silently\ncollapsing into a plausible-but-wrong kind. SDK consumers route on the\n`kind` discriminator and treat `unknown` as unrecognized.\n\n**When a new core variant is added, add an explicit arm in the forward\n`From` impl above the wildcard — `Unknown` is the floor, not the\ndestination.**",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "web_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "google_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "provider_native",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "debug": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "debug"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WireTranscriptSource": {
         "description": "Wire projection of `meerkat_core::TranscriptSource`. Lane provenance\nfor spoken-transcript blocks.\n\nR7-4 (P3 dogma): the previous shape used a wildcard arm in\n`From<TranscriptSource>` that fell through to `Spoken`, silently\nmisattributing future core variants as user-spoken transcript. The\nfix mirrors the live-wire pattern from R5-3 / R6-5 — future core\nvariants surface as `Unknown { debug }` (a fail-loud sentinel), and\nthe reverse direction is `TryFrom` returning\n`WireConversionError::TranscriptSource { debug }` for the `Unknown`\ncase rather than fabricating a typed `Spoken`.",
         "oneOf": [
@@ -33163,6 +33915,9 @@
                   "null"
                 ]
               },
+              "kind": {
+                "$ref": "#/$defs/WireServerToolKind"
+              },
               "meta": {
                 "anyOf": [
                   {
@@ -33172,13 +33927,10 @@
                     "type": "null"
                   }
                 ]
-              },
-              "name": {
-                "type": "string"
               }
             },
             "required": [
-              "name",
+              "kind",
               "content"
             ],
             "type": "object"
@@ -34550,6 +35302,89 @@
     ],
     "title": "WireBudgetSplitPolicy"
   },
+  "WireCallbackPending": {
+    "$defs": {
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "WireCallbackPendingStatus": {
+        "description": "Discriminant for [`WireCallbackPending`]. A dedicated enum so the wire\n`status` field is a typed closed value rather than a free-form string.",
+        "enum": [
+          "pending_tool_call"
+        ],
+        "type": "string"
+      },
+      "WirePendingToolCall": {
+        "description": "A single external tool call the agent is blocked on while\n[`WireCallbackPending`] is in effect.",
+        "properties": {
+          "args": {
+            "description": "Raw arguments the agent passed to the tool."
+          },
+          "tool_name": {
+            "description": "Name of the external tool the agent is waiting on.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_name",
+          "args"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Canonical typed contract for a turn that suspended on external tool\ncallbacks (`AgentError::CallbackPending`).\n\nPending state is a terminal-control fact, not a successful run: the agent\nis parked awaiting tool results that the caller must supply before\nresuming. Surfaces (CLI, MCP) serialize this contract instead of\nhand-building a success-looking JSON envelope, so the `status` discriminant\nand pending-tool list are schema-emitted and consistent across surfaces.",
+    "properties": {
+      "pending_tool_calls": {
+        "description": "The external tool calls the agent is blocked on.",
+        "items": {
+          "$ref": "#/$defs/WirePendingToolCall"
+        },
+        "type": "array"
+      },
+      "resumable": {
+        "description": "Whether the session can be resumed once tool results are supplied.",
+        "type": "boolean"
+      },
+      "session_created": {
+        "description": "Whether the session was created by the request that suspended.",
+        "type": "boolean"
+      },
+      "session_id": {
+        "$ref": "#/$defs/SessionId",
+        "description": "Session the pending turn belongs to."
+      },
+      "session_ref": {
+        "description": "Resolved external session reference, when the surface assigns one.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "status": {
+        "$ref": "#/$defs/WireCallbackPendingStatus",
+        "description": "Stable discriminant for callers that route on a flat status string.\nAlways serializes to `\"pending_tool_call\"`."
+      }
+    },
+    "required": [
+      "status",
+      "session_id",
+      "resumable",
+      "pending_tool_calls"
+    ],
+    "title": "WireCallbackPending",
+    "type": "object"
+  },
+  "WireCallbackPendingStatus": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Discriminant for [`WireCallbackPending`]. A dedicated enum so the wire\n`status` field is a typed closed value rather than a free-form string.",
+    "enum": [
+      "pending_tool_call"
+    ],
+    "title": "WireCallbackPendingStatus",
+    "type": "string"
+  },
   "WireContentBlock": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Wire-safe content block (no `source_path` — internal only).",
@@ -34657,6 +35492,21 @@
           "type",
           "media_type",
           "duration_ms"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Structured JSON tool output, materialized as inline JSON for SDK\nconsumers (the core side keeps it as opaque `Box<RawValue>`).",
+        "properties": {
+          "data": true,
+          "type": {
+            "const": "structured",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "data"
         ],
         "type": "object"
       },
@@ -34784,6 +35634,21 @@
               "type",
               "media_type",
               "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Structured JSON tool output, materialized as inline JSON for SDK\nconsumers (the core side keeps it as opaque `Box<RawValue>`).",
+            "properties": {
+              "data": true,
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
             ],
             "type": "object"
           },
@@ -40519,6 +41384,25 @@
     "title": "WirePeerConnectivitySnapshot",
     "type": "object"
   },
+  "WirePendingToolCall": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A single external tool call the agent is blocked on while\n[`WireCallbackPending`] is in effect.",
+    "properties": {
+      "args": {
+        "description": "Raw arguments the agent passed to the tool."
+      },
+      "tool_name": {
+        "description": "Name of the external tool the agent is waiting on.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "tool_name",
+      "args"
+    ],
+    "title": "WirePendingToolCall",
+    "type": "object"
+  },
   "WireProviderBinding": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Wire projection of [`meerkat_core::ProviderBinding`].",
@@ -41767,6 +42651,23 @@
               "duration_ms"
             ],
             "type": "object"
+          },
+          {
+            "description": "Structured JSON content returned by a tool, preserved as JSON rather\nthan laundered through a stringified `Text` block.\n\nTools whose result is structured data (lists, records) emit this so the\ncanonical transcript carries the typed JSON shape. The payload is opaque\npass-through JSON (`Box<RawValue>`, the allow-listed §3 pattern shared\nwith `ToolUse` args): Meerkat does not impose a closed schema on\narbitrary tool output. The model-facing text projection is *derived*\nfrom this JSON, never the other way around.",
+            "properties": {
+              "data": {
+                "description": "Provider-opaque structured JSON, parsed at most once by consumers."
+              },
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -42639,6 +43540,9 @@
                       "null"
                     ]
                   },
+                  "kind": {
+                    "$ref": "#/$defs/WireServerToolKind"
+                  },
                   "meta": {
                     "anyOf": [
                       {
@@ -42648,13 +43552,10 @@
                         "type": "null"
                       }
                     ]
-                  },
-                  "name": {
-                    "type": "string"
                   }
                 },
                 "required": [
-                  "name",
+                  "kind",
                   "content"
                 ],
                 "type": "object"
@@ -42842,6 +43743,21 @@
             "type": "object"
           },
           {
+            "description": "Structured JSON tool output, materialized as inline JSON for SDK\nconsumers (the core side keeps it as opaque `Box<RawValue>`).",
+            "properties": {
+              "data": true,
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Forward-compatibility for unknown block types.",
             "properties": {
               "type": {
@@ -42974,6 +43890,67 @@
             },
             "required": [
               "provider"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireServerToolKind": {
+        "description": "Wire projection of `meerkat_core::ServerToolKind`.\n\nMirrors the typed semantic owner of a provider-executed tool. The core enum\nis `#[non_exhaustive]`; a future semantic kind that lacks an explicit arm in\nthe forward `From` surfaces as `Unknown { debug }` rather than silently\ncollapsing into a plausible-but-wrong kind. SDK consumers route on the\n`kind` discriminator and treat `unknown` as unrecognized.\n\n**When a new core variant is added, add an explicit arm in the forward\n`From` impl above the wildcard — `Unknown` is the floor, not the\ndestination.**",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "web_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "google_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "provider_native",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "debug": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "debug"
             ],
             "type": "object"
           }
@@ -43555,6 +44532,23 @@
               "duration_ms"
             ],
             "type": "object"
+          },
+          {
+            "description": "Structured JSON content returned by a tool, preserved as JSON rather\nthan laundered through a stringified `Text` block.\n\nTools whose result is structured data (lists, records) emit this so the\ncanonical transcript carries the typed JSON shape. The payload is opaque\npass-through JSON (`Box<RawValue>`, the allow-listed §3 pattern shared\nwith `ToolUse` args): Meerkat does not impose a closed schema on\narbitrary tool output. The model-facing text projection is *derived*\nfrom this JSON, never the other way around.",
+            "properties": {
+              "data": {
+                "description": "Provider-opaque structured JSON, parsed at most once by consumers."
+              },
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -44427,6 +45421,9 @@
                       "null"
                     ]
                   },
+                  "kind": {
+                    "$ref": "#/$defs/WireServerToolKind"
+                  },
                   "meta": {
                     "anyOf": [
                       {
@@ -44436,13 +45433,10 @@
                         "type": "null"
                       }
                     ]
-                  },
-                  "name": {
-                    "type": "string"
                   }
                 },
                 "required": [
-                  "name",
+                  "kind",
                   "content"
                 ],
                 "type": "object"
@@ -44630,6 +45624,21 @@
             "type": "object"
           },
           {
+            "description": "Structured JSON tool output, materialized as inline JSON for SDK\nconsumers (the core side keeps it as opaque `Box<RawValue>`).",
+            "properties": {
+              "data": true,
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Forward-compatibility for unknown block types.",
             "properties": {
               "type": {
@@ -44762,6 +45771,67 @@
             },
             "required": [
               "provider"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireServerToolKind": {
+        "description": "Wire projection of `meerkat_core::ServerToolKind`.\n\nMirrors the typed semantic owner of a provider-executed tool. The core enum\nis `#[non_exhaustive]`; a future semantic kind that lacks an explicit arm in\nthe forward `From` surfaces as `Unknown { debug }` rather than silently\ncollapsing into a plausible-but-wrong kind. SDK consumers route on the\n`kind` discriminator and treat `unknown` as unrecognized.\n\n**When a new core variant is added, add an explicit arm in the forward\n`From` impl above the wildcard — `Unknown` is the floor, not the\ndestination.**",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "web_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "google_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "provider_native",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "debug": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "debug"
             ],
             "type": "object"
           }
@@ -45786,6 +46856,23 @@
               "duration_ms"
             ],
             "type": "object"
+          },
+          {
+            "description": "Structured JSON content returned by a tool, preserved as JSON rather\nthan laundered through a stringified `Text` block.\n\nTools whose result is structured data (lists, records) emit this so the\ncanonical transcript carries the typed JSON shape. The payload is opaque\npass-through JSON (`Box<RawValue>`, the allow-listed §3 pattern shared\nwith `ToolUse` args): Meerkat does not impose a closed schema on\narbitrary tool output. The model-facing text projection is *derived*\nfrom this JSON, never the other way around.",
+            "properties": {
+              "data": {
+                "description": "Provider-opaque structured JSON, parsed at most once by consumers."
+              },
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -46658,6 +47745,9 @@
                       "null"
                     ]
                   },
+                  "kind": {
+                    "$ref": "#/$defs/WireServerToolKind"
+                  },
                   "meta": {
                     "anyOf": [
                       {
@@ -46667,13 +47757,10 @@
                         "type": "null"
                       }
                     ]
-                  },
-                  "name": {
-                    "type": "string"
                   }
                 },
                 "required": [
-                  "name",
+                  "kind",
                   "content"
                 ],
                 "type": "object"
@@ -46861,6 +47948,21 @@
             "type": "object"
           },
           {
+            "description": "Structured JSON tool output, materialized as inline JSON for SDK\nconsumers (the core side keeps it as opaque `Box<RawValue>`).",
+            "properties": {
+              "data": true,
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Forward-compatibility for unknown block types.",
             "properties": {
               "type": {
@@ -46993,6 +48095,67 @@
             },
             "required": [
               "provider"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireServerToolKind": {
+        "description": "Wire projection of `meerkat_core::ServerToolKind`.\n\nMirrors the typed semantic owner of a provider-executed tool. The core enum\nis `#[non_exhaustive]`; a future semantic kind that lacks an explicit arm in\nthe forward `From` surfaces as `Unknown { debug }` rather than silently\ncollapsing into a plausible-but-wrong kind. SDK consumers route on the\n`kind` discriminator and treat `unknown` as unrecognized.\n\n**When a new core variant is added, add an explicit arm in the forward\n`From` impl above the wildcard — `Unknown` is the floor, not the\ndestination.**",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "web_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "google_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "provider_native",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "debug": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "debug"
             ],
             "type": "object"
           }
@@ -48374,6 +49537,21 @@
             "type": "object"
           },
           {
+            "description": "Structured JSON tool output, materialized as inline JSON for SDK\nconsumers (the core side keeps it as opaque `Box<RawValue>`).",
+            "properties": {
+              "data": true,
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Forward-compatibility for unknown block types.",
             "properties": {
               "type": {
@@ -48532,6 +49710,21 @@
               "type",
               "media_type",
               "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Structured JSON tool output, materialized as inline JSON for SDK\nconsumers (the core side keeps it as opaque `Box<RawValue>`).",
+            "properties": {
+              "data": true,
+              "type": {
+                "const": "structured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data"
             ],
             "type": "object"
           },

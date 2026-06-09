@@ -950,7 +950,10 @@ export class MeerkatClient {
     text: string,
     options?: SessionIngressOptions,
   ): Promise<{ status: string }> {
-    const params: Record<string, unknown> = { session_id: sessionId, text };
+    const params: Record<string, unknown> = {
+      session_id: sessionId,
+      content: { type: "text", text },
+    };
     if (options?.source !== undefined) {
       params.source = options.source;
     }

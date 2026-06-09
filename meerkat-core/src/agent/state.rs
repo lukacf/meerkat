@@ -4813,7 +4813,9 @@ mod tests {
         state
             .stage_active_turn_append(
                 &crate::service::AppendSystemContextRequest {
-                    text: "STEER_MARKER_visible_after_tool".to_string(),
+                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                        "STEER_MARKER_visible_after_tool".to_string(),
+                    ),
                     source: Some("test:active-steer".to_string()),
                     idempotency_key: Some("test:active-steer".to_string()),
                     source_kind: crate::session::SystemContextSource::RuntimeSteer,
@@ -5166,7 +5168,7 @@ mod tests {
                         decision: None,
                         patches: Vec::new(),
                         published_patches: Vec::new(),
-                        error: None,
+                        failure_reason: None,
                         duration_ms: None,
                     }],
                     decision: None,
@@ -6651,7 +6653,7 @@ mod tests {
                         decision: None,
                         patches: Vec::new(),
                         published_patches: Vec::new(),
-                        error: None,
+                        failure_reason: None,
                         duration_ms: None,
                     }],
                     ..HookExecutionReport::empty()

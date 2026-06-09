@@ -3639,6 +3639,19 @@ impl SessionRuntime {
             .await
     }
 
+    /// Record a typed live-adapter terminal error against a session, routing
+    /// the cause onto the session's owned event stream via the canonical
+    /// [`SessionService::record_live_terminal_error`] seam.
+    pub async fn record_live_terminal_error(
+        &self,
+        session_id: &SessionId,
+        cause: meerkat_core::live_adapter::LiveAdapterErrorCode,
+    ) -> Result<(), SessionError> {
+        self.service
+            .record_live_terminal_error(session_id, cause)
+            .await
+    }
+
     pub async fn append_realtime_transcript_event(
         &self,
         session_id: &SessionId,
@@ -6250,7 +6263,9 @@ impl SessionRuntime {
                 .append_system_context(
                     session_id,
                     AppendSystemContextRequest {
-                        text: pending.text.clone(),
+                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                            pending.text.clone(),
+                        ),
                         source: pending.source.clone(),
                         idempotency_key: pending.idempotency_key.clone(),
                         source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -8783,7 +8798,9 @@ mod tests {
         state
             .stage_append(
                 &AppendSystemContextRequest {
-                    text: "Authoritative peer token is birch seventeen.".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "Authoritative peer token is birch seventeen.".to_string(),
+                    ),
                     source: Some(
                         "peer_response_terminal:analyst:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
                             .to_string(),
@@ -10374,7 +10391,9 @@ mod tests {
             .append_system_context(
                 &session_id,
                 AppendSystemContextRequest {
-                    text: "Authoritative peer token is birch seventeen.".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "Authoritative peer token is birch seventeen.".to_string(),
+                    ),
                     source: Some(
                         "peer_response_terminal:analyst:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
                             .to_string(),
@@ -11596,7 +11615,7 @@ mod tests {
         durable_context_state
             .stage_append(
                 &AppendSystemContextRequest {
-                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}.".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}.".to_string()),
                     source: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".to_string()),
                     idempotency_key: Some("req-123".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -11690,7 +11709,7 @@ mod tests {
         durable_context_state
             .stage_append(
                 &AppendSystemContextRequest {
-                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Result: {\"token\":\"birch seventeen\"}.".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Result: {\"token\":\"birch seventeen\"}.".to_string()),
                     source: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".to_string()),
                     idempotency_key: Some("req-123".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -13246,7 +13265,9 @@ mod tests {
         }
 
         let append_req = AppendSystemContextRequest {
-            text: "Coordinate with the orchestrator.".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "Coordinate with the orchestrator.".to_string(),
+            ),
             source: Some("mob".to_string()),
             idempotency_key: Some("ctx-promotion".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -13299,7 +13320,9 @@ mod tests {
             .append_system_context(
                 &session_id,
                 AppendSystemContextRequest {
-                    text: "Always include the marker [TS-SDK-CTX] in your replies.".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "Always include the marker [TS-SDK-CTX] in your replies.".to_string(),
+                    ),
                     source: Some("typescript-smoke".to_string()),
                     idempotency_key: None,
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -13391,7 +13414,9 @@ mod tests {
             Some(admission),
         );
         let append = AppendSystemContextRequest {
-            text: "Preserve this append across rollback.".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "Preserve this append across rollback.".to_string(),
+            ),
             source: Some("test".to_string()),
             idempotency_key: Some("rollback-preserve".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -13425,7 +13450,7 @@ mod tests {
             state
                 .pending()
                 .iter()
-                .any(|pending| pending.text == append.text),
+                .any(|pending| pending.text == append.text()),
             "rollback must preserve appends made while promotion was in progress: {state:?}"
         );
     }
@@ -20214,7 +20239,9 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
         let req = AppendSystemContextRequest {
-            text: "new context".to_string(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                "new context".to_string(),
+            ),
             source: None,
             idempotency_key: Some("key-1".to_string()),
             source_kind: meerkat_core::session::SystemContextSource::Normal,

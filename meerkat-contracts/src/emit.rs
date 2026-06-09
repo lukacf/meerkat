@@ -45,6 +45,9 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireUsage": schema_for!(crate::wire::WireUsage),
         "ContractVersion": schema_for!(crate::version::ContractVersion),
         "WireRunResult": schema_for!(crate::wire::WireRunResult),
+        "WireCallbackPending": schema_for!(crate::wire::WireCallbackPending),
+        "WirePendingToolCall": schema_for!(crate::wire::WirePendingToolCall),
+        "WireCallbackPendingStatus": schema_for!(crate::wire::WireCallbackPendingStatus),
         "HelpExecutionMode": schema_for!(crate::wire::HelpExecutionMode),
         "HelpRequest": schema_for!(crate::wire::HelpRequest),
         "HelpResponse": schema_for!(crate::wire::HelpResponse),
@@ -971,11 +974,23 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             "RestAppendSystemContextRequest".to_string(),
             object_schema(
                 vec![
-                    ("text", string_schema()),
+                    (
+                        "content",
+                        serde_json::json!({
+                            "description": "Typed CoreRenderable body (tagged by `type`). A plain-text payload is `{\"type\":\"text\",\"text\":\"...\"}`.",
+                            "type": "object",
+                            "required": ["type"],
+                            "properties": {
+                                "type": { "type": "string" },
+                                "text": { "type": "string" }
+                            },
+                            "additionalProperties": true
+                        }),
+                    ),
                     ("source", string_schema()),
                     ("idempotency_key", string_schema()),
                 ],
-                vec!["text"],
+                vec!["content"],
             ),
         );
         components.insert(

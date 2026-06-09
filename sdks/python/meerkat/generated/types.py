@@ -2894,10 +2894,14 @@ class WireContentBlockVideo(TypedDict, total=False):
     media_type: Required[str]
     type: Required[Literal['video']]
 
+class WireContentBlockStructured(TypedDict, total=False):
+    data: Required[Any]
+    type: Required[Literal['structured']]
+
 class WireContentBlockUnknown(TypedDict, total=False):
     type: Required[Literal['unknown']]
 
-WireContentBlock = WireContentBlockText | WireContentBlockImage | WireContentBlockVideo | WireContentBlockUnknown
+WireContentBlock = WireContentBlockText | WireContentBlockImage | WireContentBlockVideo | WireContentBlockStructured | WireContentBlockUnknown
 
 # Wire-safe content input (mirrors `ContentInput`).
 WireContentInput = str | list[WireContentBlock]
@@ -3362,8 +3366,8 @@ class WireAssistantBlockToolUse(TypedDict, total=False):
 class WireAssistantBlockServerToolContentData(TypedDict, total=False):
     content: Required[Any]
     id: NotRequired[str]
+    kind: Required[dict[str, Any]]
     meta: NotRequired[dict[str, Any]]
-    name: Required[str]
 
 class WireAssistantBlockServerToolContent(TypedDict, total=False):
     block_type: Required[Literal['server_tool_content']]
@@ -3450,7 +3454,7 @@ class CommsCommandPeerMessage(TypedDict, total=False):
 
 class CommsCommandPeerLifecycle(TypedDict, total=False):
     kind: Required[Literal['peer_lifecycle']]
-    lifecycle_kind: Required[Literal['mob.peer_added', 'mob.peer_retired', 'mob.peer_unwired']]
+    lifecycle_kind: Required[Literal['mob.peer_added', 'mob.peer_retired', 'mob.peer_unwired'] | Literal['mob.dismiss']]
     params: Required[CommsPeerLifecycleParams]
     to: Required[PeerId]
 
@@ -3686,7 +3690,11 @@ class ContentBlockVideo(TypedDict, total=False):
     media_type: Required[str]
     type: Required[Literal['video']]
 
-ContentBlock = ContentBlockText | ContentBlockImage | ContentBlockVideo
+class ContentBlockStructured(TypedDict, total=False):
+    data: Required[Any]
+    type: Required[Literal['structured']]
+
+ContentBlock = ContentBlockText | ContentBlockImage | ContentBlockVideo | ContentBlockStructured
 
 # Input content that can be either a plain text string or multimodal content blocks.
 #
@@ -3715,7 +3723,7 @@ class CommsSendParamsPeerMessage(TypedDict, total=False):
 
 class CommsSendParamsPeerLifecycle(TypedDict, total=False):
     kind: Required[Literal['peer_lifecycle']]
-    lifecycle_kind: Required[Literal['mob.peer_added', 'mob.peer_retired', 'mob.peer_unwired']]
+    lifecycle_kind: Required[Literal['mob.peer_added', 'mob.peer_retired', 'mob.peer_unwired'] | Literal['mob.dismiss']]
     params: Required[CommsPeerLifecycleParams]
     session_id: Required[str]
     to: Required[PeerId]

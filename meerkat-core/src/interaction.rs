@@ -573,22 +573,6 @@ impl PeerIngressClassification {
             response_terminality: None,
         }
     }
-
-    pub const fn lifecycle(kind: PeerLifecycleKind) -> Self {
-        let class = match kind {
-            PeerLifecycleKind::PeerAdded => PeerInputClass::PeerLifecycleAdded,
-            PeerLifecycleKind::PeerRetired => PeerInputClass::PeerLifecycleRetired,
-            PeerLifecycleKind::PeerUnwired => PeerInputClass::PeerLifecycleUnwired,
-        };
-        Self {
-            class,
-            actionable: peer_input_class_actionable_grouping(class),
-            kind: PeerIngressKind::Request,
-            auth: PeerIngressAuthDecision::Required,
-            lifecycle_kind: Some(kind),
-            response_terminality: None,
-        }
-    }
 }
 
 /// Parsed transport facts for one peer-envelope ingress item.

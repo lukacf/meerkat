@@ -1147,7 +1147,9 @@ async fn inject_context_applied_when_idle() {
         .append_system_context(
             &sid,
             AppendSystemContextRequest {
-                text: "New runtime context".to_string(),
+                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                    "New runtime context".to_string(),
+                ),
                 source: Some("test".to_string()),
                 idempotency_key: Some("ctx-idle-1".to_string()),
                 source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -1180,7 +1182,9 @@ async fn inject_context_duplicate_idempotent() {
     let sid = created.session_id;
 
     let req = AppendSystemContextRequest {
-        text: "Idempotent context".to_string(),
+        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+            "Idempotent context".to_string(),
+        ),
         source: Some("test".to_string()),
         idempotency_key: Some("ctx-dedup-1".to_string()),
         source_kind: meerkat_core::session::SystemContextSource::Normal,

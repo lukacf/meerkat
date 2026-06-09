@@ -32,9 +32,7 @@ pub use meerkat_core::{
 };
 pub use protocol::Protocol;
 pub use request_lifecycle::{
-    MCP_TOOL_REQUEST_LIFECYCLE_CATALOG, McpToolRequestLifecycleCatalog,
-    McpToolRequestLifecycleDescriptor, RequestLifecycle, RpcRequestLifecycleRule, WireInitialTurn,
-    mcp_tool_request_lifecycle, rpc_request_lifecycle,
+    RequestLifecycle, RpcRequestLifecycleRule, WireInitialTurn, rpc_request_lifecycle,
 };
 pub use rest_catalog::{
     RestOperationDescriptor, RestPathDescriptor, rest_documented_paths, rest_path_catalog,
@@ -330,6 +328,8 @@ pub use wire::{
     WireAuthStatusDetail,
     WireBackendProfile,
     WireBindingIdentity,
+    WireCallbackPending,
+    WireCallbackPendingStatus,
     WireContentBlock,
     WireContentInput,
     WireDeviceCompleteResult,
@@ -376,6 +376,7 @@ pub use wire::{
     WireModelTier,
     WirePeerConnectivity,
     WirePeerConnectivitySnapshot,
+    WirePendingToolCall,
     WireProviderBinding,
     WireProviderMeta,
     WireProvisionApiKeyResult,

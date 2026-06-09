@@ -6,6 +6,7 @@
 use crate::inproc::InprocRegistry;
 use crate::{InboxItem, MessageKind, PubKey, TrustedPeers};
 use meerkat_core::PlainEventSource;
+use meerkat_core::comms::PeerLifecycleKind;
 use meerkat_core::types::{ContentBlock, HandlingMode, RenderMetadata};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -191,6 +192,17 @@ pub enum CommsContent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<ContentBlock>>,
     },
+    /// A one-way peer lifecycle notification (control-plane topology update).
+    ///
+    /// The lifecycle kind is the typed authority on the notification's
+    /// semantics — including dismissal terminality. Consumers read
+    /// `kind`, never the rendered body text.
+    Lifecycle {
+        /// The typed lifecycle kind.
+        kind: PeerLifecycleKind,
+        /// Parameters carried by the lifecycle notification (e.g. subject peer).
+        params: JsonValue,
+    },
     /// A response from a peer to a previous request.
     Response {
         /// The ID of the request this is responding to.
@@ -271,7 +283,10 @@ impl CommsMessage {
                 params: params.clone(),
                 blocks: blocks.clone(),
             },
-            MessageKind::Lifecycle { .. } => return None,
+            MessageKind::Lifecycle { kind, params } => CommsContent::Lifecycle {
+                kind: *kind,
+                params: params.clone(),
+            },
             MessageKind::Response {
                 in_reply_to,
                 status,
@@ -379,6 +394,22 @@ impl CommsMessage {
                 intent.as_str(),
                 params,
             ),
+            CommsContent::Lifecycle { kind, params } => {
+                // One-way lifecycle notices are control-plane notifications, not
+                // correlated requests; render them as a plain peer notice so the
+                // LLM is never told to `send_response`.
+                let params_suffix = if params.is_null()
+                    || matches!(params, JsonValue::Object(map) if map.is_empty())
+                {
+                    String::new()
+                } else {
+                    format!(" {}", serde_json::to_string(params).unwrap_or_default())
+                };
+                meerkat_core::format_peer_message_projection(
+                    &self.from_peer,
+                    &format!("[lifecycle: {}]{params_suffix}", kind.as_str()),
+                )
+            }
             CommsContent::Response {
                 in_reply_to,
                 status,

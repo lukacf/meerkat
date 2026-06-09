@@ -1980,9 +1980,14 @@ pub struct ContinueSessionRequest {
 }
 
 /// Append runtime system context to a session.
+///
+/// The body is the typed [`CoreRenderable`] owner rather than a bare `text`
+/// string; the handler threads it straight into
+/// `AppendSystemContextRequest.content`. A plain-text client payload still
+/// deserializes via `CoreRenderable`'s tagged `text` variant.
 #[derive(Debug, Deserialize)]
 pub struct AppendSystemContextRequest {
-    pub text: String,
+    pub content: CoreRenderable,
     #[serde(default)]
     pub source: Option<String>,
     #[serde(default)]
@@ -5118,7 +5123,7 @@ async fn append_system_context(
 ) -> Result<Json<Value>, ApiError> {
     let session_id = resolve_session_id_for_state(&id, &state)?;
     let svc_req = SvcAppendSystemContextRequest {
-        text: req.text,
+        content: req.content,
         source: req.source,
         idempotency_key: req.idempotency_key,
         source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -10107,7 +10112,7 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(
                 serde_json::json!({
-                    "text": "Coordinate with the orchestrator.",
+                    "content": { "type": "text", "text": "Coordinate with the orchestrator." },
                     "source": "mob",
                     "idempotency_key": "ctx-rest-test"
                 })

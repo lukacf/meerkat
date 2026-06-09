@@ -11,7 +11,8 @@ use meerkat_core::lifecycle::run_primitive::{
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, ImageData, Message, OutputSchema,
-    Provider, StopReason, SystemNoticeBlock, SystemNoticeMessage, ToolResult, Usage,
+    Provider, ServerToolKind, StopReason, SystemNoticeBlock, SystemNoticeMessage, ToolResult,
+    Usage,
 };
 use meerkat_llm_core::LlmError;
 use meerkat_llm_core::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
@@ -587,7 +588,7 @@ impl AnthropicClient {
                             }
                             meerkat_core::AssistantBlock::ServerToolContent {
                                 id,
-                                name,
+                                kind,
                                 content: server_content,
                                 ..
                             } => {
@@ -597,7 +598,8 @@ impl AnthropicClient {
                                     content.push(serde_json::json!({
                                         "type": "server_tool_use",
                                         "id": id,
-                                        "name": name,
+                                        // Provider-native name derived from the typed kind.
+                                        "name": kind.provider_name(),
                                         "input": server_content
                                             .get("input")
                                             .cloned()
@@ -1155,7 +1157,7 @@ impl LlmClient for AnthropicClient {
                                         if let Some(citations) = content_block.extra.get("citations") {
                                             yield LlmEvent::ServerToolContent {
                                                 id: None,
-                                                name: "web_search_citations".to_string(),
+                                                kind: ServerToolKind::WebSearch,
                                                 content: serde_json::json!({
                                                     "type": "text_citations",
                                                     "citations": citations
@@ -1200,7 +1202,7 @@ impl LlmClient for AnthropicClient {
                                     "web_search_tool_result" => {
                                         yield LlmEvent::ServerToolContent {
                                             id: content_block.tool_use_id.clone(),
-                                            name: "web_search".to_string(),
+                                            kind: ServerToolKind::WebSearch,
                                             content: content_block.extra.clone(),
                                             meta: None,
                                         };
@@ -1271,10 +1273,17 @@ impl LlmClient for AnthropicClient {
                                     let name = current_server_tool_name
                                         .take()
                                         .unwrap_or_else(|| "server_tool".to_string());
+                                    // Parse-at-boundary: known semantic tools map to
+                                    // typed kinds; any other server-tool name is
+                                    // provider-native and round-trips verbatim.
+                                    let kind = match name.as_str() {
+                                        "web_search" => ServerToolKind::WebSearch,
+                                        _ => ServerToolKind::ProviderNative { name },
+                                    };
                                     accumulated_server_tool_input.clear();
                                     yield LlmEvent::ServerToolContent {
                                         id,
-                                        name,
+                                        kind,
                                         content: serde_json::json!({
                                             "type": "server_tool_use",
                                             "input": input
@@ -1755,7 +1764,7 @@ mod tests {
                     },
                     AssistantBlock::ServerToolContent {
                         id: Some("srv_1".to_string()),
-                        name: "web_search".to_string(),
+                        kind: ServerToolKind::WebSearch,
                         content: serde_json::json!({
                             "type": "server_tool_use",
                             "input": {"query": "m"}
@@ -1764,7 +1773,7 @@ mod tests {
                     },
                     AssistantBlock::ServerToolContent {
                         id: None,
-                        name: "web_search_citations".to_string(),
+                        kind: ServerToolKind::WebSearch,
                         content: serde_json::json!({
                             "type": "text_citations",
                             "citations": []
@@ -2967,9 +2976,9 @@ mod tests {
         while let Some(event) = stream.next().await {
             match event.expect("stream event") {
                 LlmEvent::ServerToolContent {
-                    id, name, content, ..
+                    id, kind, content, ..
                 } => {
-                    server_blocks.push((id, name, content));
+                    server_blocks.push((id, kind, content));
                 }
                 LlmEvent::Done { .. } => break,
                 _ => {}
@@ -2979,7 +2988,7 @@ mod tests {
 
         assert_eq!(server_blocks.len(), 2);
         assert_eq!(server_blocks[0].0.as_deref(), Some("srvtoolu_1"));
-        assert_eq!(server_blocks[0].1, "web_search");
+        assert_eq!(server_blocks[0].1, ServerToolKind::WebSearch);
         assert_eq!(
             server_blocks[0].2["input"]["query"],
             "latest meerkat runtime"

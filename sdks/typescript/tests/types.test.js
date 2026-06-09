@@ -1600,11 +1600,16 @@ describe("Session wrappers", () => {
     assert.deepEqual(calls, [
       {
         method: "session/inject_context",
-        params: { session_id: "s1", text: "ctx", source: "test", idempotency_key: "k1" },
+        params: {
+          session_id: "s1",
+          content: { type: "text", text: "ctx" },
+          source: "test",
+          idempotency_key: "k1",
+        },
       },
       {
         method: "session/inject_context",
-        params: { session_id: "s2", text: "ctx2" },
+        params: { session_id: "s2", content: { type: "text", text: "ctx2" } },
       },
     ]);
   });

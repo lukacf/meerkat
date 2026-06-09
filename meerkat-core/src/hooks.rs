@@ -106,6 +106,74 @@ pub enum HookReasonCode {
     RuntimeError,
 }
 
+/// Typed reason a hook execution failed (engine-level fault, not a guardrail
+/// denial).
+///
+/// Mirrors the [`HookReasonCode`] precedent: the variant is the typed owner of
+/// the failure cause; the human-readable string is a [`Display`] derivation,
+/// never a separately-stored field.
+///
+/// [`Display`]: std::fmt::Display
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason_code", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HookFailureReason {
+    /// The hook runtime did not complete within its configured timeout.
+    Timeout { timeout_ms: u64 },
+    /// The hook runtime executed but failed.
+    ExecutionFailed {
+        /// Display projection of the underlying execution error.
+        message: String,
+    },
+    /// The hook configuration was rejected.
+    ConfigInvalid {
+        /// Display projection of the configuration error.
+        message: String,
+    },
+    /// A `pre_*` background hook attempted a non-observe action (patch or deny),
+    /// which is not permitted for observe-only background hooks.
+    ObserveOnlyViolation,
+}
+
+impl std::fmt::Display for HookFailureReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Timeout { timeout_ms } => write!(f, "hook timed out after {timeout_ms}ms"),
+            Self::ExecutionFailed { message } => write!(f, "{message}"),
+            Self::ConfigInvalid { message } => write!(f, "{message}"),
+            Self::ObserveOnlyViolation => {
+                write!(f, "pre_* background hooks are observe-only")
+            }
+        }
+    }
+}
+
+impl HookFailureReason {
+    /// Typed execution failure carrying the display message.
+    pub fn execution_failed(message: impl Into<String>) -> Self {
+        Self::ExecutionFailed {
+            message: message.into(),
+        }
+    }
+
+    /// Project a typed [`HookEngineError`] into its failure reason.
+    #[must_use]
+    pub fn from_engine_error(error: &HookEngineError) -> Self {
+        match error {
+            HookEngineError::InvalidConfiguration(reason) => Self::ConfigInvalid {
+                message: reason.clone(),
+            },
+            HookEngineError::ExecutionFailed { reason, .. } => Self::ExecutionFailed {
+                message: reason.clone(),
+            },
+            HookEngineError::Timeout { timeout_ms, .. } => Self::Timeout {
+                timeout_ms: *timeout_ms,
+            },
+        }
+    }
+}
+
 /// Final decision produced by merged hook outcomes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "decision", rename_all = "snake_case")]
@@ -207,7 +275,15 @@ pub struct HookToolCall {
 /// hooks deny/terminalize on. The text projection is presentation-only and is
 /// derived from the blocks via [`HookToolResult::text_projection`]; it is never
 /// a separately-stored field that policy code can read.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+///
+/// The wire envelope additionally serializes a `content` string for external
+/// (command/HTTP) hook consumers that read the text result. That field is a
+/// pure serialize-only derivation of `content_blocks` (the text projection); it
+/// is never a stored field, is never deserialized back as authority, and policy
+/// code must steer on `content_blocks`. Restoring it (remediation row #331)
+/// keeps external hook consumers — which previously read `content` — working
+/// without re-introducing a lossy mutable mirror.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct HookToolResult {
     pub tool_use_id: String,
@@ -220,6 +296,33 @@ pub struct HookToolResult {
     /// carry `content_blocks` instead of serializing this projection hint.
     #[serde(default, skip_serializing)]
     pub has_images: bool,
+}
+
+impl Serialize for HookToolResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        // `content` is a serialize-only text projection derived from the
+        // canonical `content_blocks` for external hook consumers (row #331);
+        // `has_images` is intentionally not serialized. The field count is
+        // `tool_use_id`, `name`, `content`, `is_error`, plus `content_blocks`
+        // when present.
+        let mut len = 4;
+        if !self.content_blocks.is_empty() {
+            len += 1;
+        }
+        let mut state = serializer.serialize_struct("HookToolResult", len)?;
+        state.serialize_field("tool_use_id", &self.tool_use_id)?;
+        state.serialize_field("name", &self.name)?;
+        state.serialize_field("content", &self.text_projection())?;
+        if !self.content_blocks.is_empty() {
+            state.serialize_field("content_blocks", &self.content_blocks)?;
+        }
+        state.serialize_field("is_error", &self.is_error)?;
+        state.end()
+    }
 }
 
 impl HookToolResult {
@@ -341,10 +444,22 @@ pub struct HookOutcome {
     pub patches: Vec<HookPatch>,
     #[serde(default)]
     pub published_patches: Vec<HookPatchEnvelope>,
+    /// Typed failure cause for this hook outcome, when the hook did not succeed.
+    /// The string form is derived via [`HookOutcome::failure_message`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub failure_reason: Option<HookFailureReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+}
+
+impl HookOutcome {
+    /// Display projection of the typed [`HookOutcome::failure_reason`], when
+    /// present. This is presentation-only — policy code must branch on the
+    /// typed `failure_reason` variant.
+    #[must_use]
+    pub fn failure_message(&self) -> Option<String> {
+        self.failure_reason.as_ref().map(ToString::to_string)
+    }
 }
 
 /// Aggregate result used by the core loop to apply hook decisions.
@@ -542,9 +657,12 @@ mod tests {
             json["content_blocks"],
             serde_json::json!([{"type": "text", "text": "just text"}])
         );
-        assert!(
-            json.get("content").is_none(),
-            "the legacy text mirror must not be serialized on the hook surface"
+        // The wire envelope serializes a derived `content` text projection for
+        // external hook consumers (row #331), derived purely from the blocks.
+        assert_eq!(
+            json["content"],
+            serde_json::json!("just text"),
+            "wire envelope must carry the derived `content` text projection"
         );
         assert!(
             json.get("has_images").is_none(),
@@ -664,21 +782,50 @@ mod tests {
             json.get("has_images").is_none(),
             "new hook payloads carry content_blocks instead of has_images"
         );
-        assert!(
-            json.get("content").is_none(),
-            "the legacy text mirror is no longer a stored field on the hook surface"
+        // `content` is serialized as a derived text projection (row #331), not a
+        // stored mirror — incoming `content` is still ignored on deserialize.
+        assert_eq!(
+            json["content"],
+            serde_json::json!("text"),
+            "wire envelope serializes the derived content text projection"
         );
 
         let decoded: HookToolResult = serde_json::from_value(serde_json::json!({
             "tool_use_id": "tc_1",
             "name": "tool",
-            "content": "text",
+            "content": "ignored-incoming-string",
             "content_blocks": [{"type": "text", "text": "text"}],
             "is_error": false,
             "has_images": true
         }))
         .expect("should deserialize");
         assert!(decoded.has_images);
+        // The incoming `content` string is not ingested as authority; the
+        // canonical content comes from `content_blocks`.
+        assert_eq!(decoded.content_blocks, vec![text_block("text")]);
+        assert_eq!(decoded.text_projection(), "text");
+    }
+
+    #[test]
+    fn hook_tool_result_wire_content_round_trips_from_blocks() {
+        // The wire envelope serializes `content` (derived) + `content_blocks`
+        // (canonical); deserializing the envelope reconstructs the canonical
+        // blocks and the derived `content` matches the text projection.
+        let original = HookToolResult {
+            tool_use_id: "tc_1".into(),
+            name: "tool".into(),
+            content_blocks: vec![text_block("alpha"), image_block("image/png", "AAAA")],
+            is_error: false,
+            has_images: true,
+        };
+        let json = serde_json::to_value(&original).expect("serialize");
+        assert_eq!(
+            json["content"],
+            serde_json::json!(original.text_projection())
+        );
+        let decoded: HookToolResult = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(decoded.content_blocks, original.content_blocks);
+        assert_eq!(decoded.text_projection(), original.text_projection());
     }
 
     #[test]

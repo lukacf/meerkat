@@ -9,7 +9,7 @@ use meerkat_core::schema::{CompiledSchema, SchemaCompat, SchemaError, SchemaWarn
 use meerkat_core::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, GeminiImageMetadata, ImageData,
     ImageGenerationIntent, ImageProviderErrorCode, ImageProviderTerminalObservation, Message,
-    OutputSchema, Provider, ProviderImageMetadata, StopReason, SystemNoticeBlock,
+    OutputSchema, Provider, ProviderImageMetadata, ServerToolKind, StopReason, SystemNoticeBlock,
     SystemNoticeMessage, ToolResult, Usage, UserMessage,
 };
 use meerkat_llm_core::LlmError;
@@ -1653,7 +1653,7 @@ impl LlmClient for GeminiClient {
                                 if let Some(grounding_metadata) = cand.grounding_metadata {
                                     yield LlmEvent::ServerToolContent {
                                         id: None,
-                                        name: "google_search".to_string(),
+                                        kind: ServerToolKind::GoogleSearch,
                                         content: grounding_metadata,
                                         meta: None,
                                     };
@@ -1856,7 +1856,7 @@ mod tests {
                     },
                     AssistantBlock::ServerToolContent {
                         id: None,
-                        name: "google_search".to_string(),
+                        kind: ServerToolKind::GoogleSearch,
                         content: serde_json::json!({
                             "groundingChunks": []
                         }),
@@ -2165,8 +2165,8 @@ mod tests {
         let mut grounding = None;
         while let Some(event) = stream.next().await {
             match event? {
-                LlmEvent::ServerToolContent { name, content, .. } => {
-                    assert_eq!(name, "google_search");
+                LlmEvent::ServerToolContent { kind, content, .. } => {
+                    assert_eq!(kind, ServerToolKind::GoogleSearch);
                     grounding = Some(content);
                 }
                 LlmEvent::Done { .. } => break,

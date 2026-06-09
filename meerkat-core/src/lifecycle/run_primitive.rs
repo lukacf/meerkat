@@ -28,6 +28,7 @@ pub enum RunApplyBoundary {
 
 /// Renderable content that can be appended to a conversation.
 #[non_exhaustive]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CoreRenderable {
@@ -51,6 +52,45 @@ pub enum CoreRenderable {
     },
     /// Reference to an external artifact.
     Reference { uri: String, label: Option<String> },
+}
+
+impl CoreRenderable {
+    /// Construct a plain-text renderable.
+    ///
+    /// Convenience constructor for callers that only carry a `String` body
+    /// (the common runtime/system-context append case). Richer producers build
+    /// the `Blocks` / `SystemNotice` / `Json` / `Reference` variants directly.
+    #[must_use]
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+
+    /// Render this content to its canonical plain-text projection.
+    ///
+    /// This is the single owner of the renderable -> text lowering used by
+    /// system-context surfaces; callers must not re-implement per-variant
+    /// flattening. Non-text variants project to their model-facing text form
+    /// (multimodal blocks collapse to their text, JSON pretty-prints, a
+    /// reference renders a `[Reference] ...` line, a system notice renders its
+    /// model-projection text).
+    #[must_use]
+    pub fn render_text(&self) -> String {
+        match self {
+            Self::Text { text } => text.clone(),
+            Self::Blocks { blocks } => crate::types::text_content(blocks),
+            Self::Json { value } => {
+                serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+            }
+            Self::Reference { uri, label } => match label {
+                Some(label) if !label.trim().is_empty() => format!("[Reference] {label} ({uri})"),
+                _ => format!("[Reference] {uri}"),
+            },
+            Self::SystemNotice { kind, body, blocks } => {
+                crate::types::SystemNoticeMessage::with_blocks(*kind, body.clone(), blocks.clone())
+                    .model_projection_text()
+            }
+        }
+    }
 }
 
 /// Which role to append to in the conversation.

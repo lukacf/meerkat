@@ -4151,7 +4151,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .map(|append| {
                 (
                     AppendSystemContextRequest {
-                        text: append.text,
+                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                            append.text,
+                        ),
                         source: append.source,
                         idempotency_key: append.idempotency_key,
                         source_kind: append.source_kind,
@@ -5592,6 +5594,18 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         id: &SessionId,
     ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
         self.inner.subscribe_session_events(id).await
+    }
+
+    /// Route the typed live-adapter terminal cause onto the session's owned
+    /// event stream via the inner ephemeral service. Overrides the trait's
+    /// `Unsupported` default so the live projection sink does not regress its
+    /// previous `Ok(())` into a propagated `SessionError::Unsupported`.
+    async fn record_live_terminal_error(
+        &self,
+        id: &SessionId,
+        cause: meerkat_core::live_adapter::LiveAdapterErrorCode,
+    ) -> Result<(), SessionError> {
+        self.inner.record_live_terminal_error(id, cause).await
     }
 }
 
@@ -9040,7 +9054,9 @@ mod tests {
         state
             .stage_append(
                 &AppendSystemContextRequest {
-                    text: append.text,
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        append.text,
+                    ),
                     source: append.source,
                     idempotency_key: append.idempotency_key,
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -12058,7 +12074,9 @@ mod tests {
             .append_system_context(
                 &id,
                 AppendSystemContextRequest {
-                    text: "runtime notice".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "runtime notice".to_string(),
+                    ),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-persistent-archive".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -15592,7 +15610,9 @@ mod tests {
             .append_system_context(
                 &id,
                 AppendSystemContextRequest {
-                    text: "runtime notice".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "runtime notice".to_string(),
+                    ),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-persistent-live".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -15643,7 +15663,9 @@ mod tests {
             .append_system_context(
                 &id,
                 AppendSystemContextRequest {
-                    text: "runtime notice".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "runtime notice".to_string(),
+                    ),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-save-failure".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -15693,7 +15715,9 @@ mod tests {
         state
             .stage_append_with_snapshot(
                 &AppendSystemContextRequest {
-                    text: "queued live append".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "queued live append".to_string(),
+                    ),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-export-merge".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -15734,7 +15758,9 @@ mod tests {
             .append_system_context(
                 &unknown,
                 AppendSystemContextRequest {
-                    text: "runtime notice".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "runtime notice".to_string(),
+                    ),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-unknown".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -16216,7 +16242,9 @@ mod tests {
             .append_system_context(
                 &append_result.session_id,
                 AppendSystemContextRequest {
-                    text: "runtime-backed control context".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "runtime-backed control context".to_string(),
+                    ),
                     source: Some("test".to_string()),
                     idempotency_key: Some("control-projection-failure".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -16392,7 +16420,9 @@ mod tests {
             .append_system_context(
                 &result.session_id,
                 AppendSystemContextRequest {
-                    text: "Remember runtime-backed context".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "Remember runtime-backed context".to_string(),
+                    ),
                     source: Some("test".to_string()),
                     idempotency_key: Some("runtime-backed-ctx".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -16458,7 +16488,9 @@ mod tests {
             .append_system_context(
                 &result.session_id,
                 AppendSystemContextRequest {
-                    text: "durable pending context".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "durable pending context".to_string(),
+                    ),
                     source: Some("api".to_string()),
                     idempotency_key: Some("durable-pending".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -16524,7 +16556,9 @@ mod tests {
             .append_system_context(
                 &result.session_id,
                 AppendSystemContextRequest {
-                    text: "control snapshot should not mint a receipt".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "control snapshot should not mint a receipt".to_string(),
+                    ),
                     source: Some("api".to_string()),
                     idempotency_key: Some("no-receipt-control-snapshot".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -16618,7 +16652,9 @@ mod tests {
             .append_system_context(
                 &result.session_id,
                 AppendSystemContextRequest {
-                    text: "runtime append".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "runtime append".to_string(),
+                    ),
                     source: Some("api".to_string()),
                     idempotency_key: Some("runtime-base".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -16686,7 +16722,9 @@ mod tests {
             .append_system_context(
                 &result.session_id,
                 AppendSystemContextRequest {
-                    text: "persisted runtime append".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "persisted runtime append".to_string(),
+                    ),
                     source: Some("api".to_string()),
                     idempotency_key: Some("persisted-runtime-append".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -17701,7 +17739,9 @@ mod tests {
             .append_system_context(
                 &result.session_id,
                 AppendSystemContextRequest {
-                    text: "prefer store".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "prefer store".to_string(),
+                    ),
                     source: Some("api".to_string()),
                     idempotency_key: Some("store-base".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -17869,7 +17909,9 @@ mod tests {
                 .append_system_context(
                     &id,
                     AppendSystemContextRequest {
-                        text: format!("{mode} store-only append must fail closed"),
+                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                            format!("{mode} store-only append must fail closed"),
+                        ),
                         source: Some("api".to_string()),
                         idempotency_key: Some(format!("store-only-{mode}-append")),
                         source_kind: meerkat_core::session::SystemContextSource::Normal,

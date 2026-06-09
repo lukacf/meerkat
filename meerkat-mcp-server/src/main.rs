@@ -5,8 +5,9 @@ use meerkat::surface::{
     RequestAdmissionError, RequestTerminalResolution, StdioJsonWriter, SurfaceRequestExecutor,
     SurfaceRequestSemantics, noop_request_action, spawn_stdio_json_writer,
 };
-use meerkat_contracts::{ErrorCode, mcp_tool_request_lifecycle};
+use meerkat_contracts::ErrorCode;
 use meerkat_core::{RealmConfig, RealmSelection, RuntimeBootstrap};
+use meerkat_mcp_server::mcp_tool_request_lifecycle;
 use meerkat_store::RealmBackend;
 use serde_json::{Value, json};
 use std::path::PathBuf;

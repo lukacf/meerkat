@@ -346,18 +346,17 @@ fn completion_outcome_to_cli_runtime_turn_result(
     }
 }
 
-fn callback_pending_json_value(pending: &CliCallbackPending) -> serde_json::Value {
-    serde_json::json!({
-        "status": "pending_tool_call",
-        "session_id": pending.session_id.to_string(),
-        "session_ref": pending.session_ref.clone(),
-        "session_created": pending.session_created,
-        "resumable": pending.resumable,
-        "pending_tool_calls": [{
-            "tool_name": pending.tool_name.clone(),
-            "args": pending.args.clone(),
-        }],
-    })
+fn callback_pending_contract(
+    pending: &CliCallbackPending,
+) -> meerkat_contracts::WireCallbackPending {
+    meerkat_contracts::WireCallbackPending::single(
+        pending.session_id.clone(),
+        Some(pending.session_ref.clone()),
+        pending.session_created,
+        pending.resumable,
+        pending.tool_name.clone(),
+        pending.args.clone(),
+    )
 }
 
 fn print_cli_callback_pending(
@@ -367,7 +366,7 @@ fn print_cli_callback_pending(
     if output.is_some_and(|value| value.eq_ignore_ascii_case("json")) {
         println!(
             "{}",
-            serde_json::to_string_pretty(&callback_pending_json_value(pending))?
+            serde_json::to_string_pretty(&callback_pending_contract(pending))?
         );
         return Ok(());
     }
@@ -14501,9 +14500,12 @@ default_model = "gemma"
         assert!(pending.resumable);
         assert_eq!(pending.tool_name, "external_mock");
         assert_eq!(pending.args, serde_json::json!({ "value": "browser" }));
+        let pending_json = serde_json::to_value(callback_pending_contract(&pending))
+            .expect("callback pending contract should serialize");
+        assert_eq!(pending_json["status"], "pending_tool_call");
         assert_eq!(
-            callback_pending_json_value(&pending)["status"],
-            "pending_tool_call"
+            pending_json["pending_tool_calls"][0]["tool_name"],
+            "external_mock"
         );
     }
 

@@ -1014,7 +1014,7 @@ pub async fn handle_append_system_context(
             &mob_id,
             &agent_identity,
             AppendSystemContextRequest {
-                text: params.text,
+                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(params.text),
                 source: params.source,
                 idempotency_key: params.idempotency_key,
                 source_kind: meerkat_core::session::SystemContextSource::Normal,

@@ -829,14 +829,11 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
         code: LiveAdapterErrorCode,
         message: &str,
     ) -> Result<(), LiveProjectionError> {
-        // Surface a tracing event so operators can correlate. The host has
-        // already terminalized the channel state (status=Closed + reap timer);
-        // session-level lifecycle remains in caller hands. A future enhancement
-        // could route this to the runtime's session-event stream once a
-        // canonical terminal-error seam exists on `SessionService`.
         // R6: drop ALL buffered finals across every response_id slot —
         // terminal error invalidates every in-flight response.
         self.drain_all_pending_turns(session_id);
+        // Surface a tracing event so operators can correlate. The host has
+        // already terminalized the channel state (status=Closed + reap timer).
         tracing::warn!(
             target: "meerkat_rpc::live_projection",
             session_id = %session_id,
@@ -844,7 +841,14 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
             message,
             "live adapter terminal error",
         );
-        Ok(())
+        // Route the typed terminal cause onto the session's owned event stream
+        // via the canonical `SessionService::record_live_terminal_error` seam
+        // rather than laundering it into a warning + `Ok(())`. The fault is now
+        // observable to session subscribers, not only in tracing.
+        self.runtime
+            .record_live_terminal_error(session_id, code)
+            .await
+            .map_err(|err| session_error_to_projection(err, session_id))
     }
 
     async fn append_realtime_transcript(

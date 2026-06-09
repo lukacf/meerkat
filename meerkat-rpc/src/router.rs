@@ -190,13 +190,13 @@ impl NotificationSink {
     /// direct session events.
     async fn emit_session_stream_event(
         &self,
-        stream_id: &Uuid,
+        stream_id: &StreamRef,
         sequence: u64,
         session_id: &SessionId,
         event: &EventEnvelope<AgentEvent>,
     ) -> StreamEmitStatus {
         let params = serde_json::json!({
-            "stream_id": stream_id.to_string(),
+            "stream_id": stream_id.as_string(),
             "sequence": sequence,
             "session_id": session_id.to_string(),
             "event": event,
@@ -210,9 +210,9 @@ impl NotificationSink {
     }
 
     /// Emit a scoped session stream event notification with scope metadata.
-    pub async fn emit_scoped_session_stream_event(
+    pub(crate) async fn emit_scoped_session_stream_event(
         &self,
-        stream_id: &Uuid,
+        stream_id: &StreamRef,
         sequence: u64,
         session_id: &SessionId,
         event: &EventEnvelope<AgentEvent>,
@@ -220,7 +220,7 @@ impl NotificationSink {
         scope_path: &[meerkat_core::event::StreamScopeFrame],
     ) {
         let params = serde_json::json!({
-            "stream_id": stream_id.to_string(),
+            "stream_id": stream_id.as_string(),
             "sequence": sequence,
             "session_id": session_id.to_string(),
             "event": event,
@@ -266,12 +266,12 @@ impl NotificationSink {
     /// For per-member streams the event is the raw [`EventEnvelope<AgentEvent>`].
     async fn emit_mob_stream_event(
         &self,
-        stream_id: &Uuid,
+        stream_id: &StreamRef,
         sequence: u64,
         event: &serde_json::Value,
     ) -> StreamEmitStatus {
         let params = serde_json::json!({
-            "stream_id": stream_id.to_string(),
+            "stream_id": stream_id.as_string(),
             "sequence": sequence,
             "event": event,
         });
@@ -308,6 +308,45 @@ impl NotificationSink {
         }
         let notification = RpcNotification::new("mob/stream_end", params);
         let _ = self.tx.send(notification).await;
+    }
+}
+
+/// Typed owner of an RPC event-stream identity.
+///
+/// A stream identity is minted once on stream open (`StreamRef::mint`) and is
+/// the single key the router uses for its in-flight stream registries. The
+/// `MeerkatMachine` keys the same stream by its canonical string form, so the
+/// only conversions are mint (open), parse-at-ingress from the untrusted wire
+/// `stream_id` (`StreamRef::parse`, fail-closed on a malformed value), the
+/// canonical authority string (`Display`), and the wire-out string in the
+/// open/close results. There is no bare-`Uuid` stream key anywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct StreamRef(Uuid);
+
+impl StreamRef {
+    /// Mint a fresh stream identity on stream open.
+    fn mint() -> Self {
+        StreamRef(Uuid::new_v4())
+    }
+
+    /// Parse an untrusted wire `stream_id` into the typed identity.
+    ///
+    /// Returns `None` for a malformed value so the caller can fail the request
+    /// closed at the ingress boundary instead of fabricating an identity.
+    fn parse(raw: &str) -> Option<Self> {
+        Uuid::parse_str(raw).ok().map(StreamRef)
+    }
+
+    /// Canonical string form, as keyed by the `MeerkatMachine` authority and
+    /// echoed back on the wire.
+    fn as_string(&self) -> String {
+        self.0.to_string()
+    }
+}
+
+impl std::fmt::Display for StreamRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
     }
 }
 
@@ -447,8 +486,8 @@ fn stop_stream_forwarder(stream: &mut StreamForwarder) {
 }
 
 async fn attach_stream_forwarder_task(
-    streams: &Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
-    stream_id: Uuid,
+    streams: &Arc<Mutex<HashMap<StreamRef, StreamForwarder>>>,
+    stream_id: StreamRef,
     task: JoinHandle<()>,
 ) {
     let mut task = Some(task);
@@ -471,10 +510,10 @@ async fn attach_stream_forwarder_task(
 
 async fn resolve_session_stream_open_authority(
     authority: &RpcStreamAuthority,
-    stream_id: &Uuid,
+    stream_id: &StreamRef,
     session_id: &SessionId,
 ) -> Result<SessionStreamOpenAuthority, String> {
-    let stream_id = stream_id.to_string();
+    let stream_id = stream_id.as_string();
     let session_id = session_id.to_string();
     let mut authority = authority.lock().await;
     let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
@@ -512,11 +551,11 @@ async fn resolve_session_stream_open_authority(
 
 async fn record_session_stream_terminal_authority(
     authority: &RpcStreamAuthority,
-    stream_id: &Uuid,
+    stream_id: &StreamRef,
     observation: meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalObservationKind,
     detail: Option<String>,
 ) -> Result<SessionStreamTerminalAuthority, String> {
-    let stream_id = stream_id.to_string();
+    let stream_id = stream_id.as_string();
     let mut authority = authority.lock().await;
     let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
         &mut *authority,
@@ -559,9 +598,9 @@ async fn record_session_stream_terminal_authority(
 
 async fn emit_authorized_session_stream_terminal(
     notification_sink: &NotificationSink,
-    active_session_streams: &Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
+    active_session_streams: &Arc<Mutex<HashMap<StreamRef, StreamForwarder>>>,
     stream_authority: &RpcStreamAuthority,
-    stream_id: Uuid,
+    stream_id: StreamRef,
     observation: meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalObservationKind,
     detail: Option<String>,
 ) {
@@ -584,9 +623,9 @@ async fn emit_authorized_session_stream_terminal(
 
 async fn resolve_session_stream_close_authority(
     authority: &RpcStreamAuthority,
-    stream_id: &Uuid,
+    stream_id: &StreamRef,
 ) -> Result<SessionStreamCloseAuthority, String> {
-    let stream_id = stream_id.to_string();
+    let stream_id = stream_id.as_string();
     let mut authority = authority.lock().await;
     let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
         &mut *authority,
@@ -638,9 +677,9 @@ async fn resolve_session_stream_close_authority(
 
 async fn resolve_mob_stream_open_authority(
     authority: &RpcStreamAuthority,
-    stream_id: &Uuid,
+    stream_id: &StreamRef,
 ) -> Result<MobStreamOpenAuthority, String> {
-    let stream_id = stream_id.to_string();
+    let stream_id = stream_id.as_string();
     let mut authority = authority.lock().await;
     let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
         &mut *authority,
@@ -670,11 +709,11 @@ async fn resolve_mob_stream_open_authority(
 
 async fn record_mob_stream_terminal_authority(
     authority: &RpcStreamAuthority,
-    stream_id: &Uuid,
+    stream_id: &StreamRef,
     observation: meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalObservationKind,
     detail: Option<String>,
 ) -> Result<MobStreamTerminalAuthority, String> {
-    let stream_id = stream_id.to_string();
+    let stream_id = stream_id.as_string();
     let mut authority = authority.lock().await;
     let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
         &mut *authority,
@@ -736,9 +775,9 @@ fn serialize_mob_stream_event<T: serde::Serialize>(
 #[cfg(feature = "mob")]
 async fn emit_authorized_mob_stream_serialization_terminal(
     notification_sink: &NotificationSink,
-    active_mob_streams: &Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
+    active_mob_streams: &Arc<Mutex<HashMap<StreamRef, StreamForwarder>>>,
     stream_authority: &RpcStreamAuthority,
-    stream_id: Uuid,
+    stream_id: StreamRef,
     serialize_error: &serde_json::Error,
 ) {
     tracing::error!(
@@ -766,9 +805,9 @@ async fn emit_authorized_mob_stream_serialization_terminal(
 #[cfg(feature = "mob")]
 async fn emit_authorized_mob_stream_terminal(
     notification_sink: &NotificationSink,
-    active_mob_streams: &Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
+    active_mob_streams: &Arc<Mutex<HashMap<StreamRef, StreamForwarder>>>,
     stream_authority: &RpcStreamAuthority,
-    stream_id: Uuid,
+    stream_id: StreamRef,
     observation: meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalObservationKind,
     detail: Option<String>,
 ) {
@@ -791,9 +830,9 @@ async fn emit_authorized_mob_stream_terminal(
 
 async fn resolve_mob_stream_close_authority(
     authority: &RpcStreamAuthority,
-    stream_id: &Uuid,
+    stream_id: &StreamRef,
 ) -> Result<MobStreamCloseAuthority, String> {
-    let stream_id = stream_id.to_string();
+    let stream_id = stream_id.as_string();
     let mut authority = authority.lock().await;
     let transition = meerkat_runtime::meerkat_machine::dsl::MeerkatMachineMutator::apply(
         &mut *authority,
@@ -854,12 +893,12 @@ pub struct MethodRouter {
     config_store: Arc<dyn ConfigStore>,
     notification_sink: NotificationSink,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
-    active_session_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
+    active_session_streams: Arc<Mutex<HashMap<StreamRef, StreamForwarder>>>,
     stream_authority: RpcStreamAuthority,
     #[cfg(feature = "mob")]
     mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
     #[cfg(feature = "mob")]
-    active_mob_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
+    active_mob_streams: Arc<Mutex<HashMap<StreamRef, StreamForwarder>>>,
     runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
     live_adapter_host: Arc<meerkat_live::LiveAdapterHost>,
     live_ws_state: Option<Arc<meerkat_live::LiveWsState>>,
@@ -1485,6 +1524,7 @@ impl MethodRouter {
             "initialize" => handlers::initialize::handle_initialize(
                 id,
                 self.runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant,
+                self.skill_runtime.is_some(),
             ),
             "help/ask" => {
                 Box::pin(handlers::help::handle_ask(
@@ -2580,7 +2620,7 @@ impl MethodRouter {
             Err(resp) => return resp,
         };
         let req = meerkat_core::AppendSystemContextRequest {
-            text: params.text,
+            content: params.content,
             source: params.source,
             idempotency_key: params.idempotency_key,
             source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -2869,7 +2909,7 @@ impl MethodRouter {
             }
         };
 
-        let stream_id = Uuid::new_v4();
+        let stream_id = StreamRef::mint();
         let open_authority = match resolve_session_stream_open_authority(
             &self.stream_authority,
             &stream_id,
@@ -2957,7 +2997,7 @@ impl MethodRouter {
         attach_stream_forwarder_task(&self.active_session_streams, stream_id, task).await;
 
         let result = meerkat_contracts::SessionStreamOpenResult {
-            stream_id: stream_id.to_string(),
+            stream_id: stream_id.as_string(),
             session_id: open_authority.session_id,
             opened: open_authority.opened,
         };
@@ -2982,9 +3022,9 @@ impl MethodRouter {
                 Err(resp) => return resp.with_id(id),
             };
 
-        let stream_id = match Uuid::parse_str(&params.stream_id) {
-            Ok(stream_id) => stream_id,
-            Err(_) => {
+        let stream_id = match StreamRef::parse(&params.stream_id) {
+            Some(stream_id) => stream_id,
+            None => {
                 return RpcResponse::error(
                     id,
                     error::INVALID_PARAMS,
@@ -3025,7 +3065,7 @@ impl MethodRouter {
         }
 
         let result = meerkat_contracts::SessionStreamCloseResult {
-            stream_id: stream_id.to_string(),
+            stream_id: stream_id.as_string(),
             closed: close_authority.closed,
             already_closed: close_authority.already_closed,
         };
@@ -3063,7 +3103,7 @@ impl MethodRouter {
             }
         };
 
-        let stream_id = Uuid::new_v4();
+        let stream_id = StreamRef::mint();
         let notification_sink = self.notification_sink.clone();
         let active_mob_streams = self.active_mob_streams.clone();
         let stream_authority = self.stream_authority.clone();
@@ -3289,7 +3329,7 @@ impl MethodRouter {
         };
 
         let result = meerkat_contracts::MobStreamOpenResult {
-            stream_id: stream_id.to_string(),
+            stream_id: stream_id.as_string(),
             opened,
         };
         match serde_json::to_value(result) {
@@ -3314,9 +3354,9 @@ impl MethodRouter {
             Err(resp) => return resp,
         };
 
-        let stream_id = match Uuid::parse_str(&params.stream_id) {
-            Ok(stream_id) => stream_id,
-            Err(_) => {
+        let stream_id = match StreamRef::parse(&params.stream_id) {
+            Some(stream_id) => stream_id,
+            None => {
                 return RpcResponse::error(
                     id,
                     error::INVALID_PARAMS,
@@ -3351,7 +3391,7 @@ impl MethodRouter {
         }
 
         let result = meerkat_contracts::MobStreamCloseResult {
-            stream_id: stream_id.to_string(),
+            stream_id: stream_id.as_string(),
             closed: close_authority.closed,
             already_closed: close_authority.already_closed,
         };
@@ -5186,12 +5226,12 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
-        let stream_uuid = Uuid::parse_str(&stream_id).unwrap();
+        let stream_ref = StreamRef::parse(&stream_id).unwrap();
         assert_eq!(router.active_session_streams.lock().await.len(), 1);
 
         record_session_stream_terminal_authority(
             &router.stream_authority,
-            &stream_uuid,
+            &stream_ref,
             meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalObservationKind::TransportEnded,
             None,
         )
@@ -7023,7 +7063,7 @@ mod tests {
                 "session/inject_context",
                 serde_json::json!({
                     "session_id": session_id,
-                    "text": "Coordinate with the lead before acting.",
+                    "content": { "type": "text", "text": "Coordinate with the lead before acting." },
                     "source": "mob",
                     "idempotency_key": "ctx-worker-1"
                 }),
@@ -7065,12 +7105,12 @@ mod tests {
         );
 
         assert!(
-            sink.emit_session_stream_event(&Uuid::new_v4(), 1, &session_id, &envelope)
+            sink.emit_session_stream_event(&StreamRef::mint(), 1, &session_id, &envelope)
                 .await
                 == StreamEmitStatus::Delivered
         );
         assert!(
-            sink.emit_session_stream_event(&Uuid::new_v4(), 2, &session_id, &envelope)
+            sink.emit_session_stream_event(&StreamRef::mint(), 2, &session_id, &envelope)
                 .await
                 == StreamEmitStatus::Overflow,
             "second send should surface overflow to the caller"
@@ -7087,7 +7127,7 @@ mod tests {
         let authority = Arc::new(Mutex::new(new_rpc_stream_authority()));
         let active_streams = Arc::new(Mutex::new(HashMap::new()));
         let session_id = SessionId::new();
-        let stream_id = Uuid::new_v4();
+        let stream_id = StreamRef::mint();
         resolve_session_stream_open_authority(&authority, &stream_id, &session_id)
             .await
             .expect("machine should accept session stream open");
@@ -7152,7 +7192,7 @@ mod tests {
         let sink = NotificationSink::new(tx);
         let authority = Arc::new(Mutex::new(new_rpc_stream_authority()));
         let session_id = SessionId::new();
-        let stream_id = Uuid::new_v4();
+        let stream_id = StreamRef::mint();
         resolve_session_stream_open_authority(&authority, &stream_id, &session_id)
             .await
             .expect("machine should accept session stream open");
@@ -7265,7 +7305,7 @@ mod tests {
         let sink = NotificationSink::new(tx);
         let authority = Arc::new(Mutex::new(new_rpc_stream_authority()));
         let active_streams = Arc::new(Mutex::new(HashMap::new()));
-        let stream_id = Uuid::new_v4();
+        let stream_id = StreamRef::mint();
         resolve_mob_stream_open_authority(&authority, &stream_id)
             .await
             .expect("machine should accept mob stream open");
@@ -7327,7 +7367,7 @@ mod tests {
         drop(rx);
         let sink = NotificationSink::new(tx);
         let authority = Arc::new(Mutex::new(new_rpc_stream_authority()));
-        let stream_id = Uuid::new_v4();
+        let stream_id = StreamRef::mint();
         resolve_mob_stream_open_authority(&authority, &stream_id)
             .await
             .expect("machine should accept mob stream open");
@@ -7425,7 +7465,7 @@ mod tests {
                 "session/inject_context",
                 serde_json::json!({
                     "session_id": session_id,
-                    "text": "should be rejected"
+                    "content": { "type": "text", "text": "should be rejected" }
                 }),
             ))
             .await
@@ -7895,12 +7935,12 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
-        let stream_uuid = Uuid::parse_str(&stream_id).unwrap();
+        let stream_ref = StreamRef::parse(&stream_id).unwrap();
         assert_eq!(router.active_mob_streams.lock().await.len(), 1);
 
         record_mob_stream_terminal_authority(
             &router.stream_authority,
-            &stream_uuid,
+            &stream_ref,
             meerkat_runtime::meerkat_machine::dsl::RpcEventStreamTerminalObservationKind::TransportEnded,
             None,
         )
@@ -8432,7 +8472,7 @@ mod tests {
             "session/inject_context",
             serde_json::json!({
                 "session_id": session_id,
-                "text": "Coordinate with the orchestrator.",
+                "content": { "type": "text", "text": "Coordinate with the orchestrator." },
                 "source": "mob",
                 "idempotency_key": "ctx-router-test"
             }),
@@ -8473,7 +8513,7 @@ mod tests {
                 "session/inject_context",
                 serde_json::json!({
                     "session_id": &session_id,
-                    "text": injected_text,
+                    "content": { "type": "text", "text": injected_text },
                     "source": "mob",
                     "idempotency_key": "ctx-next-turn-once"
                 }),
@@ -8611,7 +8651,7 @@ mod tests {
                 "session/inject_context",
                 serde_json::json!({
                     "session_id": &session_id,
-                    "text": injected_text,
+                    "content": { "type": "text", "text": injected_text },
                     "source": "mob",
                     "idempotency_key": "ctx-rpc-during-active-turn"
                 }),
@@ -8697,7 +8737,7 @@ mod tests {
                 "session/inject_context",
                 serde_json::json!({
                     "session_id": &session_id,
-                    "text": injected_text,
+                    "content": { "type": "text", "text": injected_text },
                     "source": "mob",
                     "idempotency_key": "ctx-dedup"
                 }),
@@ -8711,7 +8751,7 @@ mod tests {
                 "session/inject_context",
                 serde_json::json!({
                     "session_id": &session_id,
-                    "text": injected_text,
+                    "content": { "type": "text", "text": injected_text },
                     "source": "mob",
                     "idempotency_key": "ctx-dedup"
                 }),
@@ -9255,7 +9295,7 @@ mod tests {
                 "session/inject_context",
                 serde_json::json!({
                     "session_id": session_id,
-                    "text": injected_text,
+                    "content": { "type": "text", "text": injected_text },
                     "source": "mob",
                     "idempotency_key": "ctx-archive-drop"
                 }),

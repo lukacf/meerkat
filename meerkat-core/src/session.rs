@@ -2144,7 +2144,8 @@ mod system_context_authority {
         accepted_at: SystemTime,
         active_turn_scoped: bool,
     ) -> Result<AppendSystemContextStatus, SystemContextStageError> {
-        let text = req.text.trim();
+        let rendered_text = req.text();
+        let text = rendered_text.trim();
         let existing = req
             .idempotency_key
             .as_ref()
@@ -6577,7 +6578,9 @@ mod tests {
         state
             .stage_append(
                 &AppendSystemContextRequest {
-                    text: "Authoritative peer token is birch seventeen.".to_string(),
+                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                        "Authoritative peer token is birch seventeen.".to_string(),
+                    ),
                     source: Some(
                         "peer_response_terminal:analyst:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
                             .to_string(),
@@ -6615,7 +6618,9 @@ mod tests {
         state
             .stage_active_turn_append(
                 &AppendSystemContextRequest {
-                    text: "only for the active run".to_string(),
+                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                        "only for the active run".to_string(),
+                    ),
                     source: Some("runtime:steer:input-1".to_string()),
                     idempotency_key: Some("runtime:steer:input-1".to_string()),
                     source_kind: SystemContextSource::RuntimeSteer,
@@ -6644,7 +6649,9 @@ mod tests {
             state
                 .stage_active_turn_append(
                     &AppendSystemContextRequest {
-                        text: format!("context for {key}"),
+                        content: crate::lifecycle::run_primitive::CoreRenderable::text(format!(
+                            "context for {key}"
+                        )),
                         source: Some(key.to_string()),
                         idempotency_key: Some(key.to_string()),
                         source_kind: SystemContextSource::RuntimeSteer,
@@ -6688,7 +6695,9 @@ mod tests {
         state
             .stage_active_turn_append(
                 &AppendSystemContextRequest {
-                    text: "visible to this run".to_string(),
+                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                        "visible to this run".to_string(),
+                    ),
                     source: Some("runtime:steer:input-2".to_string()),
                     idempotency_key: Some("runtime:steer:input-2".to_string()),
                     source_kind: SystemContextSource::RuntimeSteer,
@@ -6826,7 +6835,9 @@ mod tests {
         state
             .stage_append(
                 &AppendSystemContextRequest {
-                    text: "Apply this staged context at the request boundary.".to_string(),
+                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                        "Apply this staged context at the request boundary.".to_string(),
+                    ),
                     source: Some("rpc/session_inject_context".to_string()),
                     idempotency_key: Some("ctx-boundary".to_string()),
                     source_kind: SystemContextSource::Normal,
@@ -6870,7 +6881,9 @@ mod tests {
         state
             .stage_append(
                 &AppendSystemContextRequest {
-                    text: "Apply this unkeyed staged context at the request boundary.".to_string(),
+                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                        "Apply this unkeyed staged context at the request boundary.".to_string(),
+                    ),
                     source: Some("rpc/session_inject_context".to_string()),
                     idempotency_key: None,
                     source_kind: SystemContextSource::Normal,

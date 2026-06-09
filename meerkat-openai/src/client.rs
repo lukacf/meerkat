@@ -11,7 +11,7 @@ use meerkat_core::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, ImageData, ImageGenerationIntent,
     ImageGenerationWarning, ImageProviderErrorCode, ImageProviderTerminalObservation, Message,
     OpenAiImageMetadata, OutputSchema, ProviderImageMetadata, ProviderMeta,
-    RevisedPromptDisposition, RevisedPromptSource, StopReason, SystemNoticeBlock,
+    RevisedPromptDisposition, RevisedPromptSource, ServerToolKind, StopReason, SystemNoticeBlock,
     SystemNoticeMessage, ToolResult, Usage, UserMessage,
 };
 use meerkat_llm_core::BlockAssembler;
@@ -1646,7 +1646,7 @@ impl LlmClient for OpenAiClient {
                                                                                 id: item.get("id")
                                                                                     .and_then(|v| v.as_str())
                                                                                     .map(std::string::ToString::to_string),
-                                                                                name: "web_search_annotations".to_string(),
+                                                                                kind: ServerToolKind::WebSearch,
                                                                                 content: serde_json::json!({
                                                                                     "type": "message_annotations",
                                                                                     "annotations": annotations
@@ -1775,9 +1775,12 @@ impl LlmClient for OpenAiClient {
                                                         .or_else(|| item.get("call_id"))
                                                         .and_then(|v| v.as_str())
                                                         .map(std::string::ToString::to_string);
+                                                    // Sub-event discriminator (`web_search_call`
+                                                    // vs `web_search_result`) is preserved in
+                                                    // `content["type"]`; the semantic kind is web search.
                                                     yield LlmEvent::ServerToolContent {
                                                         id,
-                                                        name: item_type.to_string(),
+                                                        kind: ServerToolKind::WebSearch,
                                                         content: item.clone(),
                                                         meta: None,
                                                     };
@@ -2033,7 +2036,7 @@ impl LlmClient for OpenAiClient {
                             }
                             yield LlmEvent::ServerToolContent {
                                 id: event.item_id.clone(),
-                                name: "web_search".to_string(),
+                                kind: ServerToolKind::WebSearch,
                                 content: Value::Object(content),
                                 meta: None,
                             };
@@ -2331,7 +2334,7 @@ mod tests {
                     },
                     AssistantBlock::ServerToolContent {
                         id: Some("ws_status".to_string()),
-                        name: "web_search".to_string(),
+                        kind: ServerToolKind::WebSearch,
                         content: serde_json::json!({
                             "type": "response.web_search_call.searching",
                             "item_id": "ws_status"
@@ -2340,7 +2343,7 @@ mod tests {
                     },
                     AssistantBlock::ServerToolContent {
                         id: Some("ws_1".to_string()),
-                        name: "web_search_call".to_string(),
+                        kind: ServerToolKind::WebSearch,
                         content: serde_json::json!({
                             "type": "web_search_call",
                             "id": "ws_1",
@@ -2350,7 +2353,7 @@ mod tests {
                     },
                     AssistantBlock::ServerToolContent {
                         id: None,
-                        name: "web_search_annotations".to_string(),
+                        kind: ServerToolKind::WebSearch,
                         content: serde_json::json!({
                             "type": "message_annotations",
                             "annotations": []
@@ -2504,7 +2507,7 @@ mod tests {
                 },
                 AssistantBlock::ServerToolContent {
                     id: Some("ws_1".to_string()),
-                    name: "web_search_call".to_string(),
+                    kind: ServerToolKind::WebSearch,
                     content: serde_json::json!({
                         "type": "web_search_call",
                         "id": "ws_1",
@@ -4679,9 +4682,9 @@ mod tests {
         while let Some(event) = stream.next().await {
             match event.expect("stream event") {
                 LlmEvent::ServerToolContent {
-                    id, name, content, ..
+                    id, kind, content, ..
                 } => {
-                    server_blocks.push((id, name, content));
+                    server_blocks.push((id, kind, content));
                 }
                 LlmEvent::Done { .. } => break,
                 _ => {}
@@ -4690,19 +4693,23 @@ mod tests {
         server.abort();
 
         assert_eq!(server_blocks.len(), 3);
+        // All OpenAI web-search sub-events project to the typed WebSearch kind;
+        // the provider-native sub-event discriminator lives in `content["type"]`.
         assert_eq!(server_blocks[0].0.as_deref(), Some("ws_123"));
-        assert_eq!(server_blocks[0].1, "web_search");
+        assert_eq!(server_blocks[0].1, ServerToolKind::WebSearch);
         assert_eq!(
             server_blocks[0].2["type"],
             "response.web_search_call.searching"
         );
         assert_eq!(server_blocks[1].0.as_deref(), Some("ws_123"));
-        assert_eq!(server_blocks[1].1, "web_search_call");
+        assert_eq!(server_blocks[1].1, ServerToolKind::WebSearch);
+        assert_eq!(server_blocks[1].2["type"], "web_search_call");
         assert_eq!(
             server_blocks[1].2["action"]["queries"][0],
             "meerkat runtime"
         );
-        assert_eq!(server_blocks[2].1, "web_search_annotations");
+        assert_eq!(server_blocks[2].1, ServerToolKind::WebSearch);
+        assert_eq!(server_blocks[2].2["type"], "message_annotations");
         assert_eq!(
             server_blocks[2].2["annotations"][0]["url"],
             "https://example.com"

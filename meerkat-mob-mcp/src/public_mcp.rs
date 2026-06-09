@@ -742,7 +742,9 @@ pub async fn handle_public_tools_call(
                     &mob_id,
                     &agent_identity,
                     meerkat_core::service::AppendSystemContextRequest {
-                        text: input.text,
+                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                            input.text,
+                        ),
                         source: input.source,
                         idempotency_key: input.idempotency_key,
                         source_kind: meerkat_core::session::SystemContextSource::Normal,

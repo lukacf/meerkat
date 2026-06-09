@@ -1,9 +1,9 @@
 #![allow(clippy::field_reassign_with_default, clippy::panic)]
 
 use meerkat_core::{
-    AgentErrorClass, AgentErrorReport, AgentEvent, Config, ContentInput, HookCapability,
-    HookDecision, HookEntryConfig, HookExecutionMode, HookId, HookInvocation, HookLlmRequest,
-    HookOutcome, HookPatch, HookPoint, HookReasonCode, HookRunOverrides, HookRuntimeConfig,
+    AgentErrorClass, AgentErrorReport, AgentEvent, Config, ContentInput, HookAdapterConfig,
+    HookCapability, HookDecision, HookEntryConfig, HookExecutionMode, HookId, HookInvocation,
+    HookLlmRequest, HookOutcome, HookPatch, HookPoint, HookReasonCode, HookRunOverrides,
     HookRuntimeKind, HooksConfig, SessionId,
 };
 use serde_json::json;
@@ -21,7 +21,7 @@ fn hooks_config_roundtrip_contract() -> Result<(), Box<dyn std::error::Error>> {
             mode: HookExecutionMode::Foreground,
             capability: HookCapability::Guardrail,
             priority: 5,
-            runtime: HookRuntimeConfig::new(
+            runtime: HookAdapterConfig::from_kind_and_value(
                 HookRuntimeKind::InProcess,
                 Some(json!({"name": "guard_pre_tool", "config": {"mode": "strict"}})),
             )?,
@@ -72,7 +72,7 @@ fn hook_invocation_outcome_roundtrip_contract() -> Result<(), Box<dyn std::error
         decision: Some(HookDecision::Allow),
         patches: vec![],
         published_patches: vec![],
-        error: None,
+        failure_reason: None,
         duration_ms: Some(2),
     };
 
@@ -308,7 +308,7 @@ fn run_override_schema_roundtrip_contract() -> Result<(), Box<dyn std::error::Er
             mode: HookExecutionMode::Foreground,
             capability: HookCapability::Guardrail,
             priority: 1,
-            runtime: HookRuntimeConfig::new(
+            runtime: HookAdapterConfig::from_kind_and_value(
                 HookRuntimeKind::InProcess,
                 Some(json!({"name": "run_guardrail"})),
             )?,

@@ -317,7 +317,9 @@ pub trait MobSessionService:
             self.append_system_context(
                 session_id,
                 AppendSystemContextRequest {
-                    text: append.text,
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        append.text,
+                    ),
                     source: append.source,
                     idempotency_key: append.idempotency_key,
                     source_kind: append.source_kind,

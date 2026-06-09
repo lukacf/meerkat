@@ -1179,11 +1179,16 @@ export interface WireContentBlockVideo {
   type: "video";
 }
 
+export interface WireContentBlockStructured {
+  data: unknown;
+  type: "structured";
+}
+
 export interface WireContentBlockUnknown {
   type: "unknown";
 }
 
-export type WireContentBlock = WireContentBlockText | WireContentBlockImage | WireContentBlockVideo | WireContentBlockUnknown;
+export type WireContentBlock = WireContentBlockText | WireContentBlockImage | WireContentBlockVideo | WireContentBlockStructured | WireContentBlockUnknown;
 
 export type WireContentInput = string | WireContentBlock[];
 
@@ -1539,7 +1544,7 @@ export interface CommsCommandPeerMessage {
 
 export interface CommsCommandPeerLifecycle {
   kind: "peer_lifecycle";
-  lifecycle_kind: "mob.peer_added" | "mob.peer_retired" | "mob.peer_unwired";
+  lifecycle_kind: "mob.peer_added" | "mob.peer_retired" | "mob.peer_unwired" | "mob.dismiss";
   params: CommsPeerLifecycleParams;
   to: PeerId;
 }
@@ -1771,7 +1776,12 @@ export interface ContentBlockVideo {
   type: "video";
 }
 
-export type ContentBlock = ContentBlockText | ContentBlockImage | ContentBlockVideo;
+export interface ContentBlockStructured {
+  data: unknown;
+  type: "structured";
+}
+
+export type ContentBlock = ContentBlockText | ContentBlockImage | ContentBlockVideo | ContentBlockStructured;
 
 export type ContentInput = string | ContentBlock[];
 
@@ -1797,7 +1807,7 @@ export interface CommsSendParamsPeerMessage {
 
 export interface CommsSendParamsPeerLifecycle {
   kind: "peer_lifecycle";
-  lifecycle_kind: "mob.peer_added" | "mob.peer_retired" | "mob.peer_unwired";
+  lifecycle_kind: "mob.peer_added" | "mob.peer_retired" | "mob.peer_unwired" | "mob.dismiss";
   params: CommsPeerLifecycleParams;
   session_id: string;
   to: PeerId;
@@ -2837,7 +2847,7 @@ export interface WireAssistantBlockToolUse {
 
 export interface WireAssistantBlockServerToolContent {
   block_type: "server_tool_content";
-  data: { content: unknown; id?: string; meta?: Record<string, unknown>; name: string };
+  data: { content: unknown; id?: string; kind: Record<string, unknown>; meta?: Record<string, unknown> };
 }
 
 export interface WireAssistantBlockImage {

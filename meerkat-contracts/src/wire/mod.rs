@@ -151,7 +151,9 @@ pub use realtime::{
     RealtimeInputKind, RealtimeOutputKind, RealtimeTextChunk, RealtimeTurningMode,
     RealtimeVideoChunk,
 };
-pub use result::WireRunResult;
+pub use result::{
+    WireCallbackPending, WireCallbackPendingStatus, WirePendingToolCall, WireRunResult,
+};
 pub use runtime::{
     PeerResponseTerminalStatusWire,
     RuntimeAcceptOutcomeType,

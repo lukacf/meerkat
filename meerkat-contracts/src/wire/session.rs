@@ -27,8 +27,8 @@ use std::collections::BTreeMap;
 
 use meerkat_core::{
     AssistantBlock, AssistantMessage, BlobId, BlockAssistantMessage, ContentBlock, ContentInput,
-    ImageData, Message, ProviderMeta, SessionHistoryPage, SessionId, SessionInfo, SessionSummary,
-    SessionTranscriptRevisionPage, StopReason, SystemMessage, SystemNoticeKind,
+    ImageData, Message, ProviderMeta, ServerToolKind, SessionHistoryPage, SessionId, SessionInfo,
+    SessionSummary, SessionTranscriptRevisionPage, StopReason, SystemMessage, SystemNoticeKind,
     SystemNoticeMessage, ToolCall, ToolResult, TranscriptEditRunningBehavior,
     TranscriptReplacement, TranscriptRewriteReason, TranscriptRewriteSelection, TranscriptSource,
     Usage, UserMessage, VideoData,
@@ -384,6 +384,58 @@ impl From<ProviderMeta> for WireProviderMeta {
     }
 }
 
+/// Wire projection of `meerkat_core::ServerToolKind`.
+///
+/// Mirrors the typed semantic owner of a provider-executed tool. The core enum
+/// is `#[non_exhaustive]`; a future semantic kind that lacks an explicit arm in
+/// the forward `From` surfaces as `Unknown { debug }` rather than silently
+/// collapsing into a plausible-but-wrong kind. SDK consumers route on the
+/// `kind` discriminator and treat `unknown` as unrecognized.
+///
+/// **When a new core variant is added, add an explicit arm in the forward
+/// `From` impl above the wildcard — `Unknown` is the floor, not the
+/// destination.**
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireServerToolKind {
+    WebSearch,
+    GoogleSearch,
+    ProviderNative { name: String },
+    Unknown { debug: String },
+}
+
+impl From<ServerToolKind> for WireServerToolKind {
+    fn from(value: ServerToolKind) -> Self {
+        match value {
+            ServerToolKind::WebSearch => Self::WebSearch,
+            ServerToolKind::GoogleSearch => Self::GoogleSearch,
+            ServerToolKind::ProviderNative { name } => Self::ProviderNative { name },
+            // Core enum is `#[non_exhaustive]`. Surface unknown semantic kinds
+            // explicitly rather than coercing to a plausible-but-wrong kind.
+            // **When a new core variant is added, add an explicit arm above.**
+            other => Self::Unknown {
+                debug: format!("{other:?}"),
+            },
+        }
+    }
+}
+
+impl TryFrom<WireServerToolKind> for ServerToolKind {
+    type Error = crate::wire::error::WireConversionError;
+
+    fn try_from(value: WireServerToolKind) -> Result<Self, Self::Error> {
+        match value {
+            WireServerToolKind::WebSearch => Ok(Self::WebSearch),
+            WireServerToolKind::GoogleSearch => Ok(Self::GoogleSearch),
+            WireServerToolKind::ProviderNative { name } => Ok(Self::ProviderNative { name }),
+            WireServerToolKind::Unknown { debug } => {
+                Err(crate::wire::error::WireConversionError::AssistantBlock { debug })
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "source", rename_all = "snake_case")]
@@ -451,6 +503,11 @@ pub enum WireContentBlock {
         #[serde(flatten)]
         data: WireVideoData,
     },
+    /// Structured JSON tool output, materialized as inline JSON for SDK
+    /// consumers (the core side keeps it as opaque `Box<RawValue>`).
+    Structured {
+        data: serde_json::Value,
+    },
     /// Forward-compatibility for unknown block types.
     #[serde(other)]
     Unknown,
@@ -477,6 +534,14 @@ impl From<ContentBlock> for WireContentBlock {
                 data: match data {
                     VideoData::Inline { data } => WireVideoData::Inline { data },
                 },
+            },
+            ContentBlock::Structured { data } => WireContentBlock::Structured {
+                // Materialize the opaque `Box<RawValue>` into a wire JSON value.
+                // The payload is valid JSON by construction; preserve the raw
+                // bytes losslessly on the unreachable parse-failure path rather
+                // than fabricating a success-shaped null.
+                data: serde_json::from_str(data.get())
+                    .unwrap_or_else(|_| serde_json::Value::String(data.get().to_owned())),
             },
             _ => WireContentBlock::Unknown,
         }
@@ -506,6 +571,10 @@ impl TryFrom<WireContentBlock> for ContentBlock {
                 data: match data {
                     WireVideoData::Inline { data } => VideoData::Inline { data },
                 },
+            }),
+            WireContentBlock::Structured { data } => Ok(ContentBlock::Structured {
+                data: serde_json::value::to_raw_value(&data)
+                    .map_err(|_| "structured content block is not serializable JSON")?,
             }),
             WireContentBlock::Unknown => Err("unknown content block type"),
         }
@@ -606,7 +675,7 @@ pub enum WireAssistantBlock {
     ServerToolContent {
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
-        name: String,
+        kind: WireServerToolKind,
         content: serde_json::Value,
         #[serde(skip_serializing_if = "Option::is_none")]
         meta: Option<WireProviderMeta>,
@@ -719,12 +788,12 @@ impl From<AssistantBlock> for WireAssistantBlock {
             },
             AssistantBlock::ServerToolContent {
                 id,
-                name,
+                kind,
                 content,
                 meta,
             } => Self::ServerToolContent {
                 id,
-                name,
+                kind: kind.into(),
                 content,
                 meta: meta.map(|m| (*m).into()),
             },
@@ -835,12 +904,12 @@ impl TryFrom<WireAssistantBlock> for AssistantBlock {
             },
             WireAssistantBlock::ServerToolContent {
                 id,
-                name,
+                kind,
                 content,
                 meta,
             } => Self::ServerToolContent {
                 id,
-                name,
+                kind: ServerToolKind::try_from(kind)?,
                 content,
                 meta: meta.and_then(wire_provider_meta_to_core).map(Box::new),
             },
@@ -2225,7 +2294,7 @@ mod tests {
             },
             AssistantBlock::ServerToolContent {
                 id: Some("st-1".to_string()),
-                name: "web_search".to_string(),
+                kind: ServerToolKind::WebSearch,
                 content: serde_json::json!({"hits": 3}),
                 meta: None,
             },

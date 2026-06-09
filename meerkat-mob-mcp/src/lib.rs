@@ -2463,8 +2463,8 @@ impl SessionService for LocalSessionService {
             let staged_sections = staged_context
                 .iter()
                 .map(|append| match append.source.as_deref() {
-                    Some(source) => format!("[SYSTEM CONTEXT:{source}] {}", append.text),
-                    None => format!("[SYSTEM CONTEXT] {}", append.text),
+                    Some(source) => format!("[SYSTEM CONTEXT:{source}] {}", append.text()),
+                    None => format!("[SYSTEM CONTEXT] {}", append.text()),
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -4928,7 +4928,9 @@ mod tests {
             .append_system_context(
                 &session_id,
                 AppendSystemContextRequest {
-                    text: "Remember the customer preference.".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "Remember the customer preference.".to_string(),
+                    ),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-1".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -4969,7 +4971,9 @@ mod tests {
             .append_system_context(
                 &session_id,
                 AppendSystemContextRequest {
-                    text: "Remember the customer preference.".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "Remember the customer preference.".to_string(),
+                    ),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-1".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5044,7 +5048,9 @@ mod tests {
             .append_system_context(
                 &session_id,
                 AppendSystemContextRequest {
-                    text: "Remember the picture.".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "Remember the picture.".to_string(),
+                    ),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-image".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,
@@ -5076,8 +5082,8 @@ mod tests {
             let staged_sections = staged_context
                 .iter()
                 .map(|append| match append.source.as_deref() {
-                    Some(source) => format!("[SYSTEM CONTEXT:{source}] {}", append.text),
-                    None => format!("[SYSTEM CONTEXT] {}", append.text),
+                    Some(source) => format!("[SYSTEM CONTEXT:{source}] {}", append.text()),
+                    None => format!("[SYSTEM CONTEXT] {}", append.text()),
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -5130,7 +5136,9 @@ mod tests {
             .append_system_context(
                 &session_id,
                 AppendSystemContextRequest {
-                    text: "Remember the customer preference.".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "Remember the customer preference.".to_string(),
+                    ),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-archive".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,

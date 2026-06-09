@@ -321,17 +321,17 @@ impl AgentLlmClient for LlmClientAdapter {
                     }
                     LlmEvent::ServerToolContent {
                         id,
-                        name,
+                        kind,
                         content,
                         meta,
                     } => {
                         let event_id = id.clone();
-                        assembler.on_server_tool_content(id, name.clone(), content.clone(), meta);
+                        assembler.on_server_tool_content(id, kind.clone(), content.clone(), meta);
                         if let Some(ref tx) = self.event_tx {
                             let _ = tx
                                 .send(AgentEvent::ServerToolContent {
                                     id: event_id,
-                                    name,
+                                    kind,
                                     content,
                                 })
                                 .await;

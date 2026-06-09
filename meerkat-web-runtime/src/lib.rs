@@ -1589,7 +1589,7 @@ fn system_context_request_from_append(
     append: &meerkat_core::PendingSystemContextAppend,
 ) -> meerkat_core::AppendSystemContextRequest {
     meerkat_core::AppendSystemContextRequest {
-        text: append.text.clone(),
+        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(append.text.clone()),
         source: append.source.clone(),
         idempotency_key: append.idempotency_key.clone(),
         source_kind: append.source_kind,
@@ -1657,7 +1657,7 @@ pub async fn append_system_context(handle: u32, request_json: &str) -> Result<Js
         .append_system_context(
             &session_id,
             meerkat_core::AppendSystemContextRequest {
-                text: req.text,
+                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(req.text),
                 source: req.source,
                 idempotency_key: req.idempotency_key,
                 // JS-originated context appends are durable, never steers.
@@ -2244,7 +2244,7 @@ pub async fn mob_append_system_context(
         .append_system_context(
             &bridge_session_id,
             meerkat_core::AppendSystemContextRequest {
-                text: req.text,
+                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(req.text),
                 source: req.source,
                 idempotency_key: req.idempotency_key,
                 // JS-originated context appends are durable, never steers.
@@ -2874,7 +2874,9 @@ mod tests {
         append: &PendingSystemContextAppend,
     ) -> meerkat_core::AppendSystemContextRequest {
         meerkat_core::AppendSystemContextRequest {
-            text: append.text.clone(),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                append.text.clone(),
+            ),
             source: append.source.clone(),
             idempotency_key: append.idempotency_key.clone(),
             source_kind: append.source_kind,
@@ -3191,7 +3193,9 @@ capabilities = [{capability_values}]
             .append_system_context(
                 &bridge_session_id,
                 meerkat_core::AppendSystemContextRequest {
-                    text: "Prioritize coordinating with the lead.".to_string(),
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "Prioritize coordinating with the lead.".to_string(),
+                    ),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-worker-1".to_string()),
                     source_kind: meerkat_core::session::SystemContextSource::Normal,

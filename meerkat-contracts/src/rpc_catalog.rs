@@ -941,7 +941,7 @@ pub fn rpc_notification_names(options: RpcMethodCatalogOptions) -> Vec<String> {
 #[allow(clippy::panic)]
 mod tests {
     use super::*;
-    use crate::{RequestLifecycle, mcp_tool_request_lifecycle, rpc_request_lifecycle};
+    use crate::{RequestLifecycle, rpc_request_lifecycle};
 
     #[test]
     fn documented_surface_keeps_live_runtime_and_mob_methods() {
@@ -1020,26 +1020,6 @@ mod tests {
         assert_eq!(
             rpc_request_lifecycle("session/list", None),
             RequestLifecycle::InlineObservation
-        );
-    }
-
-    #[test]
-    fn mcp_tool_catalog_owns_request_lifecycle_rules() {
-        assert_eq!(
-            mcp_tool_request_lifecycle("meerkat_help"),
-            RequestLifecycle::LongRunningPublishOnSuccess
-        );
-        assert_eq!(
-            mcp_tool_request_lifecycle("meerkat_run"),
-            RequestLifecycle::LongRunningPublishOnSuccess
-        );
-        assert_eq!(
-            mcp_tool_request_lifecycle("meerkat_resume"),
-            RequestLifecycle::LongRunningPublishOnSuccess
-        );
-        assert_eq!(
-            mcp_tool_request_lifecycle("meerkat_sessions"),
-            RequestLifecycle::LongRunningObservation
         );
     }
 

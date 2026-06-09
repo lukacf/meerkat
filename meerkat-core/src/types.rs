@@ -79,7 +79,7 @@ impl From<&str> for VideoData {
 
 #[non_exhaustive]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     /// Plain text content.
@@ -102,6 +102,44 @@ pub enum ContentBlock {
         #[serde(flatten)]
         data: VideoData,
     },
+    /// Structured JSON content returned by a tool, preserved as JSON rather
+    /// than laundered through a stringified `Text` block.
+    ///
+    /// Tools whose result is structured data (lists, records) emit this so the
+    /// canonical transcript carries the typed JSON shape. The payload is opaque
+    /// pass-through JSON (`Box<RawValue>`, the allow-listed §3 pattern shared
+    /// with `ToolUse` args): Meerkat does not impose a closed schema on
+    /// arbitrary tool output. The model-facing text projection is *derived*
+    /// from this JSON, never the other way around.
+    Structured {
+        /// Provider-opaque structured JSON, parsed at most once by consumers.
+        #[serde(
+            serialize_with = "serialize_structured_data",
+            deserialize_with = "deserialize_structured_data"
+        )]
+        #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
+        data: Box<RawValue>,
+    },
+}
+
+/// Serializes a `Box<RawValue>` structured payload as inline JSON (no double
+/// string-encoding).
+fn serialize_structured_data<S>(data: &RawValue, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    data.serialize(serializer)
+}
+
+/// Deserializes a structured payload via `Value` so it survives the
+/// internally-tagged `Message` buffering step, mirroring `deserialize_tool_use_args`.
+fn deserialize_structured_data<'de, D>(deserializer: D) -> Result<Box<RawValue>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    let raw = serde_json::to_string(&value).map_err(serde::de::Error::custom)?;
+    RawValue::from_string(raw).map_err(serde::de::Error::custom)
 }
 
 impl ContentBlock {
@@ -114,12 +152,31 @@ impl ContentBlock {
             ContentBlock::Text { text } => Cow::Borrowed(text),
             ContentBlock::Image { media_type, .. } => Cow::Owned(format!("[image: {media_type}]")),
             ContentBlock::Video { media_type, .. } => Cow::Owned(format!("[video: {media_type}]")),
+            ContentBlock::Structured { data } => Cow::Owned(data.get().to_string()),
         }
     }
 
     /// Convenience: wrap a string into a single-element Vec of Text blocks.
     pub fn text_vec(s: String) -> Vec<ContentBlock> {
         vec![ContentBlock::Text { text: s }]
+    }
+
+    /// Construct a structured-JSON content block from any serializable value.
+    ///
+    /// This is the typed path tools use instead of stringifying structured
+    /// output into a `Text` block. Fails closed if the value cannot be
+    /// serialized to JSON.
+    pub fn structured<T: Serialize>(value: &T) -> Result<Self, serde_json::Error> {
+        let raw = serde_json::value::to_raw_value(value)?;
+        Ok(ContentBlock::Structured { data: raw })
+    }
+
+    /// Borrow the raw structured JSON payload, if this is a `Structured` block.
+    pub fn structured_data(&self) -> Option<&RawValue> {
+        match self {
+            ContentBlock::Structured { data } => Some(data),
+            _ => None,
+        }
     }
 
     pub fn image_inline_data(&self) -> Option<(&str, &str)> {
@@ -159,6 +216,44 @@ impl fmt::Display for ContentBlock {
         f.write_str(&self.text_projection())
     }
 }
+
+impl PartialEq for ContentBlock {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (ContentBlock::Text { text: t1 }, ContentBlock::Text { text: t2 }) => t1 == t2,
+            (
+                ContentBlock::Image {
+                    media_type: mt1,
+                    data: d1,
+                },
+                ContentBlock::Image {
+                    media_type: mt2,
+                    data: d2,
+                },
+            ) => mt1 == mt2 && d1 == d2,
+            (
+                ContentBlock::Video {
+                    media_type: mt1,
+                    duration_ms: dur1,
+                    data: d1,
+                },
+                ContentBlock::Video {
+                    media_type: mt2,
+                    duration_ms: dur2,
+                    data: d2,
+                },
+            ) => mt1 == mt2 && dur1 == dur2 && d1 == d2,
+            // `RawValue` carries no `PartialEq`; compare the canonical JSON text,
+            // mirroring `AssistantBlock::ToolUse` args equality.
+            (ContentBlock::Structured { data: d1 }, ContentBlock::Structured { data: d2 }) => {
+                d1.get() == d2.get()
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ContentBlock {}
 
 /// Concatenate text projections from a slice of content blocks.
 pub fn text_content(blocks: &[ContentBlock]) -> String {
@@ -479,6 +574,55 @@ pub enum TranscriptSource {
     Spoken,
 }
 
+/// Typed semantic kind of a provider-executed (server-side) tool.
+///
+/// This is the single typed owner of the server-tool identity. Each provider
+/// adapter parses its native discriminator into this enum once at the streaming
+/// boundary, so downstream consumers never re-classify by matching a
+/// `name: String`. Provider-native sub-event detail (e.g. OpenAI's
+/// `web_search_call` vs `web_search_result`) is preserved in the accompanying
+/// `content` JSON, not in this kind.
+///
+/// `ProviderNative` is the verbatim escape hatch for dynamic provider tool
+/// names (Anthropic `server_tool_use` carries an arbitrary tool name that must
+/// round-trip exactly on replay). It is the only variant carrying a string,
+/// and that string IS the typed fact — not a re-derivable label.
+#[non_exhaustive]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ServerToolKind {
+    /// Provider-hosted web search (Anthropic `web_search*`, OpenAI
+    /// `web_search*`). Sub-event detail lives in the evidence `content`.
+    WebSearch,
+    /// Gemini grounding via Google Search (grounding metadata block).
+    GoogleSearch,
+    /// A provider-native server tool whose exact name must round-trip verbatim
+    /// (Anthropic `server_tool_use` dynamic name and any unrecognized future
+    /// server tool). The `name` is provider-owned and replayed unchanged.
+    ProviderNative { name: String },
+}
+
+impl ServerToolKind {
+    /// The provider-native tool name for this kind.
+    ///
+    /// Replay sites that must reconstruct a provider request item read this
+    /// derived projection instead of carrying a parallel `name: String`.
+    pub fn provider_name(&self) -> &str {
+        match self {
+            ServerToolKind::WebSearch => "web_search",
+            ServerToolKind::GoogleSearch => "google_search",
+            ServerToolKind::ProviderNative { name } => name,
+        }
+    }
+}
+
+impl fmt::Display for ServerToolKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.provider_name())
+    }
+}
+
 /// A block of content in an assistant message, preserving order.
 ///
 /// Uses adjacently tagged serde representation to support `Box<RawValue>` in
@@ -539,8 +683,8 @@ pub enum AssistantBlock {
         /// Provider item or tool-use ID when one exists.
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
-        /// Provider-native tool name, for example `web_search` or `google_search`.
-        name: String,
+        /// Typed semantic tool kind, parsed once at the provider adapter.
+        kind: ServerToolKind,
         /// Provider-native JSON payload, preserved for citations and grounding evidence.
         content: Value,
         /// Provider continuity metadata, if any.
@@ -611,17 +755,17 @@ impl PartialEq for AssistantBlock {
             (
                 AssistantBlock::ServerToolContent {
                     id: i1,
-                    name: n1,
+                    kind: k1,
                     content: c1,
                     meta: m1,
                 },
                 AssistantBlock::ServerToolContent {
                     id: i2,
-                    name: n2,
+                    kind: k2,
                     content: c2,
                     meta: m2,
                 },
-            ) => i1 == i2 && n1 == n2 && c1 == c2 && m1 == m2,
+            ) => i1 == i2 && k1 == k2 && c1 == c2 && m1 == m2,
             (
                 AssistantBlock::Image {
                     image_id: i1,

@@ -114,12 +114,21 @@ where
     }
 }
 
+/// Whether any drained message carries the typed dismissal lifecycle signal.
+///
+/// Dismissal is a typed control-plane fact ([`PeerLifecycleKind::Dismiss`]),
+/// never a peer-authored message body — a peer message whose text happens to
+/// be "DISMISS" is ordinary content and must not stop the executor.
 fn contains_dismiss(messages: &[CommsMessage]) -> bool {
-    messages.iter().any(|m| match &m.content {
-        crate::agent::types::CommsContent::Message { body, .. } => {
-            body.trim().eq_ignore_ascii_case("DISMISS")
-        }
-        _ => false,
+    use meerkat_core::comms::PeerLifecycleKind;
+    messages.iter().any(|m| {
+        matches!(
+            &m.content,
+            crate::agent::types::CommsContent::Lifecycle {
+                kind: PeerLifecycleKind::Dismiss,
+                ..
+            }
+        )
     })
 }
 

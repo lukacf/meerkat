@@ -102,10 +102,11 @@ async fn execute_native_web_search(
                     answer_parts.push(text.trim().to_string());
                 }
             }
-            AssistantBlock::ServerToolContent { name, content, .. } => {
+            AssistantBlock::ServerToolContent { kind, content, .. } => {
                 collect_evidence(content, &mut evidence);
                 native_events.push(WebSearchNativeEvent {
-                    name: name.clone(),
+                    // Derived projection of the typed kind owner.
+                    name: kind.provider_name().to_string(),
                     content: content.clone(),
                 });
             }
@@ -279,6 +280,7 @@ fn collect_evidence(value: &serde_json::Value, out: &mut Vec<WebSearchEvidence>)
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use meerkat_core::ServerToolKind;
     use meerkat_core::agent::LlmStreamResult;
     use meerkat_core::error::LlmFailureReason;
     use meerkat_core::types::Usage;
@@ -350,7 +352,7 @@ mod tests {
     fn server_tool_block() -> AssistantBlock {
         AssistantBlock::ServerToolContent {
             id: Some("ws_1".to_string()),
-            name: "web_search".to_string(),
+            kind: ServerToolKind::WebSearch,
             content: serde_json::json!({
                 "url": "https://example.com",
                 "title": "Meerkat",

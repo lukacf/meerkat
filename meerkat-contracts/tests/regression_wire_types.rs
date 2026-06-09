@@ -17,12 +17,13 @@ use meerkat_contracts::{
 use meerkat_core::event::BackgroundJobTerminalStatus;
 use meerkat_core::{
     AgentErrorClass, AgentEvent, AssistantImageEvent, AssistantImageId, BlobId, BlobRef,
-    BudgetType, ContentBlock, ContentInput, HookId, HookPoint, HookReasonCode, MediaType, Message,
-    ProviderImageMetadata, RevisedPromptDisposition, RunResult, SessionId,
-    SkillResolutionFailureReason, StopReason, ToolCallArguments, ToolConfigChangeOperation,
-    ToolConfigChangeStatus, ToolConfigChangedPayload, TranscriptRevisionBody,
-    TranscriptRewriteCommit, TranscriptRewriteReason, TranscriptRewriteRecord,
-    TranscriptRewriteSelection, Usage, UserMessage, transcript_messages_digest,
+    BudgetType, ContentBlock, ContentInput, HookFailureReason, HookId, HookPoint, HookReasonCode,
+    InteractionFailureReason, MediaType, Message, ProviderImageMetadata, RevisedPromptDisposition,
+    RunResult, SessionId, SkillResolutionFailureReason, StopReason, ToolCallArguments,
+    ToolConfigChangeOperation, ToolConfigChangeStatus, ToolConfigChangedPayload,
+    TranscriptRevisionBody, TranscriptRewriteCommit, TranscriptRewriteReason,
+    TranscriptRewriteRecord, TranscriptRewriteSelection, Usage, UserMessage,
+    transcript_messages_digest,
 };
 
 fn tool_args(value: serde_json::Value) -> ToolCallArguments {
@@ -440,6 +441,7 @@ fn agent_event_all_variants_roundtrip() {
         AgentEvent::HookFailed {
             hook_id: HookId::new("h1"),
             point: HookPoint::RunStarted,
+            reason: HookFailureReason::execution_failed("hook error"),
             error: "hook error".to_string(),
         },
         AgentEvent::HookDenied {
@@ -599,10 +601,12 @@ fn agent_event_all_variants_roundtrip() {
             "interaction_id": "550e8400-e29b-41d4-a716-446655440000",
             "result": "response"
         }),
-        // InteractionFailed requires uuid::Uuid for InteractionId
+        // InteractionFailed requires uuid::Uuid for InteractionId and the
+        // typed `reason` cause (the `error` string is the fused display mirror).
         serde_json::json!({
             "type": "interaction_failed",
             "interaction_id": "550e8400-e29b-41d4-a716-446655440001",
+            "reason": { "kind": "abandoned", "detail": "timeout" },
             "error": "timeout"
         }),
     ];
@@ -671,6 +675,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
         AgentEvent::HookFailed {
             hook_id: HookId::new("hook-1"),
             point: HookPoint::RunStarted,
+            reason: HookFailureReason::execution_failed("boom"),
             error: "boom".to_string(),
         },
         AgentEvent::HookDenied {
@@ -779,6 +784,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
                 "550e8400-e29b-41d4-a716-446655440001"
             ))
             .unwrap(),
+            reason: InteractionFailureReason::abandoned("failed"),
             error: "failed".to_string(),
         },
         AgentEvent::StreamTruncated {

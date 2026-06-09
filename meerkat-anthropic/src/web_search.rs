@@ -101,10 +101,11 @@ async fn execute_native_web_search(
                     answer_parts.push(text.trim().to_string());
                 }
             }
-            AssistantBlock::ServerToolContent { name, content, .. } => {
+            AssistantBlock::ServerToolContent { kind, content, .. } => {
                 collect_evidence(content, &mut evidence);
                 native_events.push(WebSearchNativeEvent {
-                    name: name.clone(),
+                    // Derived projection of the typed kind owner.
+                    name: kind.provider_name().to_string(),
                     content: content.clone(),
                 });
             }

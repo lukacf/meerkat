@@ -63,17 +63,25 @@ impl RuntimePeerCommsHandle {
 
 fn lifecycle_to_dsl(
     kind: meerkat_core::comms::PeerLifecycleKind,
-) -> mm_dsl::PeerIngressLifecycleClass {
+) -> Result<mm_dsl::PeerIngressLifecycleClass, DslTransitionError> {
     match kind {
         meerkat_core::comms::PeerLifecycleKind::PeerAdded => {
-            mm_dsl::PeerIngressLifecycleClass::PeerAdded
+            Ok(mm_dsl::PeerIngressLifecycleClass::PeerAdded)
         }
         meerkat_core::comms::PeerLifecycleKind::PeerRetired => {
-            mm_dsl::PeerIngressLifecycleClass::PeerRetired
+            Ok(mm_dsl::PeerIngressLifecycleClass::PeerRetired)
         }
         meerkat_core::comms::PeerLifecycleKind::PeerUnwired => {
-            mm_dsl::PeerIngressLifecycleClass::PeerUnwired
+            Ok(mm_dsl::PeerIngressLifecycleClass::PeerUnwired)
         }
+        // Dismissal is a supervisor/runtime drain-lifecycle terminal, not an
+        // ingress-classifiable topology notice. It has no peer-ingress
+        // classification route, so reject it fail-closed here rather than
+        // laundering it into a topology class.
+        meerkat_core::comms::PeerLifecycleKind::Dismiss => Err(DslTransitionError::guard_rejected(
+            "PeerCommsHandle::classify_external_envelope",
+            "mob.dismiss is a drain-lifecycle terminal and is not classifiable as peer ingress",
+        )),
     }
 }
 
@@ -170,7 +178,9 @@ fn request_intent_class_for(intent: &str) -> mm_dsl::PeerIngressRequestClass {
     }
 }
 
-fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::MeerkatMachineSignal {
+fn external_envelope_signal(
+    facts: &PeerIngressEnvelopeFacts,
+) -> Result<mm_dsl::MeerkatMachineSignal, DslTransitionError> {
     let (
         envelope_kind,
         request_intent,
@@ -198,7 +208,7 @@ fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::Meerkat
         meerkat_core::PeerIngressEnvelopeKind::Lifecycle { kind, params } => (
             mm_dsl::PeerIngressEnvelopeClass::Lifecycle,
             String::new(),
-            lifecycle_to_dsl(*kind),
+            lifecycle_to_dsl(*kind)?,
             lifecycle_peer_param(params),
             mm_dsl::PeerIngressResponseStatus::Accepted,
             String::new(),
@@ -229,7 +239,7 @@ fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::Meerkat
 
     let request_intent_class = request_intent_class_for(&request_intent);
 
-    mm_dsl::MeerkatMachineSignal::ClassifyExternalEnvelope {
+    Ok(mm_dsl::MeerkatMachineSignal::ClassifyExternalEnvelope {
         item_id: facts.item_id.clone(),
         from_peer: facts.from_peer.clone(),
         envelope_kind,
@@ -239,7 +249,7 @@ fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::Meerkat
         lifecycle_peer_param,
         response_status,
         in_reply_to,
-    }
+    })
 }
 
 struct PeerIngressClassifiedEffect {
@@ -402,7 +412,7 @@ impl PeerCommsHandle for RuntimePeerCommsHandle {
         let context = "PeerCommsHandle::classify_external_envelope";
         let effects = self
             .dsl
-            .apply_signal_with_effects(external_envelope_signal(&facts), context)?;
+            .apply_signal_with_effects(external_envelope_signal(&facts)?, context)?;
         let effect = classified_effect(effects, context)?;
         let classification = classification_from_effect(&effect);
         Ok(PeerIngressAdmission {

@@ -7,7 +7,7 @@ use crate::mcp_config::McpServerConfig;
 use crate::model_profile::catalog::ModelTier;
 use crate::{
     budget::BudgetLimits,
-    hooks::{HookCapability, HookExecutionMode, HookFailurePolicy, HookId, HookPoint},
+    hooks::{HookCapability, HookExecutionMode, HookId, HookPoint},
     retry::RetryPolicy,
     types::{OutputSchema, SecurityMode},
 };
@@ -1700,8 +1700,6 @@ pub struct HookEntryConfig {
     pub capability: HookCapability,
     pub priority: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure_policy: Option<HookFailurePolicy>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
     pub runtime: HookAdapterConfig,
 }
@@ -1715,7 +1713,6 @@ impl Default for HookEntryConfig {
             mode: HookExecutionMode::Foreground,
             capability: HookCapability::Observe,
             priority: 100,
-            failure_policy: None,
             timeout_ms: None,
             runtime: HookAdapterConfig::in_process("noop"),
         }

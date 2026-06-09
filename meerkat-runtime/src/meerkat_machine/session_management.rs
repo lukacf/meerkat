@@ -292,11 +292,13 @@ impl MeerkatMachine {
         let runtime_id = Self::logical_runtime_id(session_id);
         let recovered_authority =
             fresh_registered_runtime_authority(session_id, "fresh storeless session registration")?;
+        let initial_runtime_state =
+            super::dsl_authority::runtime_phase_from_authority(&recovered_authority);
         let dsl_authority = Arc::new(std::sync::Mutex::new(recovered_authority));
         let entry = self.make_driver(
             runtime_id.clone(),
             Arc::clone(&dsl_authority),
-            RuntimeState::Idle,
+            initial_runtime_state,
         );
         let control_projection = entry.control_projection_handle();
         let (ops_lifecycle, epoch_id, cursor_state) = Self::fresh_ops_state();
@@ -410,11 +412,13 @@ impl MeerkatMachine {
             &session_id,
             "fresh storeless session registration",
         )?;
+        let initial_runtime_state =
+            super::dsl_authority::runtime_phase_from_authority(&recovered_authority);
         let dsl_authority = Arc::new(std::sync::Mutex::new(recovered_authority));
         let mut entry = self.make_driver(
             runtime_id.clone(),
             Arc::clone(&dsl_authority),
-            RuntimeState::Idle,
+            initial_runtime_state,
         );
         tracing::debug!(
             %session_id,

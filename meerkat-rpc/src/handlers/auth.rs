@@ -2034,7 +2034,9 @@ mod tests {
             "openai_backend".into(),
             meerkat_core::BackendProfileConfig {
                 provider: "openai".into(),
-                backend_kind: "openai_api".into(),
+                backend_kind: meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi
+                    .as_str()
+                    .into(),
                 base_url: None,
                 options: serde_json::Value::Null,
             },
@@ -2043,7 +2045,9 @@ mod tests {
             "openai_managed".into(),
             meerkat_core::AuthProfileConfig {
                 provider: "openai".into(),
-                auth_method: "api_key".into(),
+                auth_method: meerkat_core::provider_matrix::OpenAiAuthMethod::ApiKey
+                    .as_str()
+                    .into(),
                 source: CredentialSourceSpec::ManagedStore,
                 constraints: Default::default(),
                 metadata_defaults: Default::default(),
@@ -2071,7 +2075,9 @@ mod tests {
             "chatgpt_backend".into(),
             meerkat_core::BackendProfileConfig {
                 provider: "openai".into(),
-                backend_kind: "chatgpt_backend".into(),
+                backend_kind: meerkat_core::provider_matrix::OpenAiBackendKind::ChatGptBackend
+                    .as_str()
+                    .into(),
                 base_url: None,
                 options: serde_json::Value::Null,
             },
@@ -2080,7 +2086,9 @@ mod tests {
             "openai_oauth".into(),
             meerkat_core::AuthProfileConfig {
                 provider: "openai".into(),
-                auth_method: "managed_chatgpt_oauth".into(),
+                auth_method: meerkat_core::provider_matrix::OpenAiAuthMethod::ManagedChatGptOauth
+                    .as_str()
+                    .into(),
                 source,
                 constraints: Default::default(),
                 metadata_defaults: Default::default(),
@@ -2110,7 +2118,9 @@ mod tests {
             .backend
             .get_mut("chatgpt_backend")
             .unwrap()
-            .backend_kind = "openai_api".into();
+            .backend_kind = meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi
+            .as_str()
+            .into();
         config
     }
 
@@ -2121,7 +2131,9 @@ mod tests {
             "openai_backend".into(),
             meerkat_core::BackendProfileConfig {
                 provider: "openai".into(),
-                backend_kind: "openai_api".into(),
+                backend_kind: meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi
+                    .as_str()
+                    .into(),
                 base_url: None,
                 options: serde_json::Value::Null,
             },
@@ -2130,7 +2142,9 @@ mod tests {
             "openai_external".into(),
             meerkat_core::AuthProfileConfig {
                 provider: "openai".into(),
-                auth_method: "external_authorizer".into(),
+                auth_method: meerkat_core::provider_matrix::OpenAiAuthMethod::ExternalAuthorizer
+                    .as_str()
+                    .into(),
                 source: CredentialSourceSpec::ExternalResolver {
                     handle: "external-openai".into(),
                 },
@@ -2160,7 +2174,9 @@ mod tests {
             "google_backend".into(),
             meerkat_core::BackendProfileConfig {
                 provider: "gemini".into(),
-                backend_kind: "google_genai".into(),
+                backend_kind: meerkat_core::provider_matrix::GoogleBackendKind::GoogleGenAi
+                    .as_str()
+                    .into(),
                 base_url: None,
                 options: serde_json::Value::Null,
             },
@@ -2169,7 +2185,9 @@ mod tests {
             "google_api_key".into(),
             meerkat_core::AuthProfileConfig {
                 provider: "gemini".into(),
-                auth_method: "api_key".into(),
+                auth_method: meerkat_core::provider_matrix::GoogleAuthMethod::ApiKey
+                    .as_str()
+                    .into(),
                 source: CredentialSourceSpec::ManagedStore,
                 constraints: Default::default(),
                 metadata_defaults: Default::default(),
@@ -2199,7 +2217,9 @@ mod tests {
             .auth
             .get_mut("google_api_key")
             .unwrap()
-            .auth_method = "google_oauth".into();
+            .auth_method = meerkat_core::provider_matrix::GoogleAuthMethod::GoogleOauth
+            .as_str()
+            .into();
         config
     }
 
@@ -2210,7 +2230,9 @@ mod tests {
             "anthropic_backend".into(),
             meerkat_core::BackendProfileConfig {
                 provider: "anthropic".into(),
-                backend_kind: "anthropic_api".into(),
+                backend_kind: meerkat_core::provider_matrix::AnthropicBackendKind::AnthropicApi
+                    .as_str()
+                    .into(),
                 base_url: None,
                 options: serde_json::Value::Null,
             },
@@ -2219,7 +2241,9 @@ mod tests {
             "anthropic_api_key".into(),
             meerkat_core::AuthProfileConfig {
                 provider: "anthropic".into(),
-                auth_method: "api_key".into(),
+                auth_method: meerkat_core::provider_matrix::AnthropicAuthMethod::ApiKey
+                    .as_str()
+                    .into(),
                 source: CredentialSourceSpec::ManagedStore,
                 constraints: Default::default(),
                 metadata_defaults: Default::default(),
@@ -2562,7 +2586,9 @@ mod tests {
         let profile = meerkat_core::AuthProfile {
             id: "p".to_string(),
             provider: Provider::OpenAI,
-            auth_method: "api_key".to_string(),
+            auth_method: meerkat_core::provider_matrix::OpenAiAuthMethod::ApiKey
+                .as_str()
+                .to_string(),
             source: CredentialSourceSpec::ManagedStore,
             constraints: meerkat_core::auth::AuthConstraints::default(),
             metadata_defaults: meerkat_core::auth::AuthMetadataDefaults::default(),

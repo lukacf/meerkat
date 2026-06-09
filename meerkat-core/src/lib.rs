@@ -193,9 +193,9 @@ pub use handles::{
 };
 pub use hooks::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookExecutionMode,
-    HookExecutionReport, HookFailurePolicy, HookFailureReason, HookId, HookInvocation,
-    HookLlmRequest, HookLlmResponse, HookOutcome, HookPatch, HookPatchEnvelope, HookPoint,
-    HookReasonCode, HookRevision, HookToolCall, HookToolResult, default_failure_policy,
+    HookExecutionReport, HookFailureReason, HookId, HookInvocation, HookLlmRequest,
+    HookLlmResponse, HookOutcome, HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode,
+    HookRevision, HookToolCall, HookToolResult,
 };
 pub use image_content::{
     MissingBlobBehavior, collect_blob_ids_from_blocks, collect_blob_ids_from_messages,
@@ -291,9 +291,9 @@ pub use session::{
     transcript_messages_digest,
 };
 pub use session_recovery::{
-    BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RecoveredSessionBuild, SurfaceSessionRecoveryContext,
-    SurfaceSessionRecoveryError, SurfaceSessionRecoveryOverrides, build_recovered_session,
-    has_build_only_turn_overrides, has_materialization_overrides,
+    BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RecoveredSessionBuild, RecoveryBackendKind,
+    SurfaceSessionRecoveryContext, SurfaceSessionRecoveryError, SurfaceSessionRecoveryOverrides,
+    build_recovered_session, has_build_only_turn_overrides, has_materialization_overrides,
     session_allows_first_turn_build_overrides,
 };
 pub use session_store::{SessionFilter, SessionStore, SessionStoreError};

@@ -283,11 +283,10 @@ See the [structured output guide](/guides/structured-output) for usage details.
 | `HookPoint` | 8 extension points (`RunStarted` through `TurnBoundary`) |
 | `HookCapability` | `Observe`, `Guardrail`, `Rewrite` (retired compatibility label; no patch authority) |
 | `HookExecutionMode` | `Foreground` (blocking) or `Background` (async) |
-| `HookEntryConfig` | Per-hook configuration (id, point, priority, runtime, failure policy) |
+| `HookEntryConfig` | Per-hook configuration (id, point, priority, runtime) |
 | `HookRunOverrides` | Per-run hook customization (add entries, disable by ID) |
 | `HookDecision` | `Allow` or `Deny` with reason code |
 | `HookPatch` | Retired patch surface; no valid semantic mutation variants |
-| `HookFailurePolicy` | `FailOpen` or `FailClosed` |
 
 See the [hooks guide](/guides/hooks) for usage details.
 

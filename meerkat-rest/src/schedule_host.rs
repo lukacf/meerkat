@@ -158,8 +158,9 @@ impl RestScheduleContext {
             .or_else(|| self.runtime.instance_id.clone());
         build_config.backend = create
             .backend
-            .clone()
-            .or_else(|| Some(self.runtime.backend.clone()));
+            .as_deref()
+            .and_then(meerkat_core::RecoveryBackendKind::parse)
+            .or_else(|| meerkat_core::RecoveryBackendKind::parse(&self.runtime.backend));
         build_config.keep_alive = create.keep_alive;
         build_config.app_context = create.app_context.clone();
         build_config.resume_session = Some(pre_session);

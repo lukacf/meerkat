@@ -311,7 +311,9 @@ mod tests {
             "openai_chatgpt".to_string(),
             crate::BackendProfileConfig {
                 provider: "openai".to_string(),
-                backend_kind: "chatgpt_backend".to_string(),
+                backend_kind: crate::provider_matrix::OpenAiBackendKind::ChatGptBackend
+                    .as_str()
+                    .to_string(),
                 base_url: None,
                 options: serde_json::Value::Null,
             },
@@ -320,7 +322,9 @@ mod tests {
             "openai_oauth".to_string(),
             crate::AuthProfileConfig {
                 provider: "openai".to_string(),
-                auth_method: "managed_chatgpt_oauth".to_string(),
+                auth_method: crate::provider_matrix::OpenAiAuthMethod::ManagedChatGptOauth
+                    .as_str()
+                    .to_string(),
                 source: crate::CredentialSourceSpec::ManagedStore,
                 constraints: Default::default(),
                 metadata_defaults: Default::default(),

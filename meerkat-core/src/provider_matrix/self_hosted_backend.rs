@@ -9,6 +9,8 @@ pub enum SelfHostedBackendKind {
 }
 
 impl SelfHostedBackendKind {
+    pub const ALL: &'static [Self] = &[Self::SelfHosted, Self::OpenAiCompatible];
+
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "self_hosted" => Some(Self::SelfHosted),
@@ -46,10 +48,8 @@ mod tests {
 
     #[test]
     fn parse_roundtrip_all_variants() {
-        for v in [
-            SelfHostedBackendKind::SelfHosted,
-            SelfHostedBackendKind::OpenAiCompatible,
-        ] {
+        for v in SelfHostedBackendKind::ALL {
+            let v = *v;
             assert_eq!(SelfHostedBackendKind::parse(v.as_str()), Some(v));
         }
     }

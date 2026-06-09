@@ -127,11 +127,7 @@ The docs below show run-scoped hook overrides conceptually, but the current CLI 
   </Tab>
 </Tabs>
 
-## Failure policies
-
-`HookFailurePolicy` is retained as a compatibility field on hook configuration. Current hook runtime failures fail closed through typed `HookEngineError` values; they are not converted into warning-only success or hook-local `Deny` decisions by `FailOpen` / `FailClosed`.
-
-Background hook failure policy is inert compatibility configuration. Pre-point background hooks are still required to be `Observe`, because they cannot safely block a pre-execution boundary after the loop has moved on.
+Hook runtime failures fail closed through typed `HookEngineError` values; they are never converted into warning-only success or a hook-local `Deny` decision. Pre-point background hooks are still required to be `Observe`, because they cannot safely block a pre-execution boundary after the loop has moved on.
 
 ## Decisions and patches
 
@@ -242,7 +238,6 @@ point = "pre_tool_execution"
 mode = "foreground"
 capability = "guardrail"
 priority = 10
-# failure_policy = "fail_closed"  # Compatibility field; runtime failures remain typed engine errors
 # timeout_ms = 10000              # Optional; overrides default_timeout_ms
 
 [hooks.entries.runtime]
@@ -261,9 +256,8 @@ args = ["hooks/safety_check.py"]
 | `mode` | `HookExecutionMode` | `Foreground` | Foreground or background |
 | `capability` | `HookCapability` | `Observe` | What the hook can do |
 | `priority` | `i32` | `100` | Execution order (lower runs first) |
-| `failure_policy` | `Option<HookFailurePolicy>` | `None` | Compatibility field; runtime failures remain typed engine errors |
 | `timeout_ms` | `Option<u64>` | `None` | Override default timeout |
-| `runtime` | `HookRuntimeConfig` | in_process/noop | Runtime configuration |
+| `runtime` | `HookAdapterConfig` | in_process/noop | Runtime configuration |
 </Accordion>
 
 <Accordion title="Layered config loading">

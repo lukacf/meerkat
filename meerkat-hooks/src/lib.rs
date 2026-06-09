@@ -1159,7 +1159,7 @@ impl HookEngine for DefaultHookEngine {
 mod tests {
     use super::*;
     use meerkat_core::config::HookRuntimeKind;
-    use meerkat_core::{HookFailurePolicy, HookLlmRequest, HookPoint, HookReasonCode, SessionId};
+    use meerkat_core::{HookLlmRequest, HookPoint, HookReasonCode, SessionId};
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     fn static_handler(response: RuntimeHookResponse) -> InProcessHookHandler {
@@ -1840,85 +1840,6 @@ mod tests {
             .expect_err("invalid background pre hook must be rejected");
 
         assert!(matches!(err, HookEngineError::InvalidConfiguration(_)));
-    }
-
-    #[tokio::test]
-    async fn fail_open_override_cannot_convert_runtime_error_to_success() {
-        let mut config = HooksConfig::default();
-        config.entries = vec![HookEntryConfig {
-            id: HookId::new("rewrite-explicit-open"),
-            point: HookPoint::PreToolExecution,
-            capability: HookCapability::Rewrite,
-            failure_policy: Some(HookFailurePolicy::FailOpen),
-            runtime: runtime_in_process("missing"),
-            ..Default::default()
-        }];
-
-        let engine = DefaultHookEngine::new(config);
-        let err = engine
-            .execute(
-                HookInvocation {
-                    point: HookPoint::PreToolExecution,
-                    session_id: SessionId::new(),
-                    turn_number: Some(1),
-                    prompt_input: None,
-                    prompt: None,
-                    error_report: None,
-                    error_class: None,
-                    error: None,
-                    llm_request: None,
-                    llm_response: None,
-                    tool_call: None,
-                    tool_result: None,
-                },
-                None,
-            )
-            .await
-            .expect_err("legacy fail_open override must not make runtime errors warning-only");
-
-        assert!(matches!(
-            err,
-            HookEngineError::ExecutionFailed { ref hook_id, .. }
-                if hook_id == &HookId::new("rewrite-explicit-open")
-        ));
-    }
-
-    #[tokio::test]
-    async fn background_failure_policy_is_inert_compatibility_config() {
-        let mut config = HooksConfig::default();
-        config.entries = vec![HookEntryConfig {
-            id: HookId::new("invalid-background-fail-closed"),
-            point: HookPoint::PostToolExecution,
-            mode: HookExecutionMode::Background,
-            capability: HookCapability::Observe,
-            failure_policy: Some(HookFailurePolicy::FailClosed),
-            runtime: runtime_in_process("bg"),
-            ..Default::default()
-        }];
-
-        let engine = DefaultHookEngine::new(config);
-        let report = engine
-            .execute(
-                HookInvocation {
-                    point: HookPoint::PostToolExecution,
-                    session_id: SessionId::new(),
-                    turn_number: Some(1),
-                    prompt_input: None,
-                    prompt: None,
-                    error_report: None,
-                    error_class: None,
-                    error: None,
-                    llm_request: None,
-                    llm_response: None,
-                    tool_call: None,
-                    tool_result: None,
-                },
-                None,
-            )
-            .await
-            .expect("legacy failure_policy must not be an admission authority");
-
-        assert!(report.decision.is_none());
     }
 
     #[tokio::test]

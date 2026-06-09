@@ -243,8 +243,9 @@ impl McpScheduleContext {
                 .or_else(|| self.instance_id.clone()),
             backend: create
                 .backend
-                .clone()
-                .or_else(|| Some(self.backend.clone())),
+                .as_deref()
+                .and_then(meerkat_core::RecoveryBackendKind::parse)
+                .or_else(|| meerkat_core::RecoveryBackendKind::parse(&self.backend)),
             config_generation: current_generation,
             auth_binding: None,
             mob_member_binding: None,

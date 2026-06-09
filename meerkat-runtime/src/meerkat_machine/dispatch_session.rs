@@ -36,14 +36,6 @@ impl MeerkatMachine {
         session_id: &SessionId,
         reason: String,
     ) -> Result<(), RuntimeDriverError> {
-        // Guard: DestroyedShapeInvariant — no mutation on destroyed sessions.
-        if matches!(
-            self.existing_session_runtime_state(session_id).await,
-            Some(RuntimeState::Destroyed)
-        ) {
-            return Err(RuntimeDriverError::Destroyed);
-        }
-
         let gate = self.session_mutation_gate(session_id).await;
         let _gate_guard = match gate {
             Some(g) => match Arc::clone(&g).try_lock_owned() {
@@ -63,10 +55,18 @@ impl MeerkatMachine {
         {
             Ok(state) => state,
             Err(_) => {
+                // The generated machine rejected `InterruptCurrentRun` for the
+                // current phase. Surface the terminal `Destroyed` truth as its
+                // own typed variant (DestroyedShapeInvariant) so callers that
+                // distinguish a destroyed binding from a merely not-ready one
+                // still observe it; every other rejected phase is `NotReady`.
                 let state = self
                     .existing_session_runtime_state(session_id)
                     .await
                     .unwrap_or(RuntimeState::Destroyed);
+                if state == RuntimeState::Destroyed {
+                    return Err(RuntimeDriverError::Destroyed);
+                }
                 return Err(RuntimeDriverError::NotReady { state });
             }
         };

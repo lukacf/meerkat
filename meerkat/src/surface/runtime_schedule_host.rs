@@ -105,7 +105,10 @@ fn materialized_build_options(
         .transpose()
         .map_err(schedule_internal)?;
     build.instance_id = create.instance_id.clone();
-    build.backend = create.backend.clone();
+    build.backend = create
+        .backend
+        .as_deref()
+        .and_then(meerkat_core::RecoveryBackendKind::parse);
     build.config_generation = create.config_generation;
     build.keep_alive = create.keep_alive;
     build.app_context = create.app_context.clone();

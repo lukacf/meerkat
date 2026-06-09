@@ -8730,7 +8730,7 @@ async fn run_agent(
             preload_skills,
             realm_id: Some(scope.locator.realm.clone()),
             instance_id: scope.instance_id.clone(),
-            backend: Some(manifest.backend.as_str().to_string()),
+            backend: meerkat_core::RecoveryBackendKind::parse(manifest.backend.as_str()),
             config_generation: None,
             keep_alive,
             checkpointer: None,
@@ -10107,7 +10107,10 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
                 .then(|| create.additional_instructions.clone()),
             realm_id,
             instance_id: create.instance_id.clone(),
-            backend: create.backend.clone(),
+            backend: create
+                .backend
+                .as_deref()
+                .and_then(meerkat_core::RecoveryBackendKind::parse),
             keep_alive: create.keep_alive,
             app_context: create.app_context.clone(),
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),

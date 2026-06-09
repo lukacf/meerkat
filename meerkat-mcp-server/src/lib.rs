@@ -3300,7 +3300,7 @@ async fn handle_meerkat_run(
         preload_skills,
         realm_id: Some(state.realm_id.clone()),
         instance_id: state.instance_id.clone(),
-        backend: Some(state.backend.clone()),
+        backend: meerkat_core::RecoveryBackendKind::parse(&state.backend),
         config_generation: current_generation,
         auth_binding: input
             .auth_binding
@@ -3715,8 +3715,9 @@ async fn handle_meerkat_resume(
                 .or_else(|| state.instance_id.clone()),
             backend: stored_metadata
                 .backend
-                .clone()
-                .or_else(|| Some(state.backend.clone())),
+                .as_deref()
+                .and_then(meerkat_core::RecoveryBackendKind::parse)
+                .or_else(|| meerkat_core::RecoveryBackendKind::parse(&state.backend)),
             config_generation: current_generation,
             auth_binding: None,
             mob_member_binding: stored_metadata.mob_member_binding.clone(),

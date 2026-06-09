@@ -718,7 +718,6 @@ mod scenario_06_hooks {
                     mode: HookExecutionMode::Foreground,
                     capability: HookCapability::Observe,
                     priority: 100,
-                    failure_policy: None,
                     timeout_ms: None,
                     runtime: HookAdapterConfig::from_kind_and_value(
                         HookRuntimeKind::InProcess,
@@ -733,7 +732,6 @@ mod scenario_06_hooks {
                     mode: HookExecutionMode::Foreground,
                     capability: HookCapability::Guardrail,
                     priority: 90,
-                    failure_policy: None,
                     timeout_ms: None,
                     runtime: HookAdapterConfig::from_kind_and_value(
                         HookRuntimeKind::InProcess,
@@ -748,7 +746,6 @@ mod scenario_06_hooks {
                     mode: HookExecutionMode::Foreground,
                     capability: HookCapability::Observe,
                     priority: 80,
-                    failure_policy: None,
                     timeout_ms: None,
                     runtime: HookAdapterConfig::from_kind_and_value(
                         HookRuntimeKind::InProcess,

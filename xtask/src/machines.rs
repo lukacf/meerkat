@@ -1317,98 +1317,60 @@ pub fn collect_direct_flow_reducer_transition_mismatches(root: &Path) -> Result<
         })?;
         let lines = contents.lines().collect::<Vec<_>>();
         let test_only_lines = flow_reducer_test_only_lines(&rel, &lines);
-        let mut module_aliases = BTreeMap::new();
-        let mut bare_transition_aliases = BTreeMap::new();
-        let mut bare_input_aliases = BTreeMap::new();
 
-        for module in forbidden_modules {
-            module_aliases.insert(module.to_string(), module.to_string());
-        }
-
-        for line in contents.lines() {
-            let compact = line.split_whitespace().collect::<Vec<_>>().join(" ");
-            for module in forbidden_modules {
-                if let Some(alias) = reducer_module_alias(&compact, module) {
-                    module_aliases.insert(alias, module.to_string());
-                }
-                if compact.contains(&format!("{module}::transition"))
-                    || compact.contains(&format!("{module}::Input"))
-                    || compact.contains(&format!("{module}::{{"))
+        // The transition-call, reducer-`Input`-construction, and
+        // projection-field-write detections are AST-derived: the visitor
+        // matches the banned *semantic shape* (a call whose callee path
+        // resolves to `module::transition`, an enum-variant path under
+        // `module::Input`, a place-expression assignment / mutating method
+        // call into `.flow_state.<field>` / `.kernel_state.<field>`) rather
+        // than a substring of the raw line. A token rename that keeps the
+        // banned relationship still fails, a banned token in a comment/string
+        // no longer false-positives, and a write split across lines is still
+        // caught. Import aliases (`use module as alias`, `use module::{...}`,
+        // glob) are resolved structurally from the `use` AST. `#[cfg(test)]`
+        // items are dropped structurally before the walk, mirroring the
+        // peer-response-terminal AST visitors. The CAS store-write detection
+        // (which keys off a finely-tuned multi-line allow-list of typed
+        // outcome / store-plan commits) stays line-based below.
+        if let Ok(parsed) = parse_production_file(&contents) {
+            let aliases = collect_flow_reducer_use_aliases(&parsed, forbidden_modules);
+            let mut visitor = FlowReducerTransitionVisitor::new(
+                &aliases,
+                &forbidden_flow_projection_fields,
+                &forbidden_frame_projection_fields,
+            );
+            visitor.visit_file(&parsed);
+            for hit in visitor.hits {
+                let line_index = hit.line.saturating_sub(1);
+                if line_index >= lines.len()
+                    || test_only_lines.get(line_index).copied() == Some(true)
                 {
-                    collect_reducer_bare_aliases(
-                        &compact,
-                        module,
-                        &mut bare_transition_aliases,
-                        &mut bare_input_aliases,
-                    );
+                    continue;
                 }
+                let allowed = match &hit.kind {
+                    FlowReducerHitKind::Transition { module }
+                    | FlowReducerHitKind::Input { module } => {
+                        flow_reducer_direct_use_is_structurally_allowed(
+                            &rel,
+                            &lines,
+                            line_index,
+                            module,
+                            &hit.gate_token,
+                        )
+                    }
+                    FlowReducerHitKind::ProjectionWrite => false,
+                };
+                if allowed {
+                    continue;
+                }
+                mismatches.push(format!("{}: {rel}:{}", hit.message, hit.line));
             }
         }
 
         for (line_index, line) in lines.iter().enumerate() {
             if test_only_lines[line_index] {
                 continue;
-            }
-            for alias in module_aliases.keys() {
-                let module = module_aliases
-                    .get(alias)
-                    .map(String::as_str)
-                    .unwrap_or(alias);
-                for token in [format!("{alias}::transition("), format!("{alias}::Input::")] {
-                    if line.contains(&token)
-                        && !flow_reducer_direct_use_is_structurally_allowed(
-                            &rel, &lines, line_index, module, &token,
-                        )
-                    {
-                        mismatches.push(format!(
-                            "direct live-flow reducer transition `{token}` is not MobMachine-command gated: {rel}:{}",
-                            line_index + 1
-                        ));
-                    }
-                }
-            }
-            for (alias, module) in &bare_transition_aliases {
-                if line.contains(&format!("{alias}("))
-                    && !flow_reducer_direct_use_is_structurally_allowed(
-                        &rel, &lines, line_index, module, alias,
-                    )
-                {
-                    mismatches.push(format!(
-                        "direct live-flow reducer transition alias `{alias}` is not MobMachine-command gated: {rel}:{}",
-                        line_index + 1
-                    ));
-                }
-            }
-            for (alias, module) in &bare_input_aliases {
-                let token = format!("{alias}::");
-                if line.contains(&token)
-                    && !flow_reducer_direct_use_is_structurally_allowed(
-                        &rel, &lines, line_index, module, &token,
-                    )
-                {
-                    mismatches.push(format!(
-                        "direct live-flow reducer input alias `{alias}` is not MobMachine-command gated: {rel}:{}",
-                        line_index + 1
-                    ));
-                }
-            }
-            for field in forbidden_flow_projection_fields {
-                let token = format!(".flow_state.{field}");
-                if projection_field_is_directly_written(line, &token) {
-                    mismatches.push(format!(
-                        "direct live-flow projection mutation `{token}` is not MobMachine-command gated: {rel}:{}",
-                        line_index + 1
-                    ));
-                }
-            }
-            for field in forbidden_frame_projection_fields {
-                let token = format!(".kernel_state.{field}");
-                if projection_field_is_directly_written(line, &token) {
-                    mismatches.push(format!(
-                        "direct live-flow projection mutation `{token}` is not MobMachine-command gated: {rel}:{}",
-                        line_index + 1
-                    ));
-                }
             }
             for token in forbidden_projection_cas_writes {
                 if line.contains(token)
@@ -1426,6 +1388,372 @@ pub fn collect_direct_flow_reducer_transition_mismatches(root: &Path) -> Result<
     }
 
     Ok(mismatches)
+}
+
+/// Resolved import aliases for the forbidden flow-reducer modules in one file.
+///
+/// Built structurally from the `use` AST (not a line text-scan) so a banned
+/// reducer reached through `use module as alias`, `use module::transition as x`,
+/// `use module::{Input as Y}`, or `use module::*` is recognized regardless of
+/// formatting or how the import is wrapped.
+struct FlowReducerUseAliases {
+    /// alias path-head segment -> canonical module (e.g. `fr` -> `flow_run`,
+    /// and each `module` -> itself so unaliased `module::transition` resolves).
+    module_aliases: BTreeMap<String, String>,
+    /// bare imported `transition` (possibly renamed) -> canonical module.
+    transition_aliases: BTreeMap<String, String>,
+    /// bare imported `Input` (possibly renamed) -> canonical module.
+    input_aliases: BTreeMap<String, String>,
+}
+
+fn collect_flow_reducer_use_aliases(
+    file: &syn::File,
+    forbidden_modules: [&str; 3],
+) -> FlowReducerUseAliases {
+    let mut module_aliases = BTreeMap::new();
+    let mut transition_aliases = BTreeMap::new();
+    let mut input_aliases = BTreeMap::new();
+    for module in forbidden_modules {
+        module_aliases.insert(module.to_string(), module.to_string());
+    }
+    let mut visitor = FlowReducerUseVisitor {
+        forbidden_modules,
+        module_aliases: &mut module_aliases,
+        transition_aliases: &mut transition_aliases,
+        input_aliases: &mut input_aliases,
+    };
+    visitor.visit_file(file);
+    FlowReducerUseAliases {
+        module_aliases,
+        transition_aliases,
+        input_aliases,
+    }
+}
+
+struct FlowReducerUseVisitor<'a> {
+    forbidden_modules: [&'a str; 3],
+    module_aliases: &'a mut BTreeMap<String, String>,
+    transition_aliases: &'a mut BTreeMap<String, String>,
+    input_aliases: &'a mut BTreeMap<String, String>,
+}
+
+impl FlowReducerUseVisitor<'_> {
+    /// Walk a `use` tree, tracking the trailing path segment of the module
+    /// currently in scope. When a forbidden module segment is reached, descend
+    /// to classify the imported leaf (`transition` / `Input` / glob / rename /
+    /// `as` on the module itself).
+    fn walk_tree(&mut self, tree: &syn::UseTree, parent_segment: Option<&str>) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                let segment = path.ident.to_string();
+                self.walk_tree(&path.tree, Some(&segment));
+            }
+            syn::UseTree::Name(name) => {
+                // `use a::b::flow_run;` — `flow_run` brings the module into
+                // scope under its own name, or as the leaf of a forbidden
+                // module path. Either way `module::...` keeps resolving.
+                let ident = name.ident.to_string();
+                if let Some(module) = self.forbidden_module_for(&ident) {
+                    self.module_aliases.insert(ident, module);
+                } else if let Some(module) =
+                    parent_segment.and_then(|p| self.forbidden_module_for(p))
+                {
+                    // `use module::transition;` / `use module::Input;`.
+                    self.classify_leaf(&ident, None, &module);
+                }
+            }
+            syn::UseTree::Rename(rename) => {
+                let ident = rename.ident.to_string();
+                let alias = rename.rename.to_string();
+                if let Some(module) = self.forbidden_module_for(&ident) {
+                    // `use a::b::flow_run as fr;`
+                    self.module_aliases.insert(alias, module);
+                } else if let Some(module) =
+                    parent_segment.and_then(|p| self.forbidden_module_for(p))
+                {
+                    // `use module::transition as run_transition;`
+                    self.classify_leaf(&ident, Some(&alias), &module);
+                }
+            }
+            syn::UseTree::Glob(_) => {
+                if let Some(module) = parent_segment.and_then(|p| self.forbidden_module_for(p)) {
+                    // `use module::*;` brings both `transition` and `Input`
+                    // into scope under their canonical names.
+                    self.transition_aliases
+                        .insert("transition".to_string(), module.clone());
+                    self.input_aliases.insert("Input".to_string(), module);
+                }
+            }
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    self.walk_tree(item, parent_segment);
+                }
+            }
+        }
+    }
+
+    fn forbidden_module_for(&self, ident: &str) -> Option<String> {
+        self.forbidden_modules
+            .iter()
+            .find(|module| **module == ident)
+            .map(|module| module.to_string())
+    }
+
+    fn classify_leaf(&mut self, leaf: &str, alias: Option<&str>, module: &str) {
+        match leaf {
+            "transition" => {
+                let name = alias.unwrap_or("transition").to_string();
+                self.transition_aliases.insert(name, module.to_string());
+            }
+            "Input" => {
+                let name = alias.unwrap_or("Input").to_string();
+                self.input_aliases.insert(name, module.to_string());
+            }
+            _ => {}
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for FlowReducerUseVisitor<'_> {
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        self.walk_tree(&node.tree, None);
+        syn::visit::visit_item_use(self, node);
+    }
+}
+
+/// What kind of banned flow-reducer relationship a visitor hit represents.
+enum FlowReducerHitKind {
+    Transition { module: String },
+    Input { module: String },
+    ProjectionWrite,
+}
+
+/// One AST-detected banned flow-reducer use, carrying the structural-allow-list
+/// gate token plus the already-rendered message prefix (line/path appended by
+/// the caller so the report shape matches the prior text scanner exactly).
+struct FlowReducerHit {
+    line: usize,
+    kind: FlowReducerHitKind,
+    gate_token: String,
+    message: String,
+}
+
+/// AST visitor matching the banned flow-reducer shapes: a transition call, a
+/// reducer `Input` enum-variant construction, and a direct projection-field
+/// write. Detection is structural so a token rename that keeps the banned
+/// relationship still fails.
+struct FlowReducerTransitionVisitor<'a> {
+    aliases: &'a FlowReducerUseAliases,
+    flow_fields: &'a [&'a str],
+    frame_fields: &'a [&'a str],
+    hits: Vec<FlowReducerHit>,
+}
+
+impl<'a> FlowReducerTransitionVisitor<'a> {
+    fn new(
+        aliases: &'a FlowReducerUseAliases,
+        flow_fields: &'a [&'a str],
+        frame_fields: &'a [&'a str],
+    ) -> Self {
+        Self {
+            aliases,
+            flow_fields,
+            frame_fields,
+            hits: Vec::new(),
+        }
+    }
+
+    /// Classify a callee path as a reducer `transition` call.
+    ///
+    /// Two shapes resolve: a module-qualified call `alias::transition(...)`
+    /// (head segment is a forbidden module / module-alias and the tail is
+    /// `transition`), and a bare imported transition alias `frame_transition(...)`.
+    fn transition_call_for(&self, path: &syn::Path) -> Option<(String, String)> {
+        let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        if segments.len() >= 2 && segments[segments.len() - 1] == "transition" {
+            let head = &segments[0];
+            if let Some(module) = self.aliases.module_aliases.get(head) {
+                return Some((module.clone(), format!("{head}::transition(")));
+            }
+        }
+        if segments.len() == 1
+            && let Some(module) = self.aliases.transition_aliases.get(&segments[0])
+        {
+            return Some((module.clone(), segments[0].clone()));
+        }
+        None
+    }
+
+    /// Classify a path as a reducer `Input` enum-variant construction.
+    ///
+    /// Resolves `alias::Input::Variant` (module-qualified) and `FrameInput::Variant`
+    /// / `Input::Variant` (bare imported input alias).
+    fn input_path_for(&self, path: &syn::Path) -> Option<(String, String)> {
+        let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        // module-qualified: `..::module::Input::Variant`
+        for (idx, segment) in segments.iter().enumerate() {
+            if segment == "Input"
+                && idx >= 1
+                && idx + 1 < segments.len()
+                && let Some(module) = self.aliases.module_aliases.get(&segments[idx - 1])
+            {
+                return Some((module.clone(), format!("{}::Input::", segments[idx - 1])));
+            }
+        }
+        // bare imported input alias: `<alias>::Variant`
+        if segments.len() >= 2
+            && let Some(module) = self.aliases.input_aliases.get(&segments[0])
+        {
+            return Some((module.clone(), segments[0].clone()));
+        }
+        None
+    }
+
+    fn push_transition(&mut self, span: proc_macro2::Span, module: String, display: String) {
+        self.hits.push(FlowReducerHit {
+            line: span.start().line,
+            kind: FlowReducerHitKind::Transition {
+                module: module.clone(),
+            },
+            // Gate token always contains `transition` so the run.rs
+            // typed-authority allow-list (`token.contains("transition")`) keeps
+            // accepting the wrapper; the allow-list keys on the resolved module.
+            gate_token: format!("{module}::transition("),
+            message: format!(
+                "direct live-flow reducer transition `{display}` is not MobMachine-command gated"
+            ),
+        });
+    }
+
+    fn push_transition_alias(&mut self, span: proc_macro2::Span, module: String, alias: String) {
+        self.hits.push(FlowReducerHit {
+            line: span.start().line,
+            kind: FlowReducerHitKind::Transition {
+                module: module.clone(),
+            },
+            gate_token: format!("{module}::transition("),
+            message: format!(
+                "direct live-flow reducer transition alias `{alias}` is not MobMachine-command gated"
+            ),
+        });
+    }
+
+    fn push_input(&mut self, span: proc_macro2::Span, module: String, alias: String) {
+        self.hits.push(FlowReducerHit {
+            line: span.start().line,
+            kind: FlowReducerHitKind::Input {
+                module: module.clone(),
+            },
+            // Gate token contains `Input::` so the run.rs `into_input` adapter
+            // allow-list (`token.contains("Input::")`) keeps accepting it.
+            gate_token: format!("{module}::Input::"),
+            message: format!(
+                "direct live-flow reducer input alias `{alias}` is not MobMachine-command gated"
+            ),
+        });
+    }
+
+    /// Record a reducer `Input` enum-variant construction from a path
+    /// reference. Transition *calls* are detected at the call site
+    /// (`visit_expr_call`) to carry the `alias::transition(` token shape; bare
+    /// transition-alias references that are not calls are not reducer
+    /// transitions, so they are intentionally not reported here.
+    fn record_input_path(&mut self, path: &syn::Path) {
+        if let Some((module, alias)) = self.input_path_for(path) {
+            self.push_input(path.span(), module, alias);
+        }
+    }
+
+    /// The forbidden projection field touched by a place expression, if any.
+    /// Matches `<recv>.flow_state.<field>` and `<recv>.kernel_state.<field>`
+    /// across the AST (so a multi-line place expression is still caught).
+    fn projection_field_token(&self, expr: &syn::Expr) -> Option<String> {
+        let syn::Expr::Field(outer) = expr else {
+            return None;
+        };
+        let syn::Member::Named(field_ident) = &outer.member else {
+            return None;
+        };
+        let field = field_ident.to_string();
+        let syn::Expr::Field(base) = outer.base.as_ref() else {
+            return None;
+        };
+        let syn::Member::Named(base_ident) = &base.member else {
+            return None;
+        };
+        let base_name = base_ident.to_string();
+        if base_name == "flow_state" && self.flow_fields.contains(&field.as_str()) {
+            return Some(format!(".flow_state.{field}"));
+        }
+        if base_name == "kernel_state" && self.frame_fields.contains(&field.as_str()) {
+            return Some(format!(".kernel_state.{field}"));
+        }
+        None
+    }
+
+    fn push_projection_write(&mut self, span: proc_macro2::Span, token: String) {
+        self.hits.push(FlowReducerHit {
+            line: span.start().line,
+            kind: FlowReducerHitKind::ProjectionWrite,
+            gate_token: token.clone(),
+            message: format!(
+                "direct live-flow projection mutation `{token}` is not MobMachine-command gated"
+            ),
+        });
+    }
+
+    /// `true` for a method that mutates the receiver in place (the set the
+    /// prior `projection_field_is_directly_written` text scanner recognized).
+    fn is_mutating_method(name: &str) -> bool {
+        matches!(name, "insert" | "remove" | "clear" | "push" | "retain")
+    }
+}
+
+impl<'ast> Visit<'ast> for FlowReducerTransitionVisitor<'_> {
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref()
+            && let Some((module, display)) = self.transition_call_for(&path.path)
+        {
+            if display.ends_with("::transition(") {
+                self.push_transition(node.span(), module, display);
+            } else {
+                self.push_transition_alias(node.span(), module, display);
+            }
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        self.record_input_path(&node.path);
+        syn::visit::visit_expr_path(self, node);
+    }
+
+    fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+        if let Some(token) = self.projection_field_token(&node.left) {
+            self.push_projection_write(node.span(), token);
+        }
+        syn::visit::visit_expr_assign(self, node);
+    }
+
+    fn visit_expr_binary(&mut self, node: &'ast syn::ExprBinary) {
+        // Compound assignment (`+=` / `-=`) parses as a binary op whose left is
+        // the place expression; the prior text scanner banned these too.
+        if matches!(node.op, syn::BinOp::AddAssign(_) | syn::BinOp::SubAssign(_))
+            && let Some(token) = self.projection_field_token(&node.left)
+        {
+            self.push_projection_write(node.span(), token);
+        }
+        syn::visit::visit_expr_binary(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if Self::is_mutating_method(&node.method.to_string())
+            && let Some(token) = self.projection_field_token(&node.receiver)
+        {
+            self.push_projection_write(node.span(), token);
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
 }
 
 pub fn collect_mob_runtime_catalog_command_gate_mismatches(root: &Path) -> Result<Vec<String>> {
@@ -1493,101 +1821,6 @@ impl MobCatalogCommandGateScope {
             Self::CommandArm(variant) => command_arm_scope_bounds(lines, variant),
         }
     }
-}
-
-fn reducer_module_alias(line: &str, module: &str) -> Option<String> {
-    let marker = format!("{module} as ");
-    let index = line.find(&marker)?;
-    Some(
-        line[index + marker.len()..]
-            .chars()
-            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-            .collect(),
-    )
-    .filter(|alias: &String| !alias.is_empty())
-}
-
-fn collect_reducer_bare_aliases(
-    line: &str,
-    module: &str,
-    transition_aliases: &mut BTreeMap<String, String>,
-    input_aliases: &mut BTreeMap<String, String>,
-) {
-    if let Some((_, after)) = line.split_once(&format!("{module}::transition")) {
-        if let Some(alias) = after
-            .trim_start()
-            .strip_prefix("as ")
-            .map(|value| {
-                value
-                    .chars()
-                    .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-                    .collect::<String>()
-            })
-            .filter(|alias| !alias.is_empty())
-        {
-            transition_aliases.insert(alias, module.to_string());
-        } else {
-            transition_aliases.insert("transition".to_string(), module.to_string());
-        }
-    }
-    if let Some((_, after)) = line.split_once(&format!("{module}::Input")) {
-        if let Some(alias) = after
-            .trim_start()
-            .strip_prefix("as ")
-            .map(|value| {
-                value
-                    .chars()
-                    .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-                    .collect::<String>()
-            })
-            .filter(|alias| !alias.is_empty())
-        {
-            input_aliases.insert(alias, module.to_string());
-        } else {
-            input_aliases.insert("Input".to_string(), module.to_string());
-        }
-    }
-    if line.contains(&format!("{module}::*")) {
-        transition_aliases.insert("transition".to_string(), module.to_string());
-        input_aliases.insert("Input".to_string(), module.to_string());
-    }
-    if let Some((_, imports)) = line.split_once(&format!("{module}::{{"))
-        && let Some((imports, _)) = imports.split_once('}')
-    {
-        for item in imports.split(',').map(str::trim) {
-            if let Some(alias) = item.strip_prefix("transition as ") {
-                let alias = alias.trim();
-                if !alias.is_empty() {
-                    transition_aliases.insert(alias.to_string(), module.to_string());
-                }
-            } else if item == "transition" {
-                transition_aliases.insert("transition".to_string(), module.to_string());
-            } else if let Some(alias) = item.strip_prefix("Input as ") {
-                let alias = alias.trim();
-                if !alias.is_empty() {
-                    input_aliases.insert(alias.to_string(), module.to_string());
-                }
-            } else if item == "Input" {
-                input_aliases.insert("Input".to_string(), module.to_string());
-            }
-        }
-    }
-}
-
-fn projection_field_is_directly_written(line: &str, token: &str) -> bool {
-    let Some(index) = line.find(token) else {
-        return false;
-    };
-    let tail = &line[index + token.len()..];
-    let tail = tail.trim_start();
-    (tail.starts_with('=') && !tail.starts_with("==") && !tail.starts_with("=>"))
-        || tail.starts_with("+=")
-        || tail.starts_with("-=")
-        || tail.starts_with(".insert(")
-        || tail.starts_with(".remove(")
-        || tail.starts_with(".clear(")
-        || tail.starts_with(".push(")
-        || tail.starts_with(".retain(")
 }
 
 fn mob_catalog_input_has_fail_closed_gate(lines: &[&str], input: &str) -> bool {

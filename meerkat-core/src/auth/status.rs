@@ -137,8 +137,12 @@ mod tests {
         let status = AuthStatus {
             profile_id: "openai_api_key".into(),
             provider: Provider::OpenAI,
-            backend_kind: "openai_api".into(),
-            auth_method: "api_key".into(),
+            backend_kind: crate::provider_matrix::OpenAiBackendKind::OpenAiApi
+                .as_str()
+                .into(),
+            auth_method: crate::provider_matrix::OpenAiAuthMethod::ApiKey
+                .as_str()
+                .into(),
             source_label: "env:OPENAI_API_KEY".into(),
             expires_at: None,
             account_id: None,

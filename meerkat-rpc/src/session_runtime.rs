@@ -5360,7 +5360,12 @@ impl SessionRuntime {
             let mut build = build_config.to_session_build_options();
             build.realm_id = build.realm_id.or_else(|| self.inner.realm_id());
             build.instance_id = build.instance_id.or_else(|| self.inner.instance_id());
-            build.backend = build.backend.or_else(|| self.inner.backend());
+            build.backend = build.backend.or_else(|| {
+                self.inner
+                    .backend()
+                    .as_deref()
+                    .and_then(meerkat_core::RecoveryBackendKind::parse)
+            });
             build.config_generation = build.config_generation.or(runtime_generation);
             let event_tx = self
                 .pending_session_event_fanout_tx(session_id, event_tx)
@@ -5780,7 +5785,12 @@ impl SessionRuntime {
             let mut build = build_config.to_session_build_options();
             build.realm_id = build.realm_id.or_else(|| self.inner.realm_id());
             build.instance_id = build.instance_id.or_else(|| self.inner.instance_id());
-            build.backend = build.backend.or_else(|| self.inner.backend());
+            build.backend = build.backend.or_else(|| {
+                self.inner
+                    .backend()
+                    .as_deref()
+                    .and_then(meerkat_core::RecoveryBackendKind::parse)
+            });
             build.config_generation = build.config_generation.or(runtime_generation);
             // #61/#67: resolve the initial-turn provider hint through
             // registered model ownership (the same fail-closed contract REST
@@ -9392,7 +9402,9 @@ mod tests {
             "openai_backend".into(),
             meerkat_core::BackendProfileConfig {
                 provider: "openai".into(),
-                backend_kind: "openai_api".into(),
+                backend_kind: meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi
+                    .as_str()
+                    .into(),
                 base_url: None,
                 options: serde_json::Value::Null,
             },
@@ -9401,7 +9413,9 @@ mod tests {
             "openai_managed".into(),
             meerkat_core::AuthProfileConfig {
                 provider: "openai".into(),
-                auth_method: "api_key".into(),
+                auth_method: meerkat_core::provider_matrix::OpenAiAuthMethod::ApiKey
+                    .as_str()
+                    .into(),
                 source: meerkat_core::CredentialSourceSpec::ManagedStore,
                 constraints: Default::default(),
                 metadata_defaults: Default::default(),

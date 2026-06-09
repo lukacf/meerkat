@@ -417,7 +417,11 @@ pub struct AgentBuildConfig {
     /// Optional process/agent instance identifier within a realm.
     pub instance_id: Option<String>,
     /// Backend pinned by the realm manifest (e.g. "sqlite", "jsonl").
-    pub backend: Option<String>,
+    ///
+    /// Typed thread-through (`#207`): parsed fail-closed at the surface ingress
+    /// and projected to the durable `SessionMetadata.backend` string only at the
+    /// metadata write below.
+    pub backend: Option<meerkat_core::RecoveryBackendKind>,
     /// Config generation used when this session was created/resumed.
     pub config_generation: Option<u64>,
     /// Realm-scoped auth binding (Phase 3 provider-auth redesign).
@@ -774,7 +778,7 @@ impl AgentBuildConfig {
         self.preload_skills = build.preload_skills.clone();
         self.realm_id = build.realm_id.clone();
         self.instance_id = build.instance_id.clone();
-        self.backend = build.backend.clone();
+        self.backend = build.backend;
         self.config_generation = build.config_generation;
         // Phase 3: auth_binding flows from SessionBuildOptions into
         // AgentBuildConfig so surfaces can drive binding selection per-request.
@@ -835,7 +839,7 @@ impl AgentBuildConfig {
             preload_skills: self.preload_skills.clone(),
             realm_id: self.realm_id.clone(),
             instance_id: self.instance_id.clone(),
-            backend: self.backend.clone(),
+            backend: self.backend,
             config_generation: self.config_generation,
             auth_binding: self.auth_binding.clone(),
             mob_member_binding: self.mob_member_binding.clone(),
@@ -4876,7 +4880,7 @@ impl AgentFactory {
             metadata.peer_meta = build_config.peer_meta.clone();
             metadata.realm_id = build_config.realm_id.clone();
             metadata.instance_id = build_config.instance_id.clone();
-            metadata.backend = build_config.backend.clone();
+            metadata.backend = build_config.backend.map(|b| b.as_str().to_string());
             metadata.config_generation = build_config.config_generation;
             metadata.auth_binding = build_config.auth_binding.clone();
             metadata.mob_member_binding = build_config.mob_member_binding.clone();
@@ -4907,7 +4911,7 @@ impl AgentFactory {
                 peer_meta: build_config.peer_meta.clone(),
                 realm_id: build_config.realm_id.clone(),
                 instance_id: build_config.instance_id.clone(),
-                backend: build_config.backend.clone(),
+                backend: build_config.backend.map(|b| b.as_str().to_string()),
                 config_generation: build_config.config_generation,
                 auth_binding: build_config.auth_binding.clone(),
                 mob_member_binding: build_config.mob_member_binding.clone(),

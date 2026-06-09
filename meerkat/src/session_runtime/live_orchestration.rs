@@ -609,9 +609,10 @@ mod orchestrator {
             build.instance_id = build
                 .instance_id
                 .or_else(|| self.instance_id.map(ToString::to_string));
-            build.backend = build
-                .backend
-                .or_else(|| self.backend.map(ToString::to_string));
+            build.backend = build.backend.or_else(|| {
+                self.backend
+                    .and_then(meerkat_core::RecoveryBackendKind::parse)
+            });
             build.config_generation = build.config_generation.or(runtime_generation);
 
             let (prompt, deferred_prompt_policy) = match deferred_prompt {

@@ -87,14 +87,6 @@ pub enum HookCapability {
     Rewrite,
 }
 
-/// Failure policy can be explicitly configured per hook.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum HookFailurePolicy {
-    FailOpen,
-    FailClosed,
-}
-
 /// Typed reason codes for guardrail denials.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -502,13 +494,6 @@ impl HookExecutionReport {
             }),
             HookDecision::Allow => None,
         }
-    }
-}
-
-pub fn default_failure_policy(capability: HookCapability) -> HookFailurePolicy {
-    match capability {
-        HookCapability::Observe => HookFailurePolicy::FailOpen,
-        HookCapability::Guardrail | HookCapability::Rewrite => HookFailurePolicy::FailClosed,
     }
 }
 

@@ -269,7 +269,13 @@ pub struct SessionBuildOptions {
     pub preload_skills: Option<Vec<crate::skills::SkillKey>>,
     pub realm_id: Option<crate::RealmId>,
     pub instance_id: Option<String>,
-    pub backend: Option<String>,
+    /// Typed realm-pinned session-store backend for this build.
+    ///
+    /// Carries the single typed owner ([`RecoveryBackendKind`]) rather than a
+    /// bare `"sqlite"`/`"jsonl"` string, so a recovery-environment hint cannot
+    /// silently become durable identity: any raw backend string is parsed
+    /// fail-closed at its ingress boundary before it reaches this field.
+    pub backend: Option<crate::session_recovery::RecoveryBackendKind>,
     pub config_generation: Option<u64>,
     /// Realm-scoped auth binding (Phase 3 provider-auth redesign).
     /// Flows into `AgentBuildConfig.auth_binding` via `FactoryAgentBuilder`.

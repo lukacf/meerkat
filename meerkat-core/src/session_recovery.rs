@@ -604,13 +604,19 @@ pub fn resolve_effective_turn_config(
         realm_id: metadata.realm_id.clone().or(realm_defaults.realm_id),
         instance_id: metadata.instance_id.clone().or(realm_defaults.instance_id),
         // Durable `metadata.backend` wins; the realm hint only fills an absent
-        // value, and only after it has round-tripped through the typed
-        // `RecoveryBackendKind` boundary (so an unparseable hint was already
-        // dropped to `None` and cannot reach durable identity).
+        // value. Both reach the build as the typed [`RecoveryBackendKind`]:
+        //   - durable session truth is parsed fail-closed here (an unparseable
+        //     persisted literal is dropped rather than ferried untyped), and
+        //   - the realm hint is already the typed owner, having round-tripped
+        //     through the same fail-closed boundary at
+        //     [`RealmDefaults::from_recovery_context`].
+        // A recovery-environment hint can therefore never silently become
+        // durable identity: it only fills when the durable value is absent.
         backend: metadata
             .backend
-            .clone()
-            .or_else(|| realm_defaults.backend.map(|kind| kind.as_str().to_string())),
+            .as_deref()
+            .and_then(RecoveryBackendKind::parse)
+            .or(realm_defaults.backend),
         config_generation: metadata
             .config_generation
             .or(realm_defaults.config_generation),
@@ -847,7 +853,9 @@ mod tests {
         );
         assert_eq!(effective.build.realm_id, metadata.realm_id);
         assert_eq!(effective.build.instance_id, metadata.instance_id);
-        assert_eq!(effective.build.backend, metadata.backend);
+        // Durable `metadata.backend` ("sqlite") reaches the build as the typed
+        // owner, parsed fail-closed from the persisted literal.
+        assert_eq!(effective.build.backend, Some(RecoveryBackendKind::Sqlite));
         assert_eq!(
             effective.build.config_generation,
             metadata.config_generation
@@ -909,7 +917,7 @@ mod tests {
             Some("realm-a")
         );
         assert_eq!(build.instance_id.as_deref(), Some("instance-a"));
-        assert_eq!(build.backend.as_deref(), Some("sqlite"));
+        assert_eq!(build.backend, Some(RecoveryBackendKind::Sqlite));
         assert_eq!(build.config_generation, Some(7));
         assert!(build.keep_alive);
         assert_eq!(build.override_builtins, ToolCategoryOverride::Disable);
@@ -1202,7 +1210,11 @@ mod tests {
             recovered.build.instance_id.as_deref(),
             Some("instance-from-context")
         );
-        assert_eq!(recovered.build.backend.as_deref(), Some("sqlite"));
+        assert_eq!(
+            recovered.build.backend,
+            Some(RecoveryBackendKind::Sqlite),
+            "a valid recovery-environment backend hint fills the absent durable value as the typed owner"
+        );
         assert_eq!(recovered.build.config_generation, Some(99));
     }
 

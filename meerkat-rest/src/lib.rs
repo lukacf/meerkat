@@ -4418,7 +4418,7 @@ async fn create_session_inner(
         preload_skills: req.preload_skills.clone(),
         realm_id: Some(state.realm.clone()),
         instance_id: state.instance_id.clone(),
-        backend: Some(state.backend.clone()),
+        backend: meerkat_core::RecoveryBackendKind::parse(&state.backend),
         config_generation: current_generation,
         auth_binding: None,
         // REST is not a mob runtime. On resume the factory preserves the
@@ -5455,7 +5455,7 @@ async fn continue_session_inner(
             preload_skills: None,
             realm_id: Some(state.realm.clone()),
             instance_id: state.instance_id.clone(),
-            backend: Some(state.backend.clone()),
+            backend: meerkat_core::RecoveryBackendKind::parse(&state.backend),
             config_generation: state.config_runtime.get().await.ok().map(|s| s.generation),
             auth_binding: None,
             mob_member_binding: None,

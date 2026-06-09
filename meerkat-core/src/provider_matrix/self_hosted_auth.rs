@@ -8,6 +8,8 @@ pub enum SelfHostedAuthMethod {
 }
 
 impl SelfHostedAuthMethod {
+    pub const ALL: &'static [Self] = &[Self::ApiKey, Self::None, Self::StaticBearer];
+
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "api_key" => Some(Self::ApiKey),
@@ -46,11 +48,8 @@ mod tests {
 
     #[test]
     fn parse_roundtrip_all_variants() {
-        for v in [
-            SelfHostedAuthMethod::ApiKey,
-            SelfHostedAuthMethod::None,
-            SelfHostedAuthMethod::StaticBearer,
-        ] {
+        for v in SelfHostedAuthMethod::ALL {
+            let v = *v;
             assert_eq!(SelfHostedAuthMethod::parse(v.as_str()), Some(v));
         }
     }

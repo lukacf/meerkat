@@ -18,7 +18,8 @@ use crate::Config;
 use crate::auth::{AuthConstraints, AuthMetadataDefaults};
 use crate::provider::Provider;
 use crate::provider_matrix::{
-    AnthropicBackendKind, GoogleBackendKind, OpenAiBackendKind, SelfHostedBackendKind,
+    AnthropicAuthMethod, AnthropicBackendKind, GoogleAuthMethod, GoogleBackendKind,
+    OpenAiAuthMethod, OpenAiBackendKind, SelfHostedAuthMethod, SelfHostedBackendKind,
 };
 
 const AZURE_OPENAI_API_KEY_ENV: &str = "AZURE_OPENAI_API_KEY";
@@ -1305,7 +1306,9 @@ impl RealmConfigSection {
     /// consumed by `AgentFactory::build_agent`.
     ///
     /// For each (provider, secret) pair, emits:
-    ///   - a `BackendProfileConfig { provider, backend_kind: "<p>_api" }`
+    ///   - a `BackendProfileConfig` whose `backend_kind` is the provider's
+    ///     default kind from the typed provider-matrix enum
+    ///     (`AnthropicBackendKind::AnthropicApi`, etc.)
     ///   - an `AuthProfileConfig` with `CredentialSourceSpec::InlineSecret`
     ///   - a `ProviderBindingConfig` wiring the two
     ///
@@ -1321,11 +1324,25 @@ impl RealmConfigSection {
 
         for (idx, (provider, secret)) in entries.iter().enumerate() {
             let id = format!("default_{provider}");
-            let backend_kind = match *provider {
-                "anthropic" => "anthropic_api",
-                "openai" => "openai_api",
-                "gemini" | "google" => "google_genai",
-                other => other,
+            // Derive the (backend_kind, auth_method) inline-key default pair from
+            // the typed provider-matrix enums that own each canonical string.
+            // `other =>` stays the open-world fallback: an unrecognized provider
+            // name carries its own slug as backend_kind with the conventional
+            // `api_key` auth method, since no typed matrix enum owns it.
+            let (backend_kind, auth_method) = match *provider {
+                "anthropic" => (
+                    AnthropicBackendKind::AnthropicApi.as_str(),
+                    AnthropicAuthMethod::ApiKey.as_str(),
+                ),
+                "openai" => (
+                    OpenAiBackendKind::OpenAiApi.as_str(),
+                    OpenAiAuthMethod::ApiKey.as_str(),
+                ),
+                "gemini" | "google" => (
+                    GoogleBackendKind::GoogleGenAi.as_str(),
+                    GoogleAuthMethod::ApiKey.as_str(),
+                ),
+                other => (other, "api_key"),
             };
             backend.insert(
                 id.clone(),
@@ -1340,7 +1357,7 @@ impl RealmConfigSection {
                 id.clone(),
                 AuthProfileConfig {
                     provider: provider.to_string(),
-                    auth_method: "api_key".to_string(),
+                    auth_method: auth_method.to_string(),
                     source: CredentialSourceSpec::InlineSecret {
                         secret: (*secret).to_string(),
                     },
@@ -1383,7 +1400,7 @@ where
     match provider {
         Provider::Anthropic => EnvDefaultSpec {
             backend_kind: AnthropicBackendKind::AnthropicApi.as_str(),
-            auth_method: "api_key",
+            auth_method: AnthropicAuthMethod::ApiKey.as_str(),
             env_var: "ANTHROPIC_API_KEY",
             fallback: vec![],
             base_url: None,
@@ -1392,7 +1409,7 @@ where
         Provider::OpenAI => openai_env_default_spec(env_lookup),
         Provider::Gemini => EnvDefaultSpec {
             backend_kind: GoogleBackendKind::GoogleGenAi.as_str(),
-            auth_method: "api_key",
+            auth_method: GoogleAuthMethod::ApiKey.as_str(),
             env_var: "GEMINI_API_KEY",
             fallback: vec!["GOOGLE_API_KEY".to_string()],
             base_url: None,
@@ -1400,12 +1417,16 @@ where
         },
         Provider::SelfHosted => EnvDefaultSpec {
             backend_kind: SelfHostedBackendKind::SelfHosted.as_str(),
-            auth_method: "api_key",
+            auth_method: SelfHostedAuthMethod::ApiKey.as_str(),
             env_var: "RKAT_SELF_HOSTED_API_KEY",
             fallback: vec![],
             base_url: None,
             options: serde_json::Value::Null,
         },
+        // `Provider::Other` has no typed backend/auth-method matrix enum (it is
+        // the open-world fallback provider), so these literals have no enum to
+        // derive from. They stay as the sole untyped owner of the
+        // `other_api` / `api_key` default pair.
         Provider::Other => EnvDefaultSpec {
             backend_kind: "other_api",
             auth_method: "api_key",
@@ -1451,7 +1472,7 @@ where
         }
         return EnvDefaultSpec {
             backend_kind: OpenAiBackendKind::AzureOpenAi.as_str(),
-            auth_method: "azure_api_key",
+            auth_method: OpenAiAuthMethod::AzureApiKey.as_str(),
             env_var: AZURE_OPENAI_API_KEY_ENV,
             fallback: vec![],
             base_url: Some(endpoint),
@@ -1464,7 +1485,7 @@ where
     }
     EnvDefaultSpec {
         backend_kind: OpenAiBackendKind::OpenAiApi.as_str(),
-        auth_method: "api_key",
+        auth_method: OpenAiAuthMethod::ApiKey.as_str(),
         env_var: "OPENAI_API_KEY",
         fallback: vec![],
         base_url: None,

@@ -73,7 +73,6 @@ pub use meerkat_core::{
     HookEntryConfig,
     HookExecutionMode,
     HookExecutionReport,
-    HookFailurePolicy,
     HookId,
     HookInvocation,
     HookOutcome,

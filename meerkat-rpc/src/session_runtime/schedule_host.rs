@@ -264,7 +264,16 @@ impl SessionRuntime {
             .instance_id
             .clone()
             .or_else(|| self.inner.instance_id());
-        build_config.backend = create.backend.clone().or_else(|| self.inner.backend());
+        build_config.backend = create
+            .backend
+            .as_deref()
+            .and_then(meerkat_core::RecoveryBackendKind::parse)
+            .or_else(|| {
+                self.inner
+                    .backend()
+                    .as_deref()
+                    .and_then(meerkat_core::RecoveryBackendKind::parse)
+            });
         build_config.keep_alive = create.keep_alive;
         build_config.app_context = create.app_context.clone();
         build_config.config_generation = if let Some(runtime) = self.config_runtime() {

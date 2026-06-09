@@ -1777,7 +1777,7 @@ impl SessionService for MockSessionService {
                 peer_meta: build.and_then(|b| b.peer_meta.clone()),
                 realm_id: build.and_then(|b| b.realm_id.clone()),
                 instance_id: build.and_then(|b| b.instance_id.clone()),
-                backend: build.and_then(|b| b.backend.clone()),
+                backend: build.and_then(|b| b.backend.map(|k| k.as_str().to_string())),
                 config_generation: build.and_then(|b| b.config_generation),
                 auth_binding: None,
                 // Mirror the real producer: carry the typed durable member

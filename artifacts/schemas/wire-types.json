@@ -10073,7 +10073,7 @@
         "type": "object"
       },
       "CommsPeerRequestIntent": {
-        "description": "Closed public request-intent contract for `peer_request`.\n\nUnknown strings fail during deserialization and cannot fall through to a\nlocal match/default path.",
+        "description": "Closed request-intent vocabulary for [`CommsCommandRequest::PeerRequest`].\n\nThis is the canonical, core-owned set of intents a public `peer_request`\ncommand may carry. Unknown strings fail at the serde deserialization\nboundary and cannot fall through to a local match or string default — the\nclosed set is enforced structurally, not by a runtime string comparison.\n\nThe domain envelope [`CommsCommand::PeerRequest`] intentionally keeps a wider\nopen intent space (it also carries mob topology intents such as\n`mob.peer_added`); this enum is the narrow vocabulary admitted at the public\nrequest surface. Surfaces that accept the public comms contract re-import\nthis type so they share the same fail-closed guarantee.",
         "enum": [
           "supervisor.bridge",
           "checksum_token"
@@ -10673,7 +10673,7 @@
   },
   "CommsPeerRequestIntent": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Closed public request-intent contract for `peer_request`.\n\nUnknown strings fail during deserialization and cannot fall through to a\nlocal match/default path.",
+    "description": "Closed request-intent vocabulary for [`CommsCommandRequest::PeerRequest`].\n\nThis is the canonical, core-owned set of intents a public `peer_request`\ncommand may carry. Unknown strings fail at the serde deserialization\nboundary and cannot fall through to a local match or string default — the\nclosed set is enforced structurally, not by a runtime string comparison.\n\nThe domain envelope [`CommsCommand::PeerRequest`] intentionally keeps a wider\nopen intent space (it also carries mob topology intents such as\n`mob.peer_added`); this enum is the narrow vocabulary admitted at the public\nrequest surface. Surfaces that accept the public comms contract re-import\nthis type so they share the same fail-closed guarantee.",
     "enum": [
       "supervisor.bridge",
       "checksum_token"

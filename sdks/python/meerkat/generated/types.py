@@ -3782,10 +3782,18 @@ CommsSendResult = CommsSendResultInputAccepted | CommsSendResultPeerMessageSent 
 # Closed discriminator carried in [`CommsChecksumTokenResult`].
 CommsChecksumTokenResultIntent = Literal['checksum_token']
 
-# Closed public request-intent contract for `peer_request`.
+# Closed request-intent vocabulary for [`CommsCommandRequest::PeerRequest`].
 #
-# Unknown strings fail during deserialization and cannot fall through to a
-# local match/default path.
+# This is the canonical, core-owned set of intents a public `peer_request`
+# command may carry. Unknown strings fail at the serde deserialization
+# boundary and cannot fall through to a local match or string default — the
+# closed set is enforced structurally, not by a runtime string comparison.
+#
+# The domain envelope [`CommsCommand::PeerRequest`] intentionally keeps a wider
+# open intent space (it also carries mob topology intents such as
+# `mob.peer_added`); this enum is the narrow vocabulary admitted at the public
+# request surface. Surfaces that accept the public comms contract re-import
+# this type so they share the same fail-closed guarantee.
 CommsPeerRequestIntent = Literal['supervisor.bridge', 'checksum_token']
 
 # Typed params for public `peer_request`.

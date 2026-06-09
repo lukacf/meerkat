@@ -452,7 +452,7 @@ mod orchestrator {
     use meerkat_core::service::{
         CreateSessionRequest, InitialTurnPolicy, SessionError, SessionService,
     };
-    use meerkat_core::types::{ContentInput, SessionId};
+    use meerkat_core::types::{ContentInput, Message, SessionId};
     use meerkat_core::{DeferredPromptPolicy, SessionLlmIdentity, SurfaceSessionRecoveryOverrides};
     use meerkat_live::LiveAdapterHost;
     use meerkat_llm_core::realtime_session::RealtimeSessionOpenConfig;
@@ -463,8 +463,8 @@ mod orchestrator {
         LiveChannelRefreshFailure, LiveConfigPropagationReport, LiveHotSwapSkipReason,
         build_live_projection_snapshot_for_runtime,
         live_channel_requires_close_for_identity_change, precheck_identity,
-        realtime_projection_messages, realtime_projection_runtime_system_context,
-        should_apply_global_model_hot_swap,
+        realtime_projection_messages, realtime_projection_root_system_message,
+        realtime_projection_runtime_system_context, should_apply_global_model_hot_swap,
     };
 
     use crate::service_factory::FactoryAgentBuilder;
@@ -752,7 +752,16 @@ mod orchestrator {
                 visible_tools,
                 realtime_projection_messages(&session)?,
             )
-            .with_runtime_system_context(realtime_projection_runtime_system_context(&session)?))
+            .with_runtime_system_context(realtime_projection_runtime_system_context(&session)?)
+            .with_system_prompt(
+                match realtime_projection_root_system_message(&session)? {
+                    Some(Message::System(system)) => Some(system.content),
+                    // `realtime_projection_root_system_message` only ever yields a
+                    // `Message::System` (or `None`); any other shape means there is
+                    // no root system prompt to project onto the typed field.
+                    _ => None,
+                },
+            ))
         }
 
         /// Build a live open config for a session that may be deferred

@@ -20,10 +20,7 @@ use meerkat_core::image_generation::{
 use meerkat_core::lifecycle::WaitRequestId;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::core_executor::CoreExecutor;
-use meerkat_core::lifecycle::run_primitive::{
-    ModelId, RunPrimitive, TurnMetadataOverride, legacy_override_from_split_fields,
-    take_legacy_clear_bool,
-};
+use meerkat_core::lifecycle::run_primitive::{ModelId, RunPrimitive, TurnMetadataOverride};
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::lifecycle::{RunBoundaryReceipt, RunId as LifecycleRunId};
 use meerkat_core::ops::OperationId;
@@ -53,10 +50,7 @@ use crate::traits::{
 /// `provider_params` and `auth_binding` carry the canonical Inherit/Set/Clear
 /// tri-state via [`TurnMetadataOverride`]: `None` preserves the durable value,
 /// `Some(Set)` overrides it, and `Some(Clear)` removes it. The illegal
-/// "set and clear" fourth state is structurally unrepresentable. The legacy
-/// split wire form (`provider_params` + `clear_provider_params: bool`) is still
-/// accepted at the serde boundary and folded into the tri-state, rejecting a
-/// legacy `set + clear` payload there.
+/// "set and clear" fourth state is structurally unrepresentable.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionLlmReconfigureRequest {
@@ -71,58 +65,6 @@ pub struct SessionLlmReconfigureRequest {
     /// the session's existing `SessionLlmIdentity.auth_binding`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-struct SessionLlmReconfigureRequestFields {
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    provider: Option<String>,
-    #[serde(default)]
-    provider_params: Option<TurnMetadataOverride<serde_json::Value>>,
-    #[serde(default)]
-    auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
-}
-
-impl<'de> Deserialize<'de> for SessionLlmReconfigureRequest {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        use serde::de::Error as _;
-        let mut raw = serde_json::Value::deserialize(deserializer)?;
-        let (clear_provider_params, clear_auth_binding) = if let Some(object) = raw.as_object_mut()
-        {
-            (
-                take_legacy_clear_bool(object, "clear_provider_params", &[])?,
-                take_legacy_clear_bool(object, "clear_auth_binding", &[])?,
-            )
-        } else {
-            (false, false)
-        };
-        let fields: SessionLlmReconfigureRequestFields =
-            serde_json::from_value(raw).map_err(D::Error::custom)?;
-        let provider_params = legacy_override_from_split_fields(
-            fields.provider_params,
-            clear_provider_params,
-            "provider_params",
-            "clear_provider_params",
-        )?;
-        let auth_binding = legacy_override_from_split_fields(
-            fields.auth_binding,
-            clear_auth_binding,
-            "auth_binding",
-            "clear_auth_binding",
-        )?;
-        Ok(Self {
-            model: fields.model,
-            provider: fields.provider,
-            provider_params,
-            auth_binding,
-        })
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

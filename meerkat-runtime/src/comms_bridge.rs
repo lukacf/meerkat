@@ -629,14 +629,17 @@ mod tests {
         let classified = PeerInputCandidate {
             lifecycle_peer: None,
             response_terminality: None,
-            ingress: PeerIngressFact::legacy_peer_label(
-                id,
-                "display-agent",
-                PeerInputClass::ActionableMessage,
-                meerkat_core::PeerIngressKind::Message,
-                Some(meerkat_core::PeerIngressAuthDecision::Required),
-                PeerIngressConvention::Message,
-            ),
+            ingress: PeerIngressFact {
+                interaction_id: id,
+                class: PeerInputClass::ActionableMessage,
+                kind: meerkat_core::PeerIngressKind::Message,
+                canonical_peer_id: None,
+                display_name: meerkat_core::comms::PeerName::new("display-agent".to_string()).ok(),
+                signing_pubkey: None,
+                route: None,
+                auth: Some(meerkat_core::PeerIngressAuthDecision::Required),
+                convention: PeerIngressConvention::Message,
+            },
             interaction: InboxInteraction {
                 from_route: None,
                 from: "display-agent".into(),
@@ -1085,17 +1088,20 @@ mod tests {
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 render_metadata: None,
             },
-            ingress: PeerIngressFact::legacy_peer_label(
+            ingress: PeerIngressFact {
                 interaction_id,
-                "Peer One",
-                PeerInputClass::ResponseTerminal,
-                meerkat_core::PeerIngressKind::Response,
-                Some(meerkat_core::PeerIngressAuthDecision::Required),
-                PeerIngressConvention::Response {
+                class: PeerInputClass::ResponseTerminal,
+                kind: meerkat_core::PeerIngressKind::Response,
+                canonical_peer_id: None,
+                display_name: meerkat_core::comms::PeerName::new("Peer One".to_string()).ok(),
+                signing_pubkey: None,
+                route: None,
+                auth: Some(meerkat_core::PeerIngressAuthDecision::Required),
+                convention: PeerIngressConvention::Response {
                     in_reply_to,
                     status: ResponseStatus::Completed,
                 },
-            ),
+            },
             lifecycle_peer: None,
             response_terminality: Some(meerkat_core::TerminalityClass::Terminal {
                 disposition: meerkat_core::TerminalDisposition::Completed,

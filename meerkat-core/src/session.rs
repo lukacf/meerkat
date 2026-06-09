@@ -784,14 +784,6 @@ pub const SESSION_TOOL_VISIBILITY_STATE_KEY: &str = "session_tool_visibility_sta
 /// Metadata key used to store the typed session lifecycle-terminal fact.
 pub const SESSION_LIFECYCLE_TERMINAL_KEY: &str = "session_lifecycle_terminal";
 
-/// Legacy raw-bool metadata key for session archival.
-///
-/// Sessions archived before the typed [`SessionLifecycleTerminal`] owner was
-/// introduced persist `session_archived: true` here. The only remaining reader
-/// is the legacy back-read in [`Session::try_lifecycle_terminal`]; no code path
-/// writes it anymore.
-pub const SESSION_ARCHIVED_LEGACY_KEY: &str = "session_archived";
-
 /// Canonical tool name gated by `image_tool_results` capability.
 pub const VIEW_IMAGE_TOOL_NAME: &str = "view_image";
 
@@ -3214,27 +3206,14 @@ impl Session {
 
     /// Try to load the typed session lifecycle-terminal fact.
     ///
-    /// Reads the typed [`SESSION_LIFECYCLE_TERMINAL_KEY`] first. When that key
-    /// is absent, falls back to folding the legacy raw
-    /// `session_archived: true` bool (the only place that literal string is
-    /// still honored) into [`SessionLifecycleTerminal::Archived`] so sessions
-    /// persisted before the typed owner existed still read as terminal.
+    /// Reads the typed [`SESSION_LIFECYCLE_TERMINAL_KEY`]; an absent key means
+    /// no terminal fact.
     pub fn try_lifecycle_terminal(
         &self,
     ) -> Result<Option<SessionLifecycleTerminal>, serde_json::Error> {
-        if let Some(value) = self.metadata.get(SESSION_LIFECYCLE_TERMINAL_KEY) {
-            return serde_json::from_value(value.clone()).map(Some);
-        }
-        // Legacy back-read: pre-typed-owner archive writes persisted a raw
-        // `session_archived: true` JSON bool. Fold a `true` into Archived; an
-        // absent/false legacy bool means no terminal fact.
-        match self
-            .metadata
-            .get(SESSION_ARCHIVED_LEGACY_KEY)
-            .and_then(serde_json::Value::as_bool)
-        {
-            Some(true) => Ok(Some(SessionLifecycleTerminal::Archived)),
-            _ => Ok(None),
+        match self.metadata.get(SESSION_LIFECYCLE_TERMINAL_KEY) {
+            Some(value) => serde_json::from_value(value.clone()).map(Some),
+            None => Ok(None),
         }
     }
 
@@ -6205,44 +6184,6 @@ mod tests {
                 )
                 .is_err(),
             "the typed lifecycle-terminal key is reserved for session authority"
-        );
-    }
-
-    #[test]
-    fn lifecycle_terminal_legacy_session_archived_bool_reads_as_archived() {
-        // Sessions persisted before the typed owner existed stored a raw
-        // `session_archived: true` bool. The typed reader must fold it into
-        // Archived (durable back-read), without the typed key present.
-        let mut session = Session::new();
-        session.set_metadata(SESSION_ARCHIVED_LEGACY_KEY, serde_json::Value::Bool(true));
-        assert!(
-            session
-                .metadata()
-                .get(SESSION_LIFECYCLE_TERMINAL_KEY)
-                .is_none()
-        );
-        assert_eq!(
-            session.lifecycle_terminal(),
-            Some(SessionLifecycleTerminal::Archived)
-        );
-
-        // A legacy `false`/absent bool means no terminal fact.
-        let mut active = Session::new();
-        active.set_metadata(SESSION_ARCHIVED_LEGACY_KEY, serde_json::Value::Bool(false));
-        assert_eq!(active.lifecycle_terminal(), None);
-    }
-
-    #[test]
-    fn lifecycle_terminal_typed_key_takes_precedence_over_legacy_bool() {
-        let mut session = Session::new();
-        // Legacy bool says archived, typed owner says active — the typed owner wins.
-        session.set_metadata(SESSION_ARCHIVED_LEGACY_KEY, serde_json::Value::Bool(true));
-        session
-            .set_lifecycle_terminal(SessionLifecycleTerminal::Active)
-            .expect("typed terminal write should serialize");
-        assert_eq!(
-            session.lifecycle_terminal(),
-            Some(SessionLifecycleTerminal::Active)
         );
     }
 

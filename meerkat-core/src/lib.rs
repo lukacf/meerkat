@@ -276,8 +276,8 @@ pub use service::{
 pub use session::{
     AuthorizedSessionToolVisibilityState, ConsumedDeferredTurnInputs, DeferredFirstTurnPhase,
     DeferredToolLoadAuthority, InheritedToolVisibilityAuthority, PendingDeferredPrompt,
-    PendingSystemContextAppend, PendingToolResultsMessage, SESSION_ARCHIVED_LEGACY_KEY,
-    SESSION_BUILD_STATE_KEY, SESSION_DEFERRED_TURN_STATE_KEY, SESSION_LIFECYCLE_TERMINAL_KEY,
+    PendingSystemContextAppend, PendingToolResultsMessage, SESSION_BUILD_STATE_KEY,
+    SESSION_DEFERRED_TURN_STATE_KEY, SESSION_LIFECYCLE_TERMINAL_KEY,
     SESSION_METADATA_SCHEMA_VERSION, SESSION_SYSTEM_CONTEXT_STATE_KEY,
     SESSION_TOOL_VISIBILITY_STATE_KEY, SESSION_TRANSCRIPT_HISTORY_STATE_KEY, SESSION_VERSION,
     SYSTEM_CONTEXT_SEPARATOR, SeenSystemContextKey, SeenSystemContextState, Session,

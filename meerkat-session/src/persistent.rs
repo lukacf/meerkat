@@ -84,12 +84,6 @@ use crate::projector::SessionProjector;
 /// wave-c plan) resolves unchanged.
 pub use crate::migrations;
 
-/// Legacy raw-bool archival key, owned by `meerkat-core`. Only referenced by
-/// test fixtures that exercise the typed-owner legacy back-read; production no
-/// longer writes it (the producer uses `Session::set_lifecycle_terminal`).
-#[cfg(test)]
-use meerkat_core::SESSION_ARCHIVED_LEGACY_KEY as SESSION_ARCHIVED_KEY;
-
 fn runtime_driver_error_to_session_error(err: meerkat_runtime::RuntimeDriverError) -> SessionError {
     SessionError::Agent(AgentError::InternalError(err.to_string()))
 }
@@ -1304,9 +1298,8 @@ fn view_from_authoritative_session(session: &Session) -> SessionView {
 
 /// Whether the session's typed lifecycle-terminal owner marks it archived.
 ///
-/// Reads the typed [`Session::lifecycle_terminal`] fact, which itself folds the
-/// legacy raw `session_archived: true` bool for sessions persisted before the
-/// typed owner existed. This is the standalone-path terminality authority.
+/// Reads the typed [`Session::lifecycle_terminal`] fact. This is the
+/// standalone-path terminality authority.
 fn session_marks_archived(session: &Session) -> bool {
     session
         .lifecycle_terminal()
@@ -12064,7 +12057,9 @@ mod tests {
         );
         let mut archived = Session::new();
         let id = archived.id().clone();
-        archived.set_metadata(SESSION_ARCHIVED_KEY, serde_json::Value::Bool(true));
+        archived
+            .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
+            .expect("seed typed archived lifecycle-terminal fact");
         store
             .save(&archived)
             .await
@@ -12139,7 +12134,9 @@ mod tests {
             .await
             .expect("raw store load should succeed")
             .expect("session-store projection should exist");
-        archived_projection.set_metadata(SESSION_ARCHIVED_KEY, serde_json::Value::Bool(true));
+        archived_projection
+            .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
+            .expect("seed typed archived lifecycle-terminal fact");
         store
             .save(&archived_projection)
             .await
@@ -14917,7 +14914,9 @@ mod tests {
         );
 
         let mut archived = Session::new();
-        archived.set_metadata(SESSION_ARCHIVED_KEY, serde_json::Value::Bool(true));
+        archived
+            .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
+            .expect("seed typed archived lifecycle-terminal fact");
         store.save(&archived).await.expect("save archived session");
 
         let rejected = service.create_session(resume_request(archived)).await;
@@ -14960,7 +14959,9 @@ mod tests {
             .await
             .expect("raw store load should succeed")
             .expect("session-store projection should exist");
-        archived.set_metadata(SESSION_ARCHIVED_KEY, serde_json::Value::Bool(true));
+        archived
+            .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
+            .expect("seed typed archived lifecycle-terminal fact");
         store
             .save(&archived)
             .await
@@ -15009,7 +15010,9 @@ mod tests {
             .await
             .expect("raw store load should succeed")
             .expect("session-store projection should exist");
-        archived.set_metadata(SESSION_ARCHIVED_KEY, serde_json::Value::Bool(true));
+        archived
+            .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
+            .expect("seed typed archived lifecycle-terminal fact");
         store
             .save(&archived)
             .await

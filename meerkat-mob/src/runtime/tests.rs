@@ -5687,39 +5687,6 @@ async fn create_test_mob_with_persistent_service(definition: MobDefinition) -> M
         .expect("create mob with persistent session service")
 }
 
-#[tokio::test]
-async fn persistent_mob_session_service_ignores_legacy_archived_metadata() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-    let service = meerkat_session::PersistentSessionService::new(
-        PersistentMockBuilder,
-        1,
-        Arc::clone(&store),
-        None,
-        Arc::new(meerkat_store::MemoryBlobStore::new()),
-    );
-
-    let mut archived = Session::new();
-    let session_id = archived.id().clone();
-    archived.set_metadata("session_archived", serde_json::Value::Bool(true));
-    store
-        .save(&archived)
-        .await
-        .expect("save archived persisted session");
-
-    let loaded = crate::runtime::session_service::MobSessionService::load_persisted_session(
-        &service,
-        &session_id,
-    )
-    .await;
-    let loaded = loaded.expect("legacy archived metadata is not lifecycle authority");
-    let loaded = loaded.expect("legacy metadata row remains readable");
-    assert_eq!(loaded.id(), &session_id);
-    assert!(
-        loaded.metadata().contains_key("session_archived"),
-        "legacy metadata remains a read-only compatibility field"
-    );
-}
-
 fn overlay_probe_visible_tools(overlay: Option<&TurnToolOverlay>) -> Vec<String> {
     let blocked = overlay
         .and_then(|overlay| overlay.blocked_tools.as_ref())

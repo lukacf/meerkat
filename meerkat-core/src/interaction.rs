@@ -492,38 +492,6 @@ impl PeerIngressFact {
         }
     }
 
-    /// Compatibility constructor for tests and legacy non-classified seams.
-    ///
-    /// Prefer constructing a full `peer(...)` fact with canonical peer id,
-    /// signing subject, and route when the ingress came from comms.
-    pub fn legacy_peer_label(
-        interaction_id: InteractionId,
-        label: impl Into<String>,
-        class: PeerInputClass,
-        kind: PeerIngressKind,
-        auth: Option<PeerIngressAuthDecision>,
-        convention: PeerIngressConvention,
-    ) -> Self {
-        let label = label.into();
-        let canonical_peer_id = PeerId::parse(&label).ok();
-        let display_name = PeerName::new(label).ok();
-        let route = canonical_peer_id.map(|peer_id| match &display_name {
-            Some(name) => PeerRoute::with_display_name(peer_id, name.clone()),
-            None => PeerRoute::new(peer_id),
-        });
-        Self {
-            interaction_id,
-            class,
-            kind,
-            canonical_peer_id,
-            display_name,
-            signing_pubkey: None,
-            route,
-            auth,
-            convention,
-        }
-    }
-
     pub fn canonical_peer_id_string(&self) -> Option<String> {
         self.canonical_peer_id.map(|peer_id| peer_id.as_str())
     }

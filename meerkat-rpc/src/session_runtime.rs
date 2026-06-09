@@ -10173,7 +10173,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_archived_live_context_only_runtime_apply_does_not_bypass_capacity() {
+    async fn archived_store_projection_live_context_only_runtime_apply_does_not_bypass_capacity() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(meerkat::MemoryStore::new());
         let mut runtime = make_runtime_with_session_store_and_runtime_store(
@@ -10207,7 +10207,7 @@ mod tests {
             .await
             .expect("load persisted candidate")
             .expect("candidate should be persisted");
-        mark_legacy_archived_metadata(&mut archived);
+        mark_archived_store_projection(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save archived authoritative snapshot");
@@ -10252,11 +10252,11 @@ mod tests {
                 .as_ref()
                 .err()
                 .is_some_and(|err| err.message.contains("Max sessions")),
-            "legacy archived metadata must not bypass capacity admission: {rejected:?}"
+            "archived store projection must not bypass capacity admission: {rejected:?}"
         );
         assert!(
             runtime.runtime_adapter.contains_session(&session_id).await,
-            "legacy archived metadata must not unregister runtime bindings"
+            "archived store projection must not unregister runtime bindings"
         );
 
         release.notify_waiters();
@@ -10267,7 +10267,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_archived_live_external_runtime_inputs_ignore_metadata() {
+    async fn archived_store_projection_live_external_runtime_inputs_ignore_store_metadata() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(meerkat::MemoryStore::new());
         let mut runtime = make_runtime_with_session_store_and_runtime_store(
@@ -10301,7 +10301,7 @@ mod tests {
             .await
             .expect("load persisted candidate")
             .expect("candidate should be persisted");
-        mark_legacy_archived_metadata(&mut archived);
+        mark_archived_store_projection(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save archived authoritative snapshot");
@@ -10316,11 +10316,11 @@ mod tests {
             .await;
         assert!(
             accepted.is_ok(),
-            "legacy archived metadata is inert: {accepted:?}"
+            "archived store projection is inert for live runtime state: {accepted:?}"
         );
         assert!(
             runtime.runtime_adapter.contains_session(&session_id).await,
-            "legacy archived metadata must not unregister runtime state"
+            "archived store projection must not unregister runtime state"
         );
 
         let peer_accepted = runtime
@@ -10335,11 +10335,11 @@ mod tests {
             .await;
         assert!(
             peer_accepted.is_ok(),
-            "legacy archived metadata is inert for peer terminal input: {peer_accepted:?}"
+            "archived store projection is inert for peer terminal input: {peer_accepted:?}"
         );
         assert!(
             runtime.runtime_adapter.contains_session(&session_id).await,
-            "legacy archived metadata must not unregister runtime state"
+            "archived store projection must not unregister runtime state"
         );
     }
 
@@ -12138,7 +12138,7 @@ mod tests {
             .expect("commit runtime output snapshot");
     }
 
-    fn legacy_archived_metadata_session_error(err: &SessionError) -> bool {
+    fn archived_store_projection_session_error(err: &SessionError) -> bool {
         matches!(
             err,
             SessionError::Unsupported(message)
@@ -12147,20 +12147,20 @@ mod tests {
         )
     }
 
-    fn legacy_archived_metadata_rpc_error(err: &RpcError) -> bool {
+    fn archived_store_projection_rpc_error(err: &RpcError) -> bool {
         err.code == error::INTERNAL_ERROR
             && err.message.contains("store-only compatibility projection")
             && err.message.contains("display-only")
     }
 
-    fn mark_legacy_archived_metadata(session: &mut Session) {
-        session.set_metadata("session_archived", serde_json::Value::Bool(true));
+    fn mark_archived_store_projection(session: &mut Session) {
+        session
+            .set_lifecycle_terminal(meerkat_core::SessionLifecycleTerminal::Archived)
+            .expect("seed typed archived lifecycle-terminal fact");
     }
 
-    fn legacy_archived_metadata_without_machine_authority_session_error(
-        err: &SessionError,
-    ) -> bool {
-        legacy_archived_metadata_session_error(err)
+    fn archived_projection_without_machine_authority_session_error(err: &SessionError) -> bool {
+        archived_store_projection_session_error(err)
             || matches!(
                 err,
                 SessionError::Agent(meerkat_core::AgentError::InternalError(message))
@@ -13876,7 +13876,8 @@ mod tests {
 
     #[cfg(feature = "mob")]
     #[tokio::test]
-    async fn mob_session_service_ignores_legacy_archived_metadata_without_admission_leak() {
+    async fn mob_session_service_archived_projection_without_machine_authority_fails_closed_without_admission_leak()
+     {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(meerkat::MemoryStore::new());
         let runtime = make_runtime_with_session_store_and_runtime_store(
@@ -13888,7 +13889,7 @@ mod tests {
 
         let mut archived = Session::new();
         let session_id = archived.id().clone();
-        mark_legacy_archived_metadata(&mut archived);
+        mark_archived_store_projection(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save archived session");
@@ -13912,14 +13913,14 @@ mod tests {
             resumed
                 .as_ref()
                 .err()
-                .is_some_and(legacy_archived_metadata_without_machine_authority_session_error),
-            "legacy archived metadata without machine lifecycle state should fail closed: {resumed:?}"
+                .is_some_and(archived_projection_without_machine_authority_session_error),
+            "archived store projection without machine lifecycle state should fail closed: {resumed:?}"
         );
 
         runtime
             .create_session(mock_build_config(), None, None)
             .await
-            .expect("rejected legacy metadata resume should not leak admission");
+            .expect("rejected archived-projection resume should not leak admission");
     }
 
     #[cfg(feature = "mob")]
@@ -13940,7 +13941,7 @@ mod tests {
 
         let mut archived = Session::new();
         let archived_id = archived.id().clone();
-        mark_legacy_archived_metadata(&mut archived);
+        mark_archived_store_projection(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save archived store-only session");
@@ -13956,7 +13957,7 @@ mod tests {
                 .as_ref()
                 .err()
                 .is_some_and(|err| matches!(err, SessionError::NotFound { .. })
-                    || legacy_archived_metadata_session_error(err)),
+                    || archived_store_projection_session_error(err)),
             "archived mob start_turn should fail closed before capacity: {rejected:?}"
         );
     }
@@ -13979,7 +13980,7 @@ mod tests {
 
         let mut archived = Session::new();
         let archived_id = archived.id().clone();
-        mark_legacy_archived_metadata(&mut archived);
+        mark_archived_store_projection(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save archived store-only session");
@@ -13998,7 +13999,7 @@ mod tests {
                 .as_ref()
                 .err()
                 .is_some_and(|err| matches!(err, SessionError::NotFound { .. })
-                    || legacy_archived_metadata_session_error(err)),
+                    || archived_store_projection_session_error(err)),
             "archived mob runtime apply should fail closed before capacity: {rejected:?}"
         );
     }
@@ -14019,7 +14020,7 @@ mod tests {
 
         let mut archived = Session::new();
         let archived_id = archived.id().clone();
-        mark_legacy_archived_metadata(&mut archived);
+        mark_archived_store_projection(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save archived store-only session");
@@ -14041,13 +14042,13 @@ mod tests {
                 .as_ref()
                 .err()
                 .is_some_and(|err| err.code == error::SESSION_NOT_FOUND
-                    || legacy_archived_metadata_rpc_error(err)),
+                    || archived_store_projection_rpc_error(err)),
             "archived store-only start_turn should fail closed before capacity: {rejected:?}"
         );
     }
 
     #[tokio::test]
-    async fn legacy_archived_store_only_runtime_apply_fails_as_archived_projection() {
+    async fn archived_store_only_runtime_apply_fails_as_archived_projection() {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(meerkat::MemoryStore::new());
         let runtime = make_runtime_with_session_store_and_runtime_store(
@@ -14062,7 +14063,7 @@ mod tests {
 
         let mut archived = Session::new();
         let archived_id = archived.id().clone();
-        mark_legacy_archived_metadata(&mut archived);
+        mark_archived_store_projection(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save archived store-only session");
@@ -14084,14 +14085,14 @@ mod tests {
             .await;
         assert!(
             rejected.as_ref().err().is_some_and(|err| {
-                err.code == error::SESSION_NOT_FOUND || legacy_archived_metadata_rpc_error(err)
+                err.code == error::SESSION_NOT_FOUND || archived_store_projection_rpc_error(err)
             }),
-            "store-only legacy archived metadata should remain a compatibility archive marker: {rejected:?}"
+            "store-only archived projection must fail closed as an archived projection: {rejected:?}"
         );
     }
 
     #[tokio::test]
-    async fn legacy_archived_store_only_runtime_routed_turn_fails_as_archived_projection() {
+    async fn archived_store_only_runtime_routed_turn_fails_as_archived_projection() {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(meerkat::MemoryStore::new());
         let runtime = Arc::new(make_runtime_with_session_store(
@@ -14102,7 +14103,7 @@ mod tests {
 
         let mut archived = Session::new();
         let archived_id = archived.id().clone();
-        mark_legacy_archived_metadata(&mut archived);
+        mark_archived_store_projection(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save archived store-only session");
@@ -14121,9 +14122,9 @@ mod tests {
             .await;
         assert!(
             rejected.as_ref().err().is_some_and(|err| {
-                err.code == error::SESSION_NOT_FOUND || legacy_archived_metadata_rpc_error(err)
+                err.code == error::SESSION_NOT_FOUND || archived_store_projection_rpc_error(err)
             }),
-            "store-only legacy archived metadata should remain a compatibility archive marker: {rejected:?}"
+            "store-only archived projection must fail closed as an archived projection: {rejected:?}"
         );
     }
 
@@ -15026,7 +15027,7 @@ mod tests {
 
     #[cfg(feature = "mob")]
     #[tokio::test]
-    async fn legacy_archived_store_only_rotation_registration_rejects_archived_projection() {
+    async fn archived_store_only_rotation_registration_rejects_archived_projection() {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(meerkat::MemoryStore::new());
         let runtime = Arc::new(make_runtime_with_session_store(
@@ -15037,7 +15038,7 @@ mod tests {
 
         let mut archived = Session::new();
         let archived_id = archived.id().clone();
-        mark_legacy_archived_metadata(&mut archived);
+        mark_archived_store_projection(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save archived store-only session");
@@ -15486,7 +15487,7 @@ mod tests {
             .export_live_session(&direct.session_id)
             .await
             .expect("export live direct deferred session");
-        mark_legacy_archived_metadata(&mut archived);
+        mark_archived_store_projection(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save stale archived durable snapshot");
@@ -15531,7 +15532,7 @@ mod tests {
             .export_live_session(&direct.session_id)
             .await
             .expect("export live direct deferred session");
-        mark_legacy_archived_metadata(&mut archived);
+        mark_archived_store_projection(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save stale archived durable snapshot");
@@ -15583,7 +15584,7 @@ mod tests {
             .export_live_session(&direct.session_id)
             .await
             .expect("export live direct deferred session");
-        mark_legacy_archived_metadata(&mut archived);
+        mark_archived_store_projection(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save stale archived durable snapshot");
@@ -15648,7 +15649,7 @@ mod tests {
             .export_live_session(&direct.session_id)
             .await
             .expect("export live direct deferred session");
-        mark_legacy_archived_metadata(&mut archived);
+        mark_archived_store_projection(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save stale archived durable snapshot");
@@ -17474,7 +17475,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_start_legacy_archive_metadata_does_not_block_materialization() {
+    async fn pending_start_archived_store_projection_does_not_block_materialization() {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(meerkat::MemoryStore::new());
         let runtime = make_runtime_with_session_store_and_runtime_store(
@@ -17488,7 +17489,7 @@ mod tests {
             .await
             .expect("create staged session");
         let mut archived = Session::with_id(session_id.clone());
-        mark_legacy_archived_metadata(&mut archived);
+        mark_archived_store_projection(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save archived authoritative snapshot");
@@ -17507,7 +17508,7 @@ mod tests {
             .await;
         assert!(
             completed.is_ok(),
-            "legacy archived metadata must not block pending materialization: {completed:?}"
+            "archived store projection must not block pending materialization: {completed:?}"
         );
         assert!(
             !runtime.staged_sessions.contains(&session_id).await,
@@ -17515,7 +17516,7 @@ mod tests {
         );
         assert!(
             runtime.runtime_adapter.contains_session(&session_id).await,
-            "legacy archived metadata must not unregister runtime bindings"
+            "archived store projection must not unregister runtime bindings"
         );
         let next = runtime
             .create_session(mock_build_config(), None, None)

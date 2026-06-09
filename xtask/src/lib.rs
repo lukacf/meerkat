@@ -10,6 +10,7 @@ pub mod public_contracts;
 pub mod rmat_audit;
 pub mod rmat_policy;
 pub mod seam_inventory;
+pub mod typed_carrier;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};

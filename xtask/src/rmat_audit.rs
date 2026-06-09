@@ -201,6 +201,11 @@ pub fn collect_findings(root: &Path, policy: &AuditPolicy) -> Result<Vec<Finding
         suspicion.visit_file(&parsed);
         findings.extend(suspicion.findings);
 
+        let mut typed_carrier =
+            crate::typed_carrier::TypedCarrierAdoptionVisitor::new(&relative, &source);
+        typed_carrier.visit_file(&parsed);
+        findings.extend(typed_carrier.findings);
+
         let applicable_forbidden_rules: Vec<&ForbiddenShellReadRule> = policy
             .forbidden_shell_reads
             .iter()
@@ -1225,6 +1230,13 @@ fn has_rmat_allow(source: &str, span: proc_macro2::Span, rule: &str) -> bool {
     false
 }
 
+/// Public wrapper over [`has_rmat_allow`] so sibling audit modules (e.g. the
+/// typed-carrier gate) can honor the same `// RMAT-ALLOW(<rule>)` suppression
+/// convention without duplicating the span/line scan.
+pub(crate) fn rmat_allow_at(source: &str, span: proc_macro2::Span, rule: &str) -> bool {
+    has_rmat_allow(source, span, rule)
+}
+
 fn forbidden_shell_authority_read_suppressed(
     relative: &str,
     source: &str,
@@ -1763,7 +1775,7 @@ fn contains_identifier_call(source: &str, ident: &str) -> bool {
     false
 }
 
-fn error_finding(
+pub(crate) fn error_finding(
     rule: &str,
     path: &str,
     symbol: &str,

@@ -75,8 +75,19 @@ pub const TYPED_CARRIER_REGISTRY: &[CarrierEntry] = &[
     // on every declaration (keyed by type ident, not path).
     // meerkat-core/src/comms.rs + meerkat-contracts/src/wire/comms.rs
     ("CommsCommandRequest", "intent", "CommsPeerRequestIntent"),
-    // PENDING (NOT enforced — still loosely typed at HEAD; migrated by the
-    // carrier-adoption keystone):
+    // BY-DESIGN opaque — NOT enforced and MUST NOT be migrated. These three
+    // carry arbitrary provider-native knobs and are a deliberate §3 opaque
+    // pass-through at the durable/config boundary: `provider_params` only
+    // becomes interpretable once provider context exists (projected to a typed
+    // `ProviderTag` at build time in meerkat/src/factory.rs). Typing them at
+    // this seam breaks the intentional byte-for-byte session-storage contract
+    // in meerkat-session/tests/persistence_compat.rs (fixture #4 "Anthropic
+    // thinking canary", fixture #5 scalar round-trip). `ProviderParamsOverride`
+    // is NOT serde(transparent) and has no merge owner, so it cannot replace the
+    // opaque Value here. Confirmed by keystone-carrier (2026-06-09); see the
+    // post-execution recalibration in the PR759 re-verification report. The
+    // codex ledger and the 531-agent verification both over-flagged these as
+    // active STRING_JSON; they are OVERFLAGGED_BY_DESIGN.
     //   AgentConfig.provider_params         => Option<serde_json::Value>  (meerkat-core/src/config.rs)
     //   SessionBuildOptions.provider_params => Option<serde_json::Value>  (meerkat-core/src/service/mod.rs)
     //   SessionMetadata.provider_params     => Option<serde_json::Value>  (meerkat-core/src/session.rs)

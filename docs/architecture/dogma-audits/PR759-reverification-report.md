@@ -521,3 +521,16 @@ _The 183 active rows are a **validation set**, not work targets. They cluster in
 ## On the number "357"
 
 "357" was the row count of an internal *remediation plan* (a recalibrated catalog: 10 High / 218 Med / 129 Low), **never a claim of "357 violations closed."** This PR genuinely retired a subset; this report supersedes all prior closure counts with the per-row verdicts above.
+
+
+---
+
+## Post-execution recalibration (live — updated as keystones validate the active set)
+
+The 531-agent verification ran **default-`CONFIRMED_ACTIVE`** and only adversarially refuted *downgrades*; `CONFIRMED_ACTIVE` rows were not double-checked. As predicted in the Caveats, **183 active is an upper bound**, and executing keystones is the independent pass that re-adjudicates it. Rows reclassified after a keystone attempt:
+
+### `provider_params` carriers → reclassified `CONFIRMED_ACTIVE`/`STRING_JSON` → **OVERFLAGGED_BY_DESIGN** (2026-06-09)
+- **Rows:** the `STRING_JSON` cluster's `provider_params` members — `AgentConfig.provider_params` (config.rs:779), `SessionBuildOptions.provider_params` (service/mod.rs:223), `SessionMetadata.provider_params` (session.rs:3779), and the agent-loop merge-patch (state.rs:151/171).
+- **Why over-flagged:** `provider_params` is a deliberate §3 opaque pass-through at the durable/config boundary — arbitrary provider-native knobs that only become typed once provider context exists (projected to `ProviderTag` at build time, `meerkat/src/factory.rs:3877`). Proof it must stay opaque: `meerkat-session/tests/persistence_compat.rs` enforces a **byte-for-byte** session-storage contract (fixture #4 "Anthropic thinking canary"; fixture #5 scalar round-trip) with the explicit comment *"provider_params stays opaque Value at SessionMetadata level."* `ProviderParamsOverride` is **not** `#[serde(transparent)]` and has **no merge owner** (the `merge()` at run_primitive.rs:1555 is `RuntimeTurnMetadata::merge`), so it cannot replace the opaque `Value` without breaking the contract and the on-disk format.
+- **Verdict:** the original campaign's `#7` "by-design opaque-passthrough" closure was **correct**; the codex ledger and this verification both over-flagged it. Discovered by the keystone-carrier agent, which **stopped rather than ship a breaking change** — the validation-set approach working as intended.
+- **Net effect:** genuine-active count drops by these rows; consistent with the synthesis's deep estimate (~18-22 genuinely-active in the clusters examined, vs the 183 default-active upper bound). The gate registry documents these as by-design (do not migrate).

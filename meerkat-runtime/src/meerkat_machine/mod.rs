@@ -24,7 +24,6 @@ use std::sync::RwLock as StdRwLock;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Mutex as StdMutex, OnceLock, Weak};
 
-use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::tool_scope::ToolScopeTurnOverlay;
 use meerkat_core::types::SessionId;
@@ -48,10 +47,9 @@ use crate::meerkat_machine_types::{
     MeerkatControlSnapshot, MeerkatCursorSnapshot, MeerkatDrainSnapshot, MeerkatDriverKind,
     MeerkatFormalStateProjection, MeerkatInputsSnapshot, MeerkatLedgerSnapshot,
     MeerkatMachineCommand, MeerkatMachineCommandError, MeerkatMachineCommandResult,
-    MeerkatMachineRunFailure, MeerkatMachineRunPrepared, MeerkatMachineSpineSnapshot,
-    MeerkatOpsSnapshot, SessionLlmCapabilityDelta, SessionLlmCapabilitySurface,
-    SessionLlmReconfigureHost, SessionLlmReconfigureReport, SessionLlmReconfigureRequest,
-    SessionToolVisibilityDelta,
+    MeerkatMachineRunFailure, MeerkatMachineSpineSnapshot, MeerkatOpsSnapshot,
+    SessionLlmCapabilityDelta, SessionLlmCapabilitySurface, SessionLlmReconfigureHost,
+    SessionLlmReconfigureReport, SessionLlmReconfigureRequest, SessionToolVisibilityDelta,
 };
 use crate::runtime_state::RuntimeState;
 use crate::service_ext::{RuntimeMode, SessionServiceRuntimeExt};
@@ -899,13 +897,12 @@ type MeerkatMachineCommandFuture<'a> = Pin<
 pub(crate) use driver::{
     DriverEntry, SharedCompletionRegistry, SharedDriver, cancel_runtime_loop_run,
     commit_runtime_loop_run, fail_machine_run, fail_runtime_loop_run,
-    machine_apply_run_return_projection, machine_batch_primitive_projections,
-    machine_batch_runtime_semantics, machine_begin_run, machine_commit_prepared_destroy,
-    machine_commit_service_turn_terminal_receipt, machine_prepare_bindings_projection,
-    machine_prepare_destroy, machine_recover_ephemeral_driver, machine_recover_persistent_driver,
-    machine_recycle_preserving_work, machine_reset, machine_retire,
-    machine_select_runtime_loop_batch, machine_stop_runtime, prepare_runtime_loop_batch_start,
-    rollback_runtime_loop_run_after_boundary_commit_failure,
+    machine_batch_primitive_projections, machine_batch_runtime_semantics,
+    machine_commit_prepared_destroy, machine_commit_service_turn_terminal_receipt,
+    machine_prepare_bindings_projection, machine_prepare_destroy, machine_recover_ephemeral_driver,
+    machine_recover_persistent_driver, machine_recycle_preserving_work, machine_reset,
+    machine_retire, machine_select_runtime_loop_batch, machine_stop_runtime,
+    prepare_runtime_loop_batch_start,
 };
 
 pub(crate) mod driver;
@@ -2599,12 +2596,6 @@ impl MeerkatMachine {
                 MeerkatMachineCommand::AcceptWithCompletion { .. }
                 | MeerkatMachineCommand::AcceptWithoutWake { .. } => self
                     .execute_meerkat_machine_ingress_command(command)
-                    .await
-                    .map_err(Into::into),
-                MeerkatMachineCommand::Prepare { .. }
-                | MeerkatMachineCommand::Commit { .. }
-                | MeerkatMachineCommand::Fail { .. } => self
-                    .execute_meerkat_machine_legacy_run_command(command)
                     .await
                     .map_err(Into::into),
             }

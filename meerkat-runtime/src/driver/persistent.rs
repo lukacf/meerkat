@@ -323,13 +323,6 @@ impl PersistentRuntimeDriver {
             )
     }
 
-    pub(crate) fn resolve_admission_idempotency(
-        &mut self,
-        input: &Input,
-    ) -> Result<Option<InputId>, RuntimeDriverError> {
-        self.inner.resolve_admission_idempotency(input)
-    }
-
     pub(crate) async fn accept_resolved_input(
         &mut self,
         input: Input,

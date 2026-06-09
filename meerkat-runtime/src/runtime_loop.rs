@@ -719,6 +719,7 @@ pub(crate) fn input_to_primitive(
     inputs_to_primitive(&[(input_id, input.clone())])
 }
 
+#[cfg(test)]
 pub(crate) fn admitted_input_to_primitive(
     input: &Input,
     input_id: InputId,
@@ -3322,7 +3323,10 @@ mod tests {
 
         let mut guard = driver.lock().await;
         assert_eq!(guard.as_driver().active_input_ids().len(), 1);
-        let (_input_id, input) = guard
+        let crate::meerkat_machine::DriverEntry::Ephemeral(ephemeral) = &mut *guard else {
+            panic!("test uses an ephemeral driver");
+        };
+        let (_input_id, input) = ephemeral
             .dequeue_next()
             .expect("continuation should be queued inline");
         match input {

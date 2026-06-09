@@ -42,7 +42,6 @@ rust_library(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
@@ -87,7 +86,6 @@ rust_library(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
@@ -151,7 +149,6 @@ rust_library(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
@@ -199,7 +196,6 @@ rust_library(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
@@ -252,7 +248,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
@@ -318,7 +313,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -388,7 +382,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -457,7 +450,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -526,7 +518,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -595,7 +586,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -669,7 +659,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -736,7 +725,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -803,7 +791,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -870,7 +857,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -942,7 +928,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -1009,7 +994,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -1076,7 +1060,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -1143,7 +1126,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -1210,7 +1192,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -1281,7 +1262,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -1348,7 +1328,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -1415,7 +1394,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -1484,7 +1462,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -1551,7 +1528,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -1618,7 +1594,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -1687,7 +1662,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -1754,7 +1728,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -1821,7 +1794,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -1891,7 +1863,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -1961,7 +1932,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [
@@ -2030,7 +2000,6 @@ rust_test(
         "Cargo.toml",
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
         "src/meerkat_machine/mod.rs",
     ],
     srcs = [

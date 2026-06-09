@@ -18,9 +18,8 @@ use meerkat_core::image_generation::{
     SwitchTurnControlResult, SwitchTurnIntent, SwitchTurnRequestId,
 };
 use meerkat_core::lifecycle::WaitRequestId;
-use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::core_executor::CoreExecutor;
-use meerkat_core::lifecycle::run_primitive::{ModelId, RunPrimitive, TurnMetadataOverride};
+use meerkat_core::lifecycle::run_primitive::{ModelId, TurnMetadataOverride};
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::lifecycle::{RunBoundaryReceipt, RunId as LifecycleRunId};
 use meerkat_core::ops::OperationId;
@@ -444,21 +443,6 @@ pub(crate) enum MeerkatMachineCommand {
         session_id: SessionId,
         input: Input,
     },
-    Prepare {
-        session_id: SessionId,
-        input: Input,
-    },
-    Commit {
-        session_id: SessionId,
-        input_id: InputId,
-        run_id: RunId,
-        output: CoreApplyOutput,
-    },
-    Fail {
-        session_id: SessionId,
-        run_id: RunId,
-        failure: MeerkatMachineRunFailure,
-    },
 }
 
 #[derive(Debug, Clone)]
@@ -469,14 +453,6 @@ pub(crate) struct MeerkatMachineRunFailure {
 }
 
 impl MeerkatMachineRunFailure {
-    pub(crate) fn new(error: impl Into<String>) -> Self {
-        Self {
-            source: None,
-            machine_terminal_failure_observed: false,
-            error: error.into(),
-        }
-    }
-
     pub(crate) fn from_machine_terminal_failure(error: impl Into<String>) -> Self {
         Self {
             source: None,
@@ -484,13 +460,6 @@ impl MeerkatMachineRunFailure {
             error: error.into(),
         }
     }
-}
-
-#[derive(Debug)]
-pub(crate) struct MeerkatMachineRunPrepared {
-    pub input_id: InputId,
-    pub run_id: RunId,
-    pub primitive: RunPrimitive,
 }
 
 #[derive(Debug)]
@@ -526,7 +495,6 @@ pub(crate) enum MeerkatMachineCommandResult {
     ImageOperationPhase(ImageOperationPhase),
     ImageOperationTerminalClass(ImageOperationTerminalClass),
     BoundaryReceipt(Option<RunBoundaryReceipt>),
-    Prepared(MeerkatMachineRunPrepared),
 }
 
 #[doc(hidden)]
@@ -732,9 +700,12 @@ meerkat_machine_runtime_internal_inputs!(
         ClassifyTurnTerminalCauseClass,
         ClassifyTurnTerminality,
         ClearSessionLlmState,
+        Commit,
+        Fail,
         HydrateSessionLlmState,
         LlmReturnedTerminal,
         LlmReturnedToolCalls,
+        Prepare,
         PrimitiveApplied,
         RecordBoundarySeq,
         ResolveLiveBoundaryContextReceipt,
@@ -1098,9 +1069,6 @@ pub enum MeerkatMachineCatalogInput {
     LoadBoundaryReceipt,
     AcceptWithCompletion,
     AcceptWithoutWake,
-    Prepare,
-    Commit,
-    Fail,
 }
 
 impl MeerkatMachineCatalogInput {
@@ -1150,9 +1118,6 @@ impl MeerkatMachineCatalogInput {
         Self::LoadBoundaryReceipt,
         Self::AcceptWithCompletion,
         Self::AcceptWithoutWake,
-        Self::Prepare,
-        Self::Commit,
-        Self::Fail,
     ];
 
     #[must_use]
@@ -1219,9 +1184,6 @@ impl MeerkatMachineCatalogInput {
             Self::LoadBoundaryReceipt => MeerkatMachineInputVariant::LoadBoundaryReceipt,
             Self::AcceptWithCompletion => MeerkatMachineInputVariant::AcceptWithCompletion,
             Self::AcceptWithoutWake => MeerkatMachineInputVariant::AcceptWithoutWake,
-            Self::Prepare => MeerkatMachineInputVariant::Prepare,
-            Self::Commit => MeerkatMachineInputVariant::Commit,
-            Self::Fail => MeerkatMachineInputVariant::Fail,
         }
     }
 
@@ -1273,9 +1235,6 @@ impl MeerkatMachineCatalogInput {
             Self::LoadBoundaryReceipt => "LoadBoundaryReceipt",
             Self::AcceptWithCompletion => "AcceptWithCompletion",
             Self::AcceptWithoutWake => "AcceptWithoutWake",
-            Self::Prepare => "Prepare",
-            Self::Commit => "Commit",
-            Self::Fail => "Fail",
         }
     }
 }
@@ -1350,9 +1309,6 @@ impl MeerkatMachineCommandVariant {
             Self::LoadBoundaryReceipt => Some(MeerkatMachineCatalogInput::LoadBoundaryReceipt),
             Self::AcceptWithCompletion => Some(MeerkatMachineCatalogInput::AcceptWithCompletion),
             Self::AcceptWithoutWake => Some(MeerkatMachineCatalogInput::AcceptWithoutWake),
-            Self::Prepare => Some(MeerkatMachineCatalogInput::Prepare),
-            Self::Commit => Some(MeerkatMachineCatalogInput::Commit),
-            Self::Fail => Some(MeerkatMachineCatalogInput::Fail),
         }
     }
 }
@@ -1602,15 +1558,6 @@ const fn meerkat_machine_command_classification(
             MeerkatMachineCommandClassification::CatalogInput(
                 MeerkatMachineCatalogInput::AcceptWithoutWake,
             )
-        }
-        MeerkatMachineCommandVariant::Prepare => {
-            MeerkatMachineCommandClassification::CatalogInput(MeerkatMachineCatalogInput::Prepare)
-        }
-        MeerkatMachineCommandVariant::Commit => {
-            MeerkatMachineCommandClassification::CatalogInput(MeerkatMachineCatalogInput::Commit)
-        }
-        MeerkatMachineCommandVariant::Fail => {
-            MeerkatMachineCommandClassification::CatalogInput(MeerkatMachineCatalogInput::Fail)
         }
     }
 }

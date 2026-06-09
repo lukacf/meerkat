@@ -835,56 +835,6 @@ async fn assert_no_runtime_binding(machine: &MeerkatMachine, session_id: &Sessio
     );
 }
 
-#[test]
-fn legacy_run_handler_does_not_restore_dsl_snapshots_by_hand() {
-    let source = include_str!("meerkat_machine/dispatch_ingress.rs");
-    let start = source
-        .find("pub(super) async fn execute_meerkat_machine_legacy_run_command")
-        .expect("legacy run handler should exist");
-    let legacy_run_handler = &source[start..];
-
-    assert!(
-        !legacy_run_handler.contains("previous_dsl_state"),
-        "legacy run must not manually snapshot DSL authority",
-    );
-    assert!(
-        !legacy_run_handler.contains("restore_session_dsl_state"),
-        "legacy run must not manually restore DSL authority",
-    );
-}
-
-#[test]
-fn legacy_run_handler_does_not_preflight_run_dsl_from_shell() {
-    let source = include_str!("meerkat_machine/dispatch_ingress.rs");
-    let start = source
-        .find("pub(super) async fn execute_meerkat_machine_legacy_run_command")
-        .expect("legacy run handler should exist");
-    let legacy_run_handler = &source[start..];
-
-    assert!(
-        !legacy_run_handler.contains("preview_session_dsl_input"),
-        "legacy run prepare must let the machine-owned run transition decide authority",
-    );
-}
-
-#[test]
-fn legacy_run_handler_does_not_string_match_commit_unregister_policy() {
-    let source = include_str!("meerkat_machine/dispatch_ingress.rs");
-    let start = source
-        .find("pub(super) async fn execute_meerkat_machine_legacy_run_command")
-        .expect("legacy run handler should exist");
-    let legacy_run_handler = &source[start..];
-
-    assert!(
-        !legacy_run_handler.contains("to_string().contains"),
-        "legacy run unregister policy must use typed machine-owned semantics",
-    );
-    assert!(
-        !legacy_run_handler.contains("runtime boundary commit failed"),
-        "legacy run unregister policy must not key off boundary failure text",
-    );
-}
-
 #[tokio::test]
 async fn provisional_dsl_stage_does_not_emit_routed_signal_until_authoritative_apply() {
     let machine = MeerkatMachine::ephemeral();
@@ -2168,7 +2118,7 @@ async fn hook_denial_terminalizes_with_typed_machine_apply_failure_cause() {
 }
 
 #[tokio::test]
-async fn legacy_fail_does_not_fabricate_runtime_apply_failure_cause() {
+async fn fail_machine_run_does_not_fabricate_runtime_apply_failure_cause() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter
@@ -2176,19 +2126,15 @@ async fn legacy_fail_does_not_fabricate_runtime_apply_failure_cause() {
         .await
         .expect("register session");
 
-    let result: Result<(), RuntimeDriverError> = adapter
-        .accept_input_and_run(
-            &session_id,
-            make_prompt("legacy fail"),
-            |_run_id, _primitive| async {
-                Err::<((), CoreApplyOutput), RuntimeDriverError>(RuntimeDriverError::Internal(
-                    "runtime apply failure: display-only text".to_string(),
-                ))
-            },
-        )
-        .await;
-
-    assert!(matches!(result, Err(RuntimeDriverError::Internal(_))));
+    let (driver, _input_id, run_id) =
+        prepare_live_run_for_authority_test(&adapter, &session_id, "display-only fail").await;
+    fail_machine_run(
+        &driver,
+        run_id,
+        display_only_run_failure("runtime apply failure: display-only text"),
+    )
+    .await
+    .expect("machine fail should terminalize the run");
 
     let (terminal_cause_kind, cause, message) = {
         let sessions = adapter.sessions.read().await;
@@ -14898,108 +14844,48 @@ async fn accept_input_with_completion_rejects_destroyed_session() {
 }
 
 // ---------------------------------------------------------------
-// A5: Legacy run command guards (TLA+ RunningHasActiveRunInvariant)
+// A5: Run terminalization guards (TLA+ RunningHasActiveRunInvariant)
 // ---------------------------------------------------------------
 
-async fn prepare_legacy_run_for_authority_test(
+fn display_only_run_failure(error: &str) -> MeerkatMachineRunFailure {
+    MeerkatMachineRunFailure {
+        source: None,
+        machine_terminal_failure_observed: false,
+        error: error.to_string(),
+    }
+}
+
+async fn prepare_live_run_for_authority_test(
     adapter: &MeerkatMachine,
     session_id: &SessionId,
     text: &str,
-) -> MeerkatMachineRunPrepared {
-    let result = adapter
-        .execute_meerkat_machine_command(
-            None,
-            MeerkatMachineCommand::Prepare {
-                session_id: session_id.clone(),
-                input: make_prompt(text),
-            },
+) -> (SharedDriver, InputId, RunId) {
+    let input_id = match adapter
+        .accept_input(session_id, make_prompt(text))
+        .await
+        .expect("input should be accepted")
+    {
+        AcceptOutcome::Accepted { input_id, .. } => input_id,
+        other => panic!("expected accepted input, got {other:?}"),
+    };
+    let driver = {
+        let sessions = adapter.sessions.read().await;
+        Arc::clone(
+            &sessions
+                .get(session_id)
+                .expect("registered session should exist")
+                .driver,
         )
+    };
+    let run_id = RunId::new();
+    prepare_runtime_loop_batch_start(&driver, run_id.clone(), std::slice::from_ref(&input_id))
         .await
-        .expect("legacy run prepare should succeed");
-    match result {
-        MeerkatMachineCommandResult::Prepared(prepared) => prepared,
-        other => panic!("unexpected prepare result: {other:?}"),
-    }
-}
-
-fn legacy_run_test_output(run_id: RunId, input_id: InputId) -> CoreApplyOutput {
-    CoreApplyOutput {
-        receipt: RunBoundaryReceipt {
-            run_id,
-            boundary: RunApplyBoundary::RunStart,
-            contributing_input_ids: vec![input_id],
-            conversation_digest: None,
-            message_count: 0,
-            sequence: 0,
-        },
-        session_snapshot: None,
-        terminal: None,
-    }
+        .expect("run prepare should stage the accepted input");
+    (driver, input_id, run_id)
 }
 
 #[tokio::test]
-async fn legacy_run_prepare_rejects_retired_session() {
-    let adapter = Arc::new(MeerkatMachine::ephemeral());
-    let session_id = SessionId::new();
-
-    adapter
-        .register_session(session_id.clone())
-        .await
-        .expect("register session");
-
-    let runtime_id = runtime_id_for_session(&session_id);
-    crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
-        .await
-        .expect("retire should succeed");
-
-    let input = make_prompt("should be rejected");
-    let err = adapter
-        .accept_input_and_run::<(), _, _>(&session_id, input, |_run_id, _prim| async {
-            panic!("executor should not be called on retired session");
-        })
-        .await
-        .expect_err("legacy run should reject a retired session");
-    assert!(
-        matches!(
-            err,
-            RuntimeDriverError::NotReady {
-                state: RuntimeState::Retired
-            }
-        ),
-        "expected NotReady(Retired), got {err:?}"
-    );
-}
-
-#[tokio::test]
-async fn legacy_run_prepare_rejects_destroyed_session() {
-    let adapter = Arc::new(MeerkatMachine::ephemeral());
-    let session_id = SessionId::new();
-
-    adapter
-        .register_session(session_id.clone())
-        .await
-        .expect("register session");
-
-    let runtime_id = runtime_id_for_session(&session_id);
-    crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
-        .await
-        .expect("destroy should succeed");
-
-    let input = make_prompt("should be rejected");
-    let err = adapter
-        .accept_input_and_run::<(), _, _>(&session_id, input, |_run_id, _prim| async {
-            panic!("executor should not be called on destroyed session");
-        })
-        .await
-        .expect_err("legacy run should reject a destroyed session");
-    assert!(
-        matches!(err, RuntimeDriverError::Destroyed),
-        "expected Destroyed, got {err:?}"
-    );
-}
-
-#[tokio::test]
-async fn legacy_run_commit_rejection_preserves_registered_running_session() {
+async fn run_commit_rejection_preserves_registered_running_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter
@@ -15007,20 +14893,17 @@ async fn legacy_run_commit_rejection_preserves_registered_running_session() {
         .await
         .expect("register session");
 
-    let prepared =
-        prepare_legacy_run_for_authority_test(&adapter, &session_id, "commit rejection").await;
+    let (driver, input_id, _run_id) =
+        prepare_live_run_for_authority_test(&adapter, &session_id, "commit rejection").await;
     let rejected_run_id = RunId::new();
-    let result = adapter
-        .execute_meerkat_machine_command(
-            None,
-            MeerkatMachineCommand::Commit {
-                session_id: session_id.clone(),
-                input_id: prepared.input_id.clone(),
-                run_id: rejected_run_id.clone(),
-                output: legacy_run_test_output(rejected_run_id, prepared.input_id.clone()),
-            },
-        )
-        .await;
+    let result = commit_runtime_loop_run(
+        &driver,
+        rejected_run_id.clone(),
+        vec![input_id.clone()],
+        batch_receipt(rejected_run_id, vec![input_id.clone()]),
+        None,
+    )
+    .await;
 
     assert!(
         result.is_err(),
@@ -15036,7 +14919,7 @@ async fn legacy_run_commit_rejection_preserves_registered_running_session() {
         "rejected commit must leave canonical DSL lifecycle on the active run"
     );
     let input_state = adapter
-        .input_state(&session_id, &prepared.input_id)
+        .input_state(&session_id, &input_id)
         .await
         .expect("input state read should succeed")
         .expect("prepared input should remain visible");
@@ -15048,7 +14931,7 @@ async fn legacy_run_commit_rejection_preserves_registered_running_session() {
 }
 
 #[tokio::test]
-async fn legacy_run_commit_mismatched_input_rejection_preserves_active_run() {
+async fn run_commit_mismatched_input_rejection_preserves_active_run() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter
@@ -15056,20 +14939,17 @@ async fn legacy_run_commit_mismatched_input_rejection_preserves_active_run() {
         .await
         .expect("register session");
 
-    let prepared =
-        prepare_legacy_run_for_authority_test(&adapter, &session_id, "commit input mismatch").await;
+    let (driver, input_id, run_id) =
+        prepare_live_run_for_authority_test(&adapter, &session_id, "commit input mismatch").await;
     let wrong_input_id = InputId::new();
-    let result = adapter
-        .execute_meerkat_machine_command(
-            None,
-            MeerkatMachineCommand::Commit {
-                session_id: session_id.clone(),
-                input_id: wrong_input_id,
-                run_id: prepared.run_id.clone(),
-                output: legacy_run_test_output(prepared.run_id.clone(), prepared.input_id.clone()),
-            },
-        )
-        .await;
+    let result = commit_runtime_loop_run(
+        &driver,
+        run_id.clone(),
+        vec![wrong_input_id.clone()],
+        batch_receipt(run_id.clone(), vec![wrong_input_id]),
+        None,
+    )
+    .await;
 
     assert!(result.is_err(), "mismatched commit input should reject");
     assert!(
@@ -15082,7 +14962,7 @@ async fn legacy_run_commit_mismatched_input_rejection_preserves_active_run() {
         "malformed commit must preserve the active runtime run"
     );
     let input_state = adapter
-        .input_state(&session_id, &prepared.input_id)
+        .input_state(&session_id, &input_id)
         .await
         .expect("input state read should succeed")
         .expect("prepared input should remain visible");
@@ -15092,17 +14972,13 @@ async fn legacy_run_commit_mismatched_input_rejection_preserves_active_run() {
         "malformed commit must not leave the contributor pending consumption"
     );
 
-    adapter
-        .execute_meerkat_machine_command(
-            None,
-            MeerkatMachineCommand::Fail {
-                session_id: session_id.clone(),
-                run_id: prepared.run_id.clone(),
-                failure: MeerkatMachineRunFailure::new("unwind malformed commit"),
-            },
-        )
-        .await
-        .expect("preserved active run should still be terminalizable");
+    fail_machine_run(
+        &driver,
+        run_id,
+        display_only_run_failure("unwind malformed commit"),
+    )
+    .await
+    .expect("preserved active run should still be terminalizable");
     assert_eq!(
         adapter.runtime_state(&session_id).await.unwrap(),
         RuntimeState::Idle
@@ -15110,7 +14986,7 @@ async fn legacy_run_commit_mismatched_input_rejection_preserves_active_run() {
 }
 
 #[tokio::test]
-async fn legacy_run_fail_rejection_preserves_registered_running_session() {
+async fn run_fail_rejection_preserves_registered_running_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter
@@ -15118,18 +14994,14 @@ async fn legacy_run_fail_rejection_preserves_registered_running_session() {
         .await
         .expect("register session");
 
-    let prepared =
-        prepare_legacy_run_for_authority_test(&adapter, &session_id, "fail rejection").await;
-    let result = adapter
-        .execute_meerkat_machine_command(
-            None,
-            MeerkatMachineCommand::Fail {
-                session_id: session_id.clone(),
-                run_id: RunId::new(),
-                failure: MeerkatMachineRunFailure::new("reject the wrong run"),
-            },
-        )
-        .await;
+    let (driver, input_id, _run_id) =
+        prepare_live_run_for_authority_test(&adapter, &session_id, "fail rejection").await;
+    let result = fail_machine_run(
+        &driver,
+        RunId::new(),
+        display_only_run_failure("reject the wrong run"),
+    )
+    .await;
 
     assert!(
         result.is_err(),
@@ -15145,7 +15017,7 @@ async fn legacy_run_fail_rejection_preserves_registered_running_session() {
         "rejected fail must leave canonical DSL lifecycle on the active run"
     );
     let input_state = adapter
-        .input_state(&session_id, &prepared.input_id)
+        .input_state(&session_id, &input_id)
         .await
         .expect("input state read should succeed")
         .expect("prepared input should remain visible");
@@ -15157,7 +15029,7 @@ async fn legacy_run_fail_rejection_preserves_registered_running_session() {
 }
 
 #[tokio::test]
-async fn legacy_run_fail_display_text_does_not_classify_terminal_cause() {
+async fn run_fail_display_text_does_not_classify_terminal_cause() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter
@@ -15165,21 +15037,15 @@ async fn legacy_run_fail_display_text_does_not_classify_terminal_cause() {
         .await
         .expect("register session");
 
-    let prepared =
-        prepare_legacy_run_for_authority_test(&adapter, &session_id, "display fail cause").await;
-    adapter
-        .execute_meerkat_machine_command(
-            None,
-            MeerkatMachineCommand::Fail {
-                session_id: session_id.clone(),
-                run_id: prepared.run_id.clone(),
-                failure: MeerkatMachineRunFailure::new(
-                    "Unknown terminal cause text must stay display-only",
-                ),
-            },
-        )
-        .await
-        .expect("machine should resolve the terminal cause");
+    let (driver, _input_id, run_id) =
+        prepare_live_run_for_authority_test(&adapter, &session_id, "display fail cause").await;
+    fail_machine_run(
+        &driver,
+        run_id,
+        display_only_run_failure("Unknown terminal cause text must stay display-only"),
+    )
+    .await
+    .expect("machine should resolve the terminal cause");
     assert_eq!(
         adapter.runtime_state(&session_id).await.unwrap(),
         RuntimeState::Idle,
@@ -15210,8 +15076,8 @@ async fn raw_dsl_fail_rejects_without_prior_typed_terminal_cause() {
         .await
         .expect("register session");
 
-    let prepared =
-        prepare_legacy_run_for_authority_test(&adapter, &session_id, "raw fail no cause").await;
+    let (_driver, _input_id, run_id) =
+        prepare_live_run_for_authority_test(&adapter, &session_id, "raw fail no cause").await;
     let authority = {
         let sessions = adapter.sessions.read().await;
         Arc::clone(
@@ -15229,7 +15095,7 @@ async fn raw_dsl_fail_rejects_without_prior_typed_terminal_cause() {
         mm_dsl::MeerkatMachineMutator::apply(
             &mut *guard,
             mm_dsl::MeerkatMachineInput::Fail {
-                run_id: mm_dsl::RunId::from_domain(&prepared.run_id),
+                run_id: mm_dsl::RunId::from_domain(&run_id),
             },
         )
         .expect_err("raw Fail without typed terminal cause should reject")
@@ -15248,7 +15114,7 @@ async fn raw_dsl_fail_rejects_without_prior_typed_terminal_cause() {
 }
 
 #[tokio::test]
-async fn legacy_run_fail_terminalizes_through_machine_authority() {
+async fn run_fail_terminalizes_through_machine_authority() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter
@@ -15256,17 +15122,9 @@ async fn legacy_run_fail_terminalizes_through_machine_authority() {
         .await
         .expect("register session");
 
-    let prepared =
-        prepare_legacy_run_for_authority_test(&adapter, &session_id, "fail terminalization").await;
-    adapter
-        .execute_meerkat_machine_command(
-            None,
-            MeerkatMachineCommand::Fail {
-                session_id: session_id.clone(),
-                run_id: prepared.run_id.clone(),
-                failure: MeerkatMachineRunFailure::new("executor failed"),
-            },
-        )
+    let (driver, input_id, run_id) =
+        prepare_live_run_for_authority_test(&adapter, &session_id, "fail terminalization").await;
+    fail_machine_run(&driver, run_id, display_only_run_failure("executor failed"))
         .await
         .expect("active fail should terminalize the run");
 
@@ -15276,7 +15134,7 @@ async fn legacy_run_fail_terminalizes_through_machine_authority() {
         RuntimeState::Idle
     );
     let input_state = adapter
-        .input_state(&session_id, &prepared.input_id)
+        .input_state(&session_id, &input_id)
         .await
         .expect("input state read should succeed")
         .expect("prepared input should remain visible");
@@ -15696,7 +15554,7 @@ async fn assert_commit_rejection_preserved_staged_batch(
 }
 
 #[tokio::test]
-async fn legacy_run_commit_rejects_receipt_run_id_mismatch_before_mutation() {
+async fn run_commit_rejects_receipt_run_id_mismatch_before_mutation() {
     let (driver, run_id, staged_ids) =
         staged_batch_commit_driver(make_prompt("first"), make_prompt("second")).await;
 
@@ -15717,7 +15575,7 @@ async fn legacy_run_commit_rejects_receipt_run_id_mismatch_before_mutation() {
 }
 
 #[tokio::test]
-async fn legacy_run_commit_rejects_reordered_receipt_contributors_before_mutation() {
+async fn run_commit_rejects_reordered_receipt_contributors_before_mutation() {
     let (driver, run_id, staged_ids) =
         staged_batch_commit_driver(make_prompt("first"), make_prompt("second")).await;
     let mut receipt_contributors = staged_ids.clone();
@@ -20388,9 +20246,6 @@ enum RuntimeParityProbeInput {
     LoadBoundaryReceipt,
     AcceptWithCompletion,
     AcceptWithoutWake,
-    Prepare,
-    Commit,
-    Fail,
     Reset,
     StopRuntimeExecutor,
     Destroy,
@@ -20402,8 +20257,6 @@ struct RuntimeParityFixture {
     runtime_id: LogicalRuntimeId,
     running_release: Option<Arc<Notify>>,
     running_completion: Option<crate::completion::CompletionHandle>,
-    prepared_input_id: Option<InputId>,
-    prepared_run_id: Option<RunId>,
 }
 
 impl RuntimeParityFixture {
@@ -20603,9 +20456,6 @@ fn runtime_parity_probe_for_input_variant(
         SchemaMeerkatMachineInputVariant::AcceptWithoutWake => {
             Some(RuntimeParityProbeInput::AcceptWithoutWake)
         }
-        SchemaMeerkatMachineInputVariant::Prepare => Some(RuntimeParityProbeInput::Prepare),
-        SchemaMeerkatMachineInputVariant::Commit => Some(RuntimeParityProbeInput::Commit),
-        SchemaMeerkatMachineInputVariant::Fail => Some(RuntimeParityProbeInput::Fail),
         SchemaMeerkatMachineInputVariant::Reset => Some(RuntimeParityProbeInput::Reset),
         SchemaMeerkatMachineInputVariant::StopRuntimeExecutor => {
             Some(RuntimeParityProbeInput::StopRuntimeExecutor)
@@ -21663,9 +21513,6 @@ fn runtime_parity_probe_input_variant(
         RuntimeParityProbeInput::AcceptWithoutWake => {
             SchemaMeerkatMachineInputVariant::AcceptWithoutWake
         }
-        RuntimeParityProbeInput::Prepare => SchemaMeerkatMachineInputVariant::Prepare,
-        RuntimeParityProbeInput::Commit => SchemaMeerkatMachineInputVariant::Commit,
-        RuntimeParityProbeInput::Fail => SchemaMeerkatMachineInputVariant::Fail,
         RuntimeParityProbeInput::Reset => SchemaMeerkatMachineInputVariant::Reset,
         RuntimeParityProbeInput::StopRuntimeExecutor => {
             SchemaMeerkatMachineInputVariant::StopRuntimeExecutor
@@ -22664,8 +22511,6 @@ async fn build_runtime_parity_fixture(phase: RuntimeParityPhase) -> RuntimeParit
                 runtime_id,
                 running_release: None,
                 running_completion: None,
-                prepared_input_id: None,
-                prepared_run_id: None,
             }
         }
         RuntimeParityPhase::Attached => {
@@ -22687,8 +22532,6 @@ async fn build_runtime_parity_fixture(phase: RuntimeParityPhase) -> RuntimeParit
                 runtime_id,
                 running_release: None,
                 running_completion: None,
-                prepared_input_id: None,
-                prepared_run_id: None,
             }
         }
         RuntimeParityPhase::Running => {
@@ -22731,8 +22574,6 @@ async fn build_runtime_parity_fixture(phase: RuntimeParityPhase) -> RuntimeParit
                 runtime_id,
                 running_release: Some(allow_finish),
                 running_completion: Some(completion),
-                prepared_input_id: None,
-                prepared_run_id: None,
             }
         }
         RuntimeParityPhase::Retired => {
@@ -22756,8 +22597,6 @@ async fn build_runtime_parity_fixture(phase: RuntimeParityPhase) -> RuntimeParit
                 runtime_id,
                 running_release: None,
                 running_completion: None,
-                prepared_input_id: None,
-                prepared_run_id: None,
             }
         }
         RuntimeParityPhase::Stopped => {
@@ -22776,15 +22615,12 @@ async fn build_runtime_parity_fixture(phase: RuntimeParityPhase) -> RuntimeParit
                 runtime_id,
                 running_release: None,
                 running_completion: None,
-                prepared_input_id: None,
-                prepared_run_id: None,
             }
         }
     }
 }
 
 async fn prepare_runtime_parity_probe(
-    phase: RuntimeParityPhase,
     fixture: &mut RuntimeParityFixture,
     probe: RuntimeParityProbeInput,
     setup_tags: &mut Vec<String>,
@@ -22833,35 +22669,6 @@ async fn prepare_runtime_parity_probe(
             };
         seed_deferred_tool_authority_catalog(&bindings, vec![probe_tool], deferred_names);
         setup_tags.push("visibility_authority_catalog".to_string());
-    }
-
-    if phase == RuntimeParityPhase::Running
-        && matches!(
-            probe,
-            RuntimeParityProbeInput::Commit | RuntimeParityProbeInput::Fail
-        )
-        && fixture.prepared_run_id.is_none()
-    {
-        let prepared = fixture
-            .adapter
-            .execute_meerkat_machine_command(
-                None,
-                MeerkatMachineCommand::Prepare {
-                    session_id: fixture.session_id.clone(),
-                    input: runtime_parity_prompt("runtime parity prepared run"),
-                },
-            )
-            .await
-            .expect("runtime parity should prepare a running fixture for commit/fail");
-        let prepared = match prepared {
-            MeerkatMachineCommandResult::Prepared(prepared) => prepared,
-            other => panic!("unexpected runtime parity prepare result for commit/fail: {other:?}"),
-        };
-        fixture.prepared_input_id = Some(prepared.input_id);
-        fixture.prepared_run_id = Some(prepared.run_id);
-        wait_for_runtime_parity_phase(&fixture.adapter, &fixture.session_id, RuntimeState::Running)
-            .await;
-        setup_tags.push("legacy_run_prepared".to_string());
     }
 }
 
@@ -22984,7 +22791,7 @@ fn runtime_parity_probe_command(
         RuntimeParityProbeInput::LoadBoundaryReceipt => {
             MeerkatMachineCommand::LoadBoundaryReceipt {
                 runtime_id: fixture.runtime_id.clone(),
-                run_id: fixture.prepared_run_id.clone().unwrap_or_default(),
+                run_id: RunId::default(),
                 sequence: 0,
             }
         }
@@ -22998,36 +22805,6 @@ fn runtime_parity_probe_command(
         RuntimeParityProbeInput::AcceptWithoutWake => MeerkatMachineCommand::AcceptWithoutWake {
             session_id: fixture.session_id.clone(),
             input: runtime_parity_prompt("runtime parity accept without wake"),
-        },
-        RuntimeParityProbeInput::Prepare => MeerkatMachineCommand::Prepare {
-            session_id: fixture.session_id.clone(),
-            input: runtime_parity_prompt("runtime parity prepare"),
-        },
-        RuntimeParityProbeInput::Commit => {
-            let input_id = fixture.prepared_input_id.clone().unwrap_or_default();
-            let run_id = fixture.prepared_run_id.clone().unwrap_or_default();
-            MeerkatMachineCommand::Commit {
-                session_id: fixture.session_id.clone(),
-                input_id: input_id.clone(),
-                run_id: run_id.clone(),
-                output: CoreApplyOutput {
-                    receipt: RunBoundaryReceipt {
-                        run_id,
-                        boundary: RunApplyBoundary::RunStart,
-                        contributing_input_ids: vec![input_id],
-                        conversation_digest: None,
-                        message_count: 0,
-                        sequence: 0,
-                    },
-                    session_snapshot: None,
-                    terminal: None,
-                },
-            }
-        }
-        RuntimeParityProbeInput::Fail => MeerkatMachineCommand::Fail {
-            session_id: fixture.session_id.clone(),
-            run_id: fixture.prepared_run_id.clone().unwrap_or_default(),
-            failure: MeerkatMachineRunFailure::new("runtime parity failure"),
         },
         RuntimeParityProbeInput::Reset => MeerkatMachineCommand::Reset {
             runtime_id: fixture.runtime_id.clone(),
@@ -23130,7 +22907,6 @@ fn summarize_runtime_parity_command_result(result: &MeerkatMachineCommandResult)
         MeerkatMachineCommandResult::ImageOperationTerminalClass(terminal) => {
             format!("image_operation_terminal_class:{terminal:?}")
         }
-        MeerkatMachineCommandResult::Prepared(_) => "prepared".to_string(),
     }
 }
 
@@ -23179,18 +22955,9 @@ async fn execute_runtime_parity_probe(
     phase: RuntimeParityPhase,
     probe: RuntimeParityProbeInput,
 ) -> RuntimeParityInvocationReport {
-    let base_phase = if phase == RuntimeParityPhase::Running
-        && matches!(
-            probe,
-            RuntimeParityProbeInput::Commit | RuntimeParityProbeInput::Fail
-        ) {
-        RuntimeParityPhase::Idle
-    } else {
-        phase
-    };
-    let mut fixture = build_runtime_parity_fixture(base_phase).await;
+    let mut fixture = build_runtime_parity_fixture(phase).await;
     let mut setup_tags = Vec::new();
-    prepare_runtime_parity_probe(phase, &mut fixture, probe, &mut setup_tags).await;
+    prepare_runtime_parity_probe(&mut fixture, probe, &mut setup_tags).await;
     let before = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id).await;
     let result = if matches!(
         probe,

@@ -2643,67 +2643,6 @@ async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
 }
 
 #[tokio::test]
-async fn completed_boundary_commit_failure_preserves_sync_pre_terminal_state() {
-    use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
-    use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
-    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-    use meerkat_runtime::input_state::InputLifecycleState;
-
-    let store = Arc::new(HarnessRuntimeStore::failing_atomic_apply());
-    let adapter = Arc::new(MeerkatMachine::persistent(store, memory_blob_store()));
-    let sid = SessionId::new();
-    adapter
-        .register_session(sid.clone())
-        .await
-        .expect("register session");
-
-    let input = make_prompt("sync boundary failure");
-    let input_id = input.id().clone();
-    let result = adapter
-        .accept_input_and_run(&sid, input, move |run_id, primitive| async move {
-            Ok((
-                (),
-                CoreApplyOutput {
-                    receipt: RunBoundaryReceipt {
-                        run_id,
-                        boundary: RunApplyBoundary::RunStart,
-                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                        conversation_digest: None,
-                        message_count: 0,
-                        sequence: 0,
-                    },
-                    session_snapshot: None,
-                    terminal: None,
-                },
-            ))
-        })
-        .await;
-    assert!(
-        result.is_err(),
-        "completed boundary commit failure should surface"
-    );
-    let Err(err) = result else {
-        unreachable!("asserted runtime completed boundary commit failure above");
-    };
-    let err = err.to_string();
-    assert!(
-        err.contains("failed to persist runtime completed-boundary snapshot")
-            && err.contains("synthetic atomic_apply failure"),
-        "unexpected error: {err}"
-    );
-    assert!(
-        adapter.contains_session(&sid).await,
-        "completed boundary commit rollback should preserve the registered session"
-    );
-    assert_eq!(
-        adapter.runtime_state(&sid).await.unwrap(),
-        RuntimeState::Running
-    );
-    let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.seed.phase, InputLifecycleState::Staged);
-}
-
-#[tokio::test]
 async fn completed_boundary_commit_failure_unwinds_runtime_loop_state() {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
@@ -2966,61 +2905,6 @@ async fn completed_run_runtime_loop_skips_terminal_lifecycle_snapshot_writer() {
     );
 }
 
-#[tokio::test]
-async fn completed_run_sync_path_skips_terminal_lifecycle_snapshot_writer() {
-    use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
-    use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
-    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-
-    let store = Arc::new(HarnessRuntimeStore::failing_terminal_snapshot());
-    let adapter = Arc::new(MeerkatMachine::persistent(
-        store.clone() as Arc<dyn RuntimeStore>,
-        memory_blob_store(),
-    ));
-    let sid = SessionId::new();
-    adapter
-        .register_session(sid.clone())
-        .await
-        .expect("register session");
-
-    let result = adapter
-        .accept_input_and_run(
-            &sid,
-            make_prompt("sync skips terminal lifecycle snapshot"),
-            move |run_id, primitive| async move {
-                Ok((
-                    (),
-                    CoreApplyOutput {
-                        receipt: RunBoundaryReceipt {
-                            run_id,
-                            boundary: RunApplyBoundary::RunStart,
-                            contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                            conversation_digest: None,
-                            message_count: 0,
-                            sequence: 0,
-                        },
-                        session_snapshot: None,
-                        terminal: None,
-                    },
-                ))
-            },
-        )
-        .await;
-    assert!(
-        result.is_ok(),
-        "completed sync path should not use the old terminal lifecycle writer: {result:?}"
-    );
-    assert_eq!(
-        store.commit_machine_lifecycle_calls(),
-        1,
-        "completed sync path must not use the old post-receipt lifecycle snapshot writer"
-    );
-    assert_eq!(
-        adapter.runtime_state(&sid).await.unwrap(),
-        RuntimeState::Idle
-    );
-}
-
 // ─── Phase A gate tests ───
 
 /// Gate A2: Dedup on terminal input returns (Deduplicated, None) — no hang.
@@ -3255,50 +3139,6 @@ async fn dedup_inflight_input_returns_handle_that_resolves() {
     assert!(
         matches!(result2, meerkat_runtime::completion::CompletionOutcome::Completed(ref r) if r.text == "slow done"),
         "duplicate handle should also complete with same result"
-    );
-}
-
-#[tokio::test]
-async fn accept_input_and_run_rejects_deduplicated_admission() {
-    use meerkat_runtime::identifiers::IdempotencyKey;
-
-    let adapter = Arc::new(MeerkatMachine::ephemeral());
-    let sid = SessionId::new();
-    adapter
-        .register_session(sid.clone())
-        .await
-        .expect("register session");
-
-    let key = IdempotencyKey::new("sync-dedup");
-    let mut first = make_prompt("first");
-    if let Input::Prompt(ref mut prompt) = first {
-        prompt.header.idempotency_key = Some(key.clone());
-    }
-    let first_id = first.id().clone();
-    let outcome = adapter.accept_input(&sid, first).await.unwrap();
-    assert!(outcome.is_accepted());
-
-    let mut duplicate = make_prompt("duplicate");
-    if let Input::Prompt(ref mut prompt) = duplicate {
-        prompt.header.idempotency_key = Some(key);
-    }
-
-    let err = adapter
-        .accept_input_and_run::<(), _, _>(&sid, duplicate, |_run_id, _primitive| async move {
-            unreachable!("deduplicated admission must be rejected before sync execution starts")
-        })
-        .await
-        .expect_err("deduplicated sync admission should be rejected");
-    assert!(matches!(
-        err,
-        RuntimeDriverError::ValidationFailed { ref reason }
-        if reason.contains("does not support deduplicated admission")
-    ));
-
-    let state = adapter.input_state(&sid, &first_id).await.unwrap().unwrap();
-    assert_eq!(
-        state.seed.phase,
-        meerkat_runtime::InputLifecycleState::Queued
     );
 }
 

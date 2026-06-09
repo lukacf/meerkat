@@ -2549,21 +2549,6 @@ impl EphemeralRuntimeDriver {
         Self::resolved_idempotency_from_machine_effects(input_id, effects)
     }
 
-    pub(crate) fn resolve_admission_idempotency(
-        &mut self,
-        input: &Input,
-    ) -> Result<Option<InputId>, RuntimeDriverError> {
-        let input_id = input.id().clone();
-        self.resolve_idempotency(
-            &input_id,
-            input
-                .header()
-                .idempotency_key
-                .as_ref()
-                .map(std::string::ToString::to_string),
-        )
-    }
-
     pub(crate) fn register_accepted_idempotency(
         &mut self,
         input_id: &InputId,

@@ -1703,11 +1703,7 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
                 family_name: "runtime-session-adapter".into(),
                 path_suffix: "meerkat-runtime/src/meerkat_machine/runtime_control.rs".into(),
                 type_name: "MeerkatMachine".into(),
-                method_names: vec![
-                    "stop_runtime_executor",
-                    "accept_input_and_run",
-                    "accept_input_with_completion",
-                ]
+                method_names: vec!["stop_runtime_executor", "accept_input_with_completion"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
@@ -2403,21 +2399,6 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "MeerkatMachine control region + runtime attachment publication contract",
             &["runtime stop command and fallback path produce canonical stopped/reset semantics"],
             &["attachment and completion waiter surfaces remain aligned with runtime state"],
-            EntryStatus::Closed,
-        ),
-        semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine/runtime_control.rs",
-            "accept_input_and_run",
-            BoundaryKind::PublicInherent,
-            "MeerkatMachine",
-            &["driver", "completions"],
-            "MeerkatMachine admission + input lifecycle + control regions",
-            &[
-                "synchronous compatibility path preserves canonical input acceptance, run staging, boundary commit, and terminalization semantics, and rejects deduplicated admissions deterministically",
-            ],
-            &[
-                "compatibility path cannot bypass authority-owned input/run transition guards or invent execution ownership for deduplicated inputs",
-            ],
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(

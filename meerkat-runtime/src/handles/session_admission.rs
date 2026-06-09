@@ -96,9 +96,10 @@ impl SessionAdmissionHandle for RuntimeSessionAdmissionHandle {
     }
 
     fn commit(&self, _input_id: &InputId, _run_id: &RunId) -> Result<(), DslTransitionError> {
-        // Runtime-backed commit terminalization is owned by
-        // MeerkatMachineCommand::Commit and its durable receipt path. The
-        // handle remains an observation-only compatibility hook.
+        // Runtime-backed commit terminalization is owned by the runtime
+        // loop's `commit_runtime_loop_run` durable receipt path, which fires
+        // the DSL `Commit` input itself. The handle remains an
+        // observation-only hook.
         Ok(())
     }
 }

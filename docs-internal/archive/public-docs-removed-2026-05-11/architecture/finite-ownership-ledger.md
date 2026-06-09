@@ -16,7 +16,7 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 
 | Subsystem | State Cells | Semantic Operations | Coupling Invariants | Open State Cells | Open Operations | Open Invariants |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| runtime | 7 | 21 | 4 | 0 | 0 | 0 |
+| runtime | 7 | 20 | 4 | 0 | 0 | 0 |
 | mcp | 11 | 21 | 2 | 0 | 0 | 0 |
 | mob | 6 | 37 | 3 | 0 | 0 | 0 |
 | auth | 1 | 8 | 0 | 0 | 0 | 0 |
@@ -30,7 +30,7 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 | runtime-session-adapter | public-inherent | `meerkat-runtime/src/meerkat_machine/mod.rs` | `MeerkatMachine` | `register_session` |
 | runtime-session-adapter | public-inherent | `meerkat-runtime/src/meerkat_machine/session_management.rs` | `MeerkatMachine` | `set_session_silent_intents`, `register_session_with_executor`, `ensure_session_with_executor`, `unregister_session` |
 | runtime-session-adapter | public-inherent | `meerkat-runtime/src/user_interrupt.rs` | `MeerkatMachine` | `hard_cancel_current_run` |
-| runtime-session-adapter | public-inherent | `meerkat-runtime/src/meerkat_machine/runtime_control.rs` | `MeerkatMachine` | `stop_runtime_executor`, `accept_input_and_run`, `accept_input_with_completion` |
+| runtime-session-adapter | public-inherent | `meerkat-runtime/src/meerkat_machine/runtime_control.rs` | `MeerkatMachine` | `stop_runtime_executor`, `accept_input_with_completion` |
 | runtime-session-adapter | public-inherent | `meerkat-runtime/src/meerkat_machine/comms_drain.rs` | `MeerkatMachine` | `update_peer_ingress_context`, `abort_comms_drains`, `abort_comms_drain`, `wait_comms_drain` |
 | mcp-router | public-inherent | `meerkat-mcp/src/router.rs` | `McpRouter` | `set_removal_timeout`, `add_server`, `stage_add`, `stage_remove`, `stage_reload`, `apply_staged`, `take_lifecycle_actions`, `take_external_updates`, `progress_removals`, `call_tool`, `shutdown` |
 | mcp-router-adapter | public-inherent | `meerkat-mcp/src/adapter.rs` | `McpRouterAdapter` | `refresh_tools`, `stage_add`, `stage_remove`, `stage_reload`, `apply_staged`, `poll_lifecycle_actions`, `progress_removals`, `wait_until_ready`, `shutdown` |
@@ -67,7 +67,6 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 | `meerkat-runtime/src/meerkat_machine/session_management.rs` | `unregister_session` | `public-inherent` | `closed` | `registered-session contract + MeerkatMachine drain-control region` |
 | `meerkat-runtime/src/user_interrupt.rs` | `hard_cancel_current_run` | `public-inherent` | `closed` | `MeerkatMachine control region + runtime attachment publication contract` |
 | `meerkat-runtime/src/meerkat_machine/runtime_control.rs` | `stop_runtime_executor` | `public-inherent` | `closed` | `MeerkatMachine control region + runtime attachment publication contract` |
-| `meerkat-runtime/src/meerkat_machine/runtime_control.rs` | `accept_input_and_run` | `public-inherent` | `closed` | `MeerkatMachine admission + input lifecycle + control regions` |
 | `meerkat-runtime/src/meerkat_machine/runtime_control.rs` | `accept_input_with_completion` | `public-inherent` | `closed` | `MeerkatMachine admission + input-lifecycle regions` |
 | `meerkat-runtime/src/meerkat_machine/comms_drain.rs` | `update_peer_ingress_context` | `public-inherent` | `closed` | `MeerkatMachine drain-control region` |
 | `meerkat-runtime/src/meerkat_machine/comms_drain.rs` | `notify_comms_drain_exited` | `manual-callback` | `closed` | `MeerkatMachine drain-control region` |

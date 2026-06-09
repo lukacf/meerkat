@@ -313,16 +313,6 @@ impl DriverEntry {
         }
     }
 
-    pub(crate) fn resolve_admission_idempotency(
-        &mut self,
-        input: &Input,
-    ) -> Result<Option<InputId>, RuntimeDriverError> {
-        match self {
-            DriverEntry::Ephemeral(d) => d.resolve_admission_idempotency(input),
-            DriverEntry::Persistent(d) => d.resolve_admission_idempotency(input),
-        }
-    }
-
     pub(crate) fn input_phase(&self, input_id: &InputId) -> Option<InputLifecycleState> {
         self.as_driver().input_phase(input_id)
     }
@@ -437,14 +427,6 @@ impl DriverEntry {
         match self {
             DriverEntry::Ephemeral(d) => d.take_wake_requested(),
             DriverEntry::Persistent(d) => d.take_wake_requested(),
-        }
-    }
-
-    /// Dequeue the next input for processing.
-    pub(crate) fn dequeue_next(&mut self) -> Option<(InputId, crate::input::Input)> {
-        match self {
-            DriverEntry::Ephemeral(d) => d.dequeue_next(),
-            DriverEntry::Persistent(d) => d.dequeue_next(),
         }
     }
 
@@ -689,18 +671,6 @@ impl DriverEntry {
         }
     }
 
-    /// Stage an input (Queued → Staged).
-    pub(crate) fn stage_input(
-        &mut self,
-        input_id: &InputId,
-        run_id: &RunId,
-    ) -> Result<(), crate::traits::RuntimeDriverError> {
-        match self {
-            DriverEntry::Ephemeral(d) => d.stage_input(input_id, run_id),
-            DriverEntry::Persistent(d) => d.stage_input(input_id, run_id),
-        }
-    }
-
     /// Stage a batch of inputs atomically in a single `StageDrainSnapshot`.
     pub(crate) fn machine_realize_stage_batch(
         &mut self,
@@ -889,25 +859,6 @@ pub(crate) enum RuntimeLoopRunCommitError {
     TerminalSnapshot(RuntimeDriverError),
 }
 
-impl RuntimeLoopRunCommitError {
-    pub(crate) fn should_unregister_session(&self) -> bool {
-        false
-    }
-
-    pub(crate) fn is_boundary_commit(&self) -> bool {
-        matches!(self, Self::BoundaryCommit(_))
-    }
-
-    pub(crate) fn into_driver_error(self) -> RuntimeDriverError {
-        match self {
-            Self::Rejected(err)
-            | Self::BoundaryCommit(err)
-            | Self::PostBoundaryValidation(err)
-            | Self::TerminalSnapshot(err) => err,
-        }
-    }
-}
-
 impl std::fmt::Display for RuntimeLoopRunCommitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -925,18 +876,6 @@ impl std::error::Error for RuntimeLoopRunCommitError {}
 pub(crate) enum RuntimeLoopRunFailError {
     Rejected(RuntimeDriverError),
     TerminalSnapshot(RuntimeDriverError),
-}
-
-impl RuntimeLoopRunFailError {
-    pub(crate) fn should_unregister_session(&self) -> bool {
-        false
-    }
-
-    pub(crate) fn into_driver_error(self) -> RuntimeDriverError {
-        match self {
-            Self::Rejected(err) | Self::TerminalSnapshot(err) => err,
-        }
-    }
 }
 
 impl std::fmt::Display for RuntimeLoopRunFailError {
@@ -1117,34 +1056,6 @@ pub(crate) async fn machine_commit_service_turn_terminal_receipt(
         }
     }
     Ok(())
-}
-
-fn machine_rollback_active_run_after_boundary_commit_failure(
-    driver: &mut DriverEntry,
-    run_id: &RunId,
-    input_ids: &[InputId],
-) -> Result<(), RuntimeDriverError> {
-    driver.rollback_staged(input_ids).map_err(|err| {
-        RuntimeDriverError::Internal(format!(
-            "failed to roll back staged inputs after boundary commit failure: {err}"
-        ))
-    })?;
-    machine_apply_run_return_projection(driver, run_id, RunReturnDisposition::Rollback)
-        .map(|_| ())
-        .map_err(|err| {
-            RuntimeDriverError::Internal(format!(
-                "failed to roll back runtime run after boundary commit failure: {err}"
-            ))
-        })
-}
-
-pub(crate) async fn rollback_runtime_loop_run_after_boundary_commit_failure(
-    driver: &SharedDriver,
-    run_id: &RunId,
-    input_ids: &[InputId],
-) -> Result<(), RuntimeDriverError> {
-    let mut driver = driver.lock().await;
-    machine_rollback_active_run_after_boundary_commit_failure(&mut driver, run_id, input_ids)
 }
 
 fn machine_apply_turn_run_completed(

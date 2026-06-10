@@ -39,7 +39,6 @@ pub fn observe_session_tail(messages: &[Message]) -> ObservedSessionTailKind {
         Some(Message::System(_)) => ObservedSessionTailKind::System,
         Some(Message::SystemNotice(_)) => ObservedSessionTailKind::SystemNotice,
         Some(Message::User(_)) => ObservedSessionTailKind::User,
-        Some(Message::Assistant(_)) => ObservedSessionTailKind::Assistant,
         Some(Message::BlockAssistant(_)) => ObservedSessionTailKind::BlockAssistant,
         Some(Message::ToolResults { .. }) => ObservedSessionTailKind::ToolResults,
     }

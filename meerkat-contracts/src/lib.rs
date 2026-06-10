@@ -401,7 +401,6 @@ pub use wire::{
     WireSwitchTurnControlResult,
     WireSwitchTurnIntent,
     WireSwitchTurnPhase,
-    WireToolCall,
     WireToolResult,
     WireToolResultContent,
     WireTrustedPeerIdentity,

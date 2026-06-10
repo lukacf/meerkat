@@ -388,7 +388,11 @@ Query parameters:
   "messages": [
     { "role": "system", "content": "You are a helpful assistant." },
     { "role": "user", "content": "Hello" },
-    { "role": "assistant", "content": "Hi there." }
+    {
+      "role": "block_assistant",
+      "blocks": [{ "block_type": "text", "data": { "text": "Hi there." } }],
+      "stop_reason": "end_turn"
+    }
   ]
 }
 ```

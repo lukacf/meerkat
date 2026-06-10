@@ -847,7 +847,9 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
         use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
         use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
         use meerkat_core::session_store::SessionStore as _;
-        use meerkat_core::types::{AssistantMessage, Message, StopReason, UserMessage};
+        use meerkat_core::types::{
+            AssistantBlock, BlockAssistantMessage, Message, StopReason, UserMessage,
+        };
         use meerkat_core::{Session, TranscriptRewriteReason, TranscriptRewriteSelection};
         use meerkat_store::SqliteSessionStore;
 
@@ -872,11 +874,12 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
         fn session_with_one_turn() -> Session {
             let mut session = Session::new();
             session.push(Message::User(UserMessage::text("hello".to_string())));
-            session.push(Message::Assistant(AssistantMessage {
-                content: "verbose answer".to_string(),
-                tool_calls: Vec::new(),
+            session.push(Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: "verbose answer".to_string(),
+                    meta: None,
+                }],
                 stop_reason: StopReason::EndTurn,
-                usage: meerkat_core::types::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }));
             session
@@ -1046,11 +1049,12 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             let runtime_id = runtime_id();
             let incoming = session_with_user("turn input");
             let mut current = incoming.clone();
-            current.push(Message::Assistant(AssistantMessage {
-                content: "peer response already applied".to_string(),
-                tool_calls: Vec::new(),
+            current.push(Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: "peer response already applied".to_string(),
+                    meta: None,
+                }],
                 stop_reason: StopReason::EndTurn,
-                usage: meerkat_core::types::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }));
             let current_snapshot = serde_json::to_vec(&current).unwrap();
@@ -1187,11 +1191,12 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             previous.push(Message::User(UserMessage::text(
                 "Turn 1 request".to_string(),
             )));
-            previous.push(Message::Assistant(AssistantMessage {
-                content: "Turn 1 answer".to_string(),
-                tool_calls: Vec::new(),
+            previous.push(Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: "Turn 1 answer".to_string(),
+                    meta: None,
+                }],
                 stop_reason: StopReason::EndTurn,
-                usage: meerkat_core::types::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }));
 
@@ -1203,11 +1208,12 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             for message in previous.messages()[1..].iter().cloned() {
                 incoming.push(message);
             }
-            incoming.push(Message::Assistant(AssistantMessage {
-                content: "Turn 2 generated answer".to_string(),
-                tool_calls: Vec::new(),
+            incoming.push(Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: "Turn 2 generated answer".to_string(),
+                    meta: None,
+                }],
                 stop_reason: StopReason::EndTurn,
-                usage: meerkat_core::types::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }));
             let parent_revision = incoming.transcript_revision().unwrap();
@@ -1288,11 +1294,12 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             let first_commit = first_rewrite
                 .commit_transcript_rewrite(
                     TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    vec![Message::Assistant(AssistantMessage {
-                        content: "first compact answer".to_string(),
-                        tool_calls: Vec::new(),
+                    vec![Message::BlockAssistant(BlockAssistantMessage {
+                        blocks: vec![AssistantBlock::Text {
+                            text: "first compact answer".to_string(),
+                            meta: None,
+                        }],
                         stop_reason: StopReason::EndTurn,
-                        usage: meerkat_core::types::Usage::default(),
                         created_at: meerkat_core::types::message_timestamp_now(),
                     })],
                     TranscriptRewriteReason::new("compaction"),
@@ -1315,11 +1322,12 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             let stale_commit = stale_rewrite
                 .commit_transcript_rewrite(
                     TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    vec![Message::Assistant(AssistantMessage {
-                        content: "stale compact answer".to_string(),
-                        tool_calls: Vec::new(),
+                    vec![Message::BlockAssistant(BlockAssistantMessage {
+                        blocks: vec![AssistantBlock::Text {
+                            text: "stale compact answer".to_string(),
+                            meta: None,
+                        }],
                         stop_reason: StopReason::EndTurn,
-                        usage: meerkat_core::types::Usage::default(),
                         created_at: meerkat_core::types::message_timestamp_now(),
                     })],
                     TranscriptRewriteReason::new("compaction"),

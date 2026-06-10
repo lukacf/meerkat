@@ -152,11 +152,6 @@ fn project_realtime_assistant_blocks(blocks: &[AssistantBlock]) -> Vec<Assistant
 
 fn tool_ids_from_assistant(message: &Message) -> HashSet<String> {
     match message {
-        Message::Assistant(assistant) => assistant
-            .tool_calls
-            .iter()
-            .map(|tool_call| tool_call.id.clone())
-            .collect(),
         Message::BlockAssistant(assistant) => assistant
             .blocks
             .iter()
@@ -224,13 +219,6 @@ fn project_realtime_replay_messages(messages: &[Message]) -> Result<Vec<Message>
                 transcript_role: user.transcript_role,
                 created_at: user.created_at,
             })),
-            Message::Assistant(assistant) => {
-                if assistant.content.is_empty() && assistant.tool_calls.is_empty() {
-                    None
-                } else {
-                    Some(Message::Assistant(assistant.clone()))
-                }
-            }
             Message::BlockAssistant(assistant) => {
                 let blocks = project_realtime_assistant_blocks(&assistant.blocks);
                 if blocks.is_empty() {
@@ -534,29 +522,6 @@ fn convert_messages(messages: &[Message]) -> Result<(Option<String>, Vec<Item>),
                     });
                 }
             }
-            Message::Assistant(a) => {
-                if !a.content.trim().is_empty() {
-                    items.push(Item::Message {
-                        id: None,
-                        status: None,
-                        phase: None,
-                        role: Role::Assistant,
-                        content: vec![ContentPart::OutputText {
-                            text: a.content.clone(),
-                        }],
-                    });
-                }
-                for tc in &a.tool_calls {
-                    items.push(Item::FunctionCall {
-                        id: None,
-                        status: None,
-                        phase: None,
-                        name: tc.name.clone(),
-                        call_id: tc.id.clone(),
-                        arguments: tc.args.to_string(),
-                    });
-                }
-            }
             Message::BlockAssistant(a) => {
                 for block in &a.blocks {
                     match block {
@@ -717,9 +682,9 @@ fn map_server_error(err: oai_rt_rs::error::ServerError) -> LlmError {
 mod tests {
     use super::*;
     use meerkat_core::{
-        AssistantImageId, AssistantMessage, BlobId, BlobRef, BlockAssistantMessage, ImageData,
-        MediaType, ProviderImageMetadata, RevisedPromptDisposition, ServerToolKind, SystemMessage,
-        ToolCall, ToolResult, UserMessage,
+        AssistantImageId, BlobId, BlobRef, BlockAssistantMessage, ImageData, MediaType,
+        ProviderImageMetadata, RevisedPromptDisposition, ServerToolKind, SystemMessage, ToolResult,
+        UserMessage,
     };
 
     fn sys(text: &str) -> Message {
@@ -731,11 +696,12 @@ mod tests {
     }
 
     fn asst(text: &str) -> Message {
-        Message::Assistant(AssistantMessage {
-            content: text.to_string(),
-            tool_calls: Vec::new(),
+        Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: text.to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         })
     }
@@ -888,15 +854,17 @@ mod tests {
 
     #[test]
     fn convert_tool_call_and_result_round_trips_to_function_items() {
-        let asst_with_tool = Message::Assistant(AssistantMessage {
-            content: String::new(),
-            tool_calls: vec![ToolCall::new(
-                "call_42".to_string(),
-                "read_file".to_string(),
-                serde_json::json!({"path": "/tmp/x"}),
-            )],
+        let asst_with_tool = Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::ToolUse {
+                id: "call_42".to_string(),
+                name: "read_file".to_string(),
+                args: serde_json::value::RawValue::from_string(
+                    serde_json::json!({"path": "/tmp/x"}).to_string(),
+                )
+                .expect("valid args"),
+                meta: None,
+            }],
             stop_reason: StopReason::ToolUse,
-            usage: Usage::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         });
         let tool_results = Message::ToolResults {

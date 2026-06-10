@@ -7709,36 +7709,6 @@
           },
           {
             "properties": {
-              "content": {
-                "type": "string"
-              },
-              "created_at": {
-                "type": "string"
-              },
-              "role": {
-                "const": "assistant",
-                "type": "string"
-              },
-              "stop_reason": {
-                "$ref": "#/components/schemas/WireStopReason"
-              },
-              "tool_calls": {
-                "items": {
-                  "$ref": "#/components/schemas/WireToolCall"
-                },
-                "type": "array"
-              }
-            },
-            "required": [
-              "role",
-              "content",
-              "stop_reason",
-              "created_at"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
               "blocks": {
                 "items": {
                   "$ref": "#/components/schemas/WireAssistantBlock"
@@ -7852,24 +7822,6 @@
           "cancelled"
         ],
         "type": "string"
-      },
-      "WireToolCall": {
-        "description": "Legacy assistant tool call payload.\n\nNot `PartialEq`: `args` rides as `Box<RawValue>` for pass-through\nfidelity with `meerkat_core::types::AssistantBlock::ToolUse.args` —\nopaque from provider to dispatcher, never re-parsed on the wire.\nEquivalence checks should round-trip through serialization.",
-        "properties": {
-          "args": true,
-          "id": {
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "name",
-          "args"
-        ],
-        "type": "object"
       },
       "WireToolResult": {
         "description": "Tool result payload in a transcript.",

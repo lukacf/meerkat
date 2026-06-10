@@ -10891,24 +10891,6 @@ async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
                     println!("\n[{}] USER:", i + 1);
                     println!("  {}", u.text_content());
                 }
-                Message::Assistant(a) => {
-                    println!("\n[{}] ASSISTANT:", i + 1);
-                    if !a.content.is_empty() {
-                        // Truncate long responses
-                        let display_text = if a.content.len() > 500 {
-                            format!("{}...", truncate_str(&a.content, 500))
-                        } else {
-                            a.content.clone()
-                        };
-                        println!("  {display_text}");
-                    }
-                    if !a.tool_calls.is_empty() {
-                        println!(
-                            "  Tool calls: {:?}",
-                            a.tool_calls.iter().map(|tc| &tc.name).collect::<Vec<_>>()
-                        );
-                    }
-                }
                 Message::ToolResults { results, .. } => {
                     println!("\n[{}] TOOL RESULTS:", i + 1);
                     for result in results {

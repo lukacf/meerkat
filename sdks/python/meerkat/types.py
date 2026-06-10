@@ -695,15 +695,6 @@ class ModelsCatalogResponse(TypedDict):
 
 
 @dataclass(frozen=True, slots=True)
-class SessionToolCall:
-    """Legacy assistant tool call captured in transcript history."""
-
-    id: str = ""
-    name: str = ""
-    args: Any = None
-
-
-@dataclass(frozen=True, slots=True)
 class SessionToolResult:
     """Tool result captured in transcript history."""
 
@@ -750,7 +741,6 @@ class SessionMessage:
     kind: str | None = None
     body: str | None = None
     content: ContentInput | None = None
-    tool_calls: list[SessionToolCall] = field(default_factory=list)
     stop_reason: str | None = None
     blocks: list[SessionAssistantBlock] = field(default_factory=list)
     results: list[SessionToolResult] = field(default_factory=list)
@@ -858,14 +848,6 @@ class TranscriptRewriteUserMessage(TypedDict):
     created_at: NotRequired[str]
 
 
-class TranscriptRewriteAssistantMessage(TypedDict):
-    role: Literal["assistant"]
-    content: str
-    tool_calls: NotRequired[list[dict[str, Any]]]
-    stop_reason: NotRequired[str]
-    created_at: NotRequired[str]
-
-
 class TranscriptRewriteBlockAssistantMessage(TypedDict):
     role: Literal["block_assistant"]
     blocks: list[dict[str, Any]]
@@ -883,7 +865,6 @@ TranscriptRewriteMessage = (
     TranscriptRewriteSystemMessage
     | TranscriptRewriteSystemNoticeMessage
     | TranscriptRewriteUserMessage
-    | TranscriptRewriteAssistantMessage
     | TranscriptRewriteBlockAssistantMessage
     | TranscriptRewriteToolResultsMessage
 )

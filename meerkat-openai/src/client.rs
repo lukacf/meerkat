@@ -219,11 +219,6 @@ fn project_openai_assistant_blocks(
 
 fn tool_ids_from_assistant(message: &Message) -> HashSet<String> {
     match message {
-        Message::Assistant(assistant) => assistant
-            .tool_calls
-            .iter()
-            .map(|tool_call| tool_call.id.clone())
-            .collect(),
         Message::BlockAssistant(assistant) => assistant
             .blocks
             .iter()
@@ -292,13 +287,6 @@ pub(crate) fn project_openai_replay_messages(
                 transcript_role: user.transcript_role,
                 created_at: user.created_at,
             })),
-            Message::Assistant(assistant) => {
-                if assistant.content.is_empty() && assistant.tool_calls.is_empty() {
-                    None
-                } else {
-                    Some(Message::Assistant(assistant.clone()))
-                }
-            }
             Message::BlockAssistant(assistant) => {
                 let blocks = project_openai_assistant_blocks(mode, &assistant.blocks);
                 if blocks.is_empty() {
@@ -782,26 +770,8 @@ impl OpenAiClient {
                         }));
                     }
                 }
-                Message::Assistant(a) => {
-                    // Legacy AssistantMessage format - convert to items
-                    if !a.content.is_empty() {
-                        items.push(serde_json::json!({
-                            "type": "message",
-                            "role": "assistant",
-                            "content": a.content
-                        }));
-                    }
-                    for tc in &a.tool_calls {
-                        items.push(serde_json::json!({
-                            "type": "function_call",
-                            "call_id": tc.id,
-                            "name": tc.name,
-                            "arguments": tc.args.to_string()
-                        }));
-                    }
-                }
                 Message::BlockAssistant(a) => {
-                    // New BlockAssistantMessage format - render blocks as items
+                    // BlockAssistantMessage format - render blocks as items
                     for block in &a.blocks {
                         match block {
                             AssistantBlock::Text { text, .. } => {
@@ -3539,15 +3509,15 @@ mod tests {
             "gpt-5.4",
             vec![
                 Message::User(UserMessage::text("Weather?".to_string())),
-                Message::Assistant(meerkat_core::AssistantMessage {
-                    content: String::new(),
-                    tool_calls: vec![meerkat_core::ToolCall::new(
-                        "call_abc123".to_string(),
-                        "get_weather".to_string(),
-                        tool_args,
-                    )],
+                Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
+                    blocks: vec![meerkat_core::AssistantBlock::ToolUse {
+                        id: "call_abc123".to_string(),
+                        name: "get_weather".to_string(),
+                        args: serde_json::value::RawValue::from_string(tool_args.to_string())
+                            .expect("valid args"),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::ToolUse,
-                    usage: Usage::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
             ],
@@ -4021,15 +3991,15 @@ mod tests {
             "gpt-5.4",
             vec![
                 Message::User(UserMessage::text("What's the weather?".to_string())),
-                Message::Assistant(meerkat_core::AssistantMessage {
-                    content: String::new(),
-                    tool_calls: vec![meerkat_core::ToolCall::new(
-                        "call_123".to_string(),
-                        "get_weather".to_string(),
-                        tool_args,
-                    )],
+                Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
+                    blocks: vec![meerkat_core::AssistantBlock::ToolUse {
+                        id: "call_123".to_string(),
+                        name: "get_weather".to_string(),
+                        args: serde_json::value::RawValue::from_string(tool_args.to_string())
+                            .expect("valid args"),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::ToolUse,
-                    usage: Usage::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
             ],

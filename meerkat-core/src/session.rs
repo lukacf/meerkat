@@ -293,7 +293,6 @@ fn message_role_name(message: &Message) -> &'static str {
         Message::System(_) => "system",
         Message::SystemNotice(_) => "system_notice",
         Message::User(_) => "user",
-        Message::Assistant(_) => "assistant",
         Message::BlockAssistant(_) => "block_assistant",
         Message::ToolResults { .. } => "tool_results",
     }
@@ -301,11 +300,6 @@ fn message_role_name(message: &Message) -> &'static str {
 
 fn assistant_tool_use_ids(message: &Message) -> Vec<&str> {
     match message {
-        Message::Assistant(assistant) => assistant
-            .tool_calls
-            .iter()
-            .map(|tool_call| tool_call.id.as_str())
-            .collect(),
         Message::BlockAssistant(assistant) => assistant
             .blocks
             .iter()
@@ -2959,7 +2953,6 @@ impl Session {
                 }
                 if buf.is_empty() { None } else { Some(buf) }
             }
-            Message::Assistant(a) if !a.content.is_empty() => Some(a.content.clone()),
             _ => None,
         })
     }
@@ -2975,7 +2968,6 @@ impl Session {
                         .filter(|b| matches!(b, crate::types::AssistantBlock::ToolUse { .. }))
                         .count(),
                 ),
-                Message::Assistant(a) => Some(a.tool_calls.len()),
                 _ => None,
             })
             .sum()
@@ -4152,7 +4144,7 @@ mod tests {
     use super::*;
     use crate::realtime_transcript::RealtimeTranscriptRole;
     use crate::types::{
-        AssistantMessage, BlockAssistantMessage, ContentBlock, StopReason, SystemMessage, Usage,
+        AssistantBlock, BlockAssistantMessage, ContentBlock, StopReason, SystemMessage, Usage,
         UserMessage,
     };
     use std::sync::Arc;
@@ -4248,11 +4240,12 @@ mod tests {
     fn transcript_rewrite_rejects_trailing_block_assistant_tool_call() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("question".to_string())));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "plain answer".to_string(),
-            tool_calls: Vec::new(),
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "plain answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let parent_revision = session.transcript_revision().expect("parent revision");
@@ -4287,11 +4280,12 @@ mod tests {
         session.push(Message::User(UserMessage::text(
             "keep this exact transcript".to_string(),
         )));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "unchanged".to_string(),
-            tool_calls: Vec::new(),
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "unchanged".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -4322,11 +4316,12 @@ mod tests {
     fn transcript_rewrite_run_boundary_guard_accepts_rewrite_then_append() {
         let mut original = Session::new();
         original.push(Message::User(UserMessage::text("question".to_string())));
-        original.push(Message::Assistant(AssistantMessage {
-            content: "verbose answer".to_string(),
-            tool_calls: Vec::new(),
+        original.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "verbose answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -4335,11 +4330,12 @@ mod tests {
         incoming
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(AssistantMessage {
-                    content: "compact answer".to_string(),
-                    tool_calls: Vec::new(),
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "compact answer".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::EndTurn,
-                    usage: Usage::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4348,11 +4344,12 @@ mod tests {
             )
             .expect("rewrite should commit");
         incoming.push(Message::User(UserMessage::text("follow-up".to_string())));
-        incoming.push(Message::Assistant(AssistantMessage {
-            content: "follow-up answer".to_string(),
-            tool_calls: Vec::new(),
+        incoming.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "follow-up answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -4384,11 +4381,12 @@ mod tests {
         let err = session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(AssistantMessage {
-                    content: "no tool after all".to_string(),
-                    tool_calls: Vec::new(),
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "no tool after all".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::EndTurn,
-                    usage: Usage::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4406,11 +4404,12 @@ mod tests {
     fn transcript_rewrite_rejects_trailing_assistant_tool_call() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("question".to_string())));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "plain answer".to_string(),
-            tool_calls: Vec::new(),
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "plain answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let parent_revision = session.transcript_revision().expect("parent revision");
@@ -4418,15 +4417,15 @@ mod tests {
         let err = session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(AssistantMessage {
-                    content: String::new(),
-                    tool_calls: vec![crate::types::ToolCall::new(
-                        "toolu_1".to_string(),
-                        "lookup".to_string(),
-                        serde_json::json!({}),
-                    )],
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::ToolUse {
+                        id: "toolu_1".to_string(),
+                        name: "lookup".to_string(),
+                        args: serde_json::value::RawValue::from_string("{}".to_string())
+                            .expect("valid args"),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::ToolUse,
-                    usage: Usage::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4444,11 +4443,12 @@ mod tests {
     fn transcript_rewrite_rejects_duplicate_tool_results() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("use a tool".to_string())));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "plain answer".to_string(),
-            tool_calls: Vec::new(),
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "plain answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let parent_revision = session.transcript_revision().expect("parent revision");
@@ -4487,11 +4487,12 @@ mod tests {
     fn transcript_rewrite_record_rejects_prefix_or_suffix_tampering() {
         let mut session = Session::new();
         session.push(Message::System(SystemMessage::new("keep prefix")));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "verbose answer".to_string(),
-            tool_calls: Vec::new(),
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "verbose answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         session.push(Message::User(UserMessage::text("keep suffix".to_string())));
@@ -4500,11 +4501,12 @@ mod tests {
         let commit = session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(AssistantMessage {
-                    content: "compact answer".to_string(),
-                    tool_calls: Vec::new(),
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "compact answer".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::EndTurn,
-                    usage: Usage::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4547,11 +4549,12 @@ mod tests {
     fn transcript_rewrite_replay_allows_normal_turn_revisions_between_rewrites() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("first".to_string())));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "verbose first answer".to_string(),
-            tool_calls: Vec::new(),
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "verbose first answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: crate::types::Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -4559,11 +4562,12 @@ mod tests {
         let first_commit = session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(AssistantMessage {
-                    content: "compact first answer".to_string(),
-                    tool_calls: Vec::new(),
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "compact first answer".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::EndTurn,
-                    usage: crate::types::Usage::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4573,11 +4577,12 @@ mod tests {
             .expect("first rewrite");
 
         session.push(Message::User(UserMessage::text("normal turn".to_string())));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "verbose second answer".to_string(),
-            tool_calls: Vec::new(),
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "verbose second answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: crate::types::Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let bridge_parent = session
@@ -4595,11 +4600,12 @@ mod tests {
         let second_commit = session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 3, end: 4 },
-                vec![Message::Assistant(AssistantMessage {
-                    content: "compact second answer".to_string(),
-                    tool_calls: Vec::new(),
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "compact second answer".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::EndTurn,
-                    usage: crate::types::Usage::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4645,11 +4651,12 @@ mod tests {
     fn transcript_rewrite_replay_rejects_branched_rewrite_records() {
         let mut base = Session::new();
         base.push(Message::User(UserMessage::text("question".to_string())));
-        base.push(Message::Assistant(AssistantMessage {
-            content: "verbose answer".to_string(),
-            tool_calls: Vec::new(),
+        base.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "verbose answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: crate::types::Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let parent = base.transcript_revision().expect("parent revision");
@@ -4658,11 +4665,12 @@ mod tests {
         let first_commit = first
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(AssistantMessage {
-                    content: "first compact answer".to_string(),
-                    tool_calls: Vec::new(),
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "first compact answer".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::EndTurn,
-                    usage: crate::types::Usage::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4679,11 +4687,12 @@ mod tests {
         let second_commit = second
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(AssistantMessage {
-                    content: "second compact answer".to_string(),
-                    tool_calls: Vec::new(),
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "second compact answer".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::EndTurn,
-                    usage: crate::types::Usage::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4728,11 +4737,12 @@ mod tests {
     fn internal_message_rewrites_refresh_transcript_history_head() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("question".to_string())));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "verbose answer".to_string(),
-            tool_calls: Vec::new(),
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "verbose answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: crate::types::Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -4740,11 +4750,12 @@ mod tests {
         session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(AssistantMessage {
-                    content: "compact answer".to_string(),
-                    tool_calls: Vec::new(),
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "compact answer".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::EndTurn,
-                    usage: crate::types::Usage::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4782,11 +4793,12 @@ mod tests {
             .replace_messages_internal(
                 vec![
                     Message::User(UserMessage::text("compacted question".to_string())),
-                    Message::Assistant(AssistantMessage {
-                        content: "compacted answer".to_string(),
-                        tool_calls: Vec::new(),
+                    Message::BlockAssistant(BlockAssistantMessage {
+                        blocks: vec![AssistantBlock::Text {
+                            text: "compacted answer".to_string(),
+                            meta: None,
+                        }],
                         stop_reason: StopReason::EndTurn,
-                        usage: crate::types::Usage::default(),
                         created_at: crate::types::message_timestamp_now(),
                     }),
                 ],
@@ -4816,11 +4828,12 @@ mod tests {
     fn set_system_prompt_refreshes_transcript_history_head_after_rewrite() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("question".to_string())));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "verbose answer".to_string(),
-            tool_calls: Vec::new(),
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "verbose answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: crate::types::Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -4828,11 +4841,12 @@ mod tests {
         let rewrite = session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(AssistantMessage {
-                    content: "compact answer".to_string(),
-                    tool_calls: Vec::new(),
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "compact answer".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::EndTurn,
-                    usage: crate::types::Usage::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4872,11 +4886,12 @@ mod tests {
     fn apply_transcript_history_state_uses_latest_commit_time_for_restored_head() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("question".to_string())));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "verbose answer".to_string(),
-            tool_calls: Vec::new(),
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "verbose answer".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: crate::types::Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let original_messages = session.messages().to_vec();
@@ -4884,11 +4899,12 @@ mod tests {
         let compact = session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(AssistantMessage {
-                    content: "compact answer".to_string(),
-                    tool_calls: Vec::new(),
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "compact answer".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: StopReason::EndTurn,
-                    usage: crate::types::Usage::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -5975,11 +5991,12 @@ mod tests {
         let mut session = Session::new();
         session.push(Message::System(SystemMessage::new("System prompt")));
         session.push(Message::User(UserMessage::text("Hello".to_string())));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "Hi!".to_string(),
-            tool_calls: vec![],
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "Hi!".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -6470,16 +6487,12 @@ mod tests {
     fn test_session_meta_from_session() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("Hello".to_string())));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "Hi!".to_string(),
-            tool_calls: vec![],
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "Hi!".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage {
-                input_tokens: 10,
-                output_tokens: 5,
-                cache_creation_tokens: None,
-                cache_read_tokens: None,
-            },
             created_at: crate::types::message_timestamp_now(),
         }));
         session.record_usage(Usage {

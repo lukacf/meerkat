@@ -147,8 +147,6 @@ pub enum ObservedSessionTailKind {
     SystemNotice,
     #[serde(rename = "User")]
     User,
-    #[serde(rename = "Assistant")]
-    Assistant,
     #[serde(rename = "BlockAssistant")]
     BlockAssistant,
     #[serde(rename = "ToolResults")]
@@ -161,7 +159,6 @@ impl ObservedSessionTailKind {
             Self::System => "System",
             Self::SystemNotice => "SystemNotice",
             Self::User => "User",
-            Self::Assistant => "Assistant",
             Self::BlockAssistant => "BlockAssistant",
             Self::ToolResults => "ToolResults",
         }
@@ -175,7 +172,6 @@ impl std::convert::TryFrom<&str> for ObservedSessionTailKind {
             "System" => Ok(Self::System),
             "SystemNotice" => Ok(Self::SystemNotice),
             "User" => Ok(Self::User),
-            "Assistant" => Ok(Self::Assistant),
             "BlockAssistant" => Ok(Self::BlockAssistant),
             "ToolResults" => Ok(Self::ToolResults),
             other => Err(format!("invalid ObservedSessionTailKind value `{other}`")),

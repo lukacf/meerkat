@@ -180,7 +180,7 @@ pub use session::{
     SessionStreamOpenParams, SessionStreamOpenResult, TranscriptRewriteMessage, WireAssistantBlock,
     WireContentBlock, WireContentInput, WireProviderMeta, WireSessionHistory, WireSessionInfo,
     WireSessionMessage, WireSessionSummary, WireSessionTranscriptRevision, WireStopReason,
-    WireToolCall, WireToolResult, WireToolResultContent, WireTranscriptSource,
+    WireToolResult, WireToolResultContent, WireTranscriptSource,
 };
 pub use skills::{SkillEntry, SkillInspectResponse, SkillListResponse, SkillSourceProvenance};
 pub use stream_read::StreamReadStatus;

@@ -47,9 +47,10 @@ pub use meerkat_core::{
     AgentSessionStore,
     AgentToolDispatcher,
     ArtifactRef,
-    AssistantMessage,
+    AssistantBlock,
     // Phase 3 provider-auth redesign — realm-scoped connection identity.
     AuthBindingRef,
+    BlockAssistantMessage,
     // Budget
     Budget,
     BudgetConfig,
@@ -465,10 +466,10 @@ pub use meerkat_llm_core::provider_runtime::{
 /// Prelude module for convenient imports
 pub mod prelude {
     pub use super::{
-        AgentConfig, AgentError, AgentEvent, AssistantMessage, Budget, BudgetLimits, BudgetType,
-        Config, LlmClient, LlmError, LlmEvent, LlmRequest, Message, RetryPolicy, RunResult,
-        Session, SessionFilter, SessionId, SessionMeta, SessionStore, StopReason, SystemMessage,
-        ToolCall, ToolDef, ToolResult, Usage, UserMessage,
+        AgentConfig, AgentError, AgentEvent, AssistantBlock, BlockAssistantMessage, Budget,
+        BudgetLimits, BudgetType, Config, LlmClient, LlmError, LlmEvent, LlmRequest, Message,
+        RetryPolicy, RunResult, Session, SessionFilter, SessionId, SessionMeta, SessionStore,
+        StopReason, SystemMessage, ToolCall, ToolDef, ToolResult, Usage, UserMessage,
     };
 
     #[cfg(feature = "anthropic")]

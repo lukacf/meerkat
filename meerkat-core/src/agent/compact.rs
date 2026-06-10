@@ -159,7 +159,7 @@ pub fn build_compaction_context(
 fn infer_session_boundary_index(messages: &[Message]) -> u64 {
     messages
         .iter()
-        .filter(|message| matches!(message, Message::BlockAssistant(_) | Message::Assistant(_)))
+        .filter(|message| matches!(message, Message::BlockAssistant(_)))
         .count() as u64
 }
 

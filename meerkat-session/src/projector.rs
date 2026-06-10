@@ -286,9 +286,6 @@ async fn remove_derived_path(path: &Path) -> Result<(), ProjectionError> {
 
 fn last_assistant_text_from_messages(messages: &[meerkat_core::Message]) -> Option<String> {
     messages.iter().rev().find_map(|message| match message {
-        meerkat_core::Message::Assistant(message) if !message.content.is_empty() => {
-            Some(message.content.clone())
-        }
         meerkat_core::Message::BlockAssistant(message) => {
             let text = message.to_string();
             (!text.is_empty()).then_some(text)
@@ -316,7 +313,9 @@ mod tests {
     use super::*;
     use crate::event_store::{EVENT_SCHEMA_VERSION, EventStoreError, StoredEvent};
     use meerkat_core::event::EventSourceIdentity;
-    use meerkat_core::types::{AssistantMessage, Message, StopReason, Usage, UserMessage};
+    use meerkat_core::types::{
+        AssistantBlock, BlockAssistantMessage, Message, StopReason, Usage, UserMessage,
+    };
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::time::SystemTime;
@@ -448,11 +447,12 @@ mod tests {
 
         let mut session = meerkat_core::Session::with_id(sid.clone());
         session.push(Message::User(UserMessage::text("hello")));
-        session.push(Message::Assistant(AssistantMessage {
-            content: "old summary".to_string(),
-            tool_calls: Vec::new(),
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "old summary".to_string(),
+                meta: None,
+            }],
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         }));
         let parent_revision = session.transcript_revision().unwrap();

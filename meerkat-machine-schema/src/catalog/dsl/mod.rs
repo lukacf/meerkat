@@ -340,7 +340,6 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                     "System",
                     "SystemNotice",
                     "User",
-                    "Assistant",
                     "BlockAssistant",
                     "ToolResults",
                 ],

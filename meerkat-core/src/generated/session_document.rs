@@ -119,7 +119,6 @@ pub enum ObservedSessionTailKind {
     System,
     SystemNotice,
     User,
-    Assistant,
     BlockAssistant,
     ToolResults,
 }

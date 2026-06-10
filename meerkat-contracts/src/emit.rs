@@ -223,7 +223,6 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireSessionTranscriptRevision": schema_for!(crate::wire::WireSessionTranscriptRevision),
         "WireSessionSummary": schema_for!(crate::wire::WireSessionSummary),
         "WireStopReason": schema_for!(crate::wire::WireStopReason),
-        "WireToolCall": schema_for!(crate::wire::WireToolCall),
         "WireToolResult": schema_for!(crate::wire::WireToolResult),
         "ExecutionPlacement": schema_for!(meerkat_core::ExecutionPlacement),
         "ExecutionPlacementIdentity": schema_for!(meerkat_core::ExecutionPlacementIdentity),

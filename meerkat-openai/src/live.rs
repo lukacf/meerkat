@@ -276,12 +276,6 @@ fn openai_realtime_history_context(seed_messages: &[Message]) -> Option<String> 
                     dialogue_lines.push(format!("User: {text}"));
                 }
             }
-            Message::Assistant(assistant) => {
-                let text = compact_projection_text(&assistant.content);
-                if !text.is_empty() {
-                    dialogue_lines.push(format!("Assistant: {text}"));
-                }
-            }
             Message::BlockAssistant(assistant) => {
                 let text = compact_projection_text(
                     &assistant.text_blocks().collect::<Vec<_>>().join("\n"),
@@ -421,20 +415,6 @@ fn openai_realtime_history_events(
                         phase: None,
                         role: Role::User,
                         content: vec![ContentPart::InputText {
-                            text: text.to_string(),
-                        }],
-                    })
-                })
-            }
-            Message::Assistant(assistant) => {
-                let text = assistant.content.trim();
-                (!text.is_empty()).then(|| {
-                    ProjectionHistoryItem::Dialogue(Item::Message {
-                        id: None,
-                        status: None,
-                        phase: None,
-                        role: Role::Assistant,
-                        content: vec![ContentPart::OutputText {
                             text: text.to_string(),
                         }],
                     })
@@ -4744,11 +4724,12 @@ mod tests {
                 Message::User(meerkat_core::UserMessage::text(
                     "Earlier turn context should survive reconnect.",
                 )),
-                Message::Assistant(meerkat_core::AssistantMessage {
-                    content: "Remembering amber lantern.".to_string(),
-                    tool_calls: Vec::new(),
+                Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
+                    blocks: vec![meerkat_core::AssistantBlock::Text {
+                        text: "Remembering amber lantern.".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: meerkat_core::StopReason::EndTurn,
-                    usage: meerkat_core::Usage::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
             ],
@@ -5178,11 +5159,12 @@ mod tests {
             Message::System(meerkat_core::SystemMessage::new(
                 "You are the realtime operator.".to_string(),
             )),
-            Message::Assistant(meerkat_core::AssistantMessage {
-                content: "Waiting for analyst token.".to_string(),
-                tool_calls: Vec::new(),
+            Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "Waiting for analyst token.".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::StopReason::EndTurn,
-                usage: meerkat_core::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }),
         ];
@@ -5239,11 +5221,12 @@ mod tests {
             Message::User(meerkat_core::UserMessage::text(
                 "Remember the codeword amber lantern.",
             )),
-            Message::Assistant(meerkat_core::AssistantMessage {
-                content: "Remembering amber lantern.".to_string(),
-                tool_calls: Vec::new(),
+            Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "Remembering amber lantern.".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::StopReason::EndTurn,
-                usage: meerkat_core::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }),
         ];
@@ -5300,11 +5283,12 @@ mod tests {
                 "[Runtime System Context]\nsource: peer_response_terminal:analyst-rt:req-123\n\nPeer terminal response from analyst-rt\nRequest ID: req-123\nStatus: completed\nPayload: {\n  \"request_intent\": \"checksum_token\",\n  \"token\": \"birch seventeen\"\n}",
             )),
             Message::User(meerkat_core::UserMessage::text("hello")),
-            Message::Assistant(meerkat_core::AssistantMessage {
-                content: "world".to_string(),
-                tool_calls: Vec::new(),
+            Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "world".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::StopReason::EndTurn,
-                usage: meerkat_core::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }),
             Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
@@ -5408,21 +5392,23 @@ mod tests {
                 "You are the realtime operator.".to_string(),
             )),
             Message::User(meerkat_core::UserMessage::text("old setup line")),
-            Message::Assistant(meerkat_core::AssistantMessage {
-                content: "old setup ack".to_string(),
-                tool_calls: Vec::new(),
+            Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "old setup ack".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::StopReason::EndTurn,
-                usage: meerkat_core::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }),
             Message::User(meerkat_core::UserMessage::text(
                 "Remember the codeword amber lantern.",
             )),
-            Message::Assistant(meerkat_core::AssistantMessage {
-                content: "Remembering amber lantern.".to_string(),
-                tool_calls: Vec::new(),
+            Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "Remembering amber lantern.".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::StopReason::EndTurn,
-                usage: meerkat_core::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }),
             Message::ToolResults {
@@ -5485,11 +5471,12 @@ mod tests {
             Message::User(meerkat_core::UserMessage::text(
                 "Remember the codeword amber lantern.",
             )),
-            Message::Assistant(meerkat_core::AssistantMessage {
-                content: "Remembering amber lantern.".to_string(),
-                tool_calls: Vec::new(),
+            Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "Remembering amber lantern.".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::StopReason::EndTurn,
-                usage: meerkat_core::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }),
         ];
@@ -5497,13 +5484,16 @@ mod tests {
             seed_messages.push(Message::User(meerkat_core::UserMessage::text(format!(
                 "Later dialogue turn {index}"
             ))));
-            seed_messages.push(Message::Assistant(meerkat_core::AssistantMessage {
-                content: format!("Later assistant turn {index}"),
-                tool_calls: Vec::new(),
-                stop_reason: meerkat_core::StopReason::EndTurn,
-                usage: meerkat_core::Usage::default(),
-                created_at: meerkat_core::types::message_timestamp_now(),
-            }));
+            seed_messages.push(Message::BlockAssistant(
+                meerkat_core::BlockAssistantMessage {
+                    blocks: vec![meerkat_core::AssistantBlock::Text {
+                        text: format!("Later assistant turn {index}"),
+                        meta: None,
+                    }],
+                    stop_reason: meerkat_core::StopReason::EndTurn,
+                    created_at: meerkat_core::types::message_timestamp_now(),
+                },
+            ));
         }
 
         let events = openai_realtime_history_events(&seed_messages, &[]);
@@ -8236,7 +8226,9 @@ mod tests {
     async fn open_command_seeds_provider_with_snapshot_messages() {
         use meerkat_core::live_adapter::LiveProjectionSnapshot;
         use meerkat_core::types::SessionId;
-        use meerkat_core::{AssistantMessage, Provider, StopReason, UserMessage, types};
+        use meerkat_core::{
+            AssistantBlock, BlockAssistantMessage, Provider, StopReason, UserMessage, types,
+        };
 
         // Build seed messages: a user turn followed by an assistant turn.
         // Use the same constructors the existing live.rs tests use so the
@@ -8244,11 +8236,12 @@ mod tests {
         // produces in production.
         let seed_messages = vec![
             Message::User(UserMessage::text("what's the weather")),
-            Message::Assistant(AssistantMessage {
-                content: "looks rainy".to_string(),
-                tool_calls: Vec::new(),
+            Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: "looks rainy".to_string(),
+                    meta: None,
+                }],
                 stop_reason: StopReason::EndTurn,
-                usage: meerkat_core::Usage::default(),
                 created_at: types::message_timestamp_now(),
             }),
         ];
@@ -8392,7 +8385,9 @@ mod tests {
         use meerkat_core::live_adapter::LiveProjectionSnapshot;
         use meerkat_core::session::PendingSystemContextAppend;
         use meerkat_core::types::SessionId;
-        use meerkat_core::{AssistantMessage, Provider, StopReason, UserMessage, types};
+        use meerkat_core::{
+            AssistantBlock, BlockAssistantMessage, Provider, StopReason, UserMessage, types,
+        };
         use std::time::SystemTime;
 
         // Non-empty seed: if the Refresh arm regressed and re-seeded,
@@ -8401,11 +8396,12 @@ mod tests {
         // would catch the bug immediately.
         let seed_messages = vec![
             Message::User(UserMessage::text("first turn")),
-            Message::Assistant(AssistantMessage {
-                content: "second turn".to_string(),
-                tool_calls: Vec::new(),
+            Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: "second turn".to_string(),
+                    meta: None,
+                }],
                 stop_reason: StopReason::EndTurn,
-                usage: meerkat_core::Usage::default(),
                 created_at: types::message_timestamp_now(),
             }),
         ];

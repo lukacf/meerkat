@@ -45,14 +45,6 @@ class WireProviderMeta:
 
 
 @dataclass
-class WireToolCall:
-    """Legacy assistant tool call."""
-    id: str = ''
-    name: str = ''
-    args: Optional[Any] = None
-
-
-@dataclass
 class WireToolResult:
     """Tool result transcript item."""
     tool_use_id: str = ''
@@ -68,7 +60,6 @@ class WireSessionMessage:
     kind: Optional[str] = None
     body: Optional[str] = None
     content: Optional[WireContentInput] = None
-    tool_calls: Optional[list[WireToolCall]] = None
     stop_reason: Optional[WireStopReason] = None
     blocks: Optional[list[WireAssistantBlock]] = None
     results: Optional[list[WireToolResult]] = None

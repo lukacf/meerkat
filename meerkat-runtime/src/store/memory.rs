@@ -827,12 +827,13 @@ mod tests {
         let rid = LogicalRuntimeId::new("runtime-superseded-terminal");
         let incoming = session_with_user("turn input");
         let mut current = incoming.clone();
-        current.push(meerkat_core::types::Message::Assistant(
-            meerkat_core::types::AssistantMessage {
-                content: "peer response already applied".to_string(),
-                tool_calls: Vec::new(),
+        current.push(meerkat_core::types::Message::BlockAssistant(
+            meerkat_core::types::BlockAssistantMessage {
+                blocks: vec![meerkat_core::types::AssistantBlock::Text {
+                    text: "peer response already applied".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::types::StopReason::EndTurn,
-                usage: meerkat_core::types::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             },
         ));
@@ -884,12 +885,13 @@ mod tests {
         let rid = LogicalRuntimeId::new("runtime-superseded-inputs");
         let incoming = session_with_user("turn input");
         let mut current = incoming.clone();
-        current.push(meerkat_core::types::Message::Assistant(
-            meerkat_core::types::AssistantMessage {
-                content: "peer response already applied".to_string(),
-                tool_calls: Vec::new(),
+        current.push(meerkat_core::types::Message::BlockAssistant(
+            meerkat_core::types::BlockAssistantMessage {
+                blocks: vec![meerkat_core::types::AssistantBlock::Text {
+                    text: "peer response already applied".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::types::StopReason::EndTurn,
-                usage: meerkat_core::types::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             },
         ));
@@ -1009,12 +1011,13 @@ mod tests {
         previous.push(meerkat_core::types::Message::User(
             meerkat_core::types::UserMessage::text("Turn 1 request".to_string()),
         ));
-        previous.push(meerkat_core::types::Message::Assistant(
-            meerkat_core::types::AssistantMessage {
-                content: "Turn 1 answer".to_string(),
-                tool_calls: Vec::new(),
+        previous.push(meerkat_core::types::Message::BlockAssistant(
+            meerkat_core::types::BlockAssistantMessage {
+                blocks: vec![meerkat_core::types::AssistantBlock::Text {
+                    text: "Turn 1 answer".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::types::StopReason::EndTurn,
-                usage: meerkat_core::types::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             },
         ));
@@ -1029,12 +1032,13 @@ mod tests {
         for message in previous.messages()[1..].iter().cloned() {
             incoming.push(message);
         }
-        incoming.push(meerkat_core::types::Message::Assistant(
-            meerkat_core::types::AssistantMessage {
-                content: "Turn 2 generated answer".to_string(),
-                tool_calls: Vec::new(),
+        incoming.push(meerkat_core::types::Message::BlockAssistant(
+            meerkat_core::types::BlockAssistantMessage {
+                blocks: vec![meerkat_core::types::AssistantBlock::Text {
+                    text: "Turn 2 generated answer".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::types::StopReason::EndTurn,
-                usage: meerkat_core::types::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             },
         ));

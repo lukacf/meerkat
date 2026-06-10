@@ -130,38 +130,8 @@ fn project_gemini_assistant_blocks(blocks: &[AssistantBlock]) -> Vec<AssistantBl
         .collect()
 }
 
-fn legacy_assistant_to_gemini_blocks(
-    assistant: &meerkat_core::AssistantMessage,
-) -> Result<Vec<AssistantBlock>, LlmError> {
-    let mut blocks = Vec::new();
-    if !assistant.content.is_empty() {
-        blocks.push(AssistantBlock::Text {
-            text: assistant.content.clone(),
-            meta: None,
-        });
-    }
-    for tool_call in &assistant.tool_calls {
-        let args = serde_json::to_string(&tool_call.args)
-            .map_err(|error| invalid_replay(format!("invalid legacy tool args: {error}")))?;
-        let args = serde_json::value::RawValue::from_string(args)
-            .map_err(|error| invalid_replay(format!("invalid legacy tool args: {error}")))?;
-        blocks.push(AssistantBlock::ToolUse {
-            id: tool_call.id.clone(),
-            name: tool_call.name.clone(),
-            args,
-            meta: None,
-        });
-    }
-    Ok(blocks)
-}
-
 fn tool_ids_from_assistant(message: &Message) -> HashSet<String> {
     match message {
-        Message::Assistant(assistant) => assistant
-            .tool_calls
-            .iter()
-            .map(|tool_call| tool_call.id.clone())
-            .collect(),
         Message::BlockAssistant(assistant) => assistant
             .blocks
             .iter()
@@ -233,18 +203,6 @@ fn project_gemini_replay_messages(messages: &[Message]) -> Result<Vec<Message>, 
                 transcript_role: user.transcript_role,
                 created_at: user.created_at,
             })),
-            Message::Assistant(assistant) => {
-                let blocks = legacy_assistant_to_gemini_blocks(assistant)?;
-                if blocks.is_empty() {
-                    None
-                } else {
-                    Some(Message::BlockAssistant(BlockAssistantMessage {
-                        blocks,
-                        stop_reason: assistant.stop_reason,
-                        created_at: assistant.created_at,
-                    }))
-                }
-            }
             Message::BlockAssistant(assistant) => {
                 let blocks = project_gemini_assistant_blocks(&assistant.blocks);
                 if blocks.is_empty() {
@@ -427,13 +385,8 @@ impl GeminiClient {
                         }));
                     }
                 }
-                Message::Assistant(_) => {
-                    return Err(LlmError::InvalidRequest {
-                        message: "Legacy Message::Assistant is not supported by Gemini adapter; use BlockAssistant".to_string(),
-                    });
-                }
                 Message::BlockAssistant(a) => {
-                    // New format: ordered blocks with ProviderMeta
+                    // Ordered blocks with ProviderMeta
                     let mut parts = Vec::new();
 
                     for block in &a.blocks {

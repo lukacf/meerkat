@@ -846,12 +846,6 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += '    """Provider continuity metadata."""\n'
     types_content += "    provider: str = ''\n\n\n"
 
-    types_content += "@dataclass\nclass WireToolCall:\n"
-    types_content += '    """Legacy assistant tool call."""\n'
-    types_content += "    id: str = ''\n"
-    types_content += "    name: str = ''\n"
-    types_content += "    args: Optional[Any] = None\n\n\n"
-
     types_content += "@dataclass\nclass WireToolResult:\n"
     types_content += '    """Tool result transcript item."""\n'
     types_content += "    tool_use_id: str = ''\n"
@@ -865,7 +859,6 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "    kind: Optional[str] = None\n"
     types_content += "    body: Optional[str] = None\n"
     types_content += "    content: Optional[WireContentInput] = None\n"
-    types_content += "    tool_calls: Optional[list[WireToolCall]] = None\n"
     types_content += "    stop_reason: Optional[WireStopReason] = None\n"
     types_content += "    blocks: Optional[list[WireAssistantBlock]] = None\n"
     types_content += "    results: Optional[list[WireToolResult]] = None\n\n\n"
@@ -1437,12 +1430,6 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     types_content += "  [key: string]: unknown;\n"
     types_content += "}\n\n"
 
-    types_content += "export interface WireToolCall {\n"
-    types_content += "  id: string;\n"
-    types_content += "  name: string;\n"
-    types_content += "  args: unknown;\n"
-    types_content += "}\n\n"
-
     types_content += "export interface WireToolResult {\n"
     types_content += "  tool_use_id: string;\n"
     types_content += "  content: WireToolResultContent;\n"
@@ -1455,7 +1442,6 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     types_content += "  kind?: string;\n"
     types_content += "  body?: string;\n"
     types_content += "  content?: WireContentInput;\n"
-    types_content += "  tool_calls?: WireToolCall[];\n"
     types_content += "  stop_reason?: WireStopReason;\n"
     types_content += "  blocks?: WireAssistantBlock[];\n"
     types_content += "  results?: WireToolResult[];\n"

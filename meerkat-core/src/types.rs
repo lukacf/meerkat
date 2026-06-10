@@ -813,7 +813,7 @@ impl ToolCallView<'_> {
     }
 }
 
-/// Iterator over tool calls in an AssistantMessage. Zero allocations.
+/// Iterator over tool calls in a [`BlockAssistantMessage`]. Zero allocations.
 pub struct ToolCallIter<'a> {
     inner: std::slice::Iter<'a, AssistantBlock>,
 }
@@ -1049,9 +1049,7 @@ pub enum Message {
     SystemNotice(SystemNoticeMessage),
     /// User input
     User(UserMessage),
-    /// Assistant response (may include tool calls) - legacy format
-    Assistant(AssistantMessage),
-    /// Assistant response with ordered blocks - new format (spec v2)
+    /// Assistant response with ordered blocks
     BlockAssistant(BlockAssistantMessage),
     /// Results from tool execution
     ToolResults {
@@ -1081,7 +1079,6 @@ impl Message {
     pub fn indexable_content(&self) -> MemoryIndexableContent {
         match self {
             Message::User(u) => MemoryIndexableContent::Indexable(u.text_content()),
-            Message::Assistant(a) => MemoryIndexableContent::Indexable(a.content.clone()),
             Message::BlockAssistant(ba) => {
                 let mut result = String::new();
                 for text in ba.text_blocks() {
@@ -1167,7 +1164,6 @@ enum MessageWire {
     System(SystemMessage),
     SystemNotice(SystemNoticeMessage),
     User(UserMessage),
-    Assistant(AssistantMessage),
     #[serde(rename = "block_assistant")]
     BlockAssistant(BlockAssistantMessage),
     #[serde(rename = "tool_results")]
@@ -1187,7 +1183,6 @@ impl Serialize for Message {
             Self::System(message) => MessageWire::System(message.clone()),
             Self::SystemNotice(message) => MessageWire::SystemNotice(message.clone()),
             Self::User(message) => MessageWire::User(message.clone()),
-            Self::Assistant(message) => MessageWire::Assistant(message.clone()),
             Self::BlockAssistant(message) => MessageWire::BlockAssistant(message.clone()),
             Self::ToolResults {
                 results,
@@ -1211,7 +1206,6 @@ impl<'de> Deserialize<'de> for Message {
             MessageWire::System(message) => Self::System(message),
             MessageWire::SystemNotice(message) => Self::SystemNotice(message),
             MessageWire::User(message) => Self::User(message),
-            MessageWire::Assistant(message) => Self::Assistant(message),
             MessageWire::BlockAssistant(message) => Self::BlockAssistant(message),
             MessageWire::ToolResults {
                 results,
@@ -2105,11 +2099,10 @@ impl UserMessage {
     }
 }
 
-/// New assistant message with ordered blocks - no billing metadata.
+/// Assistant message with ordered blocks - no billing metadata.
 ///
-/// This is the new format for storing assistant messages with full block ordering.
-/// The existing `AssistantMessage` is preserved for backwards compatibility during
-/// the migration period.
+/// The canonical transcript representation for assistant output: an ordered
+/// sequence of typed [`AssistantBlock`]s plus the stop reason.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BlockAssistantMessage {
     /// Ordered sequence of content blocks
@@ -2190,24 +2183,6 @@ impl fmt::Display for BlockAssistantMessage {
         }
         Ok(())
     }
-}
-
-/// Assistant message with potential tool calls (legacy format)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct AssistantMessage {
-    /// Text content (may be empty if only tool calls)
-    pub content: String,
-    /// Tool calls requested by the model
-    #[serde(default)]
-    pub tool_calls: Vec<ToolCall>,
-    /// How the turn ended
-    pub stop_reason: StopReason,
-    /// Token usage for this turn
-    pub usage: Usage,
-    /// When this assistant message was committed to the transcript.
-    #[serde(default = "message_timestamp_now")]
-    pub created_at: MessageTimestamp,
 }
 
 /// A tool call requested by the model

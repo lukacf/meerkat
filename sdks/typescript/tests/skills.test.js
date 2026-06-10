@@ -217,8 +217,8 @@ describe("Skills v2.1", () => {
           limit: options?.limit,
           hasMore: false,
           messages: [
-            { role: "user", content: "hello", toolCalls: [], blocks: [], results: [] },
-            { role: "assistant", content: "ok", stopReason: "end_turn", toolCalls: [], blocks: [], results: [] },
+            { role: "user", content: "hello", blocks: [], results: [] },
+            { role: "block_assistant", stopReason: "end_turn", blocks: [{ blockType: "text", text: "ok" }], results: [] },
           ],
         };
       },
@@ -232,7 +232,7 @@ describe("Skills v2.1", () => {
     const history = await session.history({ offset: 1, limit: 5 });
 
     assert.equal(history.sessionId, "s-1");
-    assert.equal(history.messages[1].role, "assistant");
+    assert.equal(history.messages[1].role, "block_assistant");
     assert.deepEqual(calls, [{ sessionId: "s-1", options: { offset: 1, limit: 5 } }]);
   });
 
@@ -249,7 +249,7 @@ describe("Skills v2.1", () => {
           limit: options?.limit,
           hasMore: false,
           messages: [
-            { role: "assistant", content: "pending", stopReason: "end_turn", toolCalls: [], blocks: [], results: [] },
+            { role: "block_assistant", stopReason: "end_turn", blocks: [{ blockType: "text", text: "pending" }], results: [] },
           ],
         };
       },

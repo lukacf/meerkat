@@ -514,11 +514,6 @@ fn message_summary(message: &Message) -> String {
                 text.chars().take(160).collect::<String>()
             )
         }
-        Message::Assistant(assistant) => format!(
-            "assistant tools={} text={}",
-            assistant.tool_calls.len(),
-            assistant.content.chars().take(160).collect::<String>()
-        ),
         Message::BlockAssistant(blocks) => {
             let uses = blocks
                 .blocks

@@ -6969,24 +6969,26 @@ mod tests {
         session.push(meerkat_core::types::Message::User(
             meerkat_core::types::UserMessage::text("Hello".to_string()),
         ));
-        session.push(meerkat_core::types::Message::Assistant(
-            meerkat_core::types::AssistantMessage {
-                content: "Hi there".to_string(),
-                tool_calls: vec![],
+        session.push(meerkat_core::types::Message::BlockAssistant(
+            meerkat_core::types::BlockAssistantMessage {
+                blocks: vec![meerkat_core::types::AssistantBlock::Text {
+                    text: "Hi there".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::types::StopReason::EndTurn,
-                usage: meerkat_core::types::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             },
         ));
         session.push(meerkat_core::types::Message::User(
             meerkat_core::types::UserMessage::text("Follow up".to_string()),
         ));
-        session.push(meerkat_core::types::Message::Assistant(
-            meerkat_core::types::AssistantMessage {
-                content: "Second answer".to_string(),
-                tool_calls: vec![],
+        session.push(meerkat_core::types::Message::BlockAssistant(
+            meerkat_core::types::BlockAssistantMessage {
+                blocks: vec![meerkat_core::types::AssistantBlock::Text {
+                    text: "Second answer".to_string(),
+                    meta: None,
+                }],
                 stop_reason: meerkat_core::types::StopReason::EndTurn,
-                usage: meerkat_core::types::Usage::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             },
         ));
@@ -7076,19 +7078,6 @@ mod tests {
         session.push(meerkat_core::types::Message::User(
             meerkat_core::types::UserMessage::text("hello".to_string()),
         ));
-        session.push(meerkat_core::types::Message::Assistant(
-            meerkat_core::types::AssistantMessage {
-                content: "legacy ok".to_string(),
-                tool_calls: vec![meerkat_core::types::ToolCall {
-                    id: "tool-1".to_string(),
-                    name: "search".into(),
-                    args: serde_json::json!({ "query": "history" }),
-                }],
-                stop_reason: meerkat_core::types::StopReason::ToolUse,
-                usage: meerkat_core::types::Usage::default(),
-                created_at: meerkat_core::types::message_timestamp_now(),
-            },
-        ));
         session.push(meerkat_core::types::Message::BlockAssistant(
             meerkat_core::types::BlockAssistantMessage::new(
                 vec![meerkat_core::types::AssistantBlock::ToolUse {
@@ -7120,19 +7109,17 @@ mod tests {
             .as_array()
             .expect("history messages should be an array");
 
-        assert_eq!(messages.len(), 5);
+        assert_eq!(messages.len(), 4);
         assert_eq!(messages[0]["role"], "system");
         assert_eq!(messages[1]["role"], "user");
-        assert_eq!(messages[2]["role"], "assistant");
-        assert_eq!(messages[2]["tool_calls"][0]["name"], "search");
-        assert_eq!(messages[3]["role"], "block_assistant");
-        assert_eq!(messages[3]["blocks"][0]["block_type"], "tool_use");
+        assert_eq!(messages[2]["role"], "block_assistant");
+        assert_eq!(messages[2]["blocks"][0]["block_type"], "tool_use");
         assert_eq!(
-            messages[3]["blocks"][0]["data"]["args"]["item"],
+            messages[2]["blocks"][0]["data"]["args"]["item"],
             "transcript"
         );
-        assert_eq!(messages[4]["role"], "tool_results");
-        assert_eq!(messages[4]["results"][0]["tool_use_id"], "tool-2");
+        assert_eq!(messages[3]["role"], "tool_results");
+        assert_eq!(messages[3]["results"][0]["tool_use_id"], "tool-2");
     }
 
     #[tokio::test]

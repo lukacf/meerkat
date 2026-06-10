@@ -229,7 +229,6 @@ async fn assistant_history_blob(
         .messages
         .iter()
         .filter_map(|message| match message {
-            Message::Assistant(message) => Some(message.content.clone()),
             Message::BlockAssistant(message) => {
                 Some(message.text_blocks().collect::<Vec<_>>().join("\n"))
             }

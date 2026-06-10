@@ -137,7 +137,6 @@ import type {
   SessionOptions,
   SessionTranscriptRevision,
   SessionTranscriptRewriteResult,
-  SessionToolCall,
   SessionToolResult,
   SkillKey,
   SkillRef,
@@ -4405,9 +4404,6 @@ export class MeerkatClient {
       role === "system_notice" && data.content == null && data.body != null
         ? String(data.body)
         : data.content;
-    const rawToolCalls = Array.isArray(data.tool_calls)
-      ? (data.tool_calls as Array<Record<string, unknown>>)
-      : [];
     const rawBlocks = Array.isArray(data.blocks)
       ? (data.blocks as Array<Record<string, unknown>>)
       : [];
@@ -4421,13 +4417,6 @@ export class MeerkatClient {
       body: data.body != null ? String(data.body) : undefined,
       content:
         contentValue != null ? MeerkatClient.parseContentInput(contentValue) : undefined,
-      toolCalls: rawToolCalls.map(
-        (toolCall): SessionToolCall => ({
-          id: String(toolCall.id ?? ""),
-          name: String(toolCall.name ?? ""),
-          args: toolCall.args,
-        }),
-      ),
       stopReason: data.stop_reason != null ? String(data.stop_reason) : undefined,
       blocks: rawBlocks.map((block) => MeerkatClient.parseSessionAssistantBlock(block)),
       results: rawResults.map(
@@ -4469,13 +4458,6 @@ export class MeerkatClient {
         if (camel.content !== undefined) {
           payload.content = camel.content;
         }
-      }
-      if (camel.toolCalls?.length > 0) {
-        payload.tool_calls = camel.toolCalls.map((toolCall) => ({
-          id: toolCall.id,
-          name: toolCall.name,
-          args: toolCall.args,
-        }));
       }
       if (camel.stopReason !== undefined) {
         payload.stop_reason = camel.stopReason;

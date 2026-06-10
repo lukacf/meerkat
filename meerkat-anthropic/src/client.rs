@@ -249,11 +249,6 @@ fn project_anthropic_assistant_blocks(blocks: &[AssistantBlock]) -> Vec<Assistan
 
 fn tool_ids_from_assistant(message: &Message) -> HashSet<String> {
     match message {
-        Message::Assistant(assistant) => assistant
-            .tool_calls
-            .iter()
-            .map(|tool_call| tool_call.id.clone())
-            .collect(),
         Message::BlockAssistant(assistant) => assistant
             .blocks
             .iter()
@@ -325,13 +320,6 @@ fn project_anthropic_replay_messages(messages: &[Message]) -> Result<Vec<Message
                 transcript_role: user.transcript_role,
                 created_at: user.created_at,
             })),
-            Message::Assistant(assistant) => {
-                if assistant.content.is_empty() && assistant.tool_calls.is_empty() {
-                    None
-                } else {
-                    Some(Message::Assistant(assistant.clone()))
-                }
-            }
             Message::BlockAssistant(assistant) => {
                 let blocks = project_anthropic_assistant_blocks(&assistant.blocks);
                 if blocks.is_empty() {
@@ -499,33 +487,8 @@ impl AnthropicClient {
                         }));
                     }
                 }
-                Message::Assistant(a) => {
-                    // Legacy format: flat content + tool_calls
-                    let mut content = Vec::new();
-
-                    if !a.content.is_empty() {
-                        content.push(serde_json::json!({
-                            "type": "text",
-                            "text": a.content
-                        }));
-                    }
-
-                    for tc in &a.tool_calls {
-                        content.push(serde_json::json!({
-                            "type": "tool_use",
-                            "id": tc.id,
-                            "name": tc.name,
-                            "input": tc.args
-                        }));
-                    }
-
-                    messages.push(serde_json::json!({
-                        "role": "assistant",
-                        "content": content
-                    }));
-                }
                 Message::BlockAssistant(a) => {
-                    // New format: ordered blocks with thinking support
+                    // Ordered blocks with thinking support
                     let mut content = Vec::new();
 
                     for block in &a.blocks {

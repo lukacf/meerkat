@@ -70,17 +70,28 @@ fn test_message_json_schema() {
     assert_eq!(json["body"], "Background job still running.");
 
     // Assistant message
-    let assistant = Message::Assistant(AssistantMessage {
-        content: "Hi there!".to_string(),
-        tool_calls: vec![],
+    let assistant = Message::BlockAssistant(BlockAssistantMessage {
+        blocks: vec![AssistantBlock::Text {
+            text: "Hi there!".to_string(),
+            meta: None,
+        }],
         stop_reason: StopReason::EndTurn,
-        usage: Usage::default(),
         created_at: message_timestamp_now(),
     });
     let json = serde_json::to_value(&assistant).unwrap();
-    assert_eq!(json["role"], "assistant");
-    assert_eq!(json["content"], "Hi there!");
+    assert_eq!(json["role"], "block_assistant");
+    assert_eq!(json["blocks"][0]["block_type"], "text");
+    assert_eq!(json["blocks"][0]["data"]["text"], "Hi there!");
     assert_eq!(json["stop_reason"], "end_turn");
+
+    // Legacy text-shaped assistant role fails closed at deserialization.
+    let legacy = json!({
+        "role": "assistant",
+        "content": "Hi there!",
+        "stop_reason": "end_turn"
+    });
+    serde_json::from_value::<Message>(legacy)
+        .expect_err("legacy role=assistant persisted form must be rejected");
 
     // Tool results
     let tool_results = Message::tool_results(vec![ToolResult::new(
@@ -577,20 +588,23 @@ fn test_session_checkpoint_complex() {
 
         if i % 3 == 0 {
             // With tool calls
-            messages.push(Message::Assistant(AssistantMessage {
-                content: format!("Let me help with request {i}"),
-                tool_calls: vec![ToolCall::new(
-                    format!("tc_{i}"),
-                    "test_tool".to_string(),
-                    json!({"index": i}),
-                )],
+            messages.push(Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![
+                    AssistantBlock::Text {
+                        text: format!("Let me help with request {i}"),
+                        meta: None,
+                    },
+                    AssistantBlock::ToolUse {
+                        id: format!("tc_{i}"),
+                        name: "test_tool".to_string(),
+                        args: serde_json::value::RawValue::from_string(format!(
+                            "{{\"index\":{i}}}"
+                        ))
+                        .expect("valid args"),
+                        meta: None,
+                    },
+                ],
                 stop_reason: StopReason::ToolUse,
-                usage: Usage {
-                    input_tokens: 100 + i as u64,
-                    output_tokens: 50 + i as u64,
-                    cache_creation_tokens: None,
-                    cache_read_tokens: None,
-                },
                 created_at: message_timestamp_now(),
             }));
 
@@ -600,30 +614,22 @@ fn test_session_checkpoint_complex() {
                 false,
             )]));
 
-            messages.push(Message::Assistant(AssistantMessage {
-                content: format!("Completed request {i} with tool result"),
-                tool_calls: vec![],
+            messages.push(Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: format!("Completed request {i} with tool result"),
+                    meta: None,
+                }],
                 stop_reason: StopReason::EndTurn,
-                usage: Usage {
-                    input_tokens: 150 + i as u64,
-                    output_tokens: 75 + i as u64,
-                    cache_creation_tokens: None,
-                    cache_read_tokens: None,
-                },
                 created_at: message_timestamp_now(),
             }));
         } else {
             // Without tool calls
-            messages.push(Message::Assistant(AssistantMessage {
-                content: format!("Response to request {i}"),
-                tool_calls: vec![],
+            messages.push(Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: format!("Response to request {i}"),
+                    meta: None,
+                }],
                 stop_reason: StopReason::EndTurn,
-                usage: Usage {
-                    input_tokens: 100 + i as u64,
-                    output_tokens: 50 + i as u64,
-                    cache_creation_tokens: None,
-                    cache_read_tokens: None,
-                },
                 created_at: message_timestamp_now(),
             }));
         }
@@ -1314,7 +1320,7 @@ mod ordered_transcript_types {
     }
 
     // -----------------------------------------------------------------------
-    // AssistantMessage::tool_calls() iterator tests
+    // BlockAssistantMessage::tool_calls() iterator tests
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1433,7 +1439,7 @@ mod ordered_transcript_types {
     }
 
     // -----------------------------------------------------------------------
-    // AssistantMessage Display impl tests
+    // BlockAssistantMessage Display impl tests
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1482,7 +1488,7 @@ mod ordered_transcript_types {
     }
 
     // -----------------------------------------------------------------------
-    // AssistantMessage text_blocks iterator tests
+    // BlockAssistantMessage text_blocks iterator tests
     // -----------------------------------------------------------------------
 
     #[test]

@@ -911,11 +911,6 @@ fn render_fork_context(
             Message::User(u) => {
                 lines.push(format!("[user]: {}", u.text_content()));
             }
-            Message::Assistant(a) => {
-                if !a.content.is_empty() {
-                    lines.push(format!("[assistant]: {}", a.content));
-                }
-            }
             Message::BlockAssistant(ba) => {
                 // Both `Text` (display) and `Transcript` (spoken) lanes
                 // project to the rendered text stream; supervisor sees the

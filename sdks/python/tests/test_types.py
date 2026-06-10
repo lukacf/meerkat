@@ -42,7 +42,6 @@ from meerkat import (
     SessionDetails,
     SessionMessage,
     SessionSummary,
-    SessionToolCall,
     SessionToolResult,
     SkillKey,
     SkillQuarantineDiagnostic,
@@ -777,9 +776,13 @@ def test_parse_session_history():
         "messages": [
             {"role": "system", "content": "rules"},
             {
-                "role": "assistant",
-                "content": "working",
-                "tool_calls": [{"id": "tc_1", "name": "search", "args": {"q": "rust"}}],
+                "role": "block_assistant",
+                "blocks": [
+                    {
+                        "block_type": "tool_use",
+                        "data": {"id": "tc_1", "name": "search", "args": {"q": "rust"}},
+                    }
+                ],
                 "stop_reason": "tool_use",
             },
             {
@@ -792,7 +795,7 @@ def test_parse_session_history():
     assert history.session_id == "s1"
     assert history.limit == 2
     assert history.has_more is True
-    assert history.messages[1].tool_calls[0].name == "search"
+    assert history.messages[1].blocks[0].name == "search"
     assert history.messages[2].results[0].tool_use_id == "tc_1"
 
 
@@ -842,7 +845,7 @@ def test_parse_session_history_preserves_assistant_image_blocks():
 def test_transcript_rewrite_serializes_edited_parsed_message_over_raw_payload():
     parsed = MeerkatClient._parse_session_message(
         {
-            "role": "assistant",
+            "role": "user",
             "content": "old",
             "created_at": "2026-05-26T10:00:00Z",
             "provider_trace_id": "trace-1",
@@ -853,7 +856,7 @@ def test_transcript_rewrite_serializes_edited_parsed_message_over_raw_payload():
     serialized = MeerkatClient._serialize_transcript_rewrite_message(edited)
 
     assert serialized == {
-        "role": "assistant",
+        "role": "user",
         "content": "new",
         "created_at": "2026-05-26T10:00:00Z",
         "provider_trace_id": "trace-1",
@@ -967,7 +970,7 @@ def test_session_history_types():
         messages=[
             SessionMessage(role="system", content="rules"),
             SessionMessage(
-                role="assistant",
+                role="block_assistant",
                 blocks=[
                     SessionAssistantBlock(
                         block_type="tool_use",
@@ -976,7 +979,6 @@ def test_session_history_types():
                         args={"q": "meerkat"},
                     )
                 ],
-                tool_calls=[SessionToolCall(id="tool-1", name="search", args={"q": "meerkat"})],
                 results=[SessionToolResult(tool_use_id="tool-1", content="done")],
             ),
         ],
@@ -2253,7 +2255,11 @@ async def test_client_read_session_history_calls_expected_rpc_method():
             "has_more": False,
             "messages": [
                 {"role": "user", "content": "hello"},
-                {"role": "assistant", "content": "ok", "stop_reason": "end_turn"},
+                {
+                    "role": "block_assistant",
+                    "blocks": [{"block_type": "text", "data": {"text": "ok"}}],
+                    "stop_reason": "end_turn",
+                },
             ],
         }
 
@@ -2267,7 +2273,7 @@ async def test_client_read_session_history_calls_expected_rpc_method():
     assert history.limit == 2
     assert [m for m, _ in calls] == ["session/history"]
     assert calls[0][1] == {"session_id": "s1", "offset": 1, "limit": 2}
-    assert history.messages[1].role == "assistant"
+    assert history.messages[1].role == "block_assistant"
 
 
 @pytest.mark.asyncio

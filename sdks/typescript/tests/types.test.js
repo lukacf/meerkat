@@ -90,7 +90,7 @@ describe("Contract Version", () => {
 describe("Transcript Rewrite Serialization", () => {
   it("serializes edited parsed messages over their preserved raw payload", () => {
     const parsed = MeerkatClient.parseSessionMessage({
-      role: "assistant",
+      role: "user",
       content: "old",
       created_at: "2026-05-26T10:00:00Z",
       provider_trace_id: "trace-1",
@@ -102,7 +102,7 @@ describe("Transcript Rewrite Serialization", () => {
     });
 
     assert.deepEqual(serialized, {
-      role: "assistant",
+      role: "user",
       content: "new",
       created_at: "2026-05-26T10:00:00Z",
       provider_trace_id: "trace-1",
@@ -878,9 +878,13 @@ describe("Typed Events", () => {
       messages: [
         { role: "system", content: "rules" },
         {
-          role: "assistant",
-          content: "working",
-          tool_calls: [{ id: "tc_1", name: "search", args: { q: "rust" } }],
+          role: "block_assistant",
+          blocks: [
+            {
+              block_type: "tool_use",
+              data: { id: "tc_1", name: "search", args: { q: "rust" } },
+            },
+          ],
           stop_reason: "tool_use",
         },
         {
@@ -900,7 +904,7 @@ describe("Typed Events", () => {
     assert.equal(history.sessionRef, "ref-1");
     assert.equal(history.limit, 2);
     assert.equal(history.hasMore, true);
-    assert.equal(history.messages[1].toolCalls[0].name, "search");
+    assert.equal(history.messages[1].blocks[0].name, "search");
     assert.equal(history.messages[2].blocks[0].name, "lookup");
   });
 
@@ -1900,7 +1904,11 @@ describe("Comms methods", () => {
         has_more: false,
         messages: [
           { role: "user", content: "hello" },
-          { role: "assistant", content: "ok", stop_reason: "end_turn" },
+          {
+            role: "block_assistant",
+            blocks: [{ block_type: "text", data: { text: "ok" } }],
+            stop_reason: "end_turn",
+          },
         ],
       };
     };
@@ -1911,7 +1919,7 @@ describe("Comms methods", () => {
     assert.equal(history.sessionRef, "history-ref");
     assert.equal(history.offset, 1);
     assert.equal(history.limit, 2);
-    assert.equal(history.messages[1].role, "assistant");
+    assert.equal(history.messages[1].role, "block_assistant");
     assert.deepEqual(calls, [
       {
         method: "session/history",

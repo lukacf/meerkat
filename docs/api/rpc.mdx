@@ -532,8 +532,9 @@ the parent revision for audit and restore.
     },
     "replacement": [
       {
-        "role": "assistant",
-        "content": "Compacted assistant trace"
+        "role": "block_assistant",
+        "blocks": [{ "block_type": "text", "data": { "text": "Compacted assistant trace" } }],
+        "stop_reason": "end_turn"
       }
     ],
     "reason": {

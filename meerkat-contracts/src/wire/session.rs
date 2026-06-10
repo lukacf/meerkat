@@ -26,12 +26,11 @@ where
 use std::collections::BTreeMap;
 
 use meerkat_core::{
-    AssistantBlock, AssistantMessage, BlobId, BlockAssistantMessage, ContentBlock, ContentInput,
-    ImageData, Message, ProviderMeta, ServerToolKind, SessionHistoryPage, SessionId, SessionInfo,
-    SessionSummary, SessionTranscriptRevisionPage, StopReason, SystemMessage, SystemNoticeKind,
-    SystemNoticeMessage, ToolCall, ToolResult, TranscriptEditRunningBehavior,
-    TranscriptReplacement, TranscriptRewriteReason, TranscriptRewriteSelection, TranscriptSource,
-    Usage, UserMessage, VideoData,
+    AssistantBlock, BlobId, BlockAssistantMessage, ContentBlock, ContentInput, ImageData, Message,
+    ProviderMeta, ServerToolKind, SessionHistoryPage, SessionId, SessionInfo, SessionSummary,
+    SessionTranscriptRevisionPage, StopReason, SystemMessage, SystemNoticeKind,
+    SystemNoticeMessage, ToolResult, TranscriptEditRunningBehavior, TranscriptReplacement,
+    TranscriptRewriteReason, TranscriptRewriteSelection, TranscriptSource, UserMessage, VideoData,
 };
 use std::convert::TryFrom;
 
@@ -118,15 +117,6 @@ pub enum TranscriptRewriteMessage {
     },
     User {
         content: WireContentInput,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        created_at: Option<String>,
-    },
-    Assistant {
-        content: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        tool_calls: Vec<WireToolCall>,
-        #[serde(default)]
-        stop_reason: WireStopReason,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         created_at: Option<String>,
     },
@@ -979,25 +969,6 @@ impl From<WireStopReason> for StopReason {
     }
 }
 
-/// Legacy assistant tool call payload.
-///
-/// Not `PartialEq`: `args` rides as `Box<RawValue>` for pass-through
-/// fidelity with `meerkat_core::types::AssistantBlock::ToolUse.args` —
-/// opaque from provider to dispatcher, never re-parsed on the wire.
-/// Equivalence checks should round-trip through serialization.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct WireToolCall {
-    pub id: String,
-    pub name: String,
-    #[serde(
-        serialize_with = "serialize_raw_json_box",
-        deserialize_with = "deserialize_raw_json_box"
-    )]
-    #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
-    pub args: Box<serde_json::value::RawValue>,
-}
-
 /// Tool result payload in a transcript.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1060,36 +1031,6 @@ impl TranscriptRewriteMessage {
                     content,
                     render_metadata: None,
                     transcript_role: meerkat_core::types::TranscriptUserRole::default(),
-                    created_at: transcript_message_timestamp(created_at)?,
-                }))
-            }
-            Self::Assistant {
-                content,
-                tool_calls,
-                stop_reason,
-                created_at,
-            } => {
-                let tool_calls = tool_calls
-                    .into_iter()
-                    .map(|tool_call| {
-                        serde_json::from_str(tool_call.args.get())
-                            .map(|args| ToolCall {
-                                id: tool_call.id,
-                                name: tool_call.name,
-                                args,
-                            })
-                            .map_err(|err| {
-                                crate::wire::error::WireConversionError::TranscriptMessage {
-                                    debug: format!("invalid assistant tool call args: {err}"),
-                                }
-                            })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Message::Assistant(AssistantMessage {
-                    content,
-                    tool_calls,
-                    stop_reason: stop_reason.into(),
-                    usage: Usage::default(),
                     created_at: transcript_message_timestamp(created_at)?,
                 }))
             }
@@ -1265,13 +1206,6 @@ pub enum WireSessionMessage {
         content: WireContentInput,
         created_at: String,
     },
-    Assistant {
-        content: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        tool_calls: Vec<WireToolCall>,
-        stop_reason: WireStopReason,
-        created_at: String,
-    },
     #[serde(rename = "block_assistant")]
     BlockAssistant {
         blocks: Vec<WireAssistantBlock>,
@@ -1286,7 +1220,6 @@ pub enum WireSessionMessage {
 }
 
 impl From<Message> for WireSessionMessage {
-    #[allow(clippy::expect_used)]
     fn from(value: Message) -> Self {
         match value {
             Message::System(message) => Self::System {
@@ -1313,26 +1246,6 @@ impl From<Message> for WireSessionMessage {
                     created_at,
                 }
             }
-            Message::Assistant(message) => Self::Assistant {
-                content: message.content,
-                tool_calls: message
-                    .tool_calls
-                    .into_iter()
-                    .map(|tool_call| WireToolCall {
-                        id: tool_call.id,
-                        name: tool_call.name,
-                        // Core's legacy `ToolCall.args: Value` → opaque
-                        // `Box<RawValue>` for the wire. `to_string` on a
-                        // `Value` produces canonical JSON bytes; the
-                        // RawValue constructor only fails on invalid
-                        // JSON, which `Value::to_string` cannot emit.
-                        args: serde_json::value::RawValue::from_string(tool_call.args.to_string())
-                            .expect("serde_json::Value serializes to valid JSON"),
-                    })
-                    .collect(),
-                stop_reason: message.stop_reason.into(),
-                created_at: message.created_at.to_rfc3339(),
-            },
             Message::BlockAssistant(message) => Self::BlockAssistant {
                 blocks: message.blocks.into_iter().map(Into::into).collect(),
                 stop_reason: message.stop_reason.into(),
@@ -1440,9 +1353,7 @@ impl From<SessionTranscriptRevisionPage> for WireSessionTranscriptRevision {
 mod tests {
     use super::*;
     use meerkat_core::time_compat::SystemTime;
-    use meerkat_core::{
-        AssistantMessage, BlockAssistantMessage, Message, SystemMessage, ToolCall, UserMessage,
-    };
+    use meerkat_core::{BlockAssistantMessage, Message, SystemMessage, UserMessage};
 
     #[test]
     fn test_fork_session_params_roundtrip_typed_replacement() {
@@ -1546,8 +1457,10 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_session_transcript_accepts_public_assistant_shorthand() {
-        let params: RewriteSessionTranscriptParams = serde_json::from_value(serde_json::json!({
+    fn test_rewrite_session_transcript_rejects_legacy_assistant_role() {
+        // The text-shaped `role: "assistant"` rewrite message was folded into
+        // `block_assistant`; the legacy wire form must fail closed at parse.
+        let err = serde_json::from_value::<RewriteSessionTranscriptParams>(serde_json::json!({
             "session_id": "session_123",
             "selection": {
                 "type": "message_range",
@@ -1564,23 +1477,11 @@ mod tests {
                 "kind": "compaction"
             }
         }))
-        .unwrap();
-
-        let message = params
-            .replacement
-            .into_iter()
-            .next()
-            .expect("replacement exists")
-            .into_core()
-            .expect("public assistant shorthand converts");
-        assert!(matches!(
-            message,
-            Message::Assistant(AssistantMessage {
-                content,
-                stop_reason: StopReason::EndTurn,
-                ..
-            }) if content == "Compacted assistant trace"
-        ));
+        .expect_err("legacy assistant rewrite role must be rejected");
+        assert!(
+            err.to_string().contains("assistant"),
+            "rejection should name the unknown role: {err}"
+        );
     }
 
     #[test]
@@ -1852,9 +1753,9 @@ mod tests {
         let history = WireSessionHistory {
             session_id: SessionId::new(),
             session_ref: Some("session://example".to_string()),
-            message_count: 5,
+            message_count: 4,
             offset: 0,
-            limit: Some(5),
+            limit: Some(4),
             has_more: false,
             messages: vec![
                 WireSessionMessage::System {
@@ -1865,23 +1766,19 @@ mod tests {
                     content: WireContentInput::Text("hello".to_string()),
                     created_at: "2026-04-27T00:00:01Z".to_string(),
                 },
-                WireSessionMessage::Assistant {
-                    content: "hi".to_string(),
-                    tool_calls: vec![WireToolCall {
-                        id: "tool-1".to_string(),
-                        name: "search".to_string(),
-                        args: serde_json::value::RawValue::from_string(
-                            r#"{"q":"rust"}"#.to_string(),
-                        )
-                        .expect("fixture args literal is valid JSON"),
-                    }],
-                    stop_reason: WireStopReason::ToolUse,
-                    created_at: "2026-04-27T00:00:02Z".to_string(),
-                },
                 WireSessionMessage::BlockAssistant {
                     blocks: vec![
                         WireAssistantBlock::Reasoning {
                             text: "thinking".to_string(),
+                            meta: None,
+                        },
+                        WireAssistantBlock::ToolUse {
+                            id: "tool-1".to_string(),
+                            name: "search".to_string(),
+                            args: serde_json::value::RawValue::from_string(
+                                r#"{"q":"rust"}"#.to_string(),
+                            )
+                            .expect("fixture args literal is valid JSON"),
                             meta: None,
                         },
                         WireAssistantBlock::Text {
@@ -1932,17 +1829,24 @@ mod tests {
                     meerkat_core::SystemNoticeKind::BackgroundJob,
                     "still running",
                 )),
-                Message::Assistant(AssistantMessage {
-                    content: "hello".to_string(),
-                    tool_calls: vec![ToolCall::new(
-                        "call-1".to_string(),
-                        "search".to_string(),
-                        serde_json::json!({"q":"meerkat"}),
-                    )],
-                    stop_reason: StopReason::ToolUse,
-                    usage: meerkat_core::Usage::default(),
-                    created_at: meerkat_core::types::message_timestamp_now(),
-                }),
+                Message::BlockAssistant(BlockAssistantMessage::new(
+                    vec![
+                        AssistantBlock::Text {
+                            text: "hello".to_string(),
+                            meta: None,
+                        },
+                        AssistantBlock::ToolUse {
+                            id: "call-1".to_string(),
+                            name: "search".to_string(),
+                            args: serde_json::value::RawValue::from_string(
+                                r#"{"q":"meerkat"}"#.to_string(),
+                            )
+                            .expect("fixture args literal is valid JSON"),
+                            meta: None,
+                        },
+                    ],
+                    StopReason::ToolUse,
+                )),
             ],
         };
         let wire: WireSessionHistory = page.into();
@@ -1957,7 +1861,7 @@ mod tests {
         ));
         assert!(matches!(
             wire.messages[2],
-            WireSessionMessage::Assistant { .. }
+            WireSessionMessage::BlockAssistant { .. }
         ));
     }
 

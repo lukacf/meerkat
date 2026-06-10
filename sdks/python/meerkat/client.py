@@ -127,7 +127,6 @@ from .types import (
     SessionTranscriptRewriteResult,
     SessionSummary,
     SessionMessage,
-    SessionToolCall,
     SessionToolResult,
     SkillKey,
     SkillQuarantineDiagnostic,
@@ -3729,14 +3728,6 @@ class MeerkatClient:
             content=MeerkatClient._parse_content_input(content_value)
             if content_value is not None
             else None,
-            tool_calls=[
-                SessionToolCall(
-                    id=tool_call.get("id", ""),
-                    name=tool_call.get("name", ""),
-                    args=tool_call.get("args"),
-                )
-                for tool_call in data.get("tool_calls", [])
-            ],
             stop_reason=data.get("stop_reason"),
             blocks=[
                 MeerkatClient._parse_session_assistant_block(block)
@@ -3777,11 +3768,6 @@ class MeerkatClient:
                     payload["body"] = message.body
                 if message.content is not None:
                     payload["content"] = message.content
-            if message.tool_calls:
-                payload["tool_calls"] = [
-                    {"id": call.id, "name": call.name, "args": call.args}
-                    for call in message.tool_calls
-                ]
             if message.stop_reason is not None:
                 payload["stop_reason"] = message.stop_reason
             if message.blocks:

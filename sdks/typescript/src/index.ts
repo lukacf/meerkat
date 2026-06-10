@@ -128,7 +128,6 @@ export type {
   SessionOptions,
   SessionTranscriptRevision,
   SessionTranscriptRewriteResult,
-  SessionToolCall,
   SessionToolResult,
   SkillQuarantineDiagnostic,
   SkillRuntimeDiagnostics,

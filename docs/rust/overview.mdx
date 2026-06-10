@@ -370,7 +370,7 @@ match event {
 ### Message and ContentBlock
 
 ```rust
-use meerkat::{Message, UserMessage, AssistantMessage, SystemMessage, ToolResult};
+use meerkat::{Message, UserMessage, BlockAssistantMessage, SystemMessage, ToolResult};
 use meerkat::ContentBlock;
 
 let system = Message::System(SystemMessage { content: "You are helpful.".to_string() });

@@ -426,9 +426,6 @@ async fn wait_for_member_histories_to_settle(
                     meerkat_core::types::Message::User(u) => {
                         format!("user:{}", meerkat_core::types::text_content(&u.content))
                     }
-                    meerkat_core::types::Message::Assistant(a) => {
-                        format!("assistant:{}", a.content)
-                    }
                     meerkat_core::types::Message::BlockAssistant(ba) => format!(
                         "block_assistant:{}",
                         ba.blocks
@@ -1039,7 +1036,6 @@ async fn print_conversation(
                     }
                     ("←recv", parts.join(" "))
                 }
-                meerkat_core::types::Message::Assistant(a) => ("said", a.content.clone()),
                 meerkat_core::types::Message::BlockAssistant(ba) => {
                     // Extract text + tool send calls
                     let mut parts = Vec::new();
@@ -1356,13 +1352,6 @@ async fn standalone_pictionary_multimodal_correctness_stress() {
                                     "blocks={} has_img={has_img} text={preview}",
                                     u.content.len()
                                 ),
-                            )
-                        }
-                        meerkat_core::types::Message::Assistant(a) => {
-                            let preview: String = a.content.chars().take(120).collect();
-                            (
-                                "assistant",
-                                format!("tools={} text={preview}", a.tool_calls.len()),
                             )
                         }
                         meerkat_core::types::Message::BlockAssistant(ba) => {

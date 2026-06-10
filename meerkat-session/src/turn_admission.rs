@@ -630,7 +630,7 @@ mod tests {
             .resolve_start_turn_disposition(
                 Some(RuntimeExecutionKind::ResumePending),
                 &meerkat_core::types::ContentInput::Text(String::new()),
-                ObservedSessionTailKind::Assistant,
+                ObservedSessionTailKind::BlockAssistant,
                 0,
             )
             .expect("generated disposition should resolve");

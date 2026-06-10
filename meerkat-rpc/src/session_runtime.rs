@@ -11990,7 +11990,6 @@ mod tests {
             .seed_messages
             .iter()
             .filter_map(|message| match message {
-                Message::Assistant(assistant) => Some(assistant.content.clone()),
                 Message::BlockAssistant(assistant) => {
                     Some(assistant.text_blocks().collect::<Vec<_>>().join("\n"))
                 }

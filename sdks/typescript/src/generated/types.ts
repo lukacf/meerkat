@@ -29,12 +29,6 @@ export interface WireProviderMeta {
   [key: string]: unknown;
 }
 
-export interface WireToolCall {
-  id: string;
-  name: string;
-  args: unknown;
-}
-
 export interface WireToolResult {
   tool_use_id: string;
   content: WireToolResultContent;
@@ -47,7 +41,6 @@ export interface WireSessionMessage {
   kind?: string;
   body?: string;
   content?: WireContentInput;
-  tool_calls?: WireToolCall[];
   stop_reason?: WireStopReason;
   blocks?: WireAssistantBlock[];
   results?: WireToolResult[];

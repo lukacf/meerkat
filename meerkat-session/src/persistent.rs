@@ -7316,12 +7316,13 @@ mod tests {
                 session.push(meerkat_core::types::Message::User(
                     meerkat_core::types::UserMessage::text(prompt.text_content()),
                 ));
-                session.push(meerkat_core::types::Message::Assistant(
-                    meerkat_core::types::AssistantMessage {
-                        content: "ok".to_string(),
-                        tool_calls: Vec::new(),
+                session.push(meerkat_core::types::Message::BlockAssistant(
+                    meerkat_core::types::BlockAssistantMessage {
+                        blocks: vec![meerkat_core::types::AssistantBlock::Text {
+                            text: "ok".to_string(),
+                            meta: None,
+                        }],
                         stop_reason: meerkat_core::types::StopReason::EndTurn,
-                        usage: meerkat_core::types::Usage::default(),
                         created_at: meerkat_core::types::message_timestamp_now(),
                     },
                 ));
@@ -8393,13 +8394,16 @@ mod tests {
             session.push(Message::User(UserMessage::with_blocks(
                 prompt.into_blocks(),
             )));
-            session.push(Message::Assistant(meerkat_core::types::AssistantMessage {
-                content: "ok".to_string(),
-                tool_calls: vec![],
-                stop_reason: meerkat_core::types::StopReason::EndTurn,
-                usage: meerkat_core::types::Usage::default(),
-                created_at: meerkat_core::types::message_timestamp_now(),
-            }));
+            session.push(Message::BlockAssistant(
+                meerkat_core::types::BlockAssistantMessage {
+                    blocks: vec![meerkat_core::types::AssistantBlock::Text {
+                        text: "ok".to_string(),
+                        meta: None,
+                    }],
+                    stop_reason: meerkat_core::types::StopReason::EndTurn,
+                    created_at: meerkat_core::types::message_timestamp_now(),
+                },
+            ));
             Ok(RunResult {
                 text: "ok".to_string(),
                 session_id: session.id().clone(),
@@ -8652,12 +8656,13 @@ mod tests {
             session.push(meerkat_core::types::Message::User(
                 meerkat_core::types::UserMessage::text(prompt.text_content()),
             ));
-            session.push(meerkat_core::types::Message::Assistant(
-                meerkat_core::types::AssistantMessage {
-                    content: "ok".to_string(),
-                    tool_calls: Vec::new(),
+            session.push(meerkat_core::types::Message::BlockAssistant(
+                meerkat_core::types::BlockAssistantMessage {
+                    blocks: vec![meerkat_core::types::AssistantBlock::Text {
+                        text: "ok".to_string(),
+                        meta: None,
+                    }],
                     stop_reason: meerkat_core::types::StopReason::EndTurn,
-                    usage: meerkat_core::types::Usage::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 },
             ));
@@ -9461,13 +9466,16 @@ mod tests {
             .expect("test setup should install legacy inline projection");
 
         let mut incoming = previous.clone();
-        incoming.push(Message::Assistant(meerkat_core::AssistantMessage {
-            content: "after image".to_string(),
-            tool_calls: Vec::new(),
-            stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
-            created_at: meerkat_core::types::message_timestamp_now(),
-        }));
+        incoming.push(Message::BlockAssistant(
+            meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "after image".to_string(),
+                    meta: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                created_at: meerkat_core::types::message_timestamp_now(),
+            },
+        ));
 
         service
             .save_normalized_session(incoming)
@@ -9508,13 +9516,16 @@ mod tests {
         parent.push(Message::User(UserMessage::text(
             "runtime-only prompt".to_string(),
         )));
-        parent.push(Message::Assistant(meerkat_core::AssistantMessage {
-            content: "runtime-only answer".to_string(),
-            tool_calls: Vec::new(),
-            stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
-            created_at: meerkat_core::types::message_timestamp_now(),
-        }));
+        parent.push(Message::BlockAssistant(
+            meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "runtime-only answer".to_string(),
+                    meta: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                created_at: meerkat_core::types::message_timestamp_now(),
+            },
+        ));
         let parent_revision = parent.transcript_revision().expect("parent revision");
 
         let mut incoming = parent.clone();
@@ -9650,13 +9661,16 @@ mod tests {
         let previous_revision = previous.transcript_revision()?;
 
         let mut parent = previous.clone();
-        parent.push(Message::Assistant(meerkat_core::AssistantMessage {
-            content: "runtime-only answer".to_string(),
-            tool_calls: Vec::new(),
-            stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
-            created_at: meerkat_core::types::message_timestamp_now(),
-        }));
+        parent.push(Message::BlockAssistant(
+            meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "runtime-only answer".to_string(),
+                    meta: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                created_at: meerkat_core::types::message_timestamp_now(),
+            },
+        ));
         let parent_revision = parent.transcript_revision()?;
 
         let mut incoming = parent.clone();
@@ -9831,13 +9845,16 @@ mod tests {
             },
             inline_image_block("runtime-parent"),
         ])));
-        parent.push(Message::Assistant(meerkat_core::AssistantMessage {
-            content: "runtime-only answer".to_string(),
-            tool_calls: Vec::new(),
-            stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
-            created_at: meerkat_core::types::message_timestamp_now(),
-        }));
+        parent.push(Message::BlockAssistant(
+            meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "runtime-only answer".to_string(),
+                    meta: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                created_at: meerkat_core::types::message_timestamp_now(),
+            },
+        ));
         let parent_revision = parent.transcript_revision().expect("parent revision");
 
         let mut incoming = parent.clone();
@@ -9860,13 +9877,16 @@ mod tests {
                 Some(parent_revision),
             )
             .expect("compaction rewrite should commit");
-        incoming.push(Message::Assistant(meerkat_core::AssistantMessage {
-            content: "final peer response".to_string(),
-            tool_calls: Vec::new(),
-            stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
-            created_at: meerkat_core::types::message_timestamp_now(),
-        }));
+        incoming.push(Message::BlockAssistant(
+            meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "final peer response".to_string(),
+                    meta: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                created_at: meerkat_core::types::message_timestamp_now(),
+            },
+        ));
         incoming
             .externalize_media(blob_store.as_ref(), 0)
             .await
@@ -9925,13 +9945,16 @@ mod tests {
         stale_parent.push(Message::User(UserMessage::text(
             "stale runtime branch prompt".to_string(),
         )));
-        stale_parent.push(Message::Assistant(meerkat_core::AssistantMessage {
-            content: "stale runtime branch answer".to_string(),
-            tool_calls: Vec::new(),
-            stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
-            created_at: meerkat_core::types::message_timestamp_now(),
-        }));
+        stale_parent.push(Message::BlockAssistant(
+            meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "stale runtime branch answer".to_string(),
+                    meta: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                created_at: meerkat_core::types::message_timestamp_now(),
+            },
+        ));
         let stale_parent_revision = stale_parent.transcript_revision()?;
 
         let mut incoming = stale_parent.clone();
@@ -9949,13 +9972,16 @@ mod tests {
                 Some(stale_parent_revision.clone()),
             )
             .map_err(|err| std::io::Error::other(format!("rewrite should commit: {err}")))?;
-        incoming.push(Message::Assistant(meerkat_core::AssistantMessage {
-            content: "stale branch final response".to_string(),
-            tool_calls: Vec::new(),
-            stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
-            created_at: meerkat_core::types::message_timestamp_now(),
-        }));
+        incoming.push(Message::BlockAssistant(
+            meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "stale branch final response".to_string(),
+                    meta: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                created_at: meerkat_core::types::message_timestamp_now(),
+            },
+        ));
         let incoming_revision = incoming.transcript_revision()?;
         let snapshot = serde_json::to_vec(&incoming)?;
         runtime_store
@@ -10185,13 +10211,16 @@ mod tests {
         store.save(&persisted).await?;
 
         let mut rejected = persisted.clone();
-        rejected.push(Message::Assistant(meerkat_core::AssistantMessage {
-            content: "rejected runtime snapshot".to_string(),
-            tool_calls: Vec::new(),
-            stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
-            created_at: meerkat_core::types::message_timestamp_now(),
-        }));
+        rejected.push(Message::BlockAssistant(
+            meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "rejected runtime snapshot".to_string(),
+                    meta: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                created_at: meerkat_core::types::message_timestamp_now(),
+            },
+        ));
         let rejected_snapshot = serde_json::to_vec(&rejected)?;
 
         let mut newer = rejected.clone();
@@ -10248,13 +10277,16 @@ mod tests {
         store.save(&persisted).await?;
 
         let mut rejected = persisted.clone();
-        rejected.push(Message::Assistant(meerkat_core::AssistantMessage {
-            content: "rejected runtime snapshot".to_string(),
-            tool_calls: Vec::new(),
-            stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
-            created_at: meerkat_core::types::message_timestamp_now(),
-        }));
+        rejected.push(Message::BlockAssistant(
+            meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "rejected runtime snapshot".to_string(),
+                    meta: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                created_at: meerkat_core::types::message_timestamp_now(),
+            },
+        ));
         let rejected_snapshot = serde_json::to_vec(&rejected)?;
 
         let mut newer = rejected.clone();
@@ -10350,13 +10382,16 @@ mod tests {
             .await?;
 
         let mut newer = incoming.clone();
-        newer.push(Message::Assistant(meerkat_core::AssistantMessage {
-            content: "newer runtime authority".to_string(),
-            tool_calls: Vec::new(),
-            stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
-            created_at: meerkat_core::types::message_timestamp_now(),
-        }));
+        newer.push(Message::BlockAssistant(
+            meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "newer runtime authority".to_string(),
+                    meta: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                created_at: meerkat_core::types::message_timestamp_now(),
+            },
+        ));
         let newer_snapshot = serde_json::to_vec(&newer)?;
         gated_runtime_store
             .interlope_before_snapshot_replace(runtime_id.clone(), newer_snapshot.clone())
@@ -10446,13 +10481,16 @@ mod tests {
             .await?;
 
         let mut newer = incoming.clone();
-        newer.push(Message::Assistant(meerkat_core::AssistantMessage {
-            content: "newer runtime authority before quarantine".to_string(),
-            tool_calls: Vec::new(),
-            stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
-            created_at: meerkat_core::types::message_timestamp_now(),
-        }));
+        newer.push(Message::BlockAssistant(
+            meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "newer runtime authority before quarantine".to_string(),
+                    meta: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                created_at: meerkat_core::types::message_timestamp_now(),
+            },
+        ));
         let newer_snapshot = serde_json::to_vec(&newer)?;
         gated_runtime_store.set_fail_snapshot_replaces(true);
         gated_runtime_store
@@ -10521,13 +10559,16 @@ mod tests {
         stale_parent.push(Message::User(UserMessage::text(
             "stale runtime branch prompt".to_string(),
         )));
-        stale_parent.push(Message::Assistant(meerkat_core::AssistantMessage {
-            content: "stale runtime branch answer".to_string(),
-            tool_calls: Vec::new(),
-            stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
-            created_at: meerkat_core::types::message_timestamp_now(),
-        }));
+        stale_parent.push(Message::BlockAssistant(
+            meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "stale runtime branch answer".to_string(),
+                    meta: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                created_at: meerkat_core::types::message_timestamp_now(),
+            },
+        ));
         let stale_parent_revision = stale_parent.transcript_revision()?;
         runtime_store
             .commit_session_snapshot(
@@ -11681,13 +11722,16 @@ mod tests {
             parent.push(Message::User(UserMessage::text(format!(
                 "turn-{turn} question"
             ))));
-            parent.push(Message::Assistant(meerkat_core::AssistantMessage {
-                content: format!("turn-{turn} answer"),
-                tool_calls: Vec::new(),
-                stop_reason: StopReason::EndTurn,
-                usage: Usage::default(),
-                created_at: meerkat_core::types::message_timestamp_now(),
-            }));
+            parent.push(Message::BlockAssistant(
+                meerkat_core::BlockAssistantMessage {
+                    blocks: vec![meerkat_core::AssistantBlock::Text {
+                        text: format!("turn-{turn} answer"),
+                        meta: None,
+                    }],
+                    stop_reason: StopReason::EndTurn,
+                    created_at: meerkat_core::types::message_timestamp_now(),
+                },
+            ));
         }
         let parent_revision = parent.transcript_revision().expect("parent revision");
         store
@@ -11792,13 +11836,16 @@ mod tests {
             parent.push(Message::User(UserMessage::text(format!(
                 "turn-{turn} question"
             ))));
-            parent.push(Message::Assistant(meerkat_core::AssistantMessage {
-                content: format!("turn-{turn} answer"),
-                tool_calls: Vec::new(),
-                stop_reason: StopReason::EndTurn,
-                usage: Usage::default(),
-                created_at: meerkat_core::types::message_timestamp_now(),
-            }));
+            parent.push(Message::BlockAssistant(
+                meerkat_core::BlockAssistantMessage {
+                    blocks: vec![meerkat_core::AssistantBlock::Text {
+                        text: format!("turn-{turn} answer"),
+                        meta: None,
+                    }],
+                    stop_reason: StopReason::EndTurn,
+                    created_at: meerkat_core::types::message_timestamp_now(),
+                },
+            ));
         }
         let parent_revision = parent.transcript_revision().expect("parent revision");
         store
@@ -12568,13 +12615,16 @@ mod tests {
                     &rewrite_session_id,
                     meerkat_core::SessionTranscriptRewriteRequest {
                         selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                        replacement: vec![Message::Assistant(meerkat_core::AssistantMessage {
-                            content: "compact answer".to_string(),
-                            tool_calls: Vec::new(),
-                            stop_reason: StopReason::EndTurn,
-                            usage: Usage::default(),
-                            created_at: meerkat_core::types::message_timestamp_now(),
-                        })],
+                        replacement: vec![Message::BlockAssistant(
+                            meerkat_core::BlockAssistantMessage {
+                                blocks: vec![meerkat_core::AssistantBlock::Text {
+                                    text: "compact answer".to_string(),
+                                    meta: None,
+                                }],
+                                stop_reason: StopReason::EndTurn,
+                                created_at: meerkat_core::types::message_timestamp_now(),
+                            },
+                        )],
                         reason: TranscriptRewriteReason::new("compaction"),
                         actor: Some("test".to_string()),
                         expected_parent_revision: Some(parent_revision),
@@ -12696,13 +12746,16 @@ mod tests {
                 &session_id,
                 meerkat_core::SessionTranscriptRewriteRequest {
                     selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::Assistant(meerkat_core::AssistantMessage {
-                        content: "compact answer".to_string(),
-                        tool_calls: Vec::new(),
-                        stop_reason: StopReason::EndTurn,
-                        usage: Usage::default(),
-                        created_at: meerkat_core::types::message_timestamp_now(),
-                    })],
+                    replacement: vec![Message::BlockAssistant(
+                        meerkat_core::BlockAssistantMessage {
+                            blocks: vec![meerkat_core::AssistantBlock::Text {
+                                text: "compact answer".to_string(),
+                                meta: None,
+                            }],
+                            stop_reason: StopReason::EndTurn,
+                            created_at: meerkat_core::types::message_timestamp_now(),
+                        },
+                    )],
                     reason: TranscriptRewriteReason::new("compaction"),
                     actor: Some("test".to_string()),
                     expected_parent_revision: Some(parent_revision),
@@ -12885,13 +12938,16 @@ mod tests {
                 &session_id,
                 meerkat_core::SessionTranscriptRewriteRequest {
                     selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::Assistant(meerkat_core::AssistantMessage {
-                        content: "compact answer despite audit outage".to_string(),
-                        tool_calls: Vec::new(),
-                        stop_reason: StopReason::EndTurn,
-                        usage: Usage::default(),
-                        created_at: meerkat_core::types::message_timestamp_now(),
-                    })],
+                    replacement: vec![Message::BlockAssistant(
+                        meerkat_core::BlockAssistantMessage {
+                            blocks: vec![meerkat_core::AssistantBlock::Text {
+                                text: "compact answer despite audit outage".to_string(),
+                                meta: None,
+                            }],
+                            stop_reason: StopReason::EndTurn,
+                            created_at: meerkat_core::types::message_timestamp_now(),
+                        },
+                    )],
                     reason: TranscriptRewriteReason::new("compaction"),
                     actor: Some("audit-failure-test".to_string()),
                     expected_parent_revision: Some(parent_revision),
@@ -12917,8 +12973,8 @@ mod tests {
             .expect("session projection remains present");
         assert!(!matches!(
             &raw_saved.messages()[1],
-            Message::Assistant(assistant)
-                if assistant.content == "compact answer despite audit outage"
+            Message::BlockAssistant(assistant)
+                if assistant.to_string() == "compact answer despite audit outage"
         ));
         service
             .read_history(&session_id, SessionHistoryQuery::default())
@@ -13032,13 +13088,16 @@ mod tests {
                 &session_id,
                 meerkat_core::SessionTranscriptRewriteRequest {
                     selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::Assistant(meerkat_core::AssistantMessage {
-                        content: "compact answer before audit projection existed".to_string(),
-                        tool_calls: Vec::new(),
-                        stop_reason: StopReason::EndTurn,
-                        usage: Usage::default(),
-                        created_at: meerkat_core::types::message_timestamp_now(),
-                    })],
+                    replacement: vec![Message::BlockAssistant(
+                        meerkat_core::BlockAssistantMessage {
+                            blocks: vec![meerkat_core::AssistantBlock::Text {
+                                text: "compact answer before audit projection existed".to_string(),
+                                meta: None,
+                            }],
+                            stop_reason: StopReason::EndTurn,
+                            created_at: meerkat_core::types::message_timestamp_now(),
+                        },
+                    )],
                     reason: TranscriptRewriteReason::new("compaction"),
                     actor: Some("audit-repair-test".to_string()),
                     expected_parent_revision: Some(parent_revision),
@@ -13105,26 +13164,32 @@ mod tests {
         incoming
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(meerkat_core::AssistantMessage {
-                    content: "internal compact answer".to_string(),
-                    tool_calls: Vec::new(),
-                    stop_reason: StopReason::EndTurn,
-                    usage: Usage::default(),
-                    created_at: meerkat_core::types::message_timestamp_now(),
-                })],
+                vec![Message::BlockAssistant(
+                    meerkat_core::BlockAssistantMessage {
+                        blocks: vec![meerkat_core::AssistantBlock::Text {
+                            text: "internal compact answer".to_string(),
+                            meta: None,
+                        }],
+                        stop_reason: StopReason::EndTurn,
+                        created_at: meerkat_core::types::message_timestamp_now(),
+                    },
+                )],
                 TranscriptRewriteReason::new("compaction"),
                 Some("meerkat-core".to_string()),
                 Some(parent_revision),
             )
             .expect("internal rewrite should commit");
         incoming.push(Message::User(UserMessage::text("follow-up".to_string())));
-        incoming.push(Message::Assistant(meerkat_core::AssistantMessage {
-            content: "follow-up answer".to_string(),
-            tool_calls: Vec::new(),
-            stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
-            created_at: meerkat_core::types::message_timestamp_now(),
-        }));
+        incoming.push(Message::BlockAssistant(
+            meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "follow-up answer".to_string(),
+                    meta: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                created_at: meerkat_core::types::message_timestamp_now(),
+            },
+        ));
         let incoming_revision =
             meerkat_core::transcript_messages_digest(incoming.messages()).expect("digest");
 
@@ -13181,13 +13246,16 @@ mod tests {
         let first = incoming
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(meerkat_core::AssistantMessage {
-                    content: "first compact answer".to_string(),
-                    tool_calls: Vec::new(),
-                    stop_reason: StopReason::EndTurn,
-                    usage: Usage::default(),
-                    created_at: meerkat_core::types::message_timestamp_now(),
-                })],
+                vec![Message::BlockAssistant(
+                    meerkat_core::BlockAssistantMessage {
+                        blocks: vec![meerkat_core::AssistantBlock::Text {
+                            text: "first compact answer".to_string(),
+                            meta: None,
+                        }],
+                        stop_reason: StopReason::EndTurn,
+                        created_at: meerkat_core::types::message_timestamp_now(),
+                    },
+                )],
                 TranscriptRewriteReason::new("compaction"),
                 Some("meerkat-core".to_string()),
                 Some(parent_revision),
@@ -13196,13 +13264,16 @@ mod tests {
         incoming
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(meerkat_core::AssistantMessage {
-                    content: "second compact answer".to_string(),
-                    tool_calls: Vec::new(),
-                    stop_reason: StopReason::EndTurn,
-                    usage: Usage::default(),
-                    created_at: meerkat_core::types::message_timestamp_now(),
-                })],
+                vec![Message::BlockAssistant(
+                    meerkat_core::BlockAssistantMessage {
+                        blocks: vec![meerkat_core::AssistantBlock::Text {
+                            text: "second compact answer".to_string(),
+                            meta: None,
+                        }],
+                        stop_reason: StopReason::EndTurn,
+                        created_at: meerkat_core::types::message_timestamp_now(),
+                    },
+                )],
                 TranscriptRewriteReason::new("synthetic_notice_cleanup"),
                 Some("meerkat-core".to_string()),
                 Some(first.revision),
@@ -13258,37 +13329,46 @@ mod tests {
         incoming
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(meerkat_core::AssistantMessage {
-                    content: "first compact answer".to_string(),
-                    tool_calls: Vec::new(),
-                    stop_reason: StopReason::EndTurn,
-                    usage: Usage::default(),
-                    created_at: meerkat_core::types::message_timestamp_now(),
-                })],
+                vec![Message::BlockAssistant(
+                    meerkat_core::BlockAssistantMessage {
+                        blocks: vec![meerkat_core::AssistantBlock::Text {
+                            text: "first compact answer".to_string(),
+                            meta: None,
+                        }],
+                        stop_reason: StopReason::EndTurn,
+                        created_at: meerkat_core::types::message_timestamp_now(),
+                    },
+                )],
                 TranscriptRewriteReason::new("compaction"),
                 Some("meerkat-core".to_string()),
                 Some(parent_revision),
             )
             .expect("first internal rewrite should commit");
         incoming.push(Message::User(UserMessage::text("second".to_string())));
-        incoming.push(Message::Assistant(meerkat_core::AssistantMessage {
-            content: "verbose second answer".to_string(),
-            tool_calls: Vec::new(),
-            stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
-            created_at: meerkat_core::types::message_timestamp_now(),
-        }));
+        incoming.push(Message::BlockAssistant(
+            meerkat_core::BlockAssistantMessage {
+                blocks: vec![meerkat_core::AssistantBlock::Text {
+                    text: "verbose second answer".to_string(),
+                    meta: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                created_at: meerkat_core::types::message_timestamp_now(),
+            },
+        ));
         let bridge_revision = incoming.transcript_revision().expect("bridge revision");
         incoming
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 3, end: 4 },
-                vec![Message::Assistant(meerkat_core::AssistantMessage {
-                    content: "second compact answer".to_string(),
-                    tool_calls: Vec::new(),
-                    stop_reason: StopReason::EndTurn,
-                    usage: Usage::default(),
-                    created_at: meerkat_core::types::message_timestamp_now(),
-                })],
+                vec![Message::BlockAssistant(
+                    meerkat_core::BlockAssistantMessage {
+                        blocks: vec![meerkat_core::AssistantBlock::Text {
+                            text: "second compact answer".to_string(),
+                            meta: None,
+                        }],
+                        stop_reason: StopReason::EndTurn,
+                        created_at: meerkat_core::types::message_timestamp_now(),
+                    },
+                )],
                 TranscriptRewriteReason::new("compaction"),
                 Some("meerkat-core".to_string()),
                 Some(bridge_revision),
@@ -13345,13 +13425,16 @@ mod tests {
         let first = incoming
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(meerkat_core::AssistantMessage {
-                    content: "first compact answer".to_string(),
-                    tool_calls: Vec::new(),
-                    stop_reason: StopReason::EndTurn,
-                    usage: Usage::default(),
-                    created_at: meerkat_core::types::message_timestamp_now(),
-                })],
+                vec![Message::BlockAssistant(
+                    meerkat_core::BlockAssistantMessage {
+                        blocks: vec![meerkat_core::AssistantBlock::Text {
+                            text: "first compact answer".to_string(),
+                            meta: None,
+                        }],
+                        stop_reason: StopReason::EndTurn,
+                        created_at: meerkat_core::types::message_timestamp_now(),
+                    },
+                )],
                 TranscriptRewriteReason::new("compaction"),
                 Some("meerkat-core".to_string()),
                 Some(parent_revision),
@@ -13360,13 +13443,16 @@ mod tests {
         incoming
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::Assistant(meerkat_core::AssistantMessage {
-                    content: "second compact answer".to_string(),
-                    tool_calls: Vec::new(),
-                    stop_reason: StopReason::EndTurn,
-                    usage: Usage::default(),
-                    created_at: meerkat_core::types::message_timestamp_now(),
-                })],
+                vec![Message::BlockAssistant(
+                    meerkat_core::BlockAssistantMessage {
+                        blocks: vec![meerkat_core::AssistantBlock::Text {
+                            text: "second compact answer".to_string(),
+                            meta: None,
+                        }],
+                        stop_reason: StopReason::EndTurn,
+                        created_at: meerkat_core::types::message_timestamp_now(),
+                    },
+                )],
                 TranscriptRewriteReason::new("synthetic_notice_cleanup"),
                 Some("meerkat-core".to_string()),
                 Some(first.revision.clone()),
@@ -13393,7 +13479,7 @@ mod tests {
             .expect("last audited projection should remain readable");
         assert!(matches!(
             &history.messages[1],
-            Message::Assistant(assistant) if assistant.content == "first compact answer"
+            Message::BlockAssistant(assistant) if assistant.to_string() == "first compact answer"
         ));
     }
 
@@ -13426,13 +13512,16 @@ mod tests {
                 &session_id,
                 meerkat_core::SessionTranscriptRewriteRequest {
                     selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::Assistant(meerkat_core::AssistantMessage {
-                        content: "same length durable rewrite".to_string(),
-                        tool_calls: Vec::new(),
-                        stop_reason: StopReason::EndTurn,
-                        usage: Usage::default(),
-                        created_at: meerkat_core::types::message_timestamp_now(),
-                    })],
+                    replacement: vec![Message::BlockAssistant(
+                        meerkat_core::BlockAssistantMessage {
+                            blocks: vec![meerkat_core::AssistantBlock::Text {
+                                text: "same length durable rewrite".to_string(),
+                                meta: None,
+                            }],
+                            stop_reason: StopReason::EndTurn,
+                            created_at: meerkat_core::types::message_timestamp_now(),
+                        },
+                    )],
                     reason: TranscriptRewriteReason::new("compaction"),
                     actor: Some("stale-live-test".to_string()),
                     expected_parent_revision: Some(parent_revision),
@@ -13487,13 +13576,16 @@ mod tests {
                 &session_id,
                 meerkat_core::SessionTranscriptRewriteRequest {
                     selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::Assistant(meerkat_core::AssistantMessage {
-                        content: "clock skew compact".to_string(),
-                        tool_calls: Vec::new(),
-                        stop_reason: StopReason::EndTurn,
-                        usage: Usage::default(),
-                        created_at: meerkat_core::types::message_timestamp_now(),
-                    })],
+                    replacement: vec![Message::BlockAssistant(
+                        meerkat_core::BlockAssistantMessage {
+                            blocks: vec![meerkat_core::AssistantBlock::Text {
+                                text: "clock skew compact".to_string(),
+                                meta: None,
+                            }],
+                            stop_reason: StopReason::EndTurn,
+                            created_at: meerkat_core::types::message_timestamp_now(),
+                        },
+                    )],
                     reason: TranscriptRewriteReason::new("compaction"),
                     actor: Some("clock-skew-test".to_string()),
                     expected_parent_revision: Some(original_revision.clone()),
@@ -13749,13 +13841,16 @@ mod tests {
                 &session_id,
                 meerkat_core::SessionTranscriptRewriteRequest {
                     selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::Assistant(meerkat_core::AssistantMessage {
-                        content: "event replay first compacted trace".to_string(),
-                        tool_calls: Vec::new(),
-                        stop_reason: StopReason::EndTurn,
-                        usage: Usage::default(),
-                        created_at: meerkat_core::types::message_timestamp_now(),
-                    })],
+                    replacement: vec![Message::BlockAssistant(
+                        meerkat_core::BlockAssistantMessage {
+                            blocks: vec![meerkat_core::AssistantBlock::Text {
+                                text: "event replay first compacted trace".to_string(),
+                                meta: None,
+                            }],
+                            stop_reason: StopReason::EndTurn,
+                            created_at: meerkat_core::types::message_timestamp_now(),
+                        },
+                    )],
                     reason: TranscriptRewriteReason::new("compaction"),
                     actor: Some("replay-followup-test".to_string()),
                     expected_parent_revision: Some(parent_revision),
@@ -13788,13 +13883,16 @@ mod tests {
                 &session_id,
                 meerkat_core::SessionTranscriptRewriteRequest {
                     selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::Assistant(meerkat_core::AssistantMessage {
-                        content: "event replay second compacted trace".to_string(),
-                        tool_calls: Vec::new(),
-                        stop_reason: StopReason::EndTurn,
-                        usage: Usage::default(),
-                        created_at: meerkat_core::types::message_timestamp_now(),
-                    })],
+                    replacement: vec![Message::BlockAssistant(
+                        meerkat_core::BlockAssistantMessage {
+                            blocks: vec![meerkat_core::AssistantBlock::Text {
+                                text: "event replay second compacted trace".to_string(),
+                                meta: None,
+                            }],
+                            stop_reason: StopReason::EndTurn,
+                            created_at: meerkat_core::types::message_timestamp_now(),
+                        },
+                    )],
                     reason: TranscriptRewriteReason::new("compaction"),
                     actor: Some("replay-followup-test".to_string()),
                     expected_parent_revision: Some(first.revision),
@@ -13815,8 +13913,8 @@ mod tests {
         );
         assert!(matches!(
             &saved.messages()[1],
-            Message::Assistant(assistant)
-                if assistant.content == "event replay second compacted trace"
+            Message::BlockAssistant(assistant)
+                if assistant.to_string() == "event replay second compacted trace"
         ));
     }
 
@@ -13857,13 +13955,16 @@ mod tests {
                 &session_id,
                 meerkat_core::SessionTranscriptRewriteRequest {
                     selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::Assistant(meerkat_core::AssistantMessage {
-                        content: "event replay compacted trace".to_string(),
-                        tool_calls: Vec::new(),
-                        stop_reason: StopReason::EndTurn,
-                        usage: Usage::default(),
-                        created_at: meerkat_core::types::message_timestamp_now(),
-                    })],
+                    replacement: vec![Message::BlockAssistant(
+                        meerkat_core::BlockAssistantMessage {
+                            blocks: vec![meerkat_core::AssistantBlock::Text {
+                                text: "event replay compacted trace".to_string(),
+                                meta: None,
+                            }],
+                            stop_reason: StopReason::EndTurn,
+                            created_at: meerkat_core::types::message_timestamp_now(),
+                        },
+                    )],
                     reason: TranscriptRewriteReason::new("compaction"),
                     actor: Some("replay-restore-test".to_string()),
                     expected_parent_revision: Some(parent_revision.clone()),
@@ -13957,13 +14058,16 @@ mod tests {
                 &session_id,
                 meerkat_core::SessionTranscriptRewriteRequest {
                     selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::Assistant(meerkat_core::AssistantMessage {
-                        content: "first compacted trace".to_string(),
-                        tool_calls: Vec::new(),
-                        stop_reason: StopReason::EndTurn,
-                        usage: Usage::default(),
-                        created_at: meerkat_core::types::message_timestamp_now(),
-                    })],
+                    replacement: vec![Message::BlockAssistant(
+                        meerkat_core::BlockAssistantMessage {
+                            blocks: vec![meerkat_core::AssistantBlock::Text {
+                                text: "first compacted trace".to_string(),
+                                meta: None,
+                            }],
+                            stop_reason: StopReason::EndTurn,
+                            created_at: meerkat_core::types::message_timestamp_now(),
+                        },
+                    )],
                     reason: TranscriptRewriteReason::new("compaction"),
                     actor: Some("partial-graph-replay-test".to_string()),
                     expected_parent_revision: Some(original_revision),
@@ -13983,13 +14087,16 @@ mod tests {
                 &session_id,
                 meerkat_core::SessionTranscriptRewriteRequest {
                     selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::Assistant(meerkat_core::AssistantMessage {
-                        content: "second compacted trace".to_string(),
-                        tool_calls: Vec::new(),
-                        stop_reason: StopReason::EndTurn,
-                        usage: Usage::default(),
-                        created_at: meerkat_core::types::message_timestamp_now(),
-                    })],
+                    replacement: vec![Message::BlockAssistant(
+                        meerkat_core::BlockAssistantMessage {
+                            blocks: vec![meerkat_core::AssistantBlock::Text {
+                                text: "second compacted trace".to_string(),
+                                meta: None,
+                            }],
+                            stop_reason: StopReason::EndTurn,
+                            created_at: meerkat_core::types::message_timestamp_now(),
+                        },
+                    )],
                     reason: TranscriptRewriteReason::new("compaction"),
                     actor: Some("partial-graph-replay-test".to_string()),
                     expected_parent_revision: Some(first.revision),
@@ -14069,13 +14176,16 @@ mod tests {
                 &session_id,
                 meerkat_core::SessionTranscriptRewriteRequest {
                     selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::Assistant(meerkat_core::AssistantMessage {
-                        content: "compacted trace before normal turn".to_string(),
-                        tool_calls: Vec::new(),
-                        stop_reason: StopReason::EndTurn,
-                        usage: Usage::default(),
-                        created_at: meerkat_core::types::message_timestamp_now(),
-                    })],
+                    replacement: vec![Message::BlockAssistant(
+                        meerkat_core::BlockAssistantMessage {
+                            blocks: vec![meerkat_core::AssistantBlock::Text {
+                                text: "compacted trace before normal turn".to_string(),
+                                meta: None,
+                            }],
+                            stop_reason: StopReason::EndTurn,
+                            created_at: meerkat_core::types::message_timestamp_now(),
+                        },
+                    )],
                     reason: TranscriptRewriteReason::new("compaction"),
                     actor: Some("graph-loss-replay-test".to_string()),
                     expected_parent_revision: Some(original_revision.clone()),
@@ -14215,13 +14325,16 @@ mod tests {
                 &session_id,
                 meerkat_core::SessionTranscriptRewriteRequest {
                     selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::Assistant(meerkat_core::AssistantMessage {
-                        content: "first compact answer".to_string(),
-                        tool_calls: Vec::new(),
-                        stop_reason: StopReason::EndTurn,
-                        usage: meerkat_core::Usage::default(),
-                        created_at: meerkat_core::types::message_timestamp_now(),
-                    })],
+                    replacement: vec![Message::BlockAssistant(
+                        meerkat_core::BlockAssistantMessage {
+                            blocks: vec![meerkat_core::AssistantBlock::Text {
+                                text: "first compact answer".to_string(),
+                                meta: None,
+                            }],
+                            stop_reason: StopReason::EndTurn,
+                            created_at: meerkat_core::types::message_timestamp_now(),
+                        },
+                    )],
                     reason: TranscriptRewriteReason::new("compaction"),
                     actor: Some("replay-test".to_string()),
                     expected_parent_revision: Some(initial_parent),
@@ -14248,13 +14361,16 @@ mod tests {
                 &session_id,
                 meerkat_core::SessionTranscriptRewriteRequest {
                     selection: TranscriptRewriteSelection::MessageRange { start: 3, end: 4 },
-                    replacement: vec![Message::Assistant(meerkat_core::AssistantMessage {
-                        content: "second compact answer".to_string(),
-                        tool_calls: Vec::new(),
-                        stop_reason: StopReason::EndTurn,
-                        usage: meerkat_core::Usage::default(),
-                        created_at: meerkat_core::types::message_timestamp_now(),
-                    })],
+                    replacement: vec![Message::BlockAssistant(
+                        meerkat_core::BlockAssistantMessage {
+                            blocks: vec![meerkat_core::AssistantBlock::Text {
+                                text: "second compact answer".to_string(),
+                                meta: None,
+                            }],
+                            stop_reason: StopReason::EndTurn,
+                            created_at: meerkat_core::types::message_timestamp_now(),
+                        },
+                    )],
                     reason: TranscriptRewriteReason::new("compaction"),
                     actor: Some("replay-test".to_string()),
                     expected_parent_revision: Some(bridge_parent.clone()),
@@ -14289,7 +14405,7 @@ mod tests {
         assert_eq!(recovered.session_id, session_id);
         assert!(matches!(
             &recovered.messages[3],
-            Message::Assistant(assistant) if assistant.content == "second compact answer"
+            Message::BlockAssistant(assistant) if assistant.to_string() == "second compact answer"
         ));
         let retained_bridge = recovery_service
             .read_transcript_revision(

@@ -208,12 +208,6 @@ export interface SessionInfo {
   readonly labels: Readonly<Record<string, string>>;
 }
 
-export interface SessionToolCall {
-  readonly id: string;
-  readonly name: string;
-  readonly args: unknown;
-}
-
 export interface SessionToolResult {
   readonly toolUseId: string;
   readonly content: ContentInput;
@@ -256,7 +250,6 @@ export interface SessionMessage {
   readonly kind?: string;
   readonly body?: string;
   readonly content?: ContentInput;
-  readonly toolCalls: readonly SessionToolCall[];
   readonly stopReason?: string;
   readonly blocks: readonly SessionAssistantBlock[];
   readonly results: readonly SessionToolResult[];
@@ -361,13 +354,6 @@ export type TranscriptRewriteMessage =
   | {
       readonly role: "user";
       readonly content: ContentInput;
-      readonly created_at?: string;
-    }
-  | {
-      readonly role: "assistant";
-      readonly content: string;
-      readonly tool_calls?: readonly SessionToolCall[];
-      readonly stop_reason?: string;
       readonly created_at?: string;
     }
   | {

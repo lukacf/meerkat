@@ -280,31 +280,6 @@ impl OpenAiCompatibleClient {
                         }));
                     }
                 }
-                Message::Assistant(assistant) => {
-                    let tool_calls: Vec<Value> = assistant
-                        .tool_calls
-                        .iter()
-                        .map(|tool_call| {
-                            serde_json::json!({
-                                "id": tool_call.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tool_call.name,
-                                    "arguments": tool_call.args.to_string(),
-                                }
-                            })
-                        })
-                        .collect();
-                    out.push(serde_json::json!({
-                        "role": "assistant",
-                        "content": if assistant.content.is_empty() {
-                            Value::Null
-                        } else {
-                            Value::String(assistant.content.clone())
-                        },
-                        "tool_calls": tool_calls
-                    }));
-                }
                 Message::BlockAssistant(assistant) => {
                     let mut text_parts = Vec::new();
                     let mut tool_calls = Vec::new();

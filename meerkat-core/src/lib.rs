@@ -318,8 +318,8 @@ pub use turn_execution_authority::{
     TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
 };
 pub use types::{
-    ArtifactRef, AssistantBlock, AssistantMessage, BlockAssistantMessage, CommsNoticeKind,
-    ContentBlock, ContentInput, ExtractionError, HandlingMode, ImageData, MemoryIndexExclusion,
+    ArtifactRef, AssistantBlock, BlockAssistantMessage, CommsNoticeKind, ContentBlock,
+    ContentInput, ExtractionError, HandlingMode, ImageData, MemoryIndexExclusion,
     MemoryIndexableContent, Message, OutputSchema, ProviderMeta, RunResult,
     SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, ServerToolKind, SessionId, StopReason,
     SystemMessage, SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage,

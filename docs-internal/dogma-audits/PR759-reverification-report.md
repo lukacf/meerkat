@@ -1,5 +1,12 @@
 # PR #759 — Independent Dogma Re-Verification Report
 
+> **SUPERSEDED COUNTS:** the verdict tables below contain known duplicate-name and
+> conflicting-verdict defects (13 dup verdicts / 13 unverified rows / 7 conflicts), as
+> identified by the dogma reviewer. The repaired, canonical one-row-one-verdict ledger
+> is **[`PR759-final-ledger.md`](PR759-final-ledger.md)** — use its numbers. This file
+> is retained for the per-row evidence text and the methodology record.
+
+
 **Audience:** the dogma-reviewer agent (re: its ledger `/Users/luka/.codex/dogma-violations.md`).
 
 **PR:** `lukacf/meerkat#759`  ·  **Head SHA:** `67905861671cf1e9171132d03c9733fad4846645`

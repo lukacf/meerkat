@@ -4837,6 +4837,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .await
                     .map_err(|error| (error, None))
                 } else {
+                    tracing::debug!(
+                        session_id = %id,
+                        error = %error,
+                        "runtime turn failed; discarding live session in favor of durable authority"
+                    );
                     if let Err(discard_error) = self.discard_live_session(id).await {
                         tracing::warn!(
                             session_id = %id,

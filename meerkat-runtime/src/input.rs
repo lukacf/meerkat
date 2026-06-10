@@ -894,17 +894,13 @@ fn external_event_notice_renderable(event: &ExternalEventInput) -> CoreRenderabl
 }
 
 fn input_to_append(input: &Input) -> Option<ConversationAppend> {
-    if matches!(
-        input,
-        Input::Peer(PeerInput {
-            convention: Some(PeerConvention::ResponseTerminal { .. }),
-            blocks: None,
-            ..
-        })
-    ) {
-        return None;
-    }
-
+    // Terminal peer responses always carry their typed comms notice as the
+    // turn's conversation append — with or without multimodal blocks. The
+    // former `blocks: None => no append` special case left the mandatory
+    // `AppendContextAndRun` reaction turn with a fabricated empty prompt,
+    // which providers reject (Anthropic: "user messages must have non-empty
+    // content") and which violates the typed-run-input doctrine that no
+    // empty-string prompt is ever synthesized.
     let (role, content) = match input {
         Input::Prompt(p)
             if !p.typed_turn_appends.is_empty()

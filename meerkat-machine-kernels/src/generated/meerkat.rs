@@ -777,8 +777,12 @@ impl std::fmt::Display for AdmissionQueueActionKind {
 )]
 pub enum AdmissionRejectReasonKind {
     #[default]
-    #[serde(rename = "DurabilityViolation")]
-    DurabilityViolation,
+    #[serde(rename = "DurabilityMissing")]
+    DurabilityMissing,
+    #[serde(rename = "ExternalDerivedDurabilityForbidden")]
+    ExternalDerivedDurabilityForbidden,
+    #[serde(rename = "DerivedDurabilityForbiddenForInputKind")]
+    DerivedDurabilityForbiddenForInputKind,
     #[serde(rename = "PeerHandlingModeInvalid")]
     PeerHandlingModeInvalid,
     #[serde(rename = "PeerResponseTerminalInvalid")]
@@ -787,7 +791,11 @@ pub enum AdmissionRejectReasonKind {
 impl AdmissionRejectReasonKind {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::DurabilityViolation => "DurabilityViolation",
+            Self::DurabilityMissing => "DurabilityMissing",
+            Self::ExternalDerivedDurabilityForbidden => "ExternalDerivedDurabilityForbidden",
+            Self::DerivedDurabilityForbiddenForInputKind => {
+                "DerivedDurabilityForbiddenForInputKind"
+            }
             Self::PeerHandlingModeInvalid => "PeerHandlingModeInvalid",
             Self::PeerResponseTerminalInvalid => "PeerResponseTerminalInvalid",
         }
@@ -797,7 +805,11 @@ impl std::convert::TryFrom<&str> for AdmissionRejectReasonKind {
     type Error = String;
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
-            "DurabilityViolation" => Ok(Self::DurabilityViolation),
+            "DurabilityMissing" => Ok(Self::DurabilityMissing),
+            "ExternalDerivedDurabilityForbidden" => Ok(Self::ExternalDerivedDurabilityForbidden),
+            "DerivedDurabilityForbiddenForInputKind" => {
+                Ok(Self::DerivedDurabilityForbiddenForInputKind)
+            }
             "PeerHandlingModeInvalid" => Ok(Self::PeerHandlingModeInvalid),
             "PeerResponseTerminalInvalid" => Ok(Self::PeerResponseTerminalInvalid),
             other => Err(format!("invalid AdmissionRejectReasonKind value `{other}`")),
@@ -14492,9 +14504,15 @@ pub enum TransitionId {
     AcceptWithoutWakeIdle,
     AcceptWithoutWakeAttached,
     AcceptWithoutWakeRunning,
-    ResolveAdmissionValidationDurabilityRejectedIdle,
-    ResolveAdmissionValidationDurabilityRejectedAttached,
-    ResolveAdmissionValidationDurabilityRejectedRunning,
+    ResolveAdmissionValidationDurabilityMissingRejectedIdle,
+    ResolveAdmissionValidationDurabilityMissingRejectedAttached,
+    ResolveAdmissionValidationDurabilityMissingRejectedRunning,
+    ResolveAdmissionValidationExternalDerivedRejectedIdle,
+    ResolveAdmissionValidationExternalDerivedRejectedAttached,
+    ResolveAdmissionValidationExternalDerivedRejectedRunning,
+    ResolveAdmissionValidationDerivedKindRejectedIdle,
+    ResolveAdmissionValidationDerivedKindRejectedAttached,
+    ResolveAdmissionValidationDerivedKindRejectedRunning,
     ResolveAdmissionValidationPeerHandlingRejectedIdle,
     ResolveAdmissionValidationPeerHandlingRejectedAttached,
     ResolveAdmissionValidationPeerHandlingRejectedRunning,

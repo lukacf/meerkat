@@ -1912,10 +1912,16 @@ pub enum PeerResponseTerminalObservedStatus {
     Cancelled,
 }
 
+/// Typed admission-validation rejection reason emitted on
+/// `AdmissionValidationResolved`. The machine names which validation rule
+/// fired; shells render display text from this fact instead of mirroring the
+/// guard rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum AdmissionRejectReasonKind {
     #[default]
-    DurabilityViolation,
+    DurabilityMissing,
+    ExternalDerivedDurabilityForbidden,
+    DerivedDurabilityForbiddenForInputKind,
     PeerHandlingModeInvalid,
     PeerResponseTerminalInvalid,
 }
@@ -9163,27 +9169,58 @@ macro_rules! meerkat_catalog_machine_dsl {
         // accepted/rejected result class and typed rejection reason are emitted
         // here before idempotency, lifecycle, ledger, or surface projections
         // can change.
-        transition ResolveAdmissionValidationDurabilityRejected {
+        transition ResolveAdmissionValidationDurabilityMissingRejected {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionValidation { input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
-            guard "durability_invalid" {
+            guard "durability_missing" {
                 durability == InputDurabilityKind::Missing
-                || (durability == InputDurabilityKind::Derived
-                    && (input_origin == AdmissionInputOriginKind::Operator
-                        || input_origin == AdmissionInputOriginKind::Peer
-                        || input_origin == AdmissionInputOriginKind::External
-                        || input_kind == AdmissionInputKind::Prompt
-                        || input_kind == AdmissionInputKind::PeerMessage
-                        || input_kind == AdmissionInputKind::PeerRequest
-                        || input_kind == AdmissionInputKind::PeerResponseTerminal
-                        || input_kind == AdmissionInputKind::FlowStep))
             }
             update {}
             to Idle
             emit AdmissionValidationResolved {
                 input_id: input_id,
                 result: AdmissionValidationResultKind::Reject,
-                reject_reason: Some(AdmissionRejectReasonKind::DurabilityViolation)
+                reject_reason: Some(AdmissionRejectReasonKind::DurabilityMissing)
+            }
+        }
+
+        transition ResolveAdmissionValidationExternalDerivedRejected {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionValidation { input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
+            guard "external_derived_forbidden" {
+                durability == InputDurabilityKind::Derived
+                && (input_origin == AdmissionInputOriginKind::Operator
+                    || input_origin == AdmissionInputOriginKind::Peer
+                    || input_origin == AdmissionInputOriginKind::External)
+            }
+            update {}
+            to Idle
+            emit AdmissionValidationResolved {
+                input_id: input_id,
+                result: AdmissionValidationResultKind::Reject,
+                reject_reason: Some(AdmissionRejectReasonKind::ExternalDerivedDurabilityForbidden)
+            }
+        }
+
+        transition ResolveAdmissionValidationDerivedKindRejected {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionValidation { input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
+            guard "derived_forbidden_for_input_kind" {
+                durability == InputDurabilityKind::Derived
+                && (input_origin == AdmissionInputOriginKind::Flow
+                    || input_origin == AdmissionInputOriginKind::System)
+                && (input_kind == AdmissionInputKind::Prompt
+                    || input_kind == AdmissionInputKind::PeerMessage
+                    || input_kind == AdmissionInputKind::PeerRequest
+                    || input_kind == AdmissionInputKind::PeerResponseTerminal
+                    || input_kind == AdmissionInputKind::FlowStep)
+            }
+            update {}
+            to Idle
+            emit AdmissionValidationResolved {
+                input_id: input_id,
+                result: AdmissionValidationResultKind::Reject,
+                reject_reason: Some(AdmissionRejectReasonKind::DerivedDurabilityForbiddenForInputKind)
             }
         }
 

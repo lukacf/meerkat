@@ -986,6 +986,23 @@ pub fn resolve_create_session_default_model(config: &Config) -> String {
     if !config.agent.model.is_empty() {
         return config.agent.model.clone();
     }
+    resolve_provider_catalog_default_model(config)
+}
+
+/// Tiers 2–3 of [`resolve_create_session_default_model`]: the configured
+/// per-provider default walked in catalog [`provider_priority`] order, then the
+/// catalog [`global_default_model`] terminal fallback — *without* consulting
+/// `config.agent.model`.
+///
+/// This is the seam for callers that must resolve a default while explicitly
+/// overriding the operator's global knob (e.g. the CLI's legacy-default
+/// detection, which replaces a known-stale `config.agent.model` value). Every
+/// other caller should use [`resolve_create_session_default_model`].
+///
+/// [`provider_priority`]: meerkat_core::model_profile::catalog::provider_priority
+/// [`global_default_model`]: meerkat_core::model_profile::catalog::global_default_model
+#[must_use]
+pub fn resolve_provider_catalog_default_model(config: &Config) -> String {
     let from_provider_priority = meerkat_core::model_profile::catalog::provider_priority()
         .iter()
         .find_map(|provider| {

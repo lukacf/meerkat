@@ -617,7 +617,9 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "AdmissionRejectReasonKind",
                 &[
-                    "DurabilityViolation",
+                    "DurabilityMissing",
+                    "ExternalDerivedDurabilityForbidden",
+                    "DerivedDurabilityForbiddenForInputKind",
                     "PeerHandlingModeInvalid",
                     "PeerResponseTerminalInvalid",
                 ],

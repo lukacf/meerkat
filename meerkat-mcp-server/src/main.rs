@@ -215,24 +215,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let notifier_writer = writer.clone();
                         let notifier: meerkat_mcp_server::EventNotifier =
                             Arc::new(move |session_id, event| {
-                                let session_id = session_id.to_string();
-                                let event_value = serde_json::to_value(event).unwrap_or_else(|_| {
-                                    json!({
-                                        "error": "failed_to_serialize_event"
-                                    })
-                                });
-                                let notification = json!({
-                                    "jsonrpc": "2.0",
-                                    "method": "notifications/message",
-                                    "params": {
-                                        "level": "info",
-                                        "data": {
-                                            "source": "meerkat",
-                                            "session_id": session_id,
-                                            "event": event_value
-                                        }
-                                    }
-                                });
+                                let notification = event_notification_json(session_id, event);
                                 let writer = notifier_writer.clone();
                                 tokio::spawn(async move {
                                     let _ = writer.send(notification).await;
@@ -404,10 +387,92 @@ fn request_admission_error_response(id: Option<Value>, err: RequestAdmissionErro
     }
 }
 
+/// Build the `notifications/message` payload for an agent event.
+///
+/// Serialization of the authoritative event is fallible; a failure must
+/// surface AS a fault — an `error`-level notification carrying the typed serde
+/// cause — never a fabricated success-shaped placeholder riding the normal
+/// `info` channel (the laundering shape this replaced).
+fn event_notification_json<T: serde::Serialize>(session_id: &str, event: &T) -> Value {
+    match serde_json::to_value(event) {
+        Ok(event_value) => json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/message",
+            "params": {
+                "level": "info",
+                "data": {
+                    "source": "meerkat",
+                    "session_id": session_id,
+                    "event": event_value
+                }
+            }
+        }),
+        Err(serialize_error) => json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/message",
+            "params": {
+                "level": "error",
+                "data": {
+                    "source": "meerkat",
+                    "session_id": session_id,
+                    "error": "event_serialization_failed",
+                    "message": serialize_error.to_string()
+                }
+            }
+        }),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    struct FailingSerialize;
+
+    impl serde::Serialize for FailingSerialize {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("forced serialization failure"))
+        }
+    }
+
+    /// Site-gate: an event serialization fault must surface as an error-level
+    /// notification carrying the typed cause — never a fabricated
+    /// success-shaped placeholder on the info channel.
+    #[test]
+    fn event_serialization_fault_surfaces_as_error_notification() {
+        let notification = event_notification_json("sess-1", &FailingSerialize);
+        let params = notification
+            .get("params")
+            .expect("notification carries params");
+        assert_eq!(params.get("level"), Some(&json!("error")));
+        let data = params.get("data").expect("params carry data");
+        assert_eq!(
+            data.get("error"),
+            Some(&json!("event_serialization_failed"))
+        );
+        assert!(
+            data.get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|m| m.contains("forced serialization failure")),
+            "typed serde cause must be carried, got: {data:?}"
+        );
+        assert!(
+            data.get("event").is_none(),
+            "no fabricated event payload on the fault path"
+        );
+    }
+
+    /// Happy path stays info-level with the event payload.
+    #[test]
+    fn event_notification_happy_path_is_info_with_event() {
+        let notification = event_notification_json("sess-1", &json!({"type": "run_started"}));
+        let params = notification
+            .get("params")
+            .expect("notification carries params");
+        assert_eq!(params.get("level"), Some(&json!("info")));
+        assert!(params.get("data").and_then(|d| d.get("event")).is_some());
+    }
 
     #[tokio::test]
     async fn meerkat_run_and_resume_publish_on_success() {

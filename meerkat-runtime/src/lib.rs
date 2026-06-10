@@ -49,7 +49,6 @@ pub mod completion;
 pub mod composition;
 pub(crate) mod control_plane;
 pub mod driver;
-pub mod durability;
 pub(crate) mod effect;
 #[doc(hidden)]
 pub mod generated;
@@ -122,7 +121,6 @@ pub use completion::{
     CompletionCleanupObservation, CompletionHandle, CompletionOutcome, CompletionWaitError,
 };
 pub use driver::{EphemeralRuntimeDriver, PersistentRuntimeDriver, PostAdmissionSignal};
-pub use durability::DurabilityError;
 pub use handles::{
     HandleDslAuthority, RuntimeAuthLeaseHandle, RuntimeCommsDrainHandle,
     RuntimeExternalToolSurfaceHandle, RuntimeInteractionStreamHandle,

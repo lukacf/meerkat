@@ -5318,27 +5318,75 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `IngressAccepted`
 - To: `Running`
 
-### `ResolveAdmissionValidationDurabilityRejectedIdle`
+### `ResolveAdmissionValidationDurabilityMissingRejectedIdle`
 - From: `Idle`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
-  - `durability_invalid`
+  - `durability_missing`
 - Emits: `AdmissionValidationResolved`
 - To: `Idle`
 
-### `ResolveAdmissionValidationDurabilityRejectedAttached`
+### `ResolveAdmissionValidationDurabilityMissingRejectedAttached`
 - From: `Attached`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
-  - `durability_invalid`
+  - `durability_missing`
 - Emits: `AdmissionValidationResolved`
 - To: `Attached`
 
-### `ResolveAdmissionValidationDurabilityRejectedRunning`
+### `ResolveAdmissionValidationDurabilityMissingRejectedRunning`
 - From: `Running`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
-  - `durability_invalid`
+  - `durability_missing`
+- Emits: `AdmissionValidationResolved`
+- To: `Running`
+
+### `ResolveAdmissionValidationExternalDerivedRejectedIdle`
+- From: `Idle`
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- Guards:
+  - `external_derived_forbidden`
+- Emits: `AdmissionValidationResolved`
+- To: `Idle`
+
+### `ResolveAdmissionValidationExternalDerivedRejectedAttached`
+- From: `Attached`
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- Guards:
+  - `external_derived_forbidden`
+- Emits: `AdmissionValidationResolved`
+- To: `Attached`
+
+### `ResolveAdmissionValidationExternalDerivedRejectedRunning`
+- From: `Running`
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- Guards:
+  - `external_derived_forbidden`
+- Emits: `AdmissionValidationResolved`
+- To: `Running`
+
+### `ResolveAdmissionValidationDerivedKindRejectedIdle`
+- From: `Idle`
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- Guards:
+  - `derived_forbidden_for_input_kind`
+- Emits: `AdmissionValidationResolved`
+- To: `Idle`
+
+### `ResolveAdmissionValidationDerivedKindRejectedAttached`
+- From: `Attached`
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- Guards:
+  - `derived_forbidden_for_input_kind`
+- Emits: `AdmissionValidationResolved`
+- To: `Attached`
+
+### `ResolveAdmissionValidationDerivedKindRejectedRunning`
+- From: `Running`
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- Guards:
+  - `derived_forbidden_for_input_kind`
 - Emits: `AdmissionValidationResolved`
 - To: `Running`
 

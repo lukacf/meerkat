@@ -1418,13 +1418,31 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AcceptWithoutWakeRunning`
   - anchors: `meerkat_machine`
   - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`
-- `ResolveAdmissionValidationDurabilityRejectedIdle`
+- `ResolveAdmissionValidationDurabilityMissingRejectedIdle`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
-- `ResolveAdmissionValidationDurabilityRejectedAttached`
+- `ResolveAdmissionValidationDurabilityMissingRejectedAttached`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
-- `ResolveAdmissionValidationDurabilityRejectedRunning`
+- `ResolveAdmissionValidationDurabilityMissingRejectedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionValidationExternalDerivedRejectedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionValidationExternalDerivedRejectedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionValidationExternalDerivedRejectedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionValidationDerivedKindRejectedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionValidationDerivedKindRejectedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionValidationDerivedKindRejectedRunning`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `ResolveAdmissionValidationPeerHandlingRejectedIdle`

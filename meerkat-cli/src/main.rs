@@ -3669,7 +3669,8 @@ async fn load_config(scope: &RuntimeScope) -> anyhow::Result<(Config, PathBuf)> 
 /// purpose is to detect a stale, previously-shipped default that a user still
 /// carries in their persisted `config.agent.model` and heal it by redirecting
 /// to the catalog-derived current default (see `resolve_cli_default_agent_model`
-/// → `best_available_default_model`). Entries are prior *shipped CLI defaults*,
+/// → `meerkat::resolve_provider_catalog_default_model`, the canonical tiers-2/3
+/// ladder). Entries are prior *shipped CLI defaults*,
 /// not catalog membership claims: a listed model may still be a live catalog
 /// row (e.g. `claude-opus-4-7` remains a `Supported` Anthropic entry) — being
 /// here only means it was once the built-in default and should be healed when
@@ -3697,17 +3698,13 @@ fn provider_default_model(config: &Config, provider: Provider) -> Option<String>
     (!model.is_empty()).then(|| model.clone())
 }
 
-fn best_available_default_model(config: &Config) -> String {
-    meerkat_core::model_profile::catalog::provider_priority()
-        .iter()
-        .filter_map(|core_p| Provider::from_core(*core_p))
-        .find_map(|provider| provider_default_model(config, provider))
-        .unwrap_or_else(|| config.agent.model.clone())
-}
-
 fn resolve_cli_default_agent_model(config: &Config) -> String {
     if LEGACY_AGENT_MODEL_DEFAULTS.contains(&config.agent.model.as_str()) {
-        return best_available_default_model(config);
+        // Known-stale operator default: resolve through the canonical
+        // provider-priority/catalog ladder (tiers 2-3 of the create-session
+        // seam), explicitly bypassing the stale `config.agent.model` knob.
+        // The CLI owns no parallel ladder.
+        return meerkat::resolve_provider_catalog_default_model(config);
     }
 
     config.agent.model.clone()

@@ -23,7 +23,6 @@ use crate::accept::{
     AcceptOutcome, AdmissionPlan, AdmissionQueueAction, CoarseAdmissionFlags,
     ExistingQueuedAdmissionAction, MachineAdmissionAuthority, RejectReason, ResolvedAdmission,
 };
-use crate::durability::durability_rejection_detail;
 use crate::identifiers::{IdempotencyKey, LogicalRuntimeId, PolicyVersion};
 use crate::ingress_types::{
     ContentShape, RequestId, ReservationKey, RuntimeInputProjection, RuntimeInputSemantics,
@@ -2468,9 +2467,13 @@ impl EphemeralRuntimeDriver {
         ))
     }
 
+    /// Render the machine-emitted typed rejection reason into the domain
+    /// `RejectReason`. Durability rejection text is pure rendering of the
+    /// typed reason the generated authority emitted — the shell does not
+    /// re-evaluate any durability rule here.
     fn reject_reason_from_machine_validation(
         reason: mm_dsl::AdmissionRejectReasonKind,
-        durability_detail: Option<&str>,
+        input_kind: crate::identifiers::InputKind,
         peer_handling_mode_detail: Option<&str>,
         peer_response_terminal_detail: Option<&str>,
     ) -> Result<RejectReason, RuntimeDriverError> {
@@ -2480,9 +2483,19 @@ impl EphemeralRuntimeDriver {
             ))
         };
         match reason {
-            mm_dsl::AdmissionRejectReasonKind::DurabilityViolation => {
+            mm_dsl::AdmissionRejectReasonKind::DurabilityMissing => {
                 Ok(RejectReason::DurabilityViolation {
-                    detail: durability_detail.ok_or_else(missing_detail)?.to_owned(),
+                    detail: "input durability observation missing".to_owned(),
+                })
+            }
+            mm_dsl::AdmissionRejectReasonKind::ExternalDerivedDurabilityForbidden => {
+                Ok(RejectReason::DurabilityViolation {
+                    detail: "External ingress cannot submit derived inputs".to_owned(),
+                })
+            }
+            mm_dsl::AdmissionRejectReasonKind::DerivedDurabilityForbiddenForInputKind => {
+                Ok(RejectReason::DurabilityViolation {
+                    detail: format!("Derived durability forbidden for {input_kind}"),
                 })
             }
             mm_dsl::AdmissionRejectReasonKind::PeerHandlingModeInvalid => {
@@ -2799,7 +2812,6 @@ impl EphemeralRuntimeDriver {
         }
 
         let input_id = input.id().clone();
-        let durability_detail = durability_rejection_detail(&input);
         let peer_handling_mode_error =
             crate::peer_handling_mode::validate_peer_handling_mode(&input)
                 .err()
@@ -2834,9 +2846,7 @@ impl EphemeralRuntimeDriver {
             }
             let reason = Self::reject_reason_from_machine_validation(
                 reason,
-                durability_detail
-                    .as_deref()
-                    .or(Some("durability rejected by generated authority")),
+                input.kind(),
                 peer_handling_mode_error.as_deref(),
                 peer_response_terminal_detail.as_deref(),
             )?;
@@ -3663,7 +3673,8 @@ mod tests {
             .expect("generated validation feedback should resolve");
         assert_eq!(
             generated_reason,
-            Some(mm_dsl::AdmissionRejectReasonKind::DurabilityViolation)
+            Some(mm_dsl::AdmissionRejectReasonKind::ExternalDerivedDurabilityForbidden),
+            "derived operator prompt must reject on the external-derived rule"
         );
 
         let outcome = driver.accept_input(input).await.unwrap();
@@ -3688,6 +3699,137 @@ mod tests {
                 "rejected inputs must not create lifecycle machine facts"
             );
         });
+    }
+
+    #[test]
+    fn admission_validation_durability_reasons_are_machine_emitted() {
+        use crate::identifiers::InputKind;
+        use mm_dsl::AdmissionRejectReasonKind as Reason;
+
+        let driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("validation-reasons"));
+
+        let operator = InputOrigin::Operator;
+        let system = InputOrigin::System;
+        let flow = InputOrigin::Flow {
+            flow_id: "flow-1".into(),
+            step_index: 0,
+        };
+        let peer = InputOrigin::Peer {
+            peer_id: "peer-1".into(),
+            display_identity: None,
+            runtime_id: None,
+        };
+        let external = InputOrigin::External {
+            source_name: "webhook".into(),
+        };
+
+        let cases: Vec<(InputKind, &InputOrigin, InputDurability, Option<Reason>)> = vec![
+            // External-ingress origins cannot submit derived inputs at all.
+            (
+                InputKind::Prompt,
+                &operator,
+                InputDurability::Derived,
+                Some(Reason::ExternalDerivedDurabilityForbidden),
+            ),
+            (
+                InputKind::PeerMessage,
+                &peer,
+                InputDurability::Derived,
+                Some(Reason::ExternalDerivedDurabilityForbidden),
+            ),
+            (
+                InputKind::ExternalEvent,
+                &external,
+                InputDurability::Derived,
+                Some(Reason::ExternalDerivedDurabilityForbidden),
+            ),
+            (
+                InputKind::Continuation,
+                &operator,
+                InputDurability::Derived,
+                Some(Reason::ExternalDerivedDurabilityForbidden),
+            ),
+            // Internal origins may not derive these input kinds.
+            (
+                InputKind::Prompt,
+                &system,
+                InputDurability::Derived,
+                Some(Reason::DerivedDurabilityForbiddenForInputKind),
+            ),
+            (
+                InputKind::PeerMessage,
+                &system,
+                InputDurability::Derived,
+                Some(Reason::DerivedDurabilityForbiddenForInputKind),
+            ),
+            (
+                InputKind::PeerRequest,
+                &system,
+                InputDurability::Derived,
+                Some(Reason::DerivedDurabilityForbiddenForInputKind),
+            ),
+            (
+                InputKind::PeerResponseTerminal,
+                &system,
+                InputDurability::Derived,
+                Some(Reason::DerivedDurabilityForbiddenForInputKind),
+            ),
+            (
+                InputKind::FlowStep,
+                &flow,
+                InputDurability::Derived,
+                Some(Reason::DerivedDurabilityForbiddenForInputKind),
+            ),
+            // Internal origins may derive reconstructable input kinds.
+            (
+                InputKind::PeerResponseProgress,
+                &system,
+                InputDurability::Derived,
+                None,
+            ),
+            (
+                InputKind::ExternalEvent,
+                &system,
+                InputDurability::Derived,
+                None,
+            ),
+            (
+                InputKind::Operation,
+                &system,
+                InputDurability::Derived,
+                None,
+            ),
+            // Durable/Ephemeral are always authorized.
+            (InputKind::Prompt, &operator, InputDurability::Durable, None),
+            (
+                InputKind::Prompt,
+                &operator,
+                InputDurability::Ephemeral,
+                None,
+            ),
+        ];
+
+        for (input_kind, input_origin, durability, expected) in cases {
+            let input_id = InputId::new();
+            let resolved = driver
+                .resolve_admission_validation(
+                    &input_id,
+                    AdmissionValidationFacts {
+                        input_kind,
+                        input_origin,
+                        durability,
+                        peer_handling_mode_valid: true,
+                        peer_response_terminal_structurally_valid: true,
+                        peer_response_terminal_observed_status:
+                            mm_dsl::PeerResponseTerminalObservedStatus::NotPeerTerminal,
+                    },
+                )
+                .expect("generated validation must resolve");
+            assert_eq!(
+                resolved, expected,
+                "machine-emitted reason mismatch for {input_kind:?}/{input_origin:?}/{durability:?}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -3361,10 +3361,16 @@ pub enum PeerResponseTerminalObservedStatus {
     Cancelled,
 }
 
+/// Typed admission-validation rejection reason emitted on
+/// `AdmissionValidationResolved`. The machine names which validation rule
+/// fired; shells render display text from this fact instead of mirroring the
+/// guard rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum AdmissionRejectReasonKind {
     #[default]
-    DurabilityViolation,
+    DurabilityMissing,
+    ExternalDerivedDurabilityForbidden,
+    DerivedDurabilityForbiddenForInputKind,
     PeerHandlingModeInvalid,
     PeerResponseTerminalInvalid,
 }

@@ -6,6 +6,7 @@ code for Python and TypeScript SDKs.
 """
 
 import argparse
+import copy
 import json
 import keyword
 import re
@@ -226,6 +227,7 @@ WORKGRAPH_RPC_CONTRACT_ALIAS_TYPES = [
     "WorkAttentionTarget",
     "WorkCompletionPolicy",
     "WorkEdgeKind",
+    "WorkEvidenceKind",
     "WorkGraphEventKind",
     "WorkOwnerKind",
     "WorkStatus",
@@ -597,6 +599,959 @@ def _one_of_typed_dict_variants(
     return (discriminator, variants)
 
 
+# ---------------------------------------------------------------------------
+# K21 — inline-object promotion.
+#
+# `_python_type_from_schema` / `_typescript_type_from_schema` widen anonymous
+# (inline) object schemas to `dict[str, Any]` / `Record<string, unknown>`.
+# Promotion runs as a deterministic schema pre-pass over every emitted
+# contract type: each inline object property is moved into a named `$defs`
+# entry and replaced with a `$ref`, so both language emitters produce a real
+# named type instead of an opaque map.
+#
+# Rules (all deterministic):
+#   * object property  -> `{Parent}{PascalCase(prop)}`        (WorkItem.owner -> WorkItemOwner)
+#   * array item       -> `{Parent}{SingularPascal(prop)}`    (WorkItem.external_refs -> WorkItemExternalRef)
+#     where SingularPascal strips one trailing `s` (not `ss`) from the final word.
+#   * dedupe by content: the canonical structural form (deep `$ref`
+#     resolution, `description`/`title`/`$schema`/`$defs`/`examples`
+#     stripped, keys sorted) is compared against every already-named contract
+#     type and every previously minted promotion; an exact match reuses the
+#     existing name instead of minting a twin.
+#   * multi-variant unions (`oneOf`/`anyOf`) are never minted a new name —
+#     they are replaced with a `$ref` only on an exact content match against
+#     an existing named type, otherwise reported as skipped.
+#   * recursion: promoted types are themselves scanned (BFS: a parent's
+#     direct properties are named before its children recurse).
+#   * name collisions (minted name already taken by different content) abort
+#     generation.
+# ---------------------------------------------------------------------------
+
+
+def _singular_pascal_case(name: str) -> str:
+    pascal = _pascal_case(name)
+    if pascal.endswith("s") and not pascal.endswith("ss"):
+        return pascal[:-1]
+    return pascal
+
+
+def _canonical_schema_form(root: dict[str, Any], schema: Any, stack: tuple[str, ...] = ()) -> Any:
+    """Canonical structural form for content-based promotion dedupe."""
+    if len(stack) > 32:
+        return {"$depth": True}
+    if isinstance(schema, dict):
+        ref = schema.get("$ref")
+        if isinstance(ref, str):
+            name = _resolve_schema_ref_name(ref)
+            if name and name in stack:
+                return {"$cycle": name}
+            target = _resolve_schema_ref(root, ref)
+            if not target and name:
+                target = _lookup_named_schema(root, name)
+            if isinstance(target, dict) and target:
+                base = _canonical_schema_form(root, target, stack + ((name,) if name else ()))
+                extras = {
+                    key: _canonical_schema_form(root, value, stack)
+                    for key, value in schema.items()
+                    if key not in ("$ref", "description", "title", "$schema", "$defs", "examples")
+                }
+                if extras and isinstance(base, dict):
+                    base = {**base, **extras}
+                return base
+            return {"$unresolved": name or ref}
+        return {
+            key: _canonical_schema_form(root, value, stack)
+            for key, value in schema.items()
+            if key not in ("description", "title", "$schema", "$defs", "examples")
+        }
+    if isinstance(schema, list):
+        return [_canonical_schema_form(root, value, stack) for value in schema]
+    return schema
+
+
+def _canonical_schema_key(root: dict[str, Any], schema: Any) -> str:
+    return json.dumps(_canonical_schema_form(root, schema), sort_keys=True)
+
+
+def _promote_inline_object_defs(
+    root: dict[str, Any],
+    parent_names: list[str],
+    dedupe_candidate_names: list[str],
+) -> dict[str, list[Any]]:
+    """Promote inline object property schemas in `root` to named `$defs`.
+
+    Mutates `root` in place; returns a report with `minted` (new type names
+    in deterministic mint order), `deduped` (site -> reused name) and
+    `skipped` (multi-variant union sites with no content match).
+    """
+    defs = root.setdefault("$defs", {})
+    promoted = root.get("__promoted_defs")
+    if not isinstance(promoted, set):
+        promoted = set()
+        root["__promoted_defs"] = promoted
+
+    content_to_name: dict[str, str] = {}
+    for candidate in sorted(set(dedupe_candidate_names)):
+        schema = _lookup_named_schema(root, candidate)
+        if isinstance(schema, dict) and schema:
+            content_to_name.setdefault(_canonical_schema_key(root, schema), candidate)
+
+    minted: list[str] = []
+    deduped: list[tuple[str, str]] = []
+    skipped: list[str] = []
+    queue: list[str] = []
+
+    def promote_target(target: dict[str, Any], site: str, prefer_name: str) -> dict[str, str]:
+        key = _canonical_schema_key(root, target)
+        existing = content_to_name.get(key)
+        if existing is not None:
+            deduped.append((site, existing))
+            return {"$ref": f"#/$defs/{existing}"}
+        clash = defs.get(prefer_name)
+        if clash is None:
+            top_level = root.get(prefer_name)
+            clash = top_level if isinstance(top_level, dict) else None
+        if isinstance(clash, dict):
+            raise RuntimeError(
+                "inline-object promotion name collision: "
+                f"`{prefer_name}` (for {site}) already names a different schema"
+            )
+        defs[prefer_name] = target
+        promoted.add(prefer_name)
+        content_to_name[key] = prefer_name
+        minted.append(prefer_name)
+        queue.append(prefer_name)
+        return {"$ref": f"#/$defs/{prefer_name}"}
+
+    def rewrite_slot(holder: Any, slot: Any, prop_schema: Any, parent: str, prop: str) -> None:
+        site = f"{parent}.{prop}"
+        if isinstance(prop_schema, dict):
+            for union_key in ("anyOf", "oneOf"):
+                variants = prop_schema.get(union_key)
+                if isinstance(variants, list) and variants:
+                    non_null = [
+                        index
+                        for index, variant in enumerate(variants)
+                        if not (isinstance(variant, dict) and variant.get("type") == "null")
+                    ]
+                    if len(non_null) == 1:
+                        index = non_null[0]
+                        rewrite_slot(variants, index, variants[index], parent, prop)
+                        return
+                    key = _canonical_schema_key(root, prop_schema)
+                    existing = content_to_name.get(key)
+                    if existing is not None:
+                        holder[slot] = {"$ref": f"#/$defs/{existing}"}
+                        deduped.append((site, existing))
+                    else:
+                        skipped.append(site)
+                    return
+        if _is_inline_object_payload(prop_schema):
+            holder[slot] = promote_target(prop_schema, site, f"{parent}{_pascal_case(prop)}")
+            return
+        if isinstance(prop_schema, dict) and prop_schema.get("type") == "array":
+            items = prop_schema.get("items")
+            if _is_inline_object_payload(items):
+                prop_schema["items"] = promote_target(
+                    items, f"{site}[]", f"{parent}{_singular_pascal_case(prop)}"
+                )
+
+    for name in parent_names:
+        schema = _lookup_named_schema(root, name)
+        if not isinstance(schema, dict) or not schema:
+            continue
+        if name in root and name in defs and root[name] is not defs[name]:
+            # Unify the top-level entry with any nested `$defs` copy so the
+            # promotion rewrite is visible through both lookup paths.
+            defs[name] = root[name]
+        queue.append(name)
+
+    seen: set[str] = set()
+    while queue:
+        parent = queue.pop(0)
+        if parent in seen:
+            continue
+        seen.add(parent)
+        schema = _lookup_named_schema(root, parent)
+        properties = schema.get("properties") if isinstance(schema, dict) else None
+        if not isinstance(properties, dict):
+            continue
+        for prop in list(properties):
+            rewrite_slot(properties, prop, properties[prop], parent, prop)
+
+    return {"minted": minted, "deduped": deduped, "skipped": skipped}
+
+
+def _log_promotion_report(label: str, report: dict[str, list[Any]]) -> None:
+    for name in report["minted"]:
+        print(f"inline-object promotion [{label}]: minted {name}")
+    for site, reused in report["deduped"]:
+        print(f"inline-object promotion [{label}]: {site} deduped to {reused}")
+    for site in report["skipped"]:
+        print(
+            f"inline-object promotion [{label}]: {site} skipped "
+            "(multi-variant union with no content match)"
+        )
+
+
+def _build_contract_schema_roots(
+    schemas: dict,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, list[Any]], dict[str, list[Any]]]:
+    """Shared promoted schema roots for the Python and TypeScript emitters.
+
+    Both emitters must see byte-identical promotion results, so the pass is a
+    pure function of the schema artifacts (called once per emitter, same
+    output). The raw schema dicts are deep-copied first: the promotion pass
+    rewrites property slots in place, and the loaded artifacts are shared
+    between the per-language generator invocations.
+    """
+    params_schema = _schema_root_with_nested_defs(copy.deepcopy(schemas.get("params", {})))
+    wire_schema = _schema_root_with_nested_defs(copy.deepcopy(schemas.get("wire-types", {})))
+    roster = _sdk_contract_type_roster()
+    params_report = _promote_inline_object_defs(params_schema, roster, roster)
+    wire_report = _promote_inline_object_defs(wire_schema, roster, roster)
+    overlap = set(params_report["minted"]) & set(wire_report["minted"])
+    if overlap:
+        raise RuntimeError(
+            f"inline-object promotion minted the same name from both schema roots: {sorted(overlap)}"
+        )
+    return params_schema, wire_schema, params_report, wire_report
+
+
+def _sdk_contract_type_roster() -> list[str]:
+    """Every schema-named contract type emitted by the SDK generators."""
+    roster: list[str] = []
+    for group in (
+        K20_CATALOG_CONTRACT_TYPES,
+        MCP_LIVE_CONTRACT_TYPES,
+        MCP_CONFIG_HELPER_TYPES,
+        MCP_CONFIG_ALIAS_TYPES,
+        SKILL_LIST_RPC_CONTRACT_HELPER_TYPES,
+        SKILL_LIST_RPC_CONTRACT_ALIAS_TYPES,
+        MOB_RPC_CONTRACT_TYPES,
+        MOB_RPC_CONTRACT_HELPER_TYPES,
+        MOB_RPC_CONTRACT_ALIAS_TYPES,
+        WORKGRAPH_RPC_CONTRACT_TYPES,
+        WORKGRAPH_RPC_CONTRACT_HELPER_TYPES,
+        WORKGRAPH_RPC_CONTRACT_ALIAS_TYPES,
+        COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES,
+        COMMS_SESSION_STREAM_RPC_CONTRACT_ALIAS_TYPES,
+    ):
+        for name in group:
+            if name not in roster:
+                roster.append(name)
+    return roster
+
+
+# ---------------------------------------------------------------------------
+# K21 — fail-closed workgraph read parsers.
+#
+# The generator already emits the workgraph read types; this block emits the
+# matching parse guards so the SDK wrappers stop hand-rolling validation:
+#   * Python: a `from_wire` classmethod on every struct type plus module-level
+#     `parse_*` functions for tagged unions and closed string enums, raising
+#     `MeerkatError("INVALID_RESPONSE", ...)` on missing/mistyped fields.
+#   * TypeScript: `parseX(value: unknown): X` functions throwing
+#     `MeerkatError` (the `parseInitResult` precedent in the web emission).
+# No silent fallbacks: unknown union tags, missing required fields, and
+# mistyped values always raise.
+# ---------------------------------------------------------------------------
+
+WORKGRAPH_PARSER_ROOT_TYPES = [
+    "WorkItem",
+    "WorkEdge",
+    "WorkGraphEvent",
+    "WorkGraphItemsResponse",
+    "WorkGraphEventsResponse",
+    "WorkGraphSnapshot",
+    "WorkItemsResult",
+    "WorkEventsResult",
+    "GoalStatusResult",
+    "AttentionListResult",
+]
+
+
+def _flat_string_enum_values(schema: Any) -> list[str] | None:
+    if not isinstance(schema, dict):
+        return None
+    if schema.get("type") == "string" and isinstance(schema.get("enum"), list):
+        values = schema["enum"]
+        return list(values) if all(isinstance(v, str) for v in values) else None
+    for key in ("oneOf", "anyOf"):
+        variants = schema.get(key)
+        if isinstance(variants, list) and variants:
+            values: list[str] = []
+            for variant in variants:
+                if not isinstance(variant, dict):
+                    return None
+                if isinstance(variant.get("const"), str):
+                    values.append(variant["const"])
+                elif variant.get("type") == "string" and isinstance(variant.get("enum"), list):
+                    if not all(isinstance(v, str) for v in variant["enum"]):
+                        return None
+                    values.extend(variant["enum"])
+                else:
+                    return None
+            return values
+    return None
+
+
+def _classify_parser_schema(schema_root: dict[str, Any], schema: dict[str, Any]) -> str:
+    if _one_of_typed_dict_variants(schema_root, schema) is not None:
+        return "union"
+    if _flat_string_enum_values(schema) is not None:
+        return "enum"
+    if isinstance(schema.get("properties"), dict):
+        return "struct"
+    raise KeyError(
+        f"cannot emit a fail-closed parser for schema shape: {json.dumps(schema)[:200]}"
+    )
+
+
+def _ref_is_named(root: dict[str, Any], ref_name: str | None, resolved: Any, local_defs: set[str]) -> bool:
+    """Mirror of the named-reference rule used by the type emitters."""
+    return bool(
+        ref_name
+        and resolved
+        and (ref_name not in local_defs or ref_name in root.get("__promoted_defs", set()))
+    )
+
+
+def _named_refs(root: dict[str, Any], schema: Any, local_defs: set[str]) -> list[str]:
+    found: list[str] = []
+    seen_inline: set[str] = set()
+
+    def walk(node: Any, depth: int) -> None:
+        if depth > 48:
+            raise KeyError("schema too deep for parser closure walk")
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str):
+                name = _resolve_schema_ref_name(ref)
+                resolved = _resolve_schema_ref(root, ref)
+                if not resolved and name:
+                    resolved = _lookup_named_schema(root, name)
+                if _ref_is_named(root, name, resolved, local_defs):
+                    if name not in found:
+                        found.append(name)  # type: ignore[arg-type]
+                else:
+                    key = name or ref
+                    if key not in seen_inline:
+                        seen_inline.add(key)
+                        walk(resolved, depth + 1)
+            for key, value in node.items():
+                if key in ("$ref", "$defs"):
+                    continue
+                walk(value, depth + 1)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value, depth + 1)
+
+    walk(schema, 0)
+    return found
+
+
+def _wire_parser_closure(root: dict[str, Any], root_types: list[str]) -> dict[str, str]:
+    """Transitive closure of parser types: name -> {struct, union, enum}."""
+    closure: dict[str, str] = {}
+    queue = list(root_types)
+    while queue:
+        name = queue.pop(0)
+        if name in closure:
+            continue
+        schema = _lookup_named_schema(root, name)
+        if not isinstance(schema, dict) or not schema:
+            raise KeyError(f"workgraph parser type `{name}` not found in schema root")
+        local_defs = set(schema.get("$defs", {}).keys())
+        schema_root = _schema_root_with_local_defs(root, schema)
+        closure[name] = _classify_parser_schema(schema_root, schema)
+        queue.extend(_named_refs(schema_root, schema, local_defs))
+    return closure
+
+
+def _py_parser_fn_name(name: str) -> str:
+    return "parse_" + re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+def _ts_parser_fn_name(name: str) -> str:
+    return f"parse{name}"
+
+
+def _schema_nullable(field_schema: Any) -> bool:
+    if not isinstance(field_schema, dict):
+        return False
+    schema_type = field_schema.get("type")
+    if isinstance(schema_type, list) and "null" in schema_type:
+        return True
+    for key in ("anyOf", "oneOf"):
+        variants = field_schema.get(key)
+        if isinstance(variants, list) and any(
+            isinstance(v, dict) and v.get("type") == "null" for v in variants
+        ):
+            return True
+    return False
+
+
+_WIRE_VALUE_PLACEHOLDER = "\x00VALUE\x00"
+
+
+def _py_wire_expr(
+    root: dict[str, Any],
+    field_schema: Any,
+    value: str,
+    ctx: str,
+    local_defs: set[str],
+    closure: dict[str, str],
+    depth: int = 0,
+) -> str:
+    """Python parse expression for `value` under `field_schema` (fail-closed)."""
+    if field_schema is True or (isinstance(field_schema, dict) and not field_schema):
+        return value
+    if not isinstance(field_schema, dict):
+        raise KeyError(f"cannot emit fail-closed Python parser at {ctx}")
+    for key in ("anyOf", "oneOf"):
+        variants = field_schema.get(key)
+        if isinstance(variants, list) and variants:
+            non_null = [
+                variant
+                for variant in variants
+                if not (isinstance(variant, dict) and variant.get("type") == "null")
+            ]
+            if len(non_null) == 1:
+                return _py_wire_expr(root, non_null[0], value, ctx, local_defs, closure, depth)
+            values = _flat_string_enum_values(field_schema)
+            if values is not None:
+                joined = ", ".join(repr(v) for v in values)
+                return f"_expect_wire_enum({value}, ({joined},), {ctx!r})"
+            raise KeyError(f"cannot emit fail-closed Python parser for untagged union at {ctx}")
+    if "$ref" in field_schema:
+        ref = str(field_schema["$ref"])
+        ref_name = _resolve_schema_ref_name(ref)
+        resolved = _resolve_schema_ref(root, ref)
+        if not resolved and ref_name:
+            resolved = _lookup_named_schema(root, ref_name)
+        if _ref_is_named(root, ref_name, resolved, local_defs):
+            kind = closure.get(ref_name or "")
+            if kind == "struct":
+                return f"{ref_name}.from_wire({value})"
+            if kind in ("union", "enum"):
+                return f"{_py_parser_fn_name(ref_name or '')}({value})"
+            raise KeyError(f"parser closure is missing referenced type `{ref_name}` at {ctx}")
+        return _py_wire_expr(root, resolved, value, ctx, local_defs, closure, depth)
+    if "const" in field_schema:
+        return f"_expect_wire_const({value}, {field_schema['const']!r}, {ctx!r})"
+    schema_type = field_schema.get("type")
+    if isinstance(schema_type, list):
+        non_null = [t for t in schema_type if t != "null"]
+        schema_type = non_null[0] if non_null else None
+    match schema_type:
+        case "string":
+            if isinstance(field_schema.get("enum"), list):
+                joined = ", ".join(repr(v) for v in field_schema["enum"])
+                return f"_expect_wire_enum({value}, ({joined},), {ctx!r})"
+            return f"_expect_wire_str({value}, {ctx!r})"
+        case "boolean":
+            return f"_expect_wire_bool({value}, {ctx!r})"
+        case "integer":
+            return f"_expect_wire_int({value}, {ctx!r})"
+        case "number":
+            return f"_expect_wire_number({value}, {ctx!r})"
+        case "array":
+            var = f"_item{depth or ''}"
+            inner = _py_wire_expr(
+                root, field_schema.get("items"), var, f"{ctx}[]", local_defs, closure, depth + 1
+            )
+            if inner == var:
+                return f"list(_expect_wire_list({value}, {ctx!r}))"
+            return f"[{inner} for {var} in _expect_wire_list({value}, {ctx!r})]"
+        case "object":
+            properties = field_schema.get("properties")
+            additional = field_schema.get("additionalProperties", True)
+            if isinstance(additional, dict) and not properties:
+                key_var = f"_key{depth or ''}"
+                value_var = f"_value{depth or ''}"
+                inner = _py_wire_expr(
+                    root, additional, value_var, f"{ctx}{{}}", local_defs, closure, depth + 1
+                )
+                if inner != value_var:
+                    return (
+                        f"{{{key_var}: {inner} for {key_var}, {value_var} "
+                        f"in _expect_wire_object({value}, {ctx!r}).items()}}"
+                    )
+            return f"_expect_wire_object({value}, {ctx!r})"
+        case _:
+            raise KeyError(f"cannot emit fail-closed Python parser for schema at {ctx}")
+
+
+def _python_from_wire_method(
+    name: str,
+    schema_root: dict[str, Any],
+    properties: dict[str, Any],
+    required: set[str],
+    local_defs: set[str],
+    closure: dict[str, str],
+) -> str:
+    lines = [
+        "    @classmethod",
+        f'    def from_wire(cls, value: Any) -> "{name}":',
+        '        """Fail-closed wire parser (K21): raises MeerkatError',
+        "        (INVALID_RESPONSE) on missing or mistyped fields.",
+        '        """',
+        f"        data = _expect_wire_object(value, {name!r})",
+        "        return cls(",
+    ]
+    for field_name, field_schema in properties.items():
+        py_name = _python_identifier(field_name)
+        ctx = f"{name}.{field_name}"
+        expr = _py_wire_expr(
+            schema_root, field_schema, _WIRE_VALUE_PLACEHOLDER, ctx, local_defs, closure
+        )
+        nullable = _schema_nullable(field_schema)
+        if field_name in required and not nullable:
+            source = f"_require_wire_field(data, {field_name!r}, {name!r})"
+            if expr == _WIRE_VALUE_PLACEHOLDER:
+                lines.append(f"            {py_name}={source},")
+            else:
+                lines.append(f"            {py_name}={expr.replace(_WIRE_VALUE_PLACEHOLDER, source)},")
+        else:
+            if expr == _WIRE_VALUE_PLACEHOLDER:
+                lines.append(f"            {py_name}=data.get({field_name!r}),")
+            else:
+                inner = expr.replace(_WIRE_VALUE_PLACEHOLDER, f"data[{field_name!r}]")
+                lines.append(
+                    f"            {py_name}=({inner} if data.get({field_name!r}) is not None else None),"
+                )
+    lines.append("        )")
+    return "\n".join(lines) + "\n"
+
+
+def _python_alias_parsers(
+    root: dict[str, Any],
+    closure: dict[str, str],
+) -> str:
+    blocks: list[str] = []
+    for name, kind in closure.items():
+        if kind == "struct":
+            continue
+        schema = _lookup_named_schema(root, name)
+        local_defs = set(schema.get("$defs", {}).keys())
+        schema_root = _schema_root_with_local_defs(root, schema)
+        fn = _py_parser_fn_name(name)
+        if kind == "enum":
+            values = _flat_string_enum_values(schema) or []
+            joined = ", ".join(repr(v) for v in values)
+            blocks.append(
+                f'def {fn}(value: Any) -> "{name}":\n'
+                f'    """Fail-closed wire parser for {name} (K21)."""\n'
+                f"    return _expect_wire_enum(value, ({joined},), {name!r})\n"
+            )
+            continue
+        typed = _one_of_typed_dict_variants(schema_root, schema)
+        if typed is None:
+            raise KeyError(f"cannot emit fail-closed Python parser for union `{name}`")
+        discriminator, variants = typed
+        lines = [
+            f'def {fn}(value: Any) -> "{name}":',
+            f'    """Fail-closed wire parser for {name} (K21)."""',
+            f"    data = _expect_wire_object(value, {name!r})",
+            (
+                f"    tag = _expect_wire_str(_require_wire_field(data, {discriminator!r}, {name!r}), "
+                f"{(name + '.' + discriminator)!r})"
+            ),
+        ]
+        for discriminator_value, variant in variants:
+            variant_props = variant.get("properties", {})
+            variant_required = set(variant.get("required", []))
+            variant_defs = set(variant.get("$defs", {}).keys()) | local_defs
+            lines.append(f"    if tag == {discriminator_value!r}:")
+            lines.append(
+                f"        parsed_{discriminator_value}: dict[str, Any] = {{{discriminator!r}: {discriminator_value!r}}}"
+            )
+            for field_name, field_schema in variant_props.items():
+                if field_name == discriminator:
+                    continue
+                ctx = f"{name}.{discriminator_value}.{field_name}"
+                expr = _py_wire_expr(
+                    schema_root, field_schema, _WIRE_VALUE_PLACEHOLDER, ctx, variant_defs, closure
+                )
+                nullable = _schema_nullable(field_schema)
+                if field_name in variant_required and not nullable:
+                    source = f"_require_wire_field(data, {field_name!r}, {name!r})"
+                    value_expr = source if expr == _WIRE_VALUE_PLACEHOLDER else expr.replace(
+                        _WIRE_VALUE_PLACEHOLDER, source
+                    )
+                    lines.append(
+                        f"        parsed_{discriminator_value}[{field_name!r}] = {value_expr}"
+                    )
+                else:
+                    inner = (
+                        f"data[{field_name!r}]"
+                        if expr == _WIRE_VALUE_PLACEHOLDER
+                        else expr.replace(_WIRE_VALUE_PLACEHOLDER, f"data[{field_name!r}]")
+                    )
+                    lines.append(f"        if data.get({field_name!r}) is not None:")
+                    lines.append(
+                        f"            parsed_{discriminator_value}[{field_name!r}] = {inner}"
+                    )
+            lines.append(f"        return parsed_{discriminator_value}")
+        lines.append(
+            f"    raise _wire_parse_error({name!r}, f\"unknown `{discriminator}` value `{{tag}}`\")"
+        )
+        blocks.append("\n".join(lines) + "\n")
+    return "\n\n".join(blocks)
+
+
+_PYTHON_WIRE_PARSE_PRELUDE = '''
+
+def _wire_parse_error(context: str, message: str) -> MeerkatError:
+    """INVALID_RESPONSE error for the generated fail-closed wire parsers (K21)."""
+    return MeerkatError("INVALID_RESPONSE", f"invalid {context}: {message}")
+
+
+def _expect_wire_object(value: Any, context: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise _wire_parse_error(context, "expected object")
+    return value
+
+
+def _require_wire_field(data: dict[str, Any], key: str, context: str) -> Any:
+    if data.get(key) is None:
+        raise _wire_parse_error(context, f"missing required field `{key}`")
+    return data[key]
+
+
+def _expect_wire_str(value: Any, context: str) -> str:
+    if not isinstance(value, str):
+        raise _wire_parse_error(context, "expected string")
+    return value
+
+
+def _expect_wire_bool(value: Any, context: str) -> bool:
+    if not isinstance(value, bool):
+        raise _wire_parse_error(context, "expected boolean")
+    return value
+
+
+def _expect_wire_int(value: Any, context: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise _wire_parse_error(context, "expected integer")
+    return value
+
+
+def _expect_wire_number(value: Any, context: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _wire_parse_error(context, "expected number")
+    return float(value)
+
+
+def _expect_wire_list(value: Any, context: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise _wire_parse_error(context, "expected array")
+    return value
+
+
+def _expect_wire_enum(value: Any, values: tuple[str, ...], context: str) -> Any:
+    if not isinstance(value, str) or value not in values:
+        raise _wire_parse_error(context, f"expected one of {list(values)}")
+    return value
+
+
+def _expect_wire_const(value: Any, expected: Any, context: str) -> Any:
+    if value != expected:
+        raise _wire_parse_error(context, f"expected constant `{expected}`")
+    return value
+
+'''
+
+
+def _ts_wire_expr(
+    root: dict[str, Any],
+    field_schema: Any,
+    value: str,
+    ctx: str,
+    local_defs: set[str],
+    closure: dict[str, str],
+    depth: int = 0,
+) -> str:
+    """TypeScript parse expression for `value` under `field_schema`."""
+    if field_schema is True or (isinstance(field_schema, dict) and not field_schema):
+        return value
+    if not isinstance(field_schema, dict):
+        raise KeyError(f"cannot emit fail-closed TypeScript parser at {ctx}")
+    for key in ("anyOf", "oneOf"):
+        variants = field_schema.get(key)
+        if isinstance(variants, list) and variants:
+            non_null = [
+                variant
+                for variant in variants
+                if not (isinstance(variant, dict) and variant.get("type") == "null")
+            ]
+            if len(non_null) == 1:
+                return _ts_wire_expr(root, non_null[0], value, ctx, local_defs, closure, depth)
+            values = _flat_string_enum_values(field_schema)
+            if values is not None:
+                joined = ", ".join(json.dumps(v) for v in values)
+                cast = " | ".join(json.dumps(v) for v in values)
+                return f"expectWireEnum({value}, [{joined}], {json.dumps(ctx)}) as {cast}"
+            raise KeyError(f"cannot emit fail-closed TypeScript parser for untagged union at {ctx}")
+    if "$ref" in field_schema:
+        ref = str(field_schema["$ref"])
+        ref_name = _resolve_schema_ref_name(ref)
+        resolved = _resolve_schema_ref(root, ref)
+        if not resolved and ref_name:
+            resolved = _lookup_named_schema(root, ref_name)
+        if _ref_is_named(root, ref_name, resolved, local_defs):
+            if closure.get(ref_name or "") is None:
+                raise KeyError(f"parser closure is missing referenced type `{ref_name}` at {ctx}")
+            return f"{_ts_parser_fn_name(ref_name or '')}({value})"
+        return _ts_wire_expr(root, resolved, value, ctx, local_defs, closure, depth)
+    if "const" in field_schema:
+        literal = json.dumps(field_schema["const"])
+        return f"expectWireConst({value}, {literal}, {json.dumps(ctx)}) as {literal}"
+    schema_type = field_schema.get("type")
+    if isinstance(schema_type, list):
+        non_null = [t for t in schema_type if t != "null"]
+        schema_type = non_null[0] if non_null else None
+    match schema_type:
+        case "string":
+            if isinstance(field_schema.get("enum"), list):
+                joined = ", ".join(json.dumps(v) for v in field_schema["enum"])
+                cast = " | ".join(json.dumps(v) for v in field_schema["enum"])
+                return f"expectWireEnum({value}, [{joined}], {json.dumps(ctx)}) as {cast}"
+            return f"expectWireString({value}, {json.dumps(ctx)})"
+        case "boolean":
+            return f"expectWireBoolean({value}, {json.dumps(ctx)})"
+        case "integer":
+            return f"expectWireInteger({value}, {json.dumps(ctx)})"
+        case "number":
+            return f"expectWireNumber({value}, {json.dumps(ctx)})"
+        case "array":
+            var = f"entry{depth or ''}"
+            inner = _ts_wire_expr(
+                root, field_schema.get("items"), var, f"{ctx}[]", local_defs, closure, depth + 1
+            )
+            if inner == var:
+                return f"expectWireArray({value}, {json.dumps(ctx)})"
+            return f"expectWireArray({value}, {json.dumps(ctx)}).map(({var}) => {inner})"
+        case "object":
+            properties = field_schema.get("properties")
+            additional = field_schema.get("additionalProperties", True)
+            if isinstance(additional, dict) and not properties:
+                value_var = f"mapValue{depth or ''}"
+                inner = _ts_wire_expr(
+                    root, additional, value_var, f"{ctx}{{}}", local_defs, closure, depth + 1
+                )
+                if inner != value_var:
+                    return (
+                        f"Object.fromEntries(Object.entries(expectWireObject({value}, "
+                        f"{json.dumps(ctx)})).map(([mapKey{depth or ''}, {value_var}]) => "
+                        f"[mapKey{depth or ''}, {inner}]))"
+                    )
+            return f"expectWireObject({value}, {json.dumps(ctx)})"
+        case _:
+            raise KeyError(f"cannot emit fail-closed TypeScript parser for schema at {ctx}")
+
+
+def _typescript_struct_parser(
+    name: str,
+    schema_root: dict[str, Any],
+    schema: dict[str, Any],
+    closure: dict[str, str],
+) -> str:
+    properties = schema.get("properties", {})
+    required = set(schema.get("required", []))
+    local_defs = set(schema.get("$defs", {}).keys())
+    lines = [
+        f"/** Fail-closed wire parser for {name} (K21): throws MeerkatError(INVALID_RESPONSE). */",
+        f"export function {_ts_parser_fn_name(name)}(value: unknown): {name} {{",
+        f"  const data = expectWireObject(value, {json.dumps(name)});",
+        "  return {",
+    ]
+    for field_name, field_schema in properties.items():
+        ctx = f"{name}.{field_name}"
+        expr = _ts_wire_expr(
+            schema_root, field_schema, _WIRE_VALUE_PLACEHOLDER, ctx, local_defs, closure
+        )
+        nullable = _schema_nullable(field_schema)
+        accessor = f"data[{json.dumps(field_name)}]"
+        if field_name in required and not nullable:
+            source = f"requireWireField(data, {json.dumps(field_name)}, {json.dumps(name)})"
+            value_expr = source if expr == _WIRE_VALUE_PLACEHOLDER else expr.replace(
+                _WIRE_VALUE_PLACEHOLDER, source
+            )
+            lines.append(f"    {field_name}: {value_expr},")
+        else:
+            inner = (
+                accessor
+                if expr == _WIRE_VALUE_PLACEHOLDER
+                else expr.replace(_WIRE_VALUE_PLACEHOLDER, accessor)
+            )
+            lines.append(
+                f"    ...({accessor} === undefined || {accessor} === null"
+                f" ? {{}} : {{ {field_name}: {inner} }}),"
+            )
+    lines.append("  };")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def _typescript_alias_parser(
+    name: str,
+    kind: str,
+    schema_root: dict[str, Any],
+    schema: dict[str, Any],
+    closure: dict[str, str],
+) -> str:
+    fn = _ts_parser_fn_name(name)
+    if kind == "enum":
+        values = _flat_string_enum_values(schema) or []
+        joined = ", ".join(json.dumps(v) for v in values)
+        return (
+            f"/** Fail-closed wire parser for {name} (K21): throws MeerkatError(INVALID_RESPONSE). */\n"
+            f"export function {fn}(value: unknown): {name} {{\n"
+            f"  return expectWireEnum(value, [{joined}], {json.dumps(name)}) as {name};\n"
+            "}\n"
+        )
+    local_defs = set(schema.get("$defs", {}).keys())
+    typed = _one_of_typed_dict_variants(schema_root, schema)
+    if typed is None:
+        raise KeyError(f"cannot emit fail-closed TypeScript parser for union `{name}`")
+    discriminator, variants = typed
+    lines = [
+        f"/** Fail-closed wire parser for {name} (K21): throws MeerkatError(INVALID_RESPONSE). */",
+        f"export function {fn}(value: unknown): {name} {{",
+        f"  const data = expectWireObject(value, {json.dumps(name)});",
+        (
+            f"  const tag = expectWireString(requireWireField(data, {json.dumps(discriminator)}, "
+            f"{json.dumps(name)}), {json.dumps(name + '.' + discriminator)});"
+        ),
+        "  switch (tag) {",
+    ]
+    for discriminator_value, variant in variants:
+        variant_props = variant.get("properties", {})
+        variant_required = set(variant.get("required", []))
+        variant_defs = set(variant.get("$defs", {}).keys()) | local_defs
+        lines.append(f"    case {json.dumps(discriminator_value)}:")
+        lines.append("      return {")
+        lines.append(f"        {discriminator}: {json.dumps(discriminator_value)},")
+        for field_name, field_schema in variant_props.items():
+            if field_name == discriminator:
+                continue
+            ctx = f"{name}.{discriminator_value}.{field_name}"
+            expr = _ts_wire_expr(
+                schema_root, field_schema, _WIRE_VALUE_PLACEHOLDER, ctx, variant_defs, closure
+            )
+            nullable = _schema_nullable(field_schema)
+            accessor = f"data[{json.dumps(field_name)}]"
+            if field_name in variant_required and not nullable:
+                source = (
+                    f"requireWireField(data, {json.dumps(field_name)}, {json.dumps(name)})"
+                )
+                value_expr = source if expr == _WIRE_VALUE_PLACEHOLDER else expr.replace(
+                    _WIRE_VALUE_PLACEHOLDER, source
+                )
+                lines.append(f"        {field_name}: {value_expr},")
+            else:
+                inner = (
+                    accessor
+                    if expr == _WIRE_VALUE_PLACEHOLDER
+                    else expr.replace(_WIRE_VALUE_PLACEHOLDER, accessor)
+                )
+                lines.append(
+                    f"        ...({accessor} === undefined || {accessor} === null"
+                    f" ? {{}} : {{ {field_name}: {inner} }}),"
+                )
+        lines.append("      };")
+    lines.append("    default:")
+    lines.append(
+        f"      throw wireParseError({json.dumps(name)}, "
+        f"`unknown \\`{discriminator}\\` value \\`${{tag}}\\``);"
+    )
+    lines.append("  }")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+_TYPESCRIPT_WIRE_PARSE_PRELUDE = """
+// K21 — shared fail-closed wire parsing helpers (generated; not exported).
+function wireParseError(context: string, message: string): MeerkatError {
+  return new MeerkatError("INVALID_RESPONSE", `invalid ${context}: ${message}`);
+}
+
+function expectWireObject(value: unknown, context: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw wireParseError(context, "expected object");
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireWireField(
+  data: Record<string, unknown>,
+  key: string,
+  context: string,
+): unknown {
+  const value = data[key];
+  if (value === undefined || value === null) {
+    throw wireParseError(context, `missing required field \\`${key}\\``);
+  }
+  return value;
+}
+
+function expectWireString(value: unknown, context: string): string {
+  if (typeof value !== "string") {
+    throw wireParseError(context, "expected string");
+  }
+  return value;
+}
+
+function expectWireBoolean(value: unknown, context: string): boolean {
+  if (typeof value !== "boolean") {
+    throw wireParseError(context, "expected boolean");
+  }
+  return value;
+}
+
+function expectWireInteger(value: unknown, context: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw wireParseError(context, "expected integer");
+  }
+  return value;
+}
+
+function expectWireNumber(value: unknown, context: string): number {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    throw wireParseError(context, "expected number");
+  }
+  return value;
+}
+
+function expectWireArray(value: unknown, context: string): unknown[] {
+  if (!Array.isArray(value)) {
+    throw wireParseError(context, "expected array");
+  }
+  return value;
+}
+
+function expectWireEnum(
+  value: unknown,
+  values: readonly string[],
+  context: string,
+): string {
+  if (typeof value !== "string" || !values.includes(value)) {
+    throw wireParseError(context, `expected one of ${values.join(", ")}`);
+  }
+  return value;
+}
+
+function expectWireConst(value: unknown, expected: unknown, context: string): unknown {
+  if (value !== expected) {
+    throw wireParseError(context, `expected constant \\`${String(expected)}\\``);
+  }
+  return value;
+}
+"""
+
+
 def _python_type_from_schema(
     root: dict[str, Any],
     field_schema: Any,
@@ -886,7 +1841,8 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content = "from __future__ import annotations\n\n"
     types_content += f'"""Generated wire types for Meerkat SDK.\n\nContract version: {contract_version}\n"""\n\n'
     types_content += "from dataclasses import dataclass, field\n"
-    types_content += "from typing import Any, Literal, NotRequired, Optional, Required, TypedDict\n\n\n"
+    types_content += "from typing import Any, Literal, NotRequired, Optional, Required, TypedDict\n\n"
+    types_content += "from .errors import MeerkatError\n\n\n"
     types_content += f'CONTRACT_VERSION = "{contract_version}"\n\n\n'
 
     # WireUsage
@@ -978,10 +1934,16 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         types_content += "    skills_enabled: bool = False\n"
         types_content += "    skill_refs: list[dict[str, str]] = field(default_factory=list)\n\n"
 
-    params_schema = _schema_root_with_nested_defs(schemas.get("params", {}))
-    wire_schema = _schema_root_with_nested_defs(schemas.get("wire-types", {}))
+    params_schema, wire_schema, params_promotion, wire_promotion = _build_contract_schema_roots(
+        schemas
+    )
+    _log_promotion_report("params", params_promotion)
+    _log_promotion_report("wire", wire_promotion)
+    parser_closure = _wire_parser_closure(wire_schema, WORKGRAPH_PARSER_ROOT_TYPES)
+    types_content += _PYTHON_WIRE_PARSE_PRELUDE + "\n"
     runtime_state_result_root = _runtime_state_result_root(wire_schema)
     emitted_python_dataclasses: set[str] = set()
+    emitted_from_wire_parsers: set[str] = set()
 
     def append_python_dataclass(name: str, root_schema: dict[str, Any], default_doc: str) -> None:
         nonlocal types_content
@@ -1019,6 +1981,11 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
                 optional_lines.append(f"    {python_field_name}: {annotation} = None\n")
         for line in required_lines + optional_lines:
             types_content += line
+        if parser_closure.get(name) == "struct" and _lookup_named_schema(wire_schema, name) is schema:
+            types_content += "\n" + _python_from_wire_method(
+                name, schema_root, properties, required, local_defs, parser_closure
+            )
+            emitted_from_wire_parsers.add(name)
         types_content += "\n"
         emitted_python_dataclasses.add(name)
 
@@ -1156,6 +2123,11 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         append_python_contract_dataclass(name)
     for name in WORKGRAPH_RPC_CONTRACT_HELPER_TYPES:
         append_python_contract_dataclass(name)
+    # K21: emit the inline-object promotions as named generated types.
+    for name in params_promotion["minted"]:
+        append_python_dataclass(name, params_schema, f"Promoted inline object type {name}.")
+    for name in wire_promotion["minted"]:
+        append_python_dataclass(name, wire_schema, f"Promoted inline object type {name}.")
     for name in COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES:
         append_python_contract_dataclass(name)
     append_python_dataclass("ScheduleIdParams", params_schema, "Request payload for schedule id lookups.")
@@ -1445,6 +2417,19 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     for name in COMMS_SESSION_STREAM_RPC_CONTRACT_ALIAS_TYPES:
         root_schema = params_schema if _lookup_named_schema(params_schema, name) else wire_schema
         append_python_alias(name, root_schema, f"Comms/session-stream RPC contract for {name}.")
+    # K21: module-level fail-closed parsers for the workgraph union/enum
+    # aliases (struct types carry `from_wire` classmethods inline).
+    types_content += "\n\n" + _python_alias_parsers(wire_schema, parser_closure)
+    missing_struct_parsers = sorted(
+        name
+        for name, kind in parser_closure.items()
+        if kind == "struct" and name not in emitted_from_wire_parsers
+    )
+    if missing_struct_parsers:
+        raise RuntimeError(
+            "workgraph parser closure includes struct types emitted without a "
+            f"`from_wire` parser: {missing_struct_parsers}"
+        )
     (output_dir / "types.py").write_text(types_content)
 
     # Generate error types
@@ -1482,7 +2467,9 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
 
     # Generate types
     types_content = f"// Generated wire types for Meerkat SDK\n// Contract version: {contract_version}\n\n"
+    types_content += 'import { MeerkatError } from "./errors.js";\n\n'
     types_content += f'export const CONTRACT_VERSION = "{contract_version}";\n\n'
+    types_content += _TYPESCRIPT_WIRE_PARSE_PRELUDE + "\n"
 
     types_content += "export interface WireUsage {\n"
     types_content += "  input_tokens: number;\n"
@@ -1569,8 +2556,10 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         types_content += "  skill_refs: Array<{ source_uuid: string; skill_name: string }>;\n"
         types_content += "}\n"
 
-    params_schema = _schema_root_with_nested_defs(schemas.get("params", {}))
-    wire_schema = _schema_root_with_nested_defs(schemas.get("wire-types", {}))
+    params_schema, wire_schema, params_promotion, wire_promotion = _build_contract_schema_roots(
+        schemas
+    )
+    parser_closure = _wire_parser_closure(wire_schema, WORKGRAPH_PARSER_ROOT_TYPES)
     runtime_state_result_root = _runtime_state_result_root(wire_schema)
     emitted_typescript_interfaces: set[str] = set()
 
@@ -1672,6 +2661,11 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         append_typescript_contract_interface(name)
     for name in WORKGRAPH_RPC_CONTRACT_HELPER_TYPES:
         append_typescript_contract_interface(name)
+    # K21: emit the inline-object promotions as named generated types.
+    for name in params_promotion["minted"]:
+        append_typescript_interface(name, params_schema)
+    for name in wire_promotion["minted"]:
+        append_typescript_interface(name, wire_schema)
     for name in COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES:
         append_typescript_contract_interface(name)
     append_typescript_interface("ScheduleIdParams", params_schema)
@@ -1830,6 +2824,23 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_alias("WireTranscriptSource", wire_schema)
     append_typescript_alias("WireAssistantBlock", wire_schema)
     append_typescript_alias("WireImageOperationPhase", wire_schema)
+
+    # K21: fail-closed wire parsers for the workgraph read types (the
+    # `parseInitResult` precedent from the web emission, applied to the
+    # contract types the SDK wrappers consume).
+    parser_blocks: list[str] = []
+    for name, kind in parser_closure.items():
+        schema = _lookup_named_schema(wire_schema, name)
+        schema_root = _schema_root_with_local_defs(wire_schema, schema)
+        if kind == "struct":
+            parser_blocks.append(
+                _typescript_struct_parser(name, schema_root, schema, parser_closure)
+            )
+        else:
+            parser_blocks.append(
+                _typescript_alias_parser(name, kind, schema_root, schema, parser_closure)
+            )
+    types_content += "\n" + "\n".join(parser_blocks)
 
     (output_dir / "types.ts").write_text(types_content)
 

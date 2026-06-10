@@ -24,6 +24,7 @@ import {
   Session,
   DeferredSession,
   liveWebrtcMediaConstraints,
+  parseWorkItem,
 } from "../dist/index.js";
 
 /**
@@ -1251,43 +1252,57 @@ describe("WorkGraph parsers", () => {
   };
 
   it("parses typed owners and claims", () => {
-    const item = MeerkatClient.parseWorkItem(claimedItem);
+    const item = parseWorkItem(claimedItem);
 
-    assert.equal(item.realmId, "homecore");
+    assert.equal(item.realm_id, "homecore");
     assert.equal(item.owner?.key.kind, "agent");
     assert.equal(item.claim?.owner.key.id, "homecore-kapellmeister");
-    assert.deepEqual(item.completionPolicy, { kind: "host_confirmed" });
+    assert.deepEqual(item.completion_policy, { kind: "host_confirmed" });
   });
 
   it("rejects malformed WorkGraph lifecycle truth", () => {
     assert.throws(
-      () => MeerkatClient.parseWorkItem({ ...claimedItem, status: undefined }),
+      () => parseWorkItem({ ...claimedItem, status: undefined }),
       (error) =>
         error instanceof MeerkatError &&
         error.code === "INVALID_RESPONSE" &&
-        String(error.message).includes("Invalid workgraph item"),
+        String(error.message).includes("WorkItem"),
     );
   });
 
   it("requires typed WorkGraph claim owners", () => {
     assert.throws(
       () =>
-        MeerkatClient.parseWorkItem({
+        parseWorkItem({
           ...claimedItem,
           claim: { claimed_at: timestamp },
         }),
       (error) =>
         error instanceof MeerkatError &&
         error.code === "INVALID_RESPONSE" &&
-        String(error.message).includes("missing owner"),
+        String(error.message).includes("owner"),
     );
   });
 
-  it("defaults WorkGraph fields added after 0.6.23 for compatible older payloads", () => {
-    const { completion_policy: _completionPolicy, ...legacyItem } = claimedItem;
-    const item = MeerkatClient.parseWorkItem(legacyItem);
+  it("rejects payloads missing the required completion policy (no silent default)", () => {
+    const { completion_policy: _completionPolicy, ...truncatedItem } = claimedItem;
+    assert.throws(
+      () => parseWorkItem(truncatedItem),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        String(error.message).includes("completion_policy"),
+    );
+  });
 
-    assert.deepEqual(item.completionPolicy, { kind: "self_attest" });
+  it("rejects unknown completion-policy kinds (fail-closed union parse)", () => {
+    assert.throws(
+      () => parseWorkItem({ ...claimedItem, completion_policy: { kind: "vibes" } }),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        String(error.message).includes("kind"),
+    );
   });
 
   it("rejects malformed WorkGraph attention authority enums", async () => {
@@ -1317,14 +1332,14 @@ describe("WorkGraph parsers", () => {
       (error) =>
         error instanceof MeerkatError &&
         error.code === "INVALID_RESPONSE" &&
-        String(error.message).includes("invalid mode"),
+        String(error.message).includes("WorkAttentionMode"),
     );
     await assert.rejects(
       clientFor({ ...attention, delegated_authority: "not_authority" }).listWorkGraphAttention(),
       (error) =>
         error instanceof MeerkatError &&
         error.code === "INVALID_RESPONSE" &&
-        String(error.message).includes("delegated_authority"),
+        String(error.message).includes("AttentionDelegatedAuthority"),
     );
   });
 
@@ -2347,25 +2362,31 @@ describe("Parity wrappers", () => {
     });
     const events = await client.listWorkGraphEvents({ realm_id: "homecore", limit: 10 });
     const goal = await client.getWorkGraphGoalStatus({
-      realmId: "homecore",
+      binding_id: "attention-1",
+      realm_id: "homecore",
       namespace: "family/appointments",
-      bindingId: "attention-1",
     });
     const attentionList = await client.listWorkGraphAttention({
-      realmId: "homecore",
+      realm_id: "homecore",
       status: { state: "active" },
-      target: { kind: "session", sessionId: "session-1" },
+      target: { kind: "session", session_id: "session-1" },
     });
 
     assert.equal(fetched.id, "prep-dentist-ride");
+    assert.equal(fetched.claim, undefined);
+    assert.deepEqual(fetched.evidence_refs, [{ kind: "message_draft", id: "draft-1" }]);
     assert.equal(listed.items[0].priority, "high");
     assert.equal(ready.items[0].status, "open");
     assert.deepEqual(snapshot.ready_item_ids, ["prep-dentist-ride"]);
     assert.equal(snapshot.attention[0].binding_id, "attention-1");
     assert.equal(events.events[0].kind, "created");
     assert.equal(goal.item.id, "prep-dentist-ride");
-    assert.equal(goal.attention.bindingId, "attention-1");
-    assert.equal(attentionList.attention[0].bindingId, "attention-1");
+    assert.equal(goal.attention.binding_id, "attention-1");
+    assert.equal(attentionList.attention[0].binding_id, "attention-1");
+    assert.deepEqual(attentionList.attention[0].target, {
+      kind: "session",
+      session_id: "session-1",
+    });
     assert.deepEqual(calls.map((c) => c.method), [
       "workgraph/get",
       "workgraph/list",
@@ -2392,6 +2413,16 @@ describe("Parity wrappers", () => {
       status: { state: "active" },
       target: { kind: "session", session_id: "session-1" },
     });
+  });
+
+  it("fails closed on malformed WorkGraph list entries (generated parsers)", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({ items: [{ id: "only-an-id" }] });
+    await assert.rejects(
+      client.listWorkGraphItems({ realm_id: "homecore" }),
+      (error) =>
+        error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+    );
   });
 
   it("adds wrappers for mob events, batch spawn, and profile CRUD", async () => {

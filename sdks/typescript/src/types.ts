@@ -31,13 +31,6 @@ import type {
   WireRuntimeBinding,
   WireToolAccessPolicy,
   WireToolFilter,
-  AttentionDelegatedAuthority,
-  AttentionProjectionPolicy,
-  WorkAttentionMode,
-  WorkAttentionStatus,
-  WorkCompletionPolicy,
-  WorkGraphStatus,
-  WorkGraphPriority,
 } from "./generated/types.js";
 import type { TurnTerminalCauseKind, Usage } from "./events.js";
 
@@ -999,101 +992,40 @@ export type {
   WorkItemFilter,
 } from "./generated/types.js";
 
-export type WorkGraphOwnerKind = "principal" | "agent" | "session" | "mob" | "label";
+// K21: the workgraph read shapes are fully generated (including the promoted
+// inline-object types `WorkItemOwner` / `WorkItemClaim` /
+// `WorkItemExternalRef`) and carry fail-closed `parseX` wire parsers. The
+// hand camelCase twins (`WorkGraphOwner*`, `WorkGraphClaim`,
+// `ExternalWorkRef`, hand `WorkEvidenceRef`/`WorkItem`/`WorkAttentionBinding`
+// and the goal/attention request/result mirrors) are deleted.
+export type {
+  AttentionListRequest,
+  AttentionListResult,
+  GoalStatusRequest,
+  GoalStatusResult,
+  WorkAttentionBinding,
+  WorkEvidenceKind,
+  WorkEvidenceRef,
+  WorkItem,
+  WorkItemClaim,
+  WorkItemExternalRef,
+  WorkItemOwner,
+  WorkItemRef,
+  WorkOwnerKey,
+  WorkOwnerKind,
+} from "./generated/types.js";
 
-export interface WorkGraphOwnerKey {
-  readonly kind: WorkGraphOwnerKind;
-  readonly id: string;
-}
-
-export interface WorkItemRef {
-  readonly realmId: string;
-  readonly namespace: string;
-  readonly itemId: string;
-}
-
-export interface WorkGraphOwner {
-  readonly key: WorkGraphOwnerKey;
-  readonly displayName?: string;
-}
-
-export interface WorkGraphClaim {
-  readonly owner: WorkGraphOwner;
-  readonly claimedAt: string;
-  readonly leaseExpiresAt?: string;
-}
-
-export interface ExternalWorkRef {
-  readonly kind: string;
-  readonly id: string;
-  readonly url?: string;
-}
-
-export interface WorkEvidenceRef {
-  readonly kind: string;
-  readonly id: string;
-  readonly label?: string;
-  readonly summary?: string;
-}
-
-export interface WorkItem {
-  readonly id: string;
-  readonly realmId: string;
-  readonly namespace: string;
-  readonly title: string;
-  readonly description?: string;
-  readonly status: WorkGraphStatus;
-  readonly priority: WorkGraphPriority;
-  readonly completionPolicy: WorkCompletionPolicy;
-  readonly labels: readonly string[];
-  readonly owner?: WorkGraphOwner;
-  readonly claim?: WorkGraphClaim;
-  readonly machineState: Record<string, unknown>;
-  readonly revision: number;
-  readonly dueAt?: string;
-  readonly notBefore?: string;
-  readonly snoozedUntil?: string;
-  readonly createdAt: string;
-  readonly updatedAt: string;
-  readonly terminalAt?: string;
-  readonly externalRefs: readonly ExternalWorkRef[];
-  readonly evidenceRefs: readonly WorkEvidenceRef[];
-}
-
-export interface WorkGraphGoalResult {
-  readonly item: WorkItem;
-  readonly attention: WorkAttentionBinding;
-}
-
-export interface WorkGraphGoalStatusRequest extends WorkGraphItemLookupOptions {
-  readonly bindingId: string;
-}
-
-export type WorkGraphAttentionTarget =
-  | { readonly kind: "session"; readonly sessionId: string }
-  | { readonly kind: "loweredOwner"; readonly ownerKey: WorkGraphOwnerKey };
-
-export interface WorkAttentionBinding {
-  readonly bindingId: string;
-  readonly createdAt: string;
-  readonly delegatedAuthority: AttentionDelegatedAuthority;
-  readonly machineState?: Record<string, unknown>;
-  readonly mode: WorkAttentionMode;
-  readonly projectionPolicy?: AttentionProjectionPolicy;
-  readonly status: WorkAttentionStatus;
-  readonly target: WorkGraphAttentionTarget;
-  readonly updatedAt: string;
-  readonly workRef: WorkItemRef;
-}
-
-export interface WorkGraphAttentionListRequest extends WorkGraphItemLookupOptions {
-  readonly status?: WorkAttentionStatus;
-  readonly target?: WorkGraphAttentionTarget;
-}
-
-export interface WorkGraphAttentionListResult {
-  readonly attention: readonly WorkAttentionBinding[];
-}
+export {
+  parseAttentionListResult,
+  parseGoalStatusResult,
+  parseWorkAttentionBinding,
+  parseWorkEdge,
+  parseWorkGraphEvent,
+  parseWorkGraphEventsResponse,
+  parseWorkGraphItemsResponse,
+  parseWorkGraphSnapshot,
+  parseWorkItem,
+} from "./generated/types.js";
 
 export interface WorkGraphItemLookupOptions {
   readonly realmId?: string;

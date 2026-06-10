@@ -2664,6 +2664,7 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
         "title": "Prep A for non-preferred dentist car",
         "status": "open",
         "priority": "high",
+        "completion_policy": {"kind": "self_attest"},
         "labels": ["autism-support", "dentist"],
         "revision": 1,
         "machine_state": {},
@@ -2671,6 +2672,23 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
         "updated_at": timestamp,
         "external_refs": [{"kind": "calendar_event", "id": "dentist-visit"}],
         "evidence_refs": [{"kind": "message_draft", "id": "draft-1"}],
+    }
+    attention_binding = {
+        "binding_id": "attn-1",
+        "work_ref": {
+            "realm_id": "homecore",
+            "namespace": "family/appointments",
+            "item_id": "prep-dentist-ride",
+        },
+        "target": {
+            "kind": "session",
+            "session_id": "019e63c2-0000-7000-8000-000000000030",
+        },
+        "mode": "pursue",
+        "status": {"state": "active"},
+        "delegated_authority": "request_closure",
+        "created_at": timestamp,
+        "updated_at": timestamp,
     }
 
     async def fake_request(method, params):
@@ -2706,9 +2724,9 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
                 ]
             }
         if method == "workgraph/goal/status":
-            return {"item": item, "attention": {"binding_id": "attn-1"}}
+            return {"item": item, "attention": attention_binding}
         if method == "workgraph/attention/list":
-            return {"attention": [{"binding_id": "attn-1"}]}
+            return {"attention": [attention_binding]}
         raise AssertionError(f"unexpected method {method}")
 
     client._request = fake_request  # type: ignore[method-assign]
@@ -2740,15 +2758,22 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
         }
     )
 
-    assert fetched["id"] == "prep-dentist-ride"
-    # K20: list/ready/events return the generated result dataclasses
-    # (WorkItemsResult / WorkEventsResult), not raw dicts.
-    assert listed.items[0]["priority"] == "high"
-    assert ready.items[0]["status"] == "open"
-    assert snapshot["ready_item_ids"] == ["prep-dentist-ride"]
-    assert events.events[0]["kind"] == "created"
-    assert goal["attention"]["binding_id"] == "attn-1"
-    assert attention["attention"][0]["binding_id"] == "attn-1"
+    # K21: every workgraph read flows through the generated fail-closed
+    # parsers (`from_wire`) and returns generated dataclasses, not raw dicts.
+    assert fetched.id == "prep-dentist-ride"
+    assert fetched.owner is None
+    assert fetched.evidence_refs[0].id == "draft-1"
+    assert listed.items[0].priority == "high"
+    assert ready.items[0].status == "open"
+    assert snapshot.ready_item_ids == ["prep-dentist-ride"]
+    assert events.events[0].kind == "created"
+    assert goal.attention.binding_id == "attn-1"
+    assert goal.item.id == "prep-dentist-ride"
+    assert attention.attention[0].binding_id == "attn-1"
+    assert attention.attention[0].target == {
+        "kind": "session",
+        "session_id": "019e63c2-0000-7000-8000-000000000030",
+    }
     assert [method for method, _ in calls] == [
         "workgraph/get",
         "workgraph/list",
@@ -4170,6 +4195,123 @@ async def test_list_workgraph_events_rejects_non_list_events() -> None:
     with pytest.raises(MeerkatError) as excinfo:
         await client.list_workgraph_events({"realm_id": "homecore"})
     assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+# ---------------------------------------------------------------------------
+# K21 — generated fail-closed workgraph parsers: malformed entries and
+# mistyped fields raise instead of being passed through as raw dicts.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_workgraph_items_rejects_malformed_entry() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        # Entry missing the machine-owned lifecycle truth (`status`,
+        # `machine_state`) — a contract violation, not an empty item.
+        return {"items": [{"id": "only-an-id"}]}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.list_workgraph_items({"realm_id": "homecore"})
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_get_workgraph_item_rejects_invalid_status_enum() -> None:
+    client = MeerkatClient()
+    timestamp = "2026-05-12T12:00:00Z"
+
+    async def fake_request(_method, _params):
+        return {
+            "id": "i1",
+            "realm_id": "r",
+            "namespace": "n",
+            "title": "t",
+            "status": "not_a_status",
+            "priority": "high",
+            "completion_policy": {"kind": "self_attest"},
+            "revision": 1,
+            "machine_state": {},
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.get_workgraph_item("i1")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+    assert "status" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_get_workgraph_item_requires_typed_claim_owner() -> None:
+    client = MeerkatClient()
+    timestamp = "2026-05-12T12:00:00Z"
+
+    async def fake_request(_method, _params):
+        return {
+            "id": "i1",
+            "realm_id": "r",
+            "namespace": "n",
+            "title": "t",
+            "status": "in_progress",
+            "priority": "high",
+            "completion_policy": {"kind": "self_attest"},
+            "revision": 1,
+            "machine_state": {},
+            "created_at": timestamp,
+            "updated_at": timestamp,
+            # Claim without its owner — attribution truth must not be
+            # fabricated by the parser.
+            "claim": {"claimed_at": timestamp},
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.get_workgraph_item("i1")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+    assert "owner" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_list_workgraph_attention_rejects_invalid_authority_enums() -> None:
+    timestamp = "2026-05-12T12:00:00Z"
+    binding = {
+        "binding_id": "attn-1",
+        "work_ref": {"realm_id": "r", "namespace": "n", "item_id": "i1"},
+        "target": {"kind": "session", "session_id": "s1"},
+        "mode": "pursue",
+        "status": {"state": "active"},
+        "delegated_authority": "request_closure",
+        "created_at": timestamp,
+        "updated_at": timestamp,
+    }
+
+    def client_for(entry):
+        client = MeerkatClient()
+
+        async def fake_request(_method, _params):
+            return {"attention": [entry]}
+
+        client._request = fake_request  # type: ignore[method-assign]
+        return client
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client_for({**binding, "mode": "not_a_mode"}).list_workgraph_attention()
+    assert excinfo.value.code == "INVALID_RESPONSE"
+    assert "WorkAttentionMode" in str(excinfo.value)
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client_for(
+            {**binding, "delegated_authority": "not_authority"}
+        ).list_workgraph_attention()
+    assert excinfo.value.code == "INVALID_RESPONSE"
+    assert "AttentionDelegatedAuthority" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------

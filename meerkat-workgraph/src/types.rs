@@ -730,6 +730,15 @@ impl<'de> Deserialize<'de> for WorkItem {
 
 #[cfg(feature = "schema")]
 impl schemars::JsonSchema for WorkItem {
+    // NOTE (K21): this manual schema inlines the composite field shapes
+    // (`owner`, `claim`, `completion_policy`, `external_refs`,
+    // `evidence_refs`). The SDK generator's inline-object promotion pass
+    // (tools/sdk-codegen/generate.py) dedupes them by structural content
+    // against the derived sibling schemas (`WorkOwnerKey`,
+    // `WorkCompletionPolicy`, `WorkEvidenceRef`); keep these inline copies
+    // structurally identical to the derived shapes or the generator will
+    // mint `WorkItem*`-named twins (visible in the regen diff and the
+    // promotion report).
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "WorkItem".into()
     }
@@ -765,23 +774,23 @@ impl schemars::JsonSchema for WorkItem {
                         {
                             "type": "object",
                             "required": ["kind"],
-                            "properties": { "kind": { "const": "self_attest" } }
+                            "properties": { "kind": { "type": "string", "const": "self_attest" } }
                         },
                         {
                             "type": "object",
                             "required": ["kind"],
-                            "properties": { "kind": { "const": "host_confirmed" } }
+                            "properties": { "kind": { "type": "string", "const": "host_confirmed" } }
                         },
                         {
                             "type": "object",
                             "required": ["kind"],
-                            "properties": { "kind": { "const": "principal_confirmed" } }
+                            "properties": { "kind": { "type": "string", "const": "principal_confirmed" } }
                         },
                         {
                             "type": "object",
                             "required": ["kind", "owner_key"],
                             "properties": {
-                                "kind": { "const": "supervisor" },
+                                "kind": { "type": "string", "const": "supervisor" },
                                 "owner_key": {
                                     "type": "object",
                                     "required": ["kind", "id"],
@@ -799,8 +808,8 @@ impl schemars::JsonSchema for WorkItem {
                             "type": "object",
                             "required": ["kind", "threshold"],
                             "properties": {
-                                "kind": { "const": "reviewer_quorum" },
-                                "threshold": { "type": "integer", "format": "uint16", "minimum": 1 }
+                                "kind": { "type": "string", "const": "reviewer_quorum" },
+                                "threshold": { "type": "integer", "format": "uint16", "minimum": 0, "maximum": 65535 }
                             }
                         }
                     ]
@@ -843,7 +852,24 @@ impl schemars::JsonSchema for WorkItem {
                             "type": "object",
                             "required": ["owner", "claimed_at"],
                             "properties": {
-                                "owner": { "type": "object" },
+                                "owner": {
+                                    "type": "object",
+                                    "required": ["key"],
+                                    "properties": {
+                                        "key": {
+                                            "type": "object",
+                                            "required": ["kind", "id"],
+                                            "properties": {
+                                                "kind": {
+                                                    "type": "string",
+                                                    "enum": ["principal", "agent", "session", "mob", "label"]
+                                                },
+                                                "id": { "type": "string" }
+                                            }
+                                        },
+                                        "display_name": { "type": ["string", "null"] }
+                                    }
+                                },
                                 "claimed_at": { "type": "string", "format": "date-time" },
                                 "lease_expires_at": { "type": ["string", "null"], "format": "date-time" }
                             }
@@ -883,7 +909,42 @@ impl schemars::JsonSchema for WorkItem {
                             "kind": { "type": "string" },
                             "id": { "type": "string" },
                             "label": { "type": ["string", "null"] },
-                            "summary": { "type": ["string", "null"] }
+                            "summary": { "type": ["string", "null"] },
+                            "confirmation_kind": {
+                                "anyOf": [
+                                    {
+                                        "oneOf": [
+                                            {
+                                                "type": "string",
+                                                "enum": [
+                                                    "host_confirmation",
+                                                    "principal_confirmation",
+                                                    "supervisor_confirmation",
+                                                    "reviewer_confirmation"
+                                                ]
+                                            },
+                                            { "type": "string", "const": "self_attest" }
+                                        ]
+                                    },
+                                    { "type": "null" }
+                                ]
+                            },
+                            "confirming_owner_key": {
+                                "anyOf": [
+                                    {
+                                        "type": "object",
+                                        "required": ["kind", "id"],
+                                        "properties": {
+                                            "kind": {
+                                                "type": "string",
+                                                "enum": ["principal", "agent", "session", "mob", "label"]
+                                            },
+                                            "id": { "type": "string" }
+                                        }
+                                    },
+                                    { "type": "null" }
+                                ]
+                            }
                         }
                     }
                 }

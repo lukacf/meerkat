@@ -8,6 +8,8 @@ Contract version: 0.7.0-alpha.0
 from dataclasses import dataclass, field
 from typing import Any, Literal, NotRequired, Optional, Required, TypedDict
 
+from .errors import MeerkatError
+
 
 CONTRACT_VERSION = "0.7.0-alpha.0"
 
@@ -115,6 +117,67 @@ class SkillsParams:
     """Skills parameters (available because skills capability is compiled)."""
     skills_enabled: bool = False
     skill_refs: list[dict[str, str]] = field(default_factory=list)
+
+
+
+def _wire_parse_error(context: str, message: str) -> MeerkatError:
+    """INVALID_RESPONSE error for the generated fail-closed wire parsers (K21)."""
+    return MeerkatError("INVALID_RESPONSE", f"invalid {context}: {message}")
+
+
+def _expect_wire_object(value: Any, context: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise _wire_parse_error(context, "expected object")
+    return value
+
+
+def _require_wire_field(data: dict[str, Any], key: str, context: str) -> Any:
+    if data.get(key) is None:
+        raise _wire_parse_error(context, f"missing required field `{key}`")
+    return data[key]
+
+
+def _expect_wire_str(value: Any, context: str) -> str:
+    if not isinstance(value, str):
+        raise _wire_parse_error(context, "expected string")
+    return value
+
+
+def _expect_wire_bool(value: Any, context: str) -> bool:
+    if not isinstance(value, bool):
+        raise _wire_parse_error(context, "expected boolean")
+    return value
+
+
+def _expect_wire_int(value: Any, context: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise _wire_parse_error(context, "expected integer")
+    return value
+
+
+def _expect_wire_number(value: Any, context: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _wire_parse_error(context, "expected number")
+    return float(value)
+
+
+def _expect_wire_list(value: Any, context: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise _wire_parse_error(context, "expected array")
+    return value
+
+
+def _expect_wire_enum(value: Any, values: tuple[str, ...], context: str) -> Any:
+    if not isinstance(value, str) or value not in values:
+        raise _wire_parse_error(context, f"expected one of {list(values)}")
+    return value
+
+
+def _expect_wire_const(value: Any, expected: Any, context: str) -> Any:
+    if value != expected:
+        raise _wire_parse_error(context, f"expected constant `{expected}`")
+    return value
+
 
 
 @dataclass
@@ -298,11 +361,31 @@ class WorkEventsResult:
     """Result envelope for work-event list reads (`workgraph/events`)."""
     events: list[Any]
 
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkEventsResult":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkEventsResult')
+        return cls(
+            events=list(_expect_wire_list(_require_wire_field(data, 'events', 'WorkEventsResult'), 'WorkEventsResult.events')),
+        )
+
 
 @dataclass
 class WorkItemsResult:
     """Result envelope for work-item list reads (`workgraph/list`, `workgraph/ready`)."""
     items: list[Any]
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkItemsResult":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkItemsResult')
+        return cls(
+            items=list(_expect_wire_list(_require_wire_field(data, 'items', 'WorkItemsResult'), 'WorkItemsResult.items')),
+        )
 
 
 # Parameters for the RPC `config/set` method — replace the config (bare
@@ -1348,12 +1431,33 @@ class AttentionListResult:
     """Wire payload for AttentionListResult."""
     attention: list[WorkAttentionBinding]
 
+    @classmethod
+    def from_wire(cls, value: Any) -> "AttentionListResult":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'AttentionListResult')
+        return cls(
+            attention=[WorkAttentionBinding.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'attention', 'AttentionListResult'), 'AttentionListResult.attention')],
+        )
+
 
 @dataclass
 class AttentionProjectionPolicy:
     """Wire payload for AttentionProjectionPolicy."""
     include_parent_context: Optional[bool] = None
     max_text_chars: Optional[int] = None
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "AttentionProjectionPolicy":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'AttentionProjectionPolicy')
+        return cls(
+            include_parent_context=(_expect_wire_bool(data['include_parent_context'], 'AttentionProjectionPolicy.include_parent_context') if data.get('include_parent_context') is not None else None),
+            max_text_chars=(_expect_wire_int(data['max_text_chars'], 'AttentionProjectionPolicy.max_text_chars') if data.get('max_text_chars') is not None else None),
+        )
 
 
 @dataclass
@@ -1401,6 +1505,17 @@ class GoalStatusResult:
     attention: WorkAttentionBinding
     item: WorkItem
 
+    @classmethod
+    def from_wire(cls, value: Any) -> "GoalStatusResult":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'GoalStatusResult')
+        return cls(
+            attention=WorkAttentionBinding.from_wire(_require_wire_field(data, 'attention', 'GoalStatusResult')),
+            item=WorkItem.from_wire(_require_wire_field(data, 'item', 'GoalStatusResult')),
+        )
+
 
 @dataclass
 class ProjectedAttentionAuthority:
@@ -1442,6 +1557,25 @@ class WorkAttentionBinding:
     machine_state: Optional[dict[str, Any]] = None
     projection_policy: Optional[AttentionProjectionPolicy] = None
 
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkAttentionBinding":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkAttentionBinding')
+        return cls(
+            binding_id=_expect_wire_str(_require_wire_field(data, 'binding_id', 'WorkAttentionBinding'), 'WorkAttentionBinding.binding_id'),
+            created_at=_expect_wire_str(_require_wire_field(data, 'created_at', 'WorkAttentionBinding'), 'WorkAttentionBinding.created_at'),
+            delegated_authority=parse_attention_delegated_authority(_require_wire_field(data, 'delegated_authority', 'WorkAttentionBinding')),
+            machine_state=(_expect_wire_object(data['machine_state'], 'WorkAttentionBinding.machine_state') if data.get('machine_state') is not None else None),
+            mode=parse_work_attention_mode(_require_wire_field(data, 'mode', 'WorkAttentionBinding')),
+            projection_policy=(AttentionProjectionPolicy.from_wire(data['projection_policy']) if data.get('projection_policy') is not None else None),
+            status=parse_work_attention_status(_require_wire_field(data, 'status', 'WorkAttentionBinding')),
+            target=parse_work_attention_target(_require_wire_field(data, 'target', 'WorkAttentionBinding')),
+            updated_at=_expect_wire_str(_require_wire_field(data, 'updated_at', 'WorkAttentionBinding'), 'WorkAttentionBinding.updated_at'),
+            work_ref=WorkItemRef.from_wire(_require_wire_field(data, 'work_ref', 'WorkAttentionBinding')),
+        )
+
 
 @dataclass
 class WorkGraphEventFilter:
@@ -1458,6 +1592,16 @@ class WorkGraphEventsResponse:
     """Wire payload for WorkGraphEventsResponse."""
     events: list[WorkGraphEvent]
 
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkGraphEventsResponse":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkGraphEventsResponse')
+        return cls(
+            events=[WorkGraphEvent.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'events', 'WorkGraphEventsResponse'), 'WorkGraphEventsResponse.events')],
+        )
+
 
 @dataclass
 class WorkGraphIdParams:
@@ -1473,6 +1617,16 @@ class WorkGraphItemsResponse:
     """Wire payload for WorkGraphItemsResponse."""
     items: list[WorkItem]
 
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkGraphItemsResponse":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkGraphItemsResponse')
+        return cls(
+            items=[WorkItem.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'items', 'WorkGraphItemsResponse'), 'WorkGraphItemsResponse.items')],
+        )
+
 
 @dataclass
 class WorkGraphSnapshot:
@@ -1486,6 +1640,24 @@ class WorkGraphSnapshot:
     attention: Optional[list[WorkAttentionBinding]] = None
     event_high_water_mark: Optional[int] = None
     namespace: Optional[str] = None
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkGraphSnapshot":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkGraphSnapshot')
+        return cls(
+            all_namespaces=_expect_wire_bool(_require_wire_field(data, 'all_namespaces', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.all_namespaces'),
+            attention=([WorkAttentionBinding.from_wire(_item) for _item in _expect_wire_list(data['attention'], 'WorkGraphSnapshot.attention')] if data.get('attention') is not None else None),
+            captured_at=_expect_wire_str(_require_wire_field(data, 'captured_at', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.captured_at'),
+            edges=[WorkEdge.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'edges', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.edges')],
+            event_high_water_mark=(_expect_wire_int(data['event_high_water_mark'], 'WorkGraphSnapshot.event_high_water_mark') if data.get('event_high_water_mark') is not None else None),
+            items=[WorkItem.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'items', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.items')],
+            namespace=(_expect_wire_str(data['namespace'], 'WorkGraphSnapshot.namespace') if data.get('namespace') is not None else None),
+            ready_item_ids=[_expect_wire_str(_item, 'WorkGraphSnapshot.ready_item_ids[]') for _item in _expect_wire_list(_require_wire_field(data, 'ready_item_ids', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.ready_item_ids')],
+            realm_id=_expect_wire_str(_require_wire_field(data, 'realm_id', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.realm_id'),
+        )
 
 
 @dataclass
@@ -1503,7 +1675,7 @@ class WorkGraphSnapshotFilter:
 @dataclass
 class WorkItem:
     """Wire payload for WorkItem."""
-    completion_policy: dict[str, Any]
+    completion_policy: WorkCompletionPolicy
     created_at: str
     id: str
     machine_state: dict[str, Any]
@@ -1514,16 +1686,46 @@ class WorkItem:
     status: Literal['open', 'in_progress', 'blocked', 'completed', 'cancelled', 'failed']
     title: str
     updated_at: str
-    claim: Optional[dict[str, Any]] = None
+    claim: Optional[WorkItemClaim] = None
     description: Optional[str] = None
     due_at: Optional[str] = None
-    evidence_refs: Optional[list[dict[str, Any]]] = None
-    external_refs: Optional[list[dict[str, Any]]] = None
+    evidence_refs: Optional[list[WorkEvidenceRef]] = None
+    external_refs: Optional[list[WorkItemExternalRef]] = None
     labels: Optional[list[str]] = None
     not_before: Optional[str] = None
-    owner: Optional[dict[str, Any]] = None
+    owner: Optional[WorkItemOwner] = None
     snoozed_until: Optional[str] = None
     terminal_at: Optional[str] = None
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkItem":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkItem')
+        return cls(
+            claim=(WorkItemClaim.from_wire(data['claim']) if data.get('claim') is not None else None),
+            completion_policy=parse_work_completion_policy(_require_wire_field(data, 'completion_policy', 'WorkItem')),
+            created_at=_expect_wire_str(_require_wire_field(data, 'created_at', 'WorkItem'), 'WorkItem.created_at'),
+            description=(_expect_wire_str(data['description'], 'WorkItem.description') if data.get('description') is not None else None),
+            due_at=(_expect_wire_str(data['due_at'], 'WorkItem.due_at') if data.get('due_at') is not None else None),
+            evidence_refs=([WorkEvidenceRef.from_wire(_item) for _item in _expect_wire_list(data['evidence_refs'], 'WorkItem.evidence_refs')] if data.get('evidence_refs') is not None else None),
+            external_refs=([WorkItemExternalRef.from_wire(_item) for _item in _expect_wire_list(data['external_refs'], 'WorkItem.external_refs')] if data.get('external_refs') is not None else None),
+            id=_expect_wire_str(_require_wire_field(data, 'id', 'WorkItem'), 'WorkItem.id'),
+            labels=([_expect_wire_str(_item, 'WorkItem.labels[]') for _item in _expect_wire_list(data['labels'], 'WorkItem.labels')] if data.get('labels') is not None else None),
+            machine_state=_expect_wire_object(_require_wire_field(data, 'machine_state', 'WorkItem'), 'WorkItem.machine_state'),
+            namespace=_expect_wire_str(_require_wire_field(data, 'namespace', 'WorkItem'), 'WorkItem.namespace'),
+            not_before=(_expect_wire_str(data['not_before'], 'WorkItem.not_before') if data.get('not_before') is not None else None),
+            owner=(WorkItemOwner.from_wire(data['owner']) if data.get('owner') is not None else None),
+            priority=_expect_wire_enum(_require_wire_field(data, 'priority', 'WorkItem'), ('low', 'medium', 'high',), 'WorkItem.priority'),
+            realm_id=_expect_wire_str(_require_wire_field(data, 'realm_id', 'WorkItem'), 'WorkItem.realm_id'),
+            revision=_expect_wire_int(_require_wire_field(data, 'revision', 'WorkItem'), 'WorkItem.revision'),
+            snoozed_until=(_expect_wire_str(data['snoozed_until'], 'WorkItem.snoozed_until') if data.get('snoozed_until') is not None else None),
+            status=_expect_wire_enum(_require_wire_field(data, 'status', 'WorkItem'), ('open', 'in_progress', 'blocked', 'completed', 'cancelled', 'failed',), 'WorkItem.status'),
+            terminal_at=(_expect_wire_str(data['terminal_at'], 'WorkItem.terminal_at') if data.get('terminal_at') is not None else None),
+            title=_expect_wire_str(_require_wire_field(data, 'title', 'WorkItem'), 'WorkItem.title'),
+            updated_at=_expect_wire_str(_require_wire_field(data, 'updated_at', 'WorkItem'), 'WorkItem.updated_at'),
+        )
 
 
 @dataclass
@@ -1545,6 +1747,18 @@ class WorkItemRef:
     namespace: str
     realm_id: str
 
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkItemRef":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkItemRef')
+        return cls(
+            item_id=_expect_wire_str(_require_wire_field(data, 'item_id', 'WorkItemRef'), 'WorkItemRef.item_id'),
+            namespace=_expect_wire_str(_require_wire_field(data, 'namespace', 'WorkItemRef'), 'WorkItemRef.namespace'),
+            realm_id=_expect_wire_str(_require_wire_field(data, 'realm_id', 'WorkItemRef'), 'WorkItemRef.realm_id'),
+        )
+
 
 @dataclass
 class WorkEdge:
@@ -1556,16 +1770,46 @@ class WorkEdge:
     realm_id: str
     to_id: str
 
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkEdge":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkEdge')
+        return cls(
+            created_at=_expect_wire_str(_require_wire_field(data, 'created_at', 'WorkEdge'), 'WorkEdge.created_at'),
+            from_id=_expect_wire_str(_require_wire_field(data, 'from_id', 'WorkEdge'), 'WorkEdge.from_id'),
+            kind=parse_work_edge_kind(_require_wire_field(data, 'kind', 'WorkEdge')),
+            namespace=_expect_wire_str(_require_wire_field(data, 'namespace', 'WorkEdge'), 'WorkEdge.namespace'),
+            realm_id=_expect_wire_str(_require_wire_field(data, 'realm_id', 'WorkEdge'), 'WorkEdge.realm_id'),
+            to_id=_expect_wire_str(_require_wire_field(data, 'to_id', 'WorkEdge'), 'WorkEdge.to_id'),
+        )
+
 
 @dataclass
 class WorkEvidenceRef:
     """Wire payload for WorkEvidenceRef."""
     id: str
     kind: str
-    confirmation_kind: Optional[Any] = None
+    confirmation_kind: Optional[WorkEvidenceKind] = None
     confirming_owner_key: Optional[WorkOwnerKey] = None
     label: Optional[str] = None
     summary: Optional[str] = None
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkEvidenceRef":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkEvidenceRef')
+        return cls(
+            confirmation_kind=(parse_work_evidence_kind(data['confirmation_kind']) if data.get('confirmation_kind') is not None else None),
+            confirming_owner_key=(WorkOwnerKey.from_wire(data['confirming_owner_key']) if data.get('confirming_owner_key') is not None else None),
+            id=_expect_wire_str(_require_wire_field(data, 'id', 'WorkEvidenceRef'), 'WorkEvidenceRef.id'),
+            kind=_expect_wire_str(_require_wire_field(data, 'kind', 'WorkEvidenceRef'), 'WorkEvidenceRef.kind'),
+            label=(_expect_wire_str(data['label'], 'WorkEvidenceRef.label') if data.get('label') is not None else None),
+            summary=(_expect_wire_str(data['summary'], 'WorkEvidenceRef.summary') if data.get('summary') is not None else None),
+        )
 
 
 @dataclass
@@ -1579,12 +1823,97 @@ class WorkGraphEvent:
     payload: Optional[Any] = None
     seq: Optional[int] = None
 
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkGraphEvent":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkGraphEvent')
+        return cls(
+            at=_expect_wire_str(_require_wire_field(data, 'at', 'WorkGraphEvent'), 'WorkGraphEvent.at'),
+            item_id=(_expect_wire_str(data['item_id'], 'WorkGraphEvent.item_id') if data.get('item_id') is not None else None),
+            kind=parse_work_graph_event_kind(_require_wire_field(data, 'kind', 'WorkGraphEvent')),
+            namespace=_expect_wire_str(_require_wire_field(data, 'namespace', 'WorkGraphEvent'), 'WorkGraphEvent.namespace'),
+            payload=data.get('payload'),
+            realm_id=_expect_wire_str(_require_wire_field(data, 'realm_id', 'WorkGraphEvent'), 'WorkGraphEvent.realm_id'),
+            seq=(_expect_wire_int(data['seq'], 'WorkGraphEvent.seq') if data.get('seq') is not None else None),
+        )
+
 
 @dataclass
 class WorkOwnerKey:
     """Wire payload for WorkOwnerKey."""
     id: str
     kind: WorkOwnerKind
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkOwnerKey":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkOwnerKey')
+        return cls(
+            id=_expect_wire_str(_require_wire_field(data, 'id', 'WorkOwnerKey'), 'WorkOwnerKey.id'),
+            kind=parse_work_owner_kind(_require_wire_field(data, 'kind', 'WorkOwnerKey')),
+        )
+
+
+@dataclass
+class WorkItemClaim:
+    """Promoted inline object type WorkItemClaim."""
+    claimed_at: str
+    owner: WorkItemOwner
+    lease_expires_at: Optional[str] = None
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkItemClaim":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkItemClaim')
+        return cls(
+            claimed_at=_expect_wire_str(_require_wire_field(data, 'claimed_at', 'WorkItemClaim'), 'WorkItemClaim.claimed_at'),
+            lease_expires_at=(_expect_wire_str(data['lease_expires_at'], 'WorkItemClaim.lease_expires_at') if data.get('lease_expires_at') is not None else None),
+            owner=WorkItemOwner.from_wire(_require_wire_field(data, 'owner', 'WorkItemClaim')),
+        )
+
+
+@dataclass
+class WorkItemExternalRef:
+    """Promoted inline object type WorkItemExternalRef."""
+    id: str
+    kind: str
+    url: Optional[str] = None
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkItemExternalRef":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkItemExternalRef')
+        return cls(
+            id=_expect_wire_str(_require_wire_field(data, 'id', 'WorkItemExternalRef'), 'WorkItemExternalRef.id'),
+            kind=_expect_wire_str(_require_wire_field(data, 'kind', 'WorkItemExternalRef'), 'WorkItemExternalRef.kind'),
+            url=(_expect_wire_str(data['url'], 'WorkItemExternalRef.url') if data.get('url') is not None else None),
+        )
+
+
+@dataclass
+class WorkItemOwner:
+    """Promoted inline object type WorkItemOwner."""
+    key: WorkOwnerKey
+    display_name: Optional[str] = None
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "WorkItemOwner":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'WorkItemOwner')
+        return cls(
+            display_name=(_expect_wire_str(data['display_name'], 'WorkItemOwner.display_name') if data.get('display_name') is not None else None),
+            key=WorkOwnerKey.from_wire(_require_wire_field(data, 'key', 'WorkItemOwner')),
+        )
 
 
 @dataclass
@@ -3447,6 +3776,15 @@ WorkCompletionPolicy = WorkCompletionPolicySelfAttest | WorkCompletionPolicyHost
 # WorkGraph RPC helper wire type for WorkEdgeKind.
 WorkEdgeKind = Literal['blocks', 'parent', 'related', 'supersedes', 'derived_from']
 
+# Typed classification of confirmation evidence.
+#
+# This is the canonical signal the `WorkGraphLifecycleMachine` consumes to
+# decide completion-policy satisfaction. The producer
+# (`confirmation_evidence_for_policy`) sets this field; the raw
+# [`WorkEvidenceRef::kind`] string remains only as opaque provenance/display
+# and is never re-read to classify evidence for the satisfaction decision.
+WorkEvidenceKind = Literal['host_confirmation', 'principal_confirmation', 'supervisor_confirmation', 'reviewer_confirmation'] | Literal['self_attest']
+
 # WorkGraph RPC helper wire type for WorkGraphEventKind.
 WorkGraphEventKind = Literal['created', 'updated', 'claimed', 'released', 'blocked', 'closed', 'linked', 'evidence_added', 'attention_created', 'attention_updated']
 
@@ -4121,3 +4459,93 @@ PeerDirectorySource = Literal['trusted', 'inproc', 'trusted_and_inproc', 'unknow
 
 # Comms/session-stream RPC contract for PeerSendability.
 PeerSendability = Literal['peer_message', 'peer_request', 'peer_response']
+
+
+def parse_work_completion_policy(value: Any) -> "WorkCompletionPolicy":
+    """Fail-closed wire parser for WorkCompletionPolicy (K21)."""
+    data = _expect_wire_object(value, 'WorkCompletionPolicy')
+    tag = _expect_wire_str(_require_wire_field(data, 'kind', 'WorkCompletionPolicy'), 'WorkCompletionPolicy.kind')
+    if tag == 'self_attest':
+        parsed_self_attest: dict[str, Any] = {'kind': 'self_attest'}
+        return parsed_self_attest
+    if tag == 'host_confirmed':
+        parsed_host_confirmed: dict[str, Any] = {'kind': 'host_confirmed'}
+        return parsed_host_confirmed
+    if tag == 'principal_confirmed':
+        parsed_principal_confirmed: dict[str, Any] = {'kind': 'principal_confirmed'}
+        return parsed_principal_confirmed
+    if tag == 'supervisor':
+        parsed_supervisor: dict[str, Any] = {'kind': 'supervisor'}
+        parsed_supervisor['owner_key'] = WorkOwnerKey.from_wire(_require_wire_field(data, 'owner_key', 'WorkCompletionPolicy'))
+        return parsed_supervisor
+    if tag == 'reviewer_quorum':
+        parsed_reviewer_quorum: dict[str, Any] = {'kind': 'reviewer_quorum'}
+        parsed_reviewer_quorum['threshold'] = _expect_wire_int(_require_wire_field(data, 'threshold', 'WorkCompletionPolicy'), 'WorkCompletionPolicy.reviewer_quorum.threshold')
+        return parsed_reviewer_quorum
+    raise _wire_parse_error('WorkCompletionPolicy', f"unknown `kind` value `{tag}`")
+
+
+def parse_work_edge_kind(value: Any) -> "WorkEdgeKind":
+    """Fail-closed wire parser for WorkEdgeKind (K21)."""
+    return _expect_wire_enum(value, ('blocks', 'parent', 'related', 'supersedes', 'derived_from',), 'WorkEdgeKind')
+
+
+def parse_work_graph_event_kind(value: Any) -> "WorkGraphEventKind":
+    """Fail-closed wire parser for WorkGraphEventKind (K21)."""
+    return _expect_wire_enum(value, ('created', 'updated', 'claimed', 'released', 'blocked', 'closed', 'linked', 'evidence_added', 'attention_created', 'attention_updated',), 'WorkGraphEventKind')
+
+
+def parse_work_evidence_kind(value: Any) -> "WorkEvidenceKind":
+    """Fail-closed wire parser for WorkEvidenceKind (K21)."""
+    return _expect_wire_enum(value, ('host_confirmation', 'principal_confirmation', 'supervisor_confirmation', 'reviewer_confirmation', 'self_attest',), 'WorkEvidenceKind')
+
+
+def parse_attention_delegated_authority(value: Any) -> "AttentionDelegatedAuthority":
+    """Fail-closed wire parser for AttentionDelegatedAuthority (K21)."""
+    return _expect_wire_enum(value, ('add_evidence', 'close_own_review_item', 'request_closure', 'close_if_policy_allows',), 'AttentionDelegatedAuthority')
+
+
+def parse_work_attention_mode(value: Any) -> "WorkAttentionMode":
+    """Fail-closed wire parser for WorkAttentionMode (K21)."""
+    return _expect_wire_enum(value, ('pursue', 'coordinate', 'review', 'falsify', 'judge', 'observe',), 'WorkAttentionMode')
+
+
+def parse_work_attention_status(value: Any) -> "WorkAttentionStatus":
+    """Fail-closed wire parser for WorkAttentionStatus (K21)."""
+    data = _expect_wire_object(value, 'WorkAttentionStatus')
+    tag = _expect_wire_str(_require_wire_field(data, 'state', 'WorkAttentionStatus'), 'WorkAttentionStatus.state')
+    if tag == 'active':
+        parsed_active: dict[str, Any] = {'state': 'active'}
+        return parsed_active
+    if tag == 'paused':
+        parsed_paused: dict[str, Any] = {'state': 'paused'}
+        if data.get('until') is not None:
+            parsed_paused['until'] = _expect_wire_str(data['until'], 'WorkAttentionStatus.paused.until')
+        return parsed_paused
+    if tag == 'superseded':
+        parsed_superseded: dict[str, Any] = {'state': 'superseded'}
+        return parsed_superseded
+    if tag == 'stopped':
+        parsed_stopped: dict[str, Any] = {'state': 'stopped'}
+        return parsed_stopped
+    raise _wire_parse_error('WorkAttentionStatus', f"unknown `state` value `{tag}`")
+
+
+def parse_work_attention_target(value: Any) -> "WorkAttentionTarget":
+    """Fail-closed wire parser for WorkAttentionTarget (K21)."""
+    data = _expect_wire_object(value, 'WorkAttentionTarget')
+    tag = _expect_wire_str(_require_wire_field(data, 'kind', 'WorkAttentionTarget'), 'WorkAttentionTarget.kind')
+    if tag == 'session':
+        parsed_session: dict[str, Any] = {'kind': 'session'}
+        parsed_session['session_id'] = _expect_wire_str(_require_wire_field(data, 'session_id', 'WorkAttentionTarget'), 'WorkAttentionTarget.session.session_id')
+        return parsed_session
+    if tag == 'lowered_owner':
+        parsed_lowered_owner: dict[str, Any] = {'kind': 'lowered_owner'}
+        parsed_lowered_owner['owner_key'] = WorkOwnerKey.from_wire(_require_wire_field(data, 'owner_key', 'WorkAttentionTarget'))
+        return parsed_lowered_owner
+    raise _wire_parse_error('WorkAttentionTarget', f"unknown `kind` value `{tag}`")
+
+
+def parse_work_owner_kind(value: Any) -> "WorkOwnerKind":
+    """Fail-closed wire parser for WorkOwnerKind (K21)."""
+    return _expect_wire_enum(value, ('principal', 'agent', 'session', 'mob', 'label',), 'WorkOwnerKind')

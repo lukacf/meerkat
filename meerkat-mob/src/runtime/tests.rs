@@ -11811,6 +11811,93 @@ async fn test_respawn_reports_machine_local_edge_to_retired_peer() {
     );
 }
 
+/// Task #34 regression: respawn of a role-wired member must not be destroyed
+/// by a peer whose live comms runtime is gone.
+///
+/// Live shape: the peer's runtime turn fails terminally (e.g. provider 400 /
+/// rate-limit exhaustion), the session layer fail-closed discards the peer's
+/// live session — and with it the comms runtime — while the MobMachine still
+/// owns the peer as an Active member. Respawning the OTHER member then
+/// re-wires the machine-owned edge. Before the fix, the spawn-contract
+/// role-wiring fan-out inside `finalize_spawn_from_pending` ran the same edge
+/// with hard-fail semantics, rolled back the replacement, and surfaced
+/// `spawn failed after retire for member …: wiring error: wire requires
+/// comms runtime for '<peer>'`. The machine-owned restore plan owns those
+/// edges: the unrestorable peer must resolve through the generated
+/// `ResolveRespawnTopologyRestore` authority into a typed
+/// `TopologyRestoreFailed` result that preserves the replacement member.
+#[tokio::test]
+async fn test_respawn_role_wired_member_survives_peer_without_comms_runtime() {
+    let (handle, service) = create_test_mob(sample_definition_with_role_wiring()).await;
+
+    let peer_ref = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2 (role-wired to w-1)");
+    let original = handle
+        .get_member(&AgentIdentity::from("w-2"))
+        .await
+        .unwrap()
+        .expect("w-2 in roster");
+    assert!(
+        original.wired_to.contains(&AgentIdentity::from("w-1")),
+        "role wiring should connect w-2 to w-1 at spawn"
+    );
+    let original_generation = original.agent_runtime_id.generation;
+
+    // Model the live failure: w-1's live session was fail-closed discarded,
+    // so its comms runtime is no longer resolvable while the MobMachine
+    // still owns w-1 as Active.
+    let peer_session = peer_ref
+        .bridge_session_id()
+        .cloned()
+        .expect("w-1 bridge session id");
+    service.set_missing_comms_runtime(&peer_session).await;
+
+    let error = handle
+        .respawn(AgentIdentity::from("w-2"), Some("come back online".into()))
+        .await
+        .expect_err("respawn topology restore cannot reach w-1's comms runtime");
+    match error {
+        crate::runtime::handle::MobRespawnError::TopologyRestoreFailed {
+            receipt,
+            failed_peer_ids,
+        } => {
+            assert_eq!(receipt.identity, AgentIdentity::from("w-2"));
+            assert_eq!(
+                failed_peer_ids,
+                vec![crate::ids::RespawnTopologyPeerId::from("w-1")],
+                "the degraded peer must surface through the typed topology-restore result"
+            );
+        }
+        other => {
+            panic!("expected typed TopologyRestoreFailed preserving the replacement, got {other:?}")
+        }
+    }
+
+    // The replacement member must survive with a fresh generation; the
+    // machine-owned wiring edge is preserved for repair once w-1 itself is
+    // respawned.
+    let replacement = handle
+        .get_member(&AgentIdentity::from("w-2"))
+        .await
+        .unwrap()
+        .expect("replacement member must remain in the roster");
+    assert_eq!(
+        replacement.agent_runtime_id.generation,
+        original_generation.next(),
+        "replacement must carry the next runtime generation"
+    );
+    assert!(
+        replacement.wired_to.contains(&AgentIdentity::from("w-1")),
+        "machine-owned wiring edge must be preserved for later repair"
+    );
+}
+
 #[tokio::test]
 async fn test_respawn_archive_failure_removes_stale_anchor_and_respawns() {
     let (handle, service) = create_test_mob(sample_definition()).await;
@@ -29321,13 +29408,23 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
         requester_prompt_baseline + 1,
         "terminal peer response should append runtime system context and kick a requester reaction turn"
     );
-    assert_eq!(
-        requester_prompts_after_response
-            .last()
-            .map(ContentInput::text_content)
-            .unwrap_or_default(),
-        "",
-        "terminal peer response reaction should be system-triggered, not a new user prompt"
+    // The mandatory requester reaction turn carries the typed comms-notice
+    // projection as its model-visible content — never a fabricated empty
+    // prompt (providers reject empty user messages) and never raw user
+    // prose authored by the responder outside the typed notice rendering.
+    let reaction_prompt = requester_prompts_after_response
+        .last()
+        .map(ContentInput::text_content)
+        .unwrap_or_default();
+    assert!(
+        !reaction_prompt.trim().is_empty(),
+        "terminal peer response reaction turn must have model-visible content, \
+         not a fabricated empty prompt"
+    );
+    assert!(
+        reaction_prompt.contains(&request_id.to_string()),
+        "reaction turn content must be the typed comms-notice projection \
+         correlated to the request: {reaction_prompt:?}"
     );
 
     let duplicate_peer_id =

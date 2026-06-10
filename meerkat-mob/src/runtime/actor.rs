@@ -9366,6 +9366,22 @@ impl MobActor {
         {
             planned_wiring_targets.push(parent_target);
         }
+        // Respawn replacement: edges captured in the MobMachine-owned restore
+        // plan are owned by the topology-restore loop below, whose failures
+        // are collected per peer and classified by the generated
+        // `ResolveRespawnTopologyRestore` authority into a typed
+        // `TopologyRestoreFailed` result that preserves the replacement
+        // receipt. Running those same edges through the spawn-contract
+        // role-wiring fan-out instead made any peer-side wiring failure
+        // (e.g. a peer whose live session was fail-closed discarded after a
+        // terminal turn failure) roll back and destroy the replacement
+        // member ("spawn failed after retire ...: wire requires comms
+        // runtime for '<peer>'"). Only role-derived edges that the machine
+        // does NOT already own (i.e. genuinely new wiring) keep the
+        // fail-fast spawn contract.
+        if let Some(plan) = restore_wiring.as_ref() {
+            planned_wiring_targets.retain(|target| !plan.local_peers.contains(target));
+        }
         let mut wired_spawn_targets: Vec<MeerkatId> = Vec::new();
         for target in &planned_wiring_targets {
             let target_identity = crate::ids::AgentIdentity::from(target.as_str());

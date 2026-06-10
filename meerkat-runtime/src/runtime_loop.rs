@@ -2442,7 +2442,7 @@ mod tests {
         };
         assert_eq!(staged.boundary, RunApplyBoundary::Immediate);
         assert_eq!(staged.contributing_input_ids, vec![input_id]);
-        assert!(staged.appends.is_empty());
+        assert_eq!(staged.appends.len(), 1);
         assert_eq!(staged.context_appends.len(), 1);
         assert_eq!(
             staged.context_appends[0].key,
@@ -2507,11 +2507,69 @@ mod tests {
             other => return Err(format!("expected staged input, got {other:?}")),
         };
         assert_eq!(staged.boundary, RunApplyBoundary::RunStart);
-        // Terminal peer payload still routes through the context-append
-        // path (not user-visible appends) since `input_to_append` returns
-        // None for the ResponseTerminal convention.
-        assert!(staged.appends.is_empty());
+        // Terminal peer responses carry both the typed comms notice append
+        // (the model-visible content of the mandatory requester reaction
+        // turn) and the keyed runtime context append.
+        assert_eq!(staged.appends.len(), 1);
         assert_eq!(staged.context_appends.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn queued_peer_response_terminal_reaction_turn_has_model_visible_content() -> Result<(), String>
+    {
+        // Regression lock for the live mob bug where a block-less terminal
+        // peer response staged a context-only primitive: the mandatory
+        // `AppendContextAndRun` reaction turn then ran with a fabricated
+        // empty user prompt, which Anthropic rejects with HTTP 400
+        // ("user messages must have non-empty content"). The terminal
+        // LlmFailure tore down the member's live session (and its comms
+        // runtime), which later surfaced as
+        // "wire requires comms runtime for '<peer>'" during respawn.
+        let input = Input::Peer(PeerInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: TEST_PEER_RESPONSE_ROUTE_ID.into(),
+                    display_identity: Some("analyst-rt".into()),
+                    runtime_id: None,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(crate::input::PeerConvention::ResponseTerminal {
+                request_id: TEST_PEER_RESPONSE_REQUEST_ID.into(),
+                status: crate::input::ResponseTerminalStatus::Completed,
+            }),
+            body: String::new(),
+            payload: None,
+            blocks: None,
+            handling_mode: None,
+        });
+        let primitive = inputs_to_primitive(&[(input.id().clone(), input)])
+            .expect("single input metadata cannot conflict");
+        assert!(primitive.is_peer_response_terminal_context_and_run());
+        let staged = match &primitive {
+            RunPrimitive::StagedInput(staged) => staged,
+            other => return Err(format!("expected staged input, got {other:?}")),
+        };
+        assert_eq!(
+            staged.appends.len(),
+            1,
+            "block-less terminal response must carry its typed comms notice append"
+        );
+        let provider_prompt =
+            meerkat_core::lifecycle::run_primitive::model_projection_content_input_from_conversation_appends(
+                &staged.appends,
+            );
+        assert!(
+            !provider_prompt.text_content().trim().is_empty(),
+            "the mandatory requester reaction turn must have non-empty model-visible content"
+        );
         Ok(())
     }
 
@@ -2570,7 +2628,7 @@ mod tests {
                 );
                 assert_eq!(
                     admitted_content_shape,
-                    crate::meerkat_machine::dsl::ContentShape::Context
+                    crate::meerkat_machine::dsl::ContentShape::ConversationAndContext
                 );
                 Ok(())
             }

@@ -67,6 +67,54 @@ const OPUS_45_EFFORT: &[&str] = &["low", "medium", "high"];
 
 /// Capability rows for Anthropic catalog models.
 pub const CAPABILITIES: &[ModelCapabilities] = &[
+    // Claude Fable 5
+    //
+    // Sources (live API probes against api.anthropic.com, 2026-06-10 —
+    // the model is newer than the published docs pages):
+    //   - max_tokens: 2_000_000 rejected with "max_tokens: 2000000 > 128000,
+    //     which is the maximum allowed number of output tokens for
+    //     claude-fable-5" → 128k sync output; 1M context (same window as the
+    //     Opus 4.8/4.7 generation it succeeds).
+    //   - temperature/top_p/top_k each rejected: "`temperature` is deprecated
+    //     for this model." (same contract as Opus 4.8/4.7).
+    //   - thinking: {type: "adaptive"} accepted → adaptive-only.
+    //   - output_config.effort accepted for low/xhigh/max → full
+    //     low..max ladder incl. xhigh, same as Opus 4.8/4.7.
+    //   - base64 PNG image block accepted → vision.
+    //   - web_search_20250305 server tool accepted.
+    //   - output_format json_schema with structured-outputs-2025-11-13
+    //     accepted → structured output.
+    //   - compact-2026-01-12 + structured-outputs-2025-11-13 +
+    //     interleaved-thinking-2025-05-14 beta headers accepted together.
+    ModelCapabilities {
+        id: "claude-fable-5",
+        provider: Provider::Anthropic,
+        display_name: "Claude Fable 5",
+        tier: ModelTier::Recommended,
+        model_family: "claude-fable-5",
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: true,
+        image_tool_results: true,
+        inline_video: false,
+        realtime: false,
+        supports_temperature: false,
+        supports_top_p: false,
+        supports_top_k: false,
+        thinking: ThinkingSupport::AnthropicAdaptiveOnly,
+        supports_reasoning: false,
+        effort_levels: OPUS_48_47_EFFORT,
+        supports_web_search: true,
+        supports_inference_geo: true,
+        supports_compaction: true,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: false,
+        beta_headers: ADAPTIVE_COMPACTION_BETAS,
+        call_timeout_secs: Some(300),
+    },
     // Claude Opus 4.8
     //
     // Sources:

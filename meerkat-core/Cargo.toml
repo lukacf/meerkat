@@ -1,7 +1,7 @@
 [package]
 name = "meerkat-core"
 description = "Core agent logic for Meerkat (no I/O deps)"
-version.workspace = true
+version = "0.6.34+fable.1"
 edition.workspace = true
 rust-version.workspace = true
 links = "meerkat_core"

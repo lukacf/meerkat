@@ -10706,6 +10706,39 @@
                     ]
                   },
                   "owner": {
+                    "properties": {
+                      "display_name": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "key": {
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "kind": {
+                            "enum": [
+                              "principal",
+                              "agent",
+                              "session",
+                              "mob",
+                              "label"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "id"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "key"
+                    ],
                     "type": "object"
                   }
                 },
@@ -10725,7 +10758,8 @@
               {
                 "properties": {
                   "kind": {
-                    "const": "self_attest"
+                    "const": "self_attest",
+                    "type": "string"
                   }
                 },
                 "required": [
@@ -10736,7 +10770,8 @@
               {
                 "properties": {
                   "kind": {
-                    "const": "host_confirmed"
+                    "const": "host_confirmed",
+                    "type": "string"
                   }
                 },
                 "required": [
@@ -10747,7 +10782,8 @@
               {
                 "properties": {
                   "kind": {
-                    "const": "principal_confirmed"
+                    "const": "principal_confirmed",
+                    "type": "string"
                   }
                 },
                 "required": [
@@ -10758,7 +10794,8 @@
               {
                 "properties": {
                   "kind": {
-                    "const": "supervisor"
+                    "const": "supervisor",
+                    "type": "string"
                   },
                   "owner_key": {
                     "properties": {
@@ -10792,11 +10829,13 @@
               {
                 "properties": {
                   "kind": {
-                    "const": "reviewer_quorum"
+                    "const": "reviewer_quorum",
+                    "type": "string"
                   },
                   "threshold": {
                     "format": "uint16",
-                    "minimum": 1,
+                    "maximum": 65535,
+                    "minimum": 0,
                     "type": "integer"
                   }
                 },
@@ -10828,6 +10867,59 @@
           "evidence_refs": {
             "items": {
               "properties": {
+                "confirmation_kind": {
+                  "anyOf": [
+                    {
+                      "oneOf": [
+                        {
+                          "enum": [
+                            "host_confirmation",
+                            "principal_confirmation",
+                            "supervisor_confirmation",
+                            "reviewer_confirmation"
+                          ],
+                          "type": "string"
+                        },
+                        {
+                          "const": "self_attest",
+                          "type": "string"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "confirming_owner_key": {
+                  "anyOf": [
+                    {
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "kind": {
+                          "enum": [
+                            "principal",
+                            "agent",
+                            "session",
+                            "mob",
+                            "label"
+                          ],
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "id"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "id": {
                   "type": "string"
                 },

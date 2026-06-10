@@ -190,7 +190,6 @@ BASELINE_HAND_ROLLED: set[tuple[str, str, str]] = {
     ("py", "session/stream_open", "params"),
     ("py", "session/stream_open", "result"),
     ("py", "turn/start", "result"),
-    ("py", "workgraph/get", "result"),
     ("ts", "auth/login/complete", "result"),
     ("ts", "auth/login/device_start", "result"),
     ("ts", "auth/login/start", "result"),
@@ -308,11 +307,6 @@ BASELINE_HAND_ROLLED: set[tuple[str, str, str]] = {
     ("ts", "session/stream_open", "params"),
     ("ts", "session/stream_open", "result"),
     ("ts", "turn/start", "result"),
-    ("ts", "workgraph/attention/list", "params"),
-    ("ts", "workgraph/attention/list", "result"),
-    ("ts", "workgraph/get", "result"),
-    ("ts", "workgraph/goal/status", "params"),
-    ("ts", "workgraph/goal/status", "result"),
 }
 
 

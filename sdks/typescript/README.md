@@ -190,12 +190,12 @@ async callScheduleTool(request: ScheduleToolCallRequest): Promise<Record<string,
 
 // WorkGraph is read-only from the SDK; agents mutate it through WorkGraph tools.
 async getWorkGraphItem(itemId: string, options?: WorkGraphItemLookupOptions): Promise<WorkItem>
-async listWorkGraphItems(filter?: WorkGraphItemFilter): Promise<WorkItemListResult>
-async listReadyWorkGraphItems(filter?: WorkGraphReadyFilter): Promise<WorkItemListResult>
+async listWorkGraphItems(filter?: WorkItemFilter): Promise<WorkItemsResult>
+async listReadyWorkGraphItems(filter?: ReadyWorkFilter): Promise<WorkItemsResult>
 async getWorkGraphSnapshot(filter?: WorkGraphSnapshotFilter): Promise<WorkGraphSnapshot>
-async listWorkGraphEvents(filter?: WorkGraphEventFilter): Promise<WorkGraphEventsResult>
-async getWorkGraphGoalStatus(params: WorkGraphGoalStatusRequest): Promise<WorkGraphGoalResult>
-async listWorkGraphAttention(params?: WorkGraphAttentionListRequest): Promise<WorkGraphAttentionListResult>
+async listWorkGraphEvents(filter?: WorkGraphEventFilter): Promise<WorkEventsResult>
+async getWorkGraphGoalStatus(params: GoalStatusRequest): Promise<GoalStatusResult>
+async listWorkGraphAttention(params?: AttentionListRequest): Promise<AttentionListResult>
 
 async readMobEvents(mobId: string, options?: MobEventsOptions): Promise<MobEventsResult>
 async spawnMobMembers(mobId: string, specs: SpawnSpec[]): Promise<MobSpawnManyResultEntry[]>

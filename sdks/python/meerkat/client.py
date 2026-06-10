@@ -152,6 +152,7 @@ from .types import (
     TranscriptRewriteReason,
     TranscriptRewriteSelection,
     ReadyWorkFilter,
+    WorkGraphEvent,
     WorkGraphEventFilter,
     WorkGraphEventsResponse,
     WorkGraphIdParams,
@@ -1356,7 +1357,8 @@ class MeerkatClient:
             realm_id=realm_id,
             namespace=namespace,
         )
-        return await self._request("workgraph/get", _wire_params(params))
+        raw = await self._request("workgraph/get", _wire_params(params))
+        return WorkItem.from_wire(raw)
 
     async def list_workgraph_items(
         self,
@@ -1364,9 +1366,12 @@ class MeerkatClient:
     ) -> WorkItemsResult:
         raw = await self._request("workgraph/list", _wire_params(filter or {}))
         return WorkItemsResult(
-            items=MeerkatClient._require_list_field(
-                raw, "items", "Invalid workgraph/list response"
-            )
+            items=[
+                WorkItem.from_wire(item)
+                for item in MeerkatClient._require_list_field(
+                    raw, "items", "Invalid workgraph/list response"
+                )
+            ]
         )
 
     async def list_ready_workgraph_items(
@@ -1375,16 +1380,20 @@ class MeerkatClient:
     ) -> WorkItemsResult:
         raw = await self._request("workgraph/ready", _wire_params(filter or {}))
         return WorkItemsResult(
-            items=MeerkatClient._require_list_field(
-                raw, "items", "Invalid workgraph/ready response"
-            )
+            items=[
+                WorkItem.from_wire(item)
+                for item in MeerkatClient._require_list_field(
+                    raw, "items", "Invalid workgraph/ready response"
+                )
+            ]
         )
 
     async def get_workgraph_snapshot(
         self,
         filter: WorkGraphSnapshotFilter | None = None,
     ) -> WorkGraphSnapshot:
-        return await self._request("workgraph/snapshot", _wire_params(filter or {}))
+        raw = await self._request("workgraph/snapshot", _wire_params(filter or {}))
+        return WorkGraphSnapshot.from_wire(raw)
 
     async def list_workgraph_events(
         self,
@@ -1392,19 +1401,24 @@ class MeerkatClient:
     ) -> WorkEventsResult:
         raw = await self._request("workgraph/events", _wire_params(filter or {}))
         return WorkEventsResult(
-            events=MeerkatClient._require_list_field(
-                raw, "events", "Invalid workgraph/events response"
-            )
+            events=[
+                WorkGraphEvent.from_wire(event)
+                for event in MeerkatClient._require_list_field(
+                    raw, "events", "Invalid workgraph/events response"
+                )
+            ]
         )
 
     async def get_workgraph_goal_status(self, params: GoalStatusRequest) -> GoalStatusResult:
-        return await self._request("workgraph/goal/status", _wire_params(params))
+        raw = await self._request("workgraph/goal/status", _wire_params(params))
+        return GoalStatusResult.from_wire(raw)
 
     async def list_workgraph_attention(
         self,
         params: AttentionListRequest | None = None,
     ) -> AttentionListResult:
-        return await self._request("workgraph/attention/list", _wire_params(params or {}))
+        raw = await self._request("workgraph/attention/list", _wire_params(params or {}))
+        return AttentionListResult.from_wire(raw)
 
     async def mcp_add(
         self,

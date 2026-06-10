@@ -1,4 +1,8 @@
 #![cfg_attr(target_arch = "wasm32", allow(unused_imports))]
+// The manual `WorkItem` JsonSchema impl (types.rs) expands a large
+// `schemars::json_schema!` literal; the default 128 recursion limit is too
+// small for the K21 inline composite shapes.
+#![recursion_limit = "256"]
 
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {

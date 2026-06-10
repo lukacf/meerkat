@@ -447,61 +447,17 @@ class ScheduleToolCall(TypedDict, total=False):
 from .generated.types import WorkEdgeKind as WorkEdgeKind  # noqa: E402
 from .generated.types import WorkGraphEventKind as WorkGraphEventKind  # noqa: E402
 
-WorkGraphOwnerKind = Literal["principal", "agent", "session", "mob", "label"]
-
-
-class WorkGraphOwnerKey(TypedDict):
-    kind: WorkGraphOwnerKind
-    id: str
-
-
-class WorkGraphOwner(TypedDict):
-    key: WorkGraphOwnerKey
-    display_name: NotRequired[str]
-
-
-class WorkGraphClaim(TypedDict):
-    owner: WorkGraphOwner
-    claimed_at: str
-    lease_expires_at: NotRequired[str]
-
-
-class ExternalWorkRef(TypedDict, total=False):
-    kind: str
-    id: str
-    url: str
-
-
-class WorkEvidenceRef(TypedDict, total=False):
-    kind: str
-    id: str
-    label: str
-    summary: str
-
-
-class WorkItem(TypedDict, total=False):
-    id: str
-    realm_id: str
-    namespace: str
-    title: str
-    description: str
-    status: WorkGraphStatus
-    priority: WorkGraphPriority
-    completion_policy: WorkCompletionPolicy
-    labels: list[str]
-    owner: WorkGraphOwner
-    claim: WorkGraphClaim
-    machine_state: dict[str, Any]
-    revision: int
-    due_at: str
-    not_before: str
-    snoozed_until: str
-    created_at: str
-    updated_at: str
-    terminal_at: str
-    external_refs: list[ExternalWorkRef]
-    evidence_refs: list[WorkEvidenceRef]
-
+# K21: the workgraph read shapes are fully generated (including the promoted
+# inline-object types `WorkItemOwner` / `WorkItemClaim` /
+# `WorkItemExternalRef`) and carry fail-closed `from_wire` parsers. The hand
+# TypedDict twins (`WorkGraphOwner*`, `WorkGraphClaim`, `ExternalWorkRef`,
+# hand `WorkEvidenceRef`/`WorkItem`) are deleted.
+from .generated.types import WorkItem as WorkItem  # noqa: E402
+from .generated.types import WorkItemOwner as WorkItemOwner  # noqa: E402
+from .generated.types import WorkItemClaim as WorkItemClaim  # noqa: E402
+from .generated.types import WorkItemExternalRef as WorkItemExternalRef  # noqa: E402
+from .generated.types import WorkEvidenceRef as WorkEvidenceRef  # noqa: E402
+from .generated.types import WorkEvidenceKind as WorkEvidenceKind  # noqa: E402
 
 # Re-exports of the generated wire types — the signature-parity gate enforces
 # that workgraph wrappers consume the generated shapes, not hand mirrors.

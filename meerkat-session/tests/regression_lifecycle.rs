@@ -1233,15 +1233,18 @@ async fn start_turn_forwards_handling_mode_and_render_metadata() {
                 system_prompt: None,
                 event_tx: None,
                 runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                    Some(RenderMetadata {
-                        class: RenderClass::ExternalEvent,
-                        salience: RenderSalience::Urgent,
-                    }),
                     HandlingMode::Steer,
                     None,
-                    None,
                     Vec::new(),
-                    None,
+                    Some(
+                        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                            render_metadata: Some(RenderMetadata {
+                                class: RenderClass::ExternalEvent,
+                                salience: RenderSalience::Urgent,
+                            }),
+                            ..Default::default()
+                        },
+                    ),
                 ),
             },
         )

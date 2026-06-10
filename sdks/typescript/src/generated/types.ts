@@ -128,6 +128,39 @@ export interface McpLiveOpResponse {
   status: "staged" | "applied" | "rejected";
 }
 
+export type SkillName = string;
+
+export type SkillScope = "builtin" | "project" | "user";
+
+export type SourceIdentityStatus = "active" | "disabled" | "retired";
+
+export type SourceTransportKind = "embedded" | "filesystem" | "git" | "http" | "stdio";
+
+export type SourceUuid = string;
+
+export interface SkillEntry {
+  description: string;
+  is_active: boolean;
+  key: SkillKey;
+  name: string;
+  scope: SkillScope;
+  shadowed_by?: SkillSourceProvenance;
+  source: SkillSourceProvenance;
+}
+
+export interface SkillKey {
+  skill_name: SkillName;
+  source_uuid: SourceUuid;
+}
+
+export interface SkillSourceProvenance {
+  display_name: string;
+  fingerprint: string;
+  source_uuid: SourceUuid;
+  status?: SourceIdentityStatus;
+  transport_kind: SourceTransportKind;
+}
+
 export interface ConfigEnvelope {
   backend?: string;
   config: unknown;
@@ -165,7 +198,7 @@ export interface ServerCapabilities {
 }
 
 export interface SkillListResponse {
-  skills: Record<string, unknown>[];
+  skills: SkillEntry[];
 }
 
 export interface WorkEventsResult {
@@ -576,7 +609,7 @@ export interface MobTurnStartParams {
   prompt: WireContentInput;
   provider?: string;
   provider_params?: Record<string, unknown>;
-  skill_refs?: Record<string, unknown>[];
+  skill_refs?: SkillKey[];
   structured_output_retries?: number;
   system_prompt?: string;
 }
@@ -1940,7 +1973,7 @@ export interface ContentBlockStructured {
 }
 
 export interface ContentBlockSkillContext {
-  skill_key: unknown;
+  skill_key: SkillKey;
   text: string;
   type: "skill_context";
 }

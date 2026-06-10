@@ -18,27 +18,27 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::net::TcpStream;
 
-fn spawn_result_payload(mob_id: &meerkat_mob::MobId, result: &meerkat_mob::SpawnResult) -> Value {
-    json!({
-        "agent_identity": result.agent_identity,
-        "member_ref": meerkat_contracts::WireMemberRef::encode(
-            mob_id.as_str(),
-            result.agent_identity.as_ref(),
-        ),
-    })
+fn spawn_result_payload(
+    mob_id: &meerkat_mob::MobId,
+    result: &meerkat_mob::SpawnResult,
+) -> meerkat_contracts::MobSpawnResult {
+    let identity = result.agent_identity.to_string();
+    meerkat_contracts::MobSpawnResult {
+        mob_id: mob_id.to_string(),
+        agent_identity: identity.clone(),
+        member_ref: meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity),
+    }
 }
 
 fn respawn_receipt_payload(
     mob_id: &meerkat_mob::MobId,
     receipt: &meerkat_mob::MemberRespawnReceipt,
-) -> Value {
-    json!({
-        "agent_identity": receipt.identity,
-        "member_ref": meerkat_contracts::WireMemberRef::encode(
-            mob_id.as_str(),
-            receipt.identity.as_ref(),
-        ),
-    })
+) -> meerkat_contracts::MobRespawnReceipt {
+    let identity = receipt.identity.to_string();
+    meerkat_contracts::MobRespawnReceipt {
+        identity: identity.clone(),
+        member_ref: meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity),
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -584,9 +584,7 @@ pub async fn handle_public_tools_call(
                 .mob_spawn_spec(&mob_id, spec)
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            let mut payload = spawn_result_payload(&mob_id, &spawn_result);
-            payload["mob_id"] = json!(mob_id);
-            Ok(payload)
+            Ok(json!(spawn_result_payload(&mob_id, &spawn_result)))
         }
         "meerkat_mob_spawn_many" => {
             let input: MeerkatMobSpawnManyInput = parse_args(arguments)?;
@@ -612,20 +610,28 @@ pub async fn handle_public_tools_call(
                 .mob_spawn_many(&mob_id, specs)
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            Ok(json!({
-                "results": results.into_iter().map(|result: Result<meerkat_mob::SpawnResult, meerkat_mob::MobSpawnManyFailure>| match result {
-                    Ok(spawn_result) => {
-                        let identity = spawn_result.agent_identity.to_string();
-                        json!(meerkat_contracts::MobSpawnManyResultEntry::spawned(
-                            identity.clone(),
-                            WireMemberRef::encode(mob_id.as_str(), &identity),
-                        ))
-                    }
-                    Err(error) => json!(meerkat_contracts::MobSpawnManyResultEntry::failed(
-                        error.cause(),
-                        error.to_string(),
-                    )),
-                }).collect::<Vec<_>>()
+            Ok(json!(meerkat_contracts::MobSpawnManyResult {
+                results: results
+                    .into_iter()
+                    .map(
+                        |result: Result<
+                            meerkat_mob::SpawnResult,
+                            meerkat_mob::MobSpawnManyFailure,
+                        >| match result {
+                            Ok(spawn_result) => {
+                                let identity = spawn_result.agent_identity.to_string();
+                                meerkat_contracts::MobSpawnManyResultEntry::spawned(
+                                    identity.clone(),
+                                    WireMemberRef::encode(mob_id.as_str(), &identity),
+                                )
+                            }
+                            Err(error) => meerkat_contracts::MobSpawnManyResultEntry::failed(
+                                error.cause(),
+                                error.to_string(),
+                            ),
+                        },
+                    )
+                    .collect(),
             }))
         }
         "meerkat_mob_retire" => {
@@ -638,7 +644,7 @@ pub async fn handle_public_tools_call(
                 )
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            Ok(json!({ "retired": true }))
+            Ok(json!(meerkat_contracts::MobRetireResult { retired: true }))
         }
         "meerkat_mob_respawn" => {
             let input: MeerkatMobRespawnInput = parse_args(arguments)?;
@@ -655,17 +661,18 @@ pub async fn handle_public_tools_call(
                 )
                 .await
             {
-                Ok(receipt) => Ok(json!({
-                    "status": "completed",
-                    "receipt": respawn_receipt_payload(&mob_id, &receipt),
+                Ok(receipt) => Ok(json!(meerkat_contracts::MobRespawnResult {
+                    status: meerkat_contracts::WireMobRespawnOutcome::Completed,
+                    receipt: respawn_receipt_payload(&mob_id, &receipt),
+                    failed_peer_ids: Vec::new(),
                 })),
                 Err(meerkat_mob::MobRespawnError::TopologyRestoreFailed {
                     receipt,
                     failed_peer_ids,
-                }) => Ok(json!({
-                    "status": "topology_restore_failed",
-                    "receipt": respawn_receipt_payload(&mob_id, &receipt),
-                    "failed_peer_ids": failed_peer_ids
+                }) => Ok(json!(meerkat_contracts::MobRespawnResult {
+                    status: meerkat_contracts::WireMobRespawnOutcome::TopologyRestoreFailed,
+                    receipt: respawn_receipt_payload(&mob_id, &receipt),
+                    failed_peer_ids: failed_peer_ids
                         .iter()
                         .map(std::string::ToString::to_string)
                         .collect::<Vec<_>>(),

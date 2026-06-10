@@ -438,8 +438,6 @@ class SkillResolutionFailed(Event):
 
     skill_key: SkillKey | None = None
     reason: SkillResolutionFailureReason | None = None
-    reference: str = ""
-    error: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -883,7 +881,6 @@ _TURN_TERMINAL_CAUSE_KINDS = {
 
 def _parse_skill_resolution_failure_reason(
     raw: Any,
-    fallback_message: str,
 ) -> SkillResolutionFailureReason | None:
     if not isinstance(raw, dict):
         return None
@@ -919,7 +916,7 @@ def _parse_skill_resolution_failure_reason(
         reason_type=normalized_reason_type,
         key=key,
         capability=capability if isinstance(capability, str) else "",
-        message=str(raw.get("message", fallback_message)),
+        message=str(raw.get("message", "")),
         source_uuid=str(raw.get("source_uuid", raw.get("sourceUuid", ""))),
         skill_name=str(raw.get("skill_name", raw.get("skillName", ""))),
         existing_fingerprint=str(
@@ -991,7 +988,6 @@ _STRING_FIELDS = {
     "point",
     "reason_code",
     "message",
-    "reference",
     "interaction_id",
 }
 
@@ -1044,7 +1040,6 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         "hook_failed": ("hook_id", "point", "error"),
         "hook_denied": ("hook_id", "point", "reason_code", "message"),
         "skills_resolved": ("skills", "injection_bytes"),
-        "skill_resolution_failed": ("reference", "error"),
         "interaction_complete": ("interaction_id", "result"),
         "interaction_failed": ("interaction_id", "error"),
         "stream_truncated": ("reason",),
@@ -1196,7 +1191,6 @@ def parse_event(raw: dict[str, Any]) -> Event:
             elif f == "reason" and cls is SkillResolutionFailed:
                 kwargs["reason"] = _parse_skill_resolution_failure_reason(
                     raw.get("reason"),
-                    raw["error"],
                 )
             elif f == "payload" and cls is ToolConfigChanged:
                 payload_raw = raw["payload"]

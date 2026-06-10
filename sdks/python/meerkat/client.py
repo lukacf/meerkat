@@ -40,6 +40,7 @@ from .events import Usage, parse_event
 from .generated.types import CONTRACT_VERSION
 from .generated.version_compat import is_compatible_with as _generated_is_compatible_with
 from .generated.types import (
+    SkillListResponse,
     AttentionListRequest,
     AttentionListResult,
     CapabilitiesResponse,
@@ -48,7 +49,9 @@ from .generated.types import (
     ConfigWriteResult,
     InterruptResult,
     ServerCapabilities,
-    SkillListResponse,
+    SkillEntry,
+    SkillKey as WireSkillKey,
+    SkillSourceProvenance,
     WorkEventsResult,
     WorkItemsResult,
     GoalStatusRequest,
@@ -1474,11 +1477,97 @@ class MeerkatClient:
             )
         return McpLiveOpResponse(**raw)
 
-    async def list_skills(self) -> list[dict[str, Any]]:
-        result: SkillListResponse | dict[str, Any] = await self._request("skills/list", {})
-        if isinstance(result, SkillListResponse):  # pragma: no cover - typing aid
-            result = result.__dict__
-        return result.get("skills", [])
+    async def list_skills(self) -> list[SkillEntry]:
+        result = await self._request("skills/list", {})
+        context = "Invalid skills/list response"
+        skills = result.get("skills") if isinstance(result, dict) else None
+        if not isinstance(skills, list):
+            raise MeerkatError("INVALID_RESPONSE", f"{context}: skills must be a list")
+        envelope = SkillListResponse(
+            skills=[MeerkatClient._parse_skill_entry(entry, context) for entry in skills]
+        )
+        return envelope.skills
+
+    @staticmethod
+    def _parse_skill_entry(entry: Any, context: str) -> SkillEntry:
+        if not isinstance(entry, dict):
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: skill entry must be an object"
+            )
+        name = MeerkatClient._require_string_field(entry, "name", context)
+        description = entry.get("description")
+        if not isinstance(description, str):
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: description must be a string"
+            )
+        scope = entry.get("scope")
+        if scope not in ("builtin", "project", "user"):
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: scope must be a skill scope"
+            )
+        is_active = entry.get("is_active")
+        if not isinstance(is_active, bool):
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: is_active must be a boolean"
+            )
+        shadowed_by_raw = entry.get("shadowed_by")
+        return SkillEntry(
+            key=MeerkatClient._parse_wire_skill_key(entry.get("key"), context),
+            name=name,
+            description=description,
+            scope=scope,
+            source=MeerkatClient._parse_skill_source_provenance(
+                entry.get("source"), context
+            ),
+            is_active=is_active,
+            shadowed_by=MeerkatClient._parse_skill_source_provenance(
+                shadowed_by_raw, context
+            )
+            if shadowed_by_raw is not None
+            else None,
+        )
+
+    @staticmethod
+    def _parse_wire_skill_key(value: Any, context: str) -> WireSkillKey:
+        if not isinstance(value, dict):
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: skill key must be an object"
+            )
+        return WireSkillKey(
+            source_uuid=MeerkatClient._require_string_field(value, "source_uuid", context),
+            skill_name=MeerkatClient._require_string_field(value, "skill_name", context),
+        )
+
+    @staticmethod
+    def _parse_skill_source_provenance(
+        value: Any, context: str
+    ) -> SkillSourceProvenance:
+        if not isinstance(value, dict):
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: skill source must be an object"
+            )
+        kwargs: dict[str, Any] = {
+            "source_uuid": MeerkatClient._require_string_field(
+                value, "source_uuid", context
+            ),
+            "display_name": MeerkatClient._require_string_field(
+                value, "display_name", context
+            ),
+            "transport_kind": MeerkatClient._require_string_field(
+                value, "transport_kind", context
+            ),
+            "fingerprint": MeerkatClient._require_string_field(
+                value, "fingerprint", context
+            ),
+        }
+        if "status" in value:
+            status = value.get("status")
+            if not isinstance(status, str):
+                raise MeerkatError(
+                    "INVALID_RESPONSE", f"{context}: status must be a string"
+                )
+            kwargs["status"] = status
+        return SkillSourceProvenance(**kwargs)
 
     async def subscribe_session_events(self, session_id: str) -> EventSubscription:
         return await self._open_event_subscription(
@@ -3918,13 +4007,20 @@ class MeerkatClient:
 
     @staticmethod
     def _parse_content_input(value: Any) -> ContentInput:
+        if value is None:
+            # Explicit `content: null` is a wire-contract violation (the
+            # TypeScript and Rust surfaces reject it); never coalesce it into
+            # empty-string transcript truth.
+            raise MeerkatError(
+                "INVALID_RESPONSE", "content must not be null"
+            )
         if isinstance(value, list):
             return [
                 MeerkatClient._parse_content_block(block)
                 for block in value
                 if isinstance(block, dict)
             ]
-        return "" if value is None else str(value)
+        return str(value)
 
     @staticmethod
     def _parse_content_block(data: dict[str, Any]) -> ContentBlock:

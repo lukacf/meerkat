@@ -2653,7 +2653,18 @@ impl MethodRouter {
                 .await
             {
                 Ok(result) => RpcResponse::success(id, json!({"status": result.status})),
-                Err(err) => RpcResponse::error(id, error::SESSION_NOT_FOUND, err.to_string()),
+                // Typed control-error mapping: session faults go through the
+                // shared store-error mapper; request-shape faults keep their
+                // typed control codes instead of laundering to SESSION_NOT_FOUND.
+                Err(meerkat_core::SessionControlError::Session(err)) => {
+                    mob_session_service_error_response(id, &session_id, err)
+                }
+                Err(control_err) => RpcResponse::error_with_data(
+                    id,
+                    error::INVALID_REQUEST,
+                    control_err.to_string(),
+                    json!({ "code": control_err.code() }),
+                ),
             },
             None => RpcResponse::error(
                 id,
@@ -10045,6 +10056,11 @@ mod tests {
             // still dispatches (to a typed capability error), so the parity
             // sweep covers it whenever the catalog advertises it.
             skills_enabled: true,
+            // `live/webrtc/answer` is feature-gated in the router; the
+            // catalog carries the same condition, so the default lane never
+            // advertises a method it cannot dispatch and the live-webrtc
+            // lane (with state wired above) covers it.
+            live_webrtc_enabled: cfg!(feature = "live-webrtc"),
         };
         let mut id = 0_i64;
         for method in meerkat_contracts::rpc_method_names(options) {

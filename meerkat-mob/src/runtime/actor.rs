@@ -17021,12 +17021,15 @@ impl MobActor {
                         system_prompt: None,
                         event_tx: None,
                         runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                            render_metadata,
                             handling_mode,
                             None,
-                            None,
                             Vec::new(),
-                            None,
+                            render_metadata.map(|render_metadata| {
+                                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                                    render_metadata: Some(render_metadata),
+                                    ..Default::default()
+                                }
+                            }),
                         ),
                     };
                     return Ok(SubmitWorkDispatchCompletion::AwaitTurnAdmission {
@@ -17084,12 +17087,15 @@ impl MobActor {
                     system_prompt: None,
                     event_tx: None,
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                        render_metadata,
                         handling_mode,
                         None,
-                        None,
                         Vec::new(),
-                        None,
+                        render_metadata.map(|render_metadata| {
+                            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                                render_metadata: Some(render_metadata),
+                                ..Default::default()
+                            }
+                        }),
                     ),
                 };
                 tracing::debug!(

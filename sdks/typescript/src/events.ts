@@ -391,10 +391,6 @@ export interface SkillResolutionFailedEvent {
   readonly type: "skill_resolution_failed";
   readonly skillKey?: SkillKey;
   readonly reason?: SkillResolutionFailureReason;
-  /** Legacy display mirror. Prefer `skillKey` when present. */
-  readonly reference: string;
-  /** Legacy display mirror. Prefer `reason` for structured handling. */
-  readonly error: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -916,7 +912,6 @@ const TURN_TERMINAL_CAUSE_KINDS = new Set<TurnTerminalCauseKind>([
 
 function parseSkillResolutionFailureReason(
   raw: unknown,
-  fallbackMessage: string,
 ): SkillResolutionFailureReason | undefined {
   if (raw == null || typeof raw !== "object") {
     return undefined;
@@ -984,11 +979,11 @@ function parseSkillResolutionFailureReason(
         skillName: String(value.skill_name ?? value.skillName ?? ""),
       };
     case "unknown":
-      return { reasonType, message: String(value.message ?? fallbackMessage) };
+      return { reasonType, message: String(value.message ?? "") };
     default:
       return {
         reasonType: "unknown",
-        message: String(value.message ?? fallbackMessage),
+        message: String(value.message ?? ""),
         rawReasonType: reasonType,
       };
   }
@@ -1204,16 +1199,12 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         injectionBytes: requireNumberField(raw, "injection_bytes"),
       };
     case "skill_resolution_failed": {
-      const reference = requireStringField(raw, "reference");
-      const error = requireStringField(raw, "error");
       const skillKey = parseSkillKey(raw.skill_key);
-      const reason = parseSkillResolutionFailureReason(raw.reason, error);
+      const reason = parseSkillResolutionFailureReason(raw.reason);
       return {
         type,
         ...(skillKey ? { skillKey } : {}),
         ...(reason ? { reason } : {}),
-        reference,
-        error,
       };
     }
 

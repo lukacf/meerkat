@@ -283,10 +283,17 @@ impl AgentMobToolSurface {
         value: serde_json::Value,
         session_effects: Vec<meerkat_core::SessionEffect>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
-        let content = serde_json::to_string(&value)
-            .map_err(|e| ToolError::execution_failed(format!("encode tool result: {e}")))?;
+        // K1 structured egress: structured mob-tool output stays a typed
+        // `ContentBlock::Structured` payload instead of being collapsed into
+        // serialized text. Serialization faults propagate as typed errors.
+        let block = meerkat_core::types::ContentBlock::structured(&value).map_err(|e| {
+            ToolError::execution_failed(format!(
+                "failed to serialize JSON tool output for '{}': {e}",
+                call.name
+            ))
+        })?;
         Ok(meerkat_core::ToolDispatchOutcome::new(
-            ToolResult::new(call.id.to_string(), content, false),
+            ToolResult::with_blocks(call.id.to_string(), vec![block], false),
             vec![],
             session_effects,
         ))

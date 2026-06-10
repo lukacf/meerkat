@@ -1378,9 +1378,7 @@ async fn test_flow_tool_overlay_is_cleared_after_canceled_turn() {
                 &sid_clone,
                 StartTurnRequest {
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                        None,
                         HandlingMode::Queue,
-                        None,
                         Some(overlay),
                         Vec::new(),
                         None,
@@ -1437,9 +1435,7 @@ async fn test_flow_tool_overlay_enforced_by_runtime_and_resets_next_turn() {
             &session_id,
             StartTurnRequest {
                 runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                    None,
                     HandlingMode::Queue,
-                    None,
                     Some(TurnToolOverlay {
                         allowed_tools: Some(vec!["alpha".to_string(), "beta".to_string()]),
                         blocked_tools: Some(vec!["beta".to_string()]),
@@ -1500,9 +1496,7 @@ async fn test_start_turn_returns_error_when_overlay_clear_fails() {
             &session_id,
             StartTurnRequest {
                 runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                    None,
                     HandlingMode::Queue,
-                    None,
                     Some(TurnToolOverlay {
                         allowed_tools: Some(vec!["alpha".to_string()]),
                         blocked_tools: None,

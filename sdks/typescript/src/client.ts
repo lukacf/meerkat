@@ -53,7 +53,7 @@ import {
   type ConfigWriteResult,
   type InterruptResult,
   type ServerCapabilities,
-  type SkillListResponse,
+  type SkillEntry,
   type WorkEventsResult,
   type WorkItemsResult,
   type LiveChannelParams,
@@ -78,6 +78,7 @@ import {
   type MobSpawnManyFailureCause,
   type MobSpawnManyResultEntry,
   type WireMobMemberStatus,
+  SkillListResponse,
 } from "./generated/types.js";
 import { DeferredSession, Session } from "./session.js";
 import {
@@ -1131,10 +1132,11 @@ export class MeerkatClient {
 
   // -- Skills ---------------------------------------------------------------
 
-  async listSkills(): Promise<Array<Record<string, unknown>>> {
-    const result = (await this.request("skills/list", {})) as Partial<SkillListResponse> &
-      Record<string, unknown>;
-    return (result.skills as Array<Record<string, unknown>>) ?? [];
+  async listSkills(): Promise<SkillEntry[]> {
+    const result = await this.request("skills/list", {});
+    MeerkatClient.requireRecordArray(result.skills, "Invalid skills/list response");
+    const envelope = result as unknown as SkillListResponse;
+    return envelope.skills;
   }
 
   async getBlob(blobId: string): Promise<BlobPayload> {
@@ -1396,7 +1398,7 @@ export class MeerkatClient {
   async listMobs(): Promise<MobSummary[]> {
     this.requireCapability("mob");
     const result = await this.request("mob/list", {});
-    const mobs = (result.mobs as Array<Record<string, unknown>>) ?? [];
+    const mobs = MeerkatClient.requireRecordArray(result.mobs, "Invalid mob/list response");
     return mobs.map((mob) => ({
       mobId: String(mob.mob_id ?? mob.mobId ?? ""),
       status: MeerkatClient.requireStringField(

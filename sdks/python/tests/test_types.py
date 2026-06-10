@@ -879,6 +879,20 @@ def test_parse_session_message_fails_closed_on_missing_identity_facts():
         )
     assert excinfo.value.code == "INVALID_RESPONSE"
 
+    # An explicit `content: null` is equally malformed (the TypeScript and
+    # Rust surfaces reject it) — never coalesced into "" transcript truth.
+    with pytest.raises(MeerkatError, match="must not be null") as excinfo:
+        MeerkatClient._parse_session_message(
+            {
+                "role": "tool_results",
+                "created_at": "2026-05-26T10:00:00Z",
+                "results": [
+                    {"tool_use_id": "tc_1", "is_error": False, "content": None}
+                ],
+            }
+        )
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
     with pytest.raises(MeerkatError) as excinfo:
         MeerkatClient._parse_session_message(
             {
@@ -2229,8 +2243,6 @@ def test_parse_skill_resolution_failed_with_typed_reason():
             "reason_type": "not_found",
             "key": {"source_uuid": source_uuid, "skill_name": "email-extractor"},
         },
-        "reference": f"{source_uuid}/email-extractor",
-        "error": f"skill not found: {source_uuid}/email-extractor",
     }
     event = parse_event(raw)
     assert isinstance(event, SkillResolutionFailed)
@@ -2244,8 +2256,6 @@ def test_parse_skill_resolution_failed_with_typed_reason():
         source_uuid=source_uuid,
         skill_name="email-extractor",
     )
-    assert event.reference == f"{source_uuid}/email-extractor"
-    assert event.error == f"skill not found: {source_uuid}/email-extractor"
 
 
 def test_parse_legacy_skill_resolution_failed_payload():
@@ -2258,8 +2268,10 @@ def test_parse_legacy_skill_resolution_failed_payload():
     assert isinstance(event, SkillResolutionFailed)
     assert event.skill_key is None
     assert event.reason is None
-    assert event.reference == "legacy/ref"
-    assert event.error == "missing"
+    # Legacy display mirrors are ignored on ingest; the typed fields are
+    # the only carriers.
+    assert not hasattr(event, "reference")
+    assert not hasattr(event, "error")
 
 
 def test_parse_skill_resolution_failed_does_not_fabricate_malformed_reason():

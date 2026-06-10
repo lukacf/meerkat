@@ -293,6 +293,25 @@ MOB_RPC_CONTRACT_HELPER_TYPES = [
     "MobReconcileFailureWire",
 ]
 
+# Item 6 / K20 pattern: the `skills/list` RPC result is catalog-typed
+# (`SkillListResponse` -> `SkillEntry`), but the entry shape and its identity
+# types only exist as schema-local `$defs`; promote and emit them so SDK
+# codegen produces `skills: SkillEntry[]` / `list[SkillEntry]` instead of
+# widening the entry rows to `Record<string, unknown>` / `dict[str, Any]`.
+SKILL_LIST_RPC_CONTRACT_HELPER_TYPES = [
+    "SkillEntry",
+    "SkillKey",
+    "SkillSourceProvenance",
+]
+
+SKILL_LIST_RPC_CONTRACT_ALIAS_TYPES = [
+    "SkillName",
+    "SkillScope",
+    "SourceIdentityStatus",
+    "SourceTransportKind",
+    "SourceUuid",
+]
+
 MOB_RPC_PROMOTED_SCHEMA_DEFS = frozenset(
     [
         *MOB_RPC_CONTRACT_ALIAS_TYPES,
@@ -441,6 +460,8 @@ def _promote_nested_schema_def(name: str) -> bool:
         *MCP_CONFIG_HELPER_TYPES,
         *MCP_CONFIG_ALIAS_TYPES,
         *MOB_RPC_PROMOTED_SCHEMA_DEFS,
+        *SKILL_LIST_RPC_CONTRACT_HELPER_TYPES,
+        *SKILL_LIST_RPC_CONTRACT_ALIAS_TYPES,
         *WORKGRAPH_RPC_CONTRACT_TYPES,
         *WORKGRAPH_RPC_CONTRACT_ALIAS_TYPES,
         *WORKGRAPH_RPC_CONTRACT_HELPER_TYPES,
@@ -1116,6 +1137,10 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "\nMcpServerConfig = McpStdioServerConfig | McpHttpServerConfig\n"
     for name in MCP_LIVE_CONTRACT_TYPES:
         append_python_contract_dataclass(name)
+    for name in SKILL_LIST_RPC_CONTRACT_ALIAS_TYPES:
+        append_python_alias(name, wire_schema, f"Wire payload for {name}.")
+    for name in SKILL_LIST_RPC_CONTRACT_HELPER_TYPES:
+        append_python_contract_dataclass(name)
     for name in K20_CATALOG_CONTRACT_TYPES:
         append_python_contract_dataclass(name)
     # `config/set` accepts a bare config object or a wrapped
@@ -1629,6 +1654,10 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         "  | ({ name: string; connect_timeout_secs?: number } & McpHttpConfig);\n"
     )
     for name in MCP_LIVE_CONTRACT_TYPES:
+        append_typescript_contract_interface(name)
+    for name in SKILL_LIST_RPC_CONTRACT_ALIAS_TYPES:
+        append_typescript_alias(name, wire_schema)
+    for name in SKILL_LIST_RPC_CONTRACT_HELPER_TYPES:
         append_typescript_contract_interface(name)
     for name in K20_CATALOG_CONTRACT_TYPES:
         append_typescript_contract_interface(name)
@@ -2348,6 +2377,62 @@ export function parseInitResult(json: string): InitResult {
 }
 """
     (output_dir / "runtime.ts").write_text(content)
+
+
+WEB_SESSION_TYPES_CONTENT = """// Generated session façade contracts for @rkat/web
+// Source: tools/sdk-codegen/generate.py (generate_web_session_types)
+import type { SchemaWarning, SessionId, TurnTerminalCauseKind, Usage } from './events.js';
+
+/**
+ * Canonical run-result wire envelope (mirrors `meerkat_contracts::WireRunResult`,
+ * the same shape RPC's `turn/start` returns and the WASM `start_turn` export
+ * resolves with).
+ */
+export interface WireRunResult {
+  session_id: SessionId;
+  session_ref?: string | null;
+  text: string;
+  turns: number;
+  tool_calls: number;
+  usage: Usage;
+  structured_output?: unknown;
+  extraction_error?: { last_output: string; attempts: number; reason: string } | null;
+  schema_warnings?: SchemaWarning[] | null;
+  skill_diagnostics?: unknown;
+  /**
+   * Runtime-owned terminal cause for this turn (e.g. `budget_exhausted`).
+   * Present only when the turn terminated on a typed terminal condition.
+   */
+  terminal_cause_kind?: TurnTerminalCauseKind | null;
+}
+
+/**
+ * Runtime-backed state for a direct browser session façade. Mirrors the JSON
+ * envelope produced by the WASM `get_session_state` export.
+ */
+export interface SessionState {
+  handle: number;
+  session_id: SessionId;
+  mob_id: string;
+  model: string;
+  usage: Usage;
+  message_count: number;
+  is_active: boolean;
+  last_assistant_text?: string | null;
+}
+"""
+
+
+def generate_web_session_types(output_dir: Path) -> None:
+    """Emit the @rkat/web direct-session façade contracts (K21).
+
+    `WireRunResult` mirrors the canonical contracts run-result envelope the
+    WASM `start_turn` export resolves with; `SessionState` mirrors the
+    `get_session_state` export's JSON envelope. The hand-authored
+    `sdks/web/src/types.ts` re-exports these instead of re-declaring twins.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "session.ts").write_text(WEB_SESSION_TYPES_CONTENT)
 
 
 def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
@@ -3382,6 +3467,10 @@ def main():
     # Generate web runtime bootstrap contracts (K21).
     generate_web_runtime_types(web_events_output)
     print(f"Generated web runtime contracts in {web_events_output}")
+
+    # Generate web session façade contracts (K21).
+    generate_web_session_types(web_events_output)
+    print(f"Generated web session contracts in {web_events_output}")
 
     # Ratchet: every catalog-named contract type must be exposed by the
     # generated SDK output (modulo the shrink-only grandfather baseline).

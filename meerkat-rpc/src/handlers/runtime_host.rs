@@ -24,6 +24,7 @@ fn host_surface_options(
         schedule_enabled: cfg!(feature = "schedule"),
         workgraph_enabled: cfg!(feature = "workgraph"),
         skills_enabled,
+        live_webrtc_enabled: cfg!(feature = "live-webrtc"),
     };
     let mut options = meerkat::surface::RuntimeHostSurfaceOptions::process(
         "meerkat-rpc",

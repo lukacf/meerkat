@@ -13,7 +13,7 @@ This file is a lean navigator. Load the specific reference under `references/` w
 
 1. **Infrastructure, not application** — the agent loop is a composable primitive with no opinions about prompts, tools, or output.
 2. **Trait contracts own the architecture** — `meerkat-core` defines contracts; implementations live in satellite crates.
-3. **Surfaces are skins, not authorities** — CLI, REST, RPC, MCP, WASM route through shared substrate and factory seams, but runtime-backed surfaces own runtime semantics.
+3. **Surfaces are skins, not authorities** — CLI, REST, RPC, MCP, WASM route through shared substrate and factory seams. Runtime semantics (keep-alive, input admission, drain lifecycle, commit boundaries) are owned by the shared runtime control plane (`MeerkatMachine` in `meerkat-runtime`); runtime-backed surfaces lower into it, they do not own it.
 4. **Composition over configuration** — optional components are `Option<Arc<dyn Trait>>`, not feature-flagged defaults.
 5. **Runtime conforms to catalog-generated machines** — the runtime follows the verified DSL model, not the other way around. Production bridge modules import/invoke catalog-owned DSL bodies; they do not author competing machine semantics.
 6. **Mob is the only multi-agent runtime path** — no separate sub-agent substrate. User-facing "delegate"/"sub-agent" flows compile to mob members, often inside session-owned implicit mobs.
@@ -153,19 +153,21 @@ lives in `meerkat-live`. For a deeper internal reference,
 `meerkat-contracts/src/wire/live.rs` are the authoritative surface;
 `docs/guides/realtime.mdx` is the user-facing Live Channels companion.
 
-## The 7-machine target
+## The canonical machine catalog
 
-Exactly seven canonical machines, each with a DSL source in `meerkat-machine-schema/src/catalog/dsl/`:
+The machine roster is owned by `canonical_machine_schemas()` and
+`canonical_composition_schemas()` in `meerkat-machine-schema/src/catalog/mod.rs`,
+with one DSL source per machine in `meerkat-machine-schema/src/catalog/dsl/`.
+Do not maintain a copy of the machine list here — read the registry (and
+`canonical_machine_production_owner_relations()` for per-machine production
+owners; the public mirror is `docs/reference/machine-authority.mdx`).
 
-- **MeerkatMachine** — session-scoped execution kernel. Owns session lifecycle, input admission, ops lifecycle, turn execution, tool surface state, drain lifecycle, peer comms classification.
-- **MobMachine** — mob-scoped orchestration. Owns mob lifecycle, member lifecycle, kickoff, wiring, roster, flow/frame/loop execution. (Per-member realtime intent and the realtime-binding plane were removed — live channels are caller-initiated via `live/*`, gated on each member's session-level `ModelCapabilities.realtime`.)
-- **ScheduleLifecycleMachine** — scheduler triggers and schedule lifecycle.
-- **OccurrenceLifecycleMachine** — occurrence dispatch and delivery.
-- **AuthMachine** — auth/session authorization state that must remain machine-owned.
-- **WorkGraphLifecycleMachine** — realm-scoped durable commitment graph authority. Owns work item lifecycle, revision/CAS legality, dependency readiness, claim leases, terminal state, topology legality, and evidence revision handling.
-- **WorkAttentionLifecycleMachine** — WorkGraph attention/goal binding authority. Owns attention binding lifecycle, revision/CAS legality, and pause/resume/stop/supersession state transitions. `WorkGraphService` builds delegated authority projections, and runtime ingress validates projection currentness before scoped continuation execution.
-
-Plus six composition protocols at the seams: `meerkat_mob_seam`, `schedule_bundle`, `schedule_runtime_bundle`, `schedule_mob_bundle`, `auth_lease_bundle`, `workgraph_attention_bundle`.
+`MeerkatMachine` and `MobMachine` are the two runtime kernels; the remaining
+catalog machines (auth, approval, session document, session turn admission,
+schedule/occurrence, workgraph/attention) are scoped authorities for perimeter
+state. (Per-member realtime intent and the realtime-binding plane were removed —
+live channels are caller-initiated via `live/*`, gated on each member's
+session-level `ModelCapabilities.realtime`.)
 
 **Primary semantic authority lives in the catalog-generated machines.** Production modules are bridge shells around catalog-owned DSL bodies and crate-local bridging types. Handwritten `*_authority.rs` helpers that still exist are adapter mechanics, projections, planners, or sealed mutators, not competing semantic owners.
 
@@ -244,7 +246,7 @@ Load these as needed. SKILL.md alone is intentionally minimal — everything els
 
 For comprehensive file lists, see the matching reference. This is a minimal pointer index for the most common landmarks.
 
-- `meerkat-machine-schema/src/catalog/dsl/` — DSL sources (truth for all 7 canonical machines)
+- `meerkat-machine-schema/src/catalog/dsl/` — DSL sources (one per canonical machine; the roster and count are owned by `canonical_machine_schemas()`)
 - `meerkat-machine-schema/src/catalog/mod.rs` — `canonical_machine_schemas()` registry
 - `meerkat-machine-kernels/src/runtime.rs` — `GeneratedMachineKernel` interpreter
 - `meerkat-runtime/src/meerkat_machine/` — `MeerkatMachine`, session management, dispatch paths, DSL adapter

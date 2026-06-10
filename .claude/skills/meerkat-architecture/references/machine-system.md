@@ -2,21 +2,21 @@
 
 Load this reference when working on DSL definitions, schema catalog, generated kernels, TLC verification, production bridge modules, command classification, schema/alphabet parity, or authority cutover.
 
-## The 7-machine target
+## The canonical machine catalog
 
-The final system has exactly seven canonical machines:
+The machine roster is owned by `canonical_machine_schemas()` and the
+composition roster by `canonical_composition_schemas()`, both in
+`meerkat-machine-schema/src/catalog/mod.rs`. Per-machine production owners are
+owned by `canonical_machine_production_owner_relations()` in the same file
+(public mirror: `docs/reference/machine-authority.mdx`). Do not maintain a
+hand-written machine list or machine count in this reference — read the
+registry; previous copies of the list here drifted stale (the catalog has grown
+beyond the original seven machines, e.g. `ApprovalLifecycleMachine`,
+`SessionDocumentMachine`, and `SessionTurnAdmissionMachine`, the latter owned by
+`meerkat-session`, not absorbed into `MeerkatMachine`).
 
-- **MeerkatMachine** — session-scoped execution kernel (absorbs input lifecycle, runtime ingress, ops lifecycle, turn execution, comms drain, peer comms, external tool surface, session turn admission)
-- **MobMachine** — mob-scoped orchestration (absorbs mob lifecycle, member bootstrap, member lifecycle, wiring, roster, orchestrator, flow, loop iteration)
-- **ScheduleLifecycleMachine** — perimeter scheduler
-- **OccurrenceLifecycleMachine** — perimeter occurrence lifecycle
-- **AuthMachine** — auth/session authorization lifecycle
-- **WorkGraphLifecycleMachine** — realm-scoped durable work graph lifecycle, revision/CAS legality, dependency readiness, claim leases, terminal state, topology legality, and evidence revision handling
-- **WorkAttentionLifecycleMachine** — WorkGraph attention/goal binding lifecycle, revision/CAS legality, and pause/resume/stop/supersession state transitions. Delegated authority projection belongs to `WorkGraphService`; runtime continuation freshness is validated at runtime ingress.
-
-Plus six canonical composition schemas at the seams: `meerkat_mob_seam`, `schedule_bundle`, `schedule_runtime_bundle`, `schedule_mob_bundle`, `auth_lease_bundle`, `workgraph_attention_bundle`.
-
-Catalog authoritative directory: `meerkat-machine-schema/src/catalog/dsl/` — contains exactly these seven machine DSLs.
+Catalog authoritative directory: `meerkat-machine-schema/src/catalog/dsl/` — one
+DSL source file per canonical machine.
 
 Previously-standalone machines absorbed into MeerkatMachine/MobMachine state become fields, inputs, and transitions inside the host machine. Post-absorption, remaining helper modules are projection/reducer support or shell mechanics; shell code routes semantic decisions through the host machine's DSL via handle traits or in-crate MobMachine authority access (see "Cross-crate DSL access" below).
 
@@ -26,14 +26,9 @@ The DSL is a single source that produces two artifacts:
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│  DSL SOURCE (single source of truth, 7 files)                      │
-│  meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs         │
-│  meerkat-machine-schema/src/catalog/dsl/mob_machine.rs             │
-│  meerkat-machine-schema/src/catalog/dsl/schedule_lifecycle.rs      │
-│  meerkat-machine-schema/src/catalog/dsl/occurrence_lifecycle.rs    │
-│  meerkat-machine-schema/src/catalog/dsl/auth_machine.rs            │
-│  meerkat-machine-schema/src/catalog/dsl/workgraph_lifecycle.rs     │
-│  meerkat-machine-schema/src/catalog/dsl/work_attention_lifecycle.rs │
+│  DSL SOURCE (single source of truth)                               │
+│  meerkat-machine-schema/src/catalog/dsl/*.rs                       │
+│  (one file per machine in canonical_machine_schemas())             │
 │                                                                    │
 │  machine_dsl! {                                                    │
 │    state { <fields> }                                              │
@@ -222,8 +217,8 @@ and archived historically at `docs-internal/archive/public-docs-removed-2026-05-
 
 ## What the workspace looks like in the target state
 
-- Exactly 7 canonical machine DSL files in `meerkat-machine-schema/src/catalog/dsl/` — one per machine. Shared catalog helpers in that directory are allowed; no production crate authors a competing machine body.
-- Exactly 6 canonical compositions in `meerkat-machine-schema/src/catalog/compositions.rs`, registered by `canonical_composition_schemas()`.
+- `meerkat-machine-schema/src/catalog/dsl/` holds one DSL file per registry entry of `canonical_machine_schemas()` (the registry owns the machine roster and count). Shared catalog helpers in that directory are allowed; no production crate authors a competing machine body.
+- Canonical compositions live in `meerkat-machine-schema/src/catalog/compositions.rs`, registered by `canonical_composition_schemas()` (the registry owns the roster and count).
 - Zero `*_authority.rs` files containing handwritten match-table state machines. Files named `dsl_authority.rs` are runtime adapter plumbing (not state machines); other authority-named helpers must be projections, planners, or sealed mutators with no semantic transition table.
 - Runtime shell holds only: per-session `Arc<Mutex<MeerkatMachineAuthority>>` + `Arc<Mutex<MobMachineAuthority>>`, handle trait impls that route through the shared authorities, IO mechanics (channels, handles, wall-clock timestamps), and observability projections (history logs, diagnostic snapshots).
 - Handle traits in `meerkat-core/src/handles.rs` (`TurnStateHandle`, `CommsDrainHandle`, `ExternalToolSurfaceHandle`, `PeerCommsHandle`, `SessionAdmissionHandle`, `ModelRoutingHandle`, `AuthLeaseHandle`, `McpServerLifecycleHandle`, `PeerInteractionHandle`, `SessionContextHandle`, `SessionClaimHandle`, `InteractionStreamHandle`) give cross-crate access to MeerkatMachine/AuthMachine-owned transitions and projections. Mob-internal callers use `MobActor.dsl_authority` directly.

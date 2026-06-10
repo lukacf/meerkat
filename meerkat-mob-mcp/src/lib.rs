@@ -4991,9 +4991,7 @@ mod tests {
                     system_prompt: None,
                     event_tx: None,
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                        None,
                         HandlingMode::Queue,
-                        None,
                         None,
                         Vec::new(),
                         None,
@@ -5185,9 +5183,7 @@ mod tests {
                     system_prompt: None,
                     event_tx: None,
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                        None,
                         HandlingMode::Queue,
-                        None,
                         None,
                         Vec::new(),
                         None,

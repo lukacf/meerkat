@@ -1005,14 +1005,18 @@ impl SessionBackend {
     }
 
     fn runtime_input_from_turn_request(req: &StartTurnRequest) -> Input {
-        let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-            handling_mode: Some(req.runtime.handling_mode),
-            keep_alive: None,
-            skill_references: req.runtime.skill_references.clone(),
-            flow_tool_overlay: req.runtime.flow_tool_overlay.clone(),
-            render_metadata: req.runtime.render_metadata.clone(),
-            ..Default::default()
-        };
+        // The canonical `RuntimeTurnMetadata` carrier owns render metadata and
+        // skill references; only handling/overlay retain a flat fallback on
+        // `StartTurnRuntimeSemantics`.
+        let mut turn_metadata = req.runtime.turn_metadata.clone().unwrap_or_default();
+        turn_metadata.handling_mode = Some(
+            turn_metadata
+                .handling_mode
+                .unwrap_or(req.runtime.handling_mode),
+        );
+        if turn_metadata.flow_tool_overlay.is_none() {
+            turn_metadata.flow_tool_overlay = req.runtime.flow_tool_overlay.clone();
+        }
         let prompt = req.prompt.clone();
         Input::Prompt(PromptInput {
             header: InputHeader {
@@ -1757,11 +1761,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             system_prompt: None,
             event_tx: queued_context.map(|context| context.event_tx),
             runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                None,
                 meerkat_core::types::HandlingMode::Queue,
-                primitive
-                    .turn_metadata()
-                    .and_then(|meta| meta.skill_references.clone()),
                 primitive
                     .turn_metadata()
                     .and_then(|meta| meta.flow_tool_overlay.clone()),
@@ -2372,16 +2372,20 @@ impl MobProvisioner for SessionBackend {
                 req.prompt.clone(),
                 &run_id.to_string(),
                 0,
-                Some(
-                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                        handling_mode: Some(req.runtime.handling_mode),
-                        keep_alive: None,
-                        skill_references: req.runtime.skill_references.clone(),
-                        flow_tool_overlay: req.runtime.flow_tool_overlay.clone(),
-                        render_metadata: req.runtime.render_metadata.clone(),
-                        ..Default::default()
-                    },
-                ),
+                Some({
+                    // Consume the canonical carrier; flats only backfill
+                    // handling/overlay.
+                    let mut turn_metadata = req.runtime.turn_metadata.clone().unwrap_or_default();
+                    turn_metadata.handling_mode = Some(
+                        turn_metadata
+                            .handling_mode
+                            .unwrap_or(req.runtime.handling_mode),
+                    );
+                    if turn_metadata.flow_tool_overlay.is_none() {
+                        turn_metadata.flow_tool_overlay = req.runtime.flow_tool_overlay.clone();
+                    }
+                    turn_metadata
+                }),
             );
             return self
                 .admit_runtime_input(&session_id, input, req.event_tx)

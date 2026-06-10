@@ -148,12 +148,10 @@ fn start_turn_request_from_initial_turn(
         system_prompt: None,
         event_tx: initial_turn.event_tx,
         runtime: StartTurnRuntimeSemantics::new(
-            None,
             initial_turn
                 .turn_metadata
                 .handling_mode
                 .unwrap_or(HandlingMode::Queue),
-            None,
             None,
             Vec::new(),
             Some(initial_turn.turn_metadata),
@@ -603,9 +601,16 @@ async fn validate_workgraph_attention_primitive(
     let Some(workgraph_service) = workgraph_service else {
         return Ok(());
     };
-    let Some(projection) = primitive.turn_metadata().and_then(|metadata| {
-        crate::workgraph_attention_projection_from_overlay(metadata.flow_tool_overlay.as_ref())
-    }) else {
+    let projection = match primitive.turn_metadata() {
+        Some(metadata) => {
+            crate::workgraph_attention_projection_from_overlay(metadata.flow_tool_overlay.as_ref())
+                .map_err(|error| {
+                    CoreExecutorError::apply_failed_primitive_rejected(error.to_string())
+                })?
+        }
+        None => None,
+    };
+    let Some(projection) = projection else {
         return Ok(());
     };
     crate::validate_workgraph_attention_projection_current(workgraph_service, &projection)
@@ -648,9 +653,7 @@ fn start_turn_request_from_primitive(
         system_prompt: None,
         event_tx: None,
         runtime: StartTurnRuntimeSemantics::new(
-            None,
             HandlingMode::Queue,
-            None,
             None,
             pre_turn_context_appends,
             metadata.cloned(),
@@ -985,12 +988,10 @@ mod tests {
         let req = start_turn_request_from_primitive(&primitive)
             .expect("metadata should be carried, not rejected");
 
-        assert_eq!(req.runtime.render_metadata, None);
         assert_eq!(
             req.runtime.handling_mode,
             meerkat_core::types::HandlingMode::Queue
         );
-        assert_eq!(req.runtime.skill_references, None);
         assert_eq!(req.runtime.flow_tool_overlay, None);
         assert_eq!(
             req.runtime.typed_turn_appends,

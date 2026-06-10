@@ -1457,12 +1457,7 @@ where
                     let _ = crate::event_tap::tap_emit(
                         &self.event_tap,
                         event_tx,
-                        AgentEvent::SkillResolutionFailed {
-                            skill_key,
-                            reason,
-                            reference: String::new(),
-                            error: e.to_string(),
-                        },
+                        AgentEvent::SkillResolutionFailed { skill_key, reason },
                     )
                     .await;
                 }

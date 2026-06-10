@@ -1242,11 +1242,7 @@ async fn apply_runtime_turn(
         system_prompt: None,
         event_tx: event_tx.clone(),
         runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-            None,
             HandlingMode::Queue,
-            primitive
-                .turn_metadata()
-                .and_then(|meta| meta.skill_references.clone()),
             primitive
                 .turn_metadata()
                 .and_then(|meta| meta.flow_tool_overlay.clone()),
@@ -1326,11 +1322,7 @@ async fn apply_runtime_turn(
                         system_prompt: None,
                         event_tx,
                         runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                            None,
                             HandlingMode::Queue,
-                            primitive
-                                .turn_metadata()
-                                .and_then(|meta| meta.skill_references.clone()),
                             primitive
                                 .turn_metadata()
                                 .and_then(|meta| meta.flow_tool_overlay.clone()),

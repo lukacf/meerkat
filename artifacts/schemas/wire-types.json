@@ -1099,23 +1099,13 @@
           {
             "description": "A skill reference could not be resolved.",
             "properties": {
-              "error": {
-                "default": "",
-                "description": "Legacy display mirror for consumers still reading string errors.",
-                "type": "string"
-              },
               "reason": {
                 "$ref": "#/$defs/SkillResolutionFailureReason",
                 "default": {
                   "message": "",
                   "reason_type": "unknown"
                 },
-                "description": "Structured reason for the failure. Legacy payloads deserialize as `unknown`."
-              },
-              "reference": {
-                "default": "",
-                "description": "Legacy display mirror for consumers still reading string references.",
-                "type": "string"
+                "description": "Structured reason for the failure. Legacy payloads deserialize as\n`unknown`. Display text is the `Display` projection of this typed\nreason, never a separately-carried field."
               },
               "skill_key": {
                 "anyOf": [
@@ -14236,23 +14226,13 @@
           {
             "description": "A skill reference could not be resolved.",
             "properties": {
-              "error": {
-                "default": "",
-                "description": "Legacy display mirror for consumers still reading string errors.",
-                "type": "string"
-              },
               "reason": {
                 "$ref": "#/$defs/SkillResolutionFailureReason",
                 "default": {
                   "message": "",
                   "reason_type": "unknown"
                 },
-                "description": "Structured reason for the failure. Legacy payloads deserialize as `unknown`."
-              },
-              "reference": {
-                "default": "",
-                "description": "Legacy display mirror for consumers still reading string references.",
-                "type": "string"
+                "description": "Structured reason for the failure. Legacy payloads deserialize as\n`unknown`. Display text is the `Display` projection of this typed\nreason, never a separately-carried field."
               },
               "skill_key": {
                 "anyOf": [

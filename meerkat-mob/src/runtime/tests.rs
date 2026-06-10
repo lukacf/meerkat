@@ -27501,7 +27501,12 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             .await
             .entry(session_id.clone())
             .or_default()
-            .push(req.runtime.render_metadata.clone());
+            .push(
+                req.runtime
+                    .turn_metadata
+                    .as_ref()
+                    .and_then(|meta| meta.render_metadata.clone()),
+            );
         self.active_runtime_runs
             .write()
             .await

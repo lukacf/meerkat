@@ -350,9 +350,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                             system_prompt: None,
                             event_tx: Some(event_tx),
                             runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                                None,
                                 meerkat_core::types::HandlingMode::Queue,
-                                None,
                                 flow_tool_overlay,
                                 Vec::new(),
                                 None,

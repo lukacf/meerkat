@@ -710,8 +710,6 @@ describe("Typed Events", () => {
         reason_type: "not_found",
         key: { source_uuid: sourceUuid, skill_name: "email-extractor" },
       },
-      reference: `${sourceUuid}/email-extractor`,
-      error: `skill not found: ${sourceUuid}/email-extractor`,
     });
 
     assert.equal(event.type, "skill_resolution_failed");
@@ -727,8 +725,8 @@ describe("Typed Events", () => {
           skillName: "email-extractor",
         });
       }
-      assert.equal(event.reference, `${sourceUuid}/email-extractor`);
-      assert.equal(event.error, `skill not found: ${sourceUuid}/email-extractor`);
+      assert.equal("reference" in event, false);
+      assert.equal("error" in event, false);
     }
   });
 
@@ -743,8 +741,8 @@ describe("Typed Events", () => {
     if (event.type === "skill_resolution_failed") {
       assert.equal(event.skillKey, undefined);
       assert.equal(event.reason, undefined);
-      assert.equal(event.reference, "legacy/ref");
-      assert.equal(event.error, "missing");
+      assert.equal("reference" in event, false);
+      assert.equal("error" in event, false);
     }
   });
 
@@ -2956,6 +2954,26 @@ describe("Mob surface fail-closed status parsing (DOGMA Rule 6)", () => {
 
     it("rejects an empty status string", async () => {
       const client = mobListClient({ mobs: [{ mob_id: "mob-1", status: "" }] });
+      await assert.rejects(
+        () => client.listMobs(),
+        (error) =>
+          error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+      );
+    });
+
+    it("rejects a missing mobs envelope instead of coalescing to empty success", async () => {
+      const client = mobListClient({});
+      await assert.rejects(
+        () => client.listMobs(),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /mob\/list/.test(String(error.message)),
+      );
+    });
+
+    it("rejects a non-array mobs envelope", async () => {
+      const client = mobListClient({ mobs: "nope" });
       await assert.rejects(
         () => client.listMobs(),
         (error) =>

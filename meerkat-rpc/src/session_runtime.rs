@@ -5110,9 +5110,7 @@ impl SessionRuntime {
         primitive: &RunPrimitive,
         prompt: ContentInput,
         event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
-        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
-        _additional_instructions: Option<Vec<String>>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
     ) -> Result<CoreApplyOutput, RpcError> {
         self.apply_runtime_turn_with_pre_admission(
@@ -5121,15 +5119,16 @@ impl SessionRuntime {
             primitive,
             prompt,
             event_tx,
-            skill_references,
             flow_tool_overlay,
-            _additional_instructions,
             overrides,
             None,
         )
         .await
     }
 
+    // Skill references travel exclusively on the primitive's
+    // `RuntimeTurnMetadata` carrier (K10 fold); the apply seam takes no
+    // parallel copy.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn apply_runtime_turn_with_pre_admission(
         &self,
@@ -5138,9 +5137,7 @@ impl SessionRuntime {
         primitive: &RunPrimitive,
         prompt: ContentInput,
         event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
-        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
-        _additional_instructions: Option<Vec<String>>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
         pre_admission: Option<RuntimePreAdmission>,
     ) -> Result<CoreApplyOutput, RpcError> {
@@ -5268,9 +5265,7 @@ impl SessionRuntime {
                 system_prompt: None,
                 event_tx: Some(event_tx.clone()),
                 runtime: StartTurnRuntimeSemantics::new(
-                    None,
                     meerkat_core::types::HandlingMode::Queue,
-                    skill_references.clone(),
                     flow_tool_overlay.clone(),
                     pre_turn_context_appends.clone(),
                     primitive.turn_metadata().cloned(),
@@ -5463,9 +5458,7 @@ impl SessionRuntime {
                     system_prompt: None,
                     event_tx: Some(event_tx),
                     runtime: StartTurnRuntimeSemantics::new(
-                        None,
                         meerkat_core::types::HandlingMode::Queue,
-                        skill_references,
                         flow_tool_overlay,
                         pre_turn_context_appends.clone(),
                         primitive.turn_metadata().cloned(),
@@ -5515,9 +5508,7 @@ impl SessionRuntime {
                 system_prompt: None,
                 event_tx: Some(event_tx),
                 runtime: StartTurnRuntimeSemantics::new(
-                    None,
                     meerkat_core::types::HandlingMode::Queue,
-                    skill_references,
                     flow_tool_overlay,
                     pre_turn_context_appends,
                     primitive.turn_metadata().cloned(),
@@ -5910,9 +5901,7 @@ impl SessionRuntime {
                     system_prompt: None,
                     event_tx: Some(event_tx),
                     runtime: StartTurnRuntimeSemantics::new(
-                        None,
                         meerkat_core::types::HandlingMode::Queue,
-                        skill_references,
                         flow_tool_overlay,
                         Vec::new(),
                         turn_metadata,
@@ -6029,9 +6018,7 @@ impl SessionRuntime {
             system_prompt: None,
             event_tx: Some(event_tx.clone()),
             runtime: StartTurnRuntimeSemantics::new(
-                None,
                 meerkat_core::types::HandlingMode::Queue,
-                skill_references.clone(),
                 flow_tool_overlay.clone(),
                 Vec::new(),
                 turn_metadata,
@@ -9890,8 +9877,6 @@ mod tests {
                 event_tx,
                 None,
                 None,
-                None,
-                None,
             )
             .await
             .expect("context-only apply should succeed");
@@ -10040,8 +10025,6 @@ mod tests {
                 &primitive,
                 ContentInput::Text(String::new()),
                 event_tx,
-                None,
-                None,
                 None,
                 None,
             )
@@ -10202,8 +10185,6 @@ mod tests {
                 event_tx,
                 None,
                 None,
-                None,
-                None,
             )
             .await;
         assert!(
@@ -10263,8 +10244,6 @@ mod tests {
                 &primitive,
                 ContentInput::Text(String::new()),
                 event_tx,
-                None,
-                None,
                 None,
                 None,
             )
@@ -10367,8 +10346,6 @@ mod tests {
                 &primitive,
                 ContentInput::Text(String::new()),
                 event_tx,
-                None,
-                None,
                 None,
                 None,
             )
@@ -14227,8 +14204,6 @@ mod tests {
                 event_tx,
                 None,
                 None,
-                None,
-                None,
             )
             .await;
         assert!(
@@ -15753,8 +15728,6 @@ mod tests {
                 event_tx,
                 None,
                 None,
-                None,
-                None,
             )
             .await;
         assert!(
@@ -17103,8 +17076,6 @@ mod tests {
                     event_tx,
                     None,
                     None,
-                    None,
-                    None,
                 )
                 .await
         });
@@ -17245,8 +17216,6 @@ mod tests {
                 "invalid keep_alive".into(),
                 event_tx,
                 None,
-                None,
-                None,
                 Some(crate::handlers::turn::TurnOverrides {
                     keep_alive: Some(true),
                     ..Default::default()
@@ -17289,8 +17258,6 @@ mod tests {
                 &primitive,
                 ContentInput::Text(String::new()),
                 event_tx,
-                None,
-                None,
                 None,
                 None,
             )
@@ -17356,8 +17323,6 @@ mod tests {
                 &primitive,
                 ContentInput::Text(String::new()),
                 event_tx,
-                None,
-                None,
                 None,
                 None,
             )
@@ -18190,8 +18155,6 @@ mod tests {
                 event_tx,
                 None,
                 None,
-                None,
-                None,
             )
             .await
             .expect("no-pending boundary should be returned as a runtime terminal");
@@ -18443,8 +18406,6 @@ mod tests {
                 &primitive,
                 ContentInput::Text("rejected runtime apply".to_string()),
                 event_tx,
-                None,
-                None,
                 None,
                 Some(overrides),
             )
@@ -18771,8 +18732,6 @@ mod tests {
                 event_tx,
                 None,
                 None,
-                None,
-                None,
             )
             .await
             .expect("recovered no-pending boundary should be returned as a typed terminal");
@@ -18838,8 +18797,6 @@ mod tests {
                 event_tx,
                 None,
                 None,
-                None,
-                None,
             )
             .await;
         assert!(
@@ -18898,8 +18855,6 @@ mod tests {
                 event_tx,
                 None,
                 None,
-                None,
-                None,
             )
             .await;
         assert!(
@@ -18937,8 +18892,6 @@ mod tests {
                 &primitive,
                 ContentInput::Text("retry recovery after durable store recovers".to_string()),
                 event_tx,
-                None,
-                None,
                 None,
                 None,
             )

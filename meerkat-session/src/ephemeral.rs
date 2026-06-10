@@ -2704,23 +2704,15 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .as_ref()
             .and_then(|build| build.initial_turn_metadata.as_ref())
             .cloned();
-        let initial_render_metadata = initial_turn_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.render_metadata.clone());
         let initial_handling_mode = initial_turn_metadata
             .as_ref()
             .and_then(|metadata| metadata.handling_mode)
             .unwrap_or(meerkat_core::types::HandlingMode::Queue);
-        let initial_skill_references = initial_turn_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.skill_references.clone());
         let initial_flow_tool_overlay = initial_turn_metadata
             .as_ref()
             .and_then(|metadata| metadata.flow_tool_overlay.clone());
         let initial_runtime = meerkat_core::service::StartTurnRuntimeSemantics::new(
-            initial_render_metadata,
             initial_handling_mode,
-            initial_skill_references,
             initial_flow_tool_overlay,
             Vec::new(),
             initial_turn_metadata,
@@ -3627,16 +3619,14 @@ async fn session_task<A: SessionAgent>(
                 let metadata = runtime.turn_metadata;
                 let render_metadata = metadata
                     .as_ref()
-                    .and_then(|metadata| metadata.render_metadata.clone())
-                    .or(runtime.render_metadata);
+                    .and_then(|metadata| metadata.render_metadata.clone());
                 let handling_mode = metadata
                     .as_ref()
                     .and_then(|metadata| metadata.handling_mode)
                     .unwrap_or(runtime.handling_mode);
                 let skill_references = metadata
                     .as_ref()
-                    .and_then(|metadata| metadata.skill_references.clone())
-                    .or(runtime.skill_references);
+                    .and_then(|metadata| metadata.skill_references.clone());
                 let flow_tool_overlay = metadata
                     .as_ref()
                     .and_then(|metadata| metadata.flow_tool_overlay.clone())
@@ -5215,7 +5205,7 @@ mod runtime_turn_metadata_tests {
     }
 
     #[tokio::test]
-    async fn start_turn_runtime_metadata_prevents_stale_split_skill_replay() {
+    async fn start_turn_runtime_metadata_is_sole_skill_carrier() {
         let observed_skill_references = Arc::new(Mutex::new(Vec::new()));
         let observed_context_texts = Arc::new(Mutex::new(Vec::new()));
         let run_context_counts = Arc::new(Mutex::new(Vec::new()));
@@ -5229,8 +5219,6 @@ mod runtime_turn_metadata_tests {
             },
             1,
         );
-        let stale_split =
-            SkillKey::builtin(SkillName::parse("stale-split-skill").expect("valid skill"));
         let canonical =
             SkillKey::builtin(SkillName::parse("runtime-canonical-skill").expect("valid skill"));
 
@@ -5257,9 +5245,7 @@ mod runtime_turn_metadata_tests {
                     system_prompt: None,
                     event_tx: None,
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                        None,
                         meerkat_core::types::HandlingMode::Queue,
-                        Some(vec![stale_split]),
                         None,
                         Vec::new(),
                         Some(RuntimeTurnMetadata {
@@ -5321,9 +5307,7 @@ mod runtime_turn_metadata_tests {
                     system_prompt: None,
                     event_tx: None,
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                        None,
                         meerkat_core::types::HandlingMode::Queue,
-                        None,
                         None,
                         vec![PendingSystemContextAppend {
                             content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
@@ -5477,9 +5461,7 @@ mod runtime_turn_metadata_tests {
                         system_prompt: None,
                         event_tx: None,
                         runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                            None,
                             meerkat_core::types::HandlingMode::Queue,
-                            None,
                             None,
                             Vec::new(),
                             Some(RuntimeTurnMetadata {
@@ -5835,9 +5817,7 @@ mod runtime_turn_metadata_tests {
                     system_prompt: None,
                     event_tx: None,
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                        None,
                         meerkat_core::types::HandlingMode::Queue,
-                        None,
                         Some(TurnToolOverlay {
                             allowed_tools: Some(vec!["flow_tool".to_string()]),
                             blocked_tools: None,

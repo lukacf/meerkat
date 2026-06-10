@@ -11,7 +11,7 @@ use meerkat_core::types::{
     SystemNoticeBlock, SystemNoticeKind, ToolCallView, ToolDef, ToolProvenance, ToolResult,
     ToolSourceKind,
 };
-use meerkat_core::{AgentToolDispatcher, ToolDispatchContext};
+use meerkat_core::{AgentToolDispatcher, ToolCallArguments, ToolDispatchContext};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -106,14 +106,21 @@ pub fn workgraph_attention_context_append(
 
 pub fn workgraph_attention_projection_from_overlay(
     overlay: Option<&TurnToolOverlay>,
-) -> Option<AttentionContextProjection> {
-    overlay
-        .and_then(|overlay| {
-            overlay
-                .dispatch_context
-                .get(WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY)
+) -> Result<Option<AttentionContextProjection>, crate::WorkGraphError> {
+    let Some(value) = overlay.and_then(|overlay| {
+        overlay
+            .dispatch_context
+            .get(WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY)
+    }) else {
+        return Ok(None);
+    };
+    serde_json::from_value::<AttentionContextProjection>(value.clone())
+        .map(Some)
+        .map_err(|error| {
+            crate::WorkGraphError::InvalidInput(format!(
+                "malformed WorkGraph attention projection in turn tool overlay dispatch context: {error}"
+            ))
         })
-        .and_then(|value| serde_json::from_value::<AttentionContextProjection>(value.clone()).ok())
 }
 
 pub async fn validate_workgraph_attention_projection_current(
@@ -231,13 +238,25 @@ impl AgentToolDispatcher for WorkGraphToolSurface {
                 name: call.name.into(),
             });
         }
-        let mut args: Value = serde_json::from_str(call.args.get())
-            .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
-        let context_projection = context
-            .turn_metadata(WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY)
-            .and_then(|value| {
-                serde_json::from_value::<AttentionContextProjection>(value.clone()).ok()
-            });
+        let mut args: Value = ToolCallArguments::from_raw_json(call.args)
+            .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?
+            .into_value();
+        let context_projection = match context.turn_metadata(WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY)
+        {
+            Some(value) => Some(
+                serde_json::from_value::<AttentionContextProjection>(value.clone()).map_err(
+                    |error| {
+                        ToolError::invalid_arguments(
+                            call.name,
+                            format!(
+                                "malformed WorkGraph attention projection in dispatch context: {error}"
+                            ),
+                        )
+                    },
+                )?,
+            ),
+            None => None,
+        };
         let projection = context_projection
             .as_ref()
             .or(self.attention_projection.as_ref());
@@ -782,6 +801,80 @@ mod tests {
             .expect("dispatch");
         let value: Value = serde_json::from_str(&outcome.result.text_content()).unwrap();
         assert_eq!(value["item"]["title"].as_str(), Some("surface item"));
+    }
+
+    /// Non-object tool args must fail closed as `InvalidArguments` instead of
+    /// being laundered into a `Value::String` fallback payload.
+    #[tokio::test]
+    async fn dispatch_rejects_non_object_args_fail_closed() {
+        let surface =
+            WorkGraphToolSurface::new(WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new())));
+        let args =
+            serde_json::value::RawValue::from_string(json!("not an object").to_string()).unwrap();
+        let err = surface
+            .dispatch(ToolCallView {
+                id: "call-bad-args",
+                name: "workgraph_create",
+                args: &args,
+            })
+            .await
+            .expect_err("non-object args must be rejected");
+        assert!(matches!(err, ToolError::InvalidArguments { .. }));
+    }
+
+    /// A present-but-malformed attention projection in the dispatch context
+    /// must fail closed rather than silently widening to the unscoped (or
+    /// constructor-scoped) projection.
+    #[tokio::test]
+    async fn dispatch_context_rejects_malformed_attention_projection() {
+        let surface =
+            WorkGraphToolSurface::new(WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new())));
+        let args = serde_json::value::RawValue::from_string(
+            json!({ "title": "surface item" }).to_string(),
+        )
+        .unwrap();
+        let mut metadata = BTreeMap::new();
+        metadata.insert(
+            WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY.to_string(),
+            json!({ "binding_id": 42 }),
+        );
+        let context = ToolDispatchContext::default().with_turn_metadata(metadata);
+        let err = surface
+            .dispatch_with_context(
+                ToolCallView {
+                    id: "call-bad-projection",
+                    name: "workgraph_create",
+                    args: &args,
+                },
+                &context,
+            )
+            .await
+            .expect_err("malformed attention projection must be rejected");
+        assert!(matches!(err, ToolError::InvalidArguments { .. }));
+    }
+
+    /// A present-but-malformed attention projection in a turn tool overlay
+    /// must surface a typed `WorkGraphError` instead of decaying to `None`.
+    #[test]
+    fn overlay_projection_extraction_fails_closed_on_malformed_payload() {
+        assert!(matches!(
+            workgraph_attention_projection_from_overlay(None),
+            Ok(None)
+        ));
+
+        let mut dispatch_context = BTreeMap::new();
+        dispatch_context.insert(
+            WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY.to_string(),
+            json!({ "binding_id": 42 }),
+        );
+        let overlay = TurnToolOverlay {
+            allowed_tools: None,
+            blocked_tools: None,
+            dispatch_context,
+        };
+        let err = workgraph_attention_projection_from_overlay(Some(&overlay))
+            .expect_err("malformed overlay projection must be rejected");
+        assert!(matches!(err, crate::WorkGraphError::InvalidInput(_)));
     }
 
     #[test]

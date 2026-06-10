@@ -550,10 +550,8 @@ fn agent_event_all_variants_roundtrip() {
         AgentEvent::SkillResolutionFailed {
             skill_key: Some(failed_skill_key.clone()),
             reason: SkillResolutionFailureReason::NotFound {
-                key: failed_skill_key.clone(),
+                key: failed_skill_key,
             },
-            reference: failed_skill_key.to_string(),
-            error: format!("skill not found: {failed_skill_key}"),
         },
         // InteractionComplete and InteractionFailed are constructed via JSON
         // below to avoid a direct uuid crate dependency.
@@ -596,10 +594,13 @@ fn agent_event_all_variants_roundtrip() {
             assert!(json.get("skill_key").is_some(), "missing typed skill_key");
             assert!(json.get("reason").is_some(), "missing typed failure reason");
             assert_eq!(json["reason"]["reason_type"], "not_found");
-            assert_eq!(json["reference"], failed_skill_key.to_string());
-            assert_eq!(
-                json["error"],
-                format!("skill not found: {failed_skill_key}")
+            assert!(
+                json.get("reference").is_none(),
+                "legacy display mirror `reference` must not be serialized"
+            );
+            assert!(
+                json.get("error").is_none(),
+                "legacy display mirror `error` must not be serialized"
             );
         }
 
@@ -800,8 +801,6 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             reason: SkillResolutionFailureReason::Unknown {
                 message: "missing".to_string(),
             },
-            reference: "skill".to_string(),
-            error: "missing".to_string(),
         },
         AgentEvent::InteractionComplete {
             interaction_id: serde_json::from_value(serde_json::json!(

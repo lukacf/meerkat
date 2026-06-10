@@ -361,7 +361,7 @@ function handleEvent(event: AgentEvent): string {
     case 'skills_resolved':
       return `${event.skills.length}`;
     case 'skill_resolution_failed':
-      return event.reference ?? '';
+      return event.reason ? JSON.stringify(event.reason) : '';
     case 'interaction_complete':
       return event.result;
     case 'interaction_callback_pending':

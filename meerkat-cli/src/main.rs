@@ -7427,9 +7427,18 @@ async fn validate_cli_workgraph_attention_primitive(
     let Some(workgraph_service) = workgraph_service else {
         return Ok(());
     };
-    let Some(projection) = primitive.turn_metadata().and_then(|metadata| {
-        meerkat::workgraph_attention_projection_from_overlay(metadata.flow_tool_overlay.as_ref())
-    }) else {
+    let projection = match primitive.turn_metadata() {
+        Some(metadata) => meerkat::workgraph_attention_projection_from_overlay(
+            metadata.flow_tool_overlay.as_ref(),
+        )
+        .map_err(|error| {
+            meerkat_core::lifecycle::core_executor::CoreExecutorError::apply_failed_primitive_rejected(
+                error.to_string(),
+            )
+        })?,
+        None => None,
+    };
+    let Some(projection) = projection else {
         return Ok(());
     };
     meerkat::validate_workgraph_attention_projection_current(workgraph_service, &projection)
@@ -7579,11 +7588,7 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
             system_prompt: None,
             event_tx: self.event_tx.clone(),
             runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                None,
                 meerkat_core::types::HandlingMode::Queue,
-                primitive
-                    .turn_metadata()
-                    .and_then(|meta| meta.skill_references.clone()),
                 primitive
                     .turn_metadata()
                     .and_then(|meta| meta.flow_tool_overlay.clone()),
@@ -18613,9 +18618,7 @@ capabilities = ["definitely_missing_capability"]
                         .handling_mode
                         .unwrap_or(meerkat_core::types::HandlingMode::Queue);
                     meerkat_core::service::StartTurnRuntimeSemantics::new(
-                        None,
                         handling_mode,
-                        None,
                         None,
                         Vec::new(),
                         Some(turn_metadata),
@@ -18734,9 +18737,7 @@ capabilities = ["definitely_missing_capability"]
                         .handling_mode
                         .unwrap_or(meerkat_core::types::HandlingMode::Queue);
                     meerkat_core::service::StartTurnRuntimeSemantics::new(
-                        None,
                         handling_mode,
-                        None,
                         None,
                         Vec::new(),
                         Some(turn_metadata),

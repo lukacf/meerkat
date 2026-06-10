@@ -1366,9 +1366,7 @@ pub fn collect_direct_flow_reducer_transition_mismatches(root: &Path) -> Result<
                     }
                     FlowReducerHitKind::ProjectionWrite => false,
                     FlowReducerHitKind::CasStoreWrite => {
-                        flow_reducer_projection_commit_is_structurally_allowed(
-                            &rel, &lines, line_index,
-                        )
+                        flow_reducer_projection_commit_is_structurally_allowed(&rel, &hit)
                     }
                 };
                 if allowed {
@@ -1536,6 +1534,128 @@ struct FlowReducerHit {
     kind: FlowReducerHitKind,
     gate_token: String,
     message: String,
+    /// Structural context for the CAS-write allow decision (K22(c)): the
+    /// allow-list keys off AST facts captured at the hit (enclosing function,
+    /// signature types, preceding callees, call-argument idents, enclosing
+    /// match-arm patterns) instead of line-text windows.
+    cas_allow: Option<CasWriteAllowContext>,
+}
+
+/// AST-derived context for one forbidden `cas_*` projection-write hit, used
+/// by `flow_reducer_projection_commit_is_structurally_allowed`. Every field
+/// is resolved structurally (syn visitors) — never as raw-line substrings —
+/// so comments/strings cannot false-positive and calls split across lines
+/// are still classified correctly.
+#[derive(Default, Clone)]
+struct CasWriteAllowContext {
+    /// Callee name of the CAS write (e.g. `cas_flow_state`).
+    cas_method: String,
+    /// Name of the enclosing production function, if any.
+    enclosing_fn: Option<String>,
+    /// Path-segment idents appearing in the enclosing function signature.
+    signature_type_idents: BTreeSet<String>,
+    /// Callee idents (method calls / call-path tails) visited earlier in the
+    /// enclosing function body, in source order, before this CAS write.
+    preceding_callee_idents: BTreeSet<String>,
+    /// Path-segment idents of expression paths visited earlier in the
+    /// enclosing function body before this CAS write (catches
+    /// `MobMachineFlowRunCommand::Variant` command sources).
+    preceding_path_idents: BTreeSet<String>,
+    /// Idents (path segments + named field members) inside this CAS call's
+    /// argument expressions.
+    call_arg_idents: BTreeSet<String>,
+    /// Rendered `Path::Segments` of every enclosing `match`-arm pattern.
+    enclosing_match_arm_patterns: Vec<String>,
+    /// Whole-function fact: the enclosing function commits prepared DSL
+    /// inputs via `commit_prepared_dsl_input(prepared)`.
+    fn_commits_prepared_inputs: bool,
+    /// Whole-function fact: the enclosing function prepares machine inputs
+    /// via `prepare_dsl_inputs(plan.machine_inputs(), ..)`.
+    fn_prepares_machine_inputs: bool,
+}
+
+/// Per-function tracking state for the flow-reducer visitor: facts needed by
+/// the structural CAS allow-list, accumulated in source order while walking
+/// the function body.
+#[derive(Default)]
+struct FlowReducerFnContext {
+    name: String,
+    signature_type_idents: BTreeSet<String>,
+    callee_idents: BTreeSet<String>,
+    path_idents: BTreeSet<String>,
+    commits_prepared_inputs: bool,
+    prepares_machine_inputs: bool,
+    /// Indices into `hits` for CAS hits inside this function; whole-function
+    /// facts are backfilled when the function walk completes.
+    cas_hit_indices: Vec<usize>,
+}
+
+/// Collect every path-segment ident under a syntax node.
+struct PathIdentCollector<'a> {
+    idents: &'a mut BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for PathIdentCollector<'_> {
+    fn visit_path_segment(&mut self, node: &'ast syn::PathSegment) {
+        self.idents.insert(node.ident.to_string());
+        syn::visit::visit_path_segment(self, node);
+    }
+}
+
+/// Collect path-segment idents and named field-member idents inside an
+/// expression (used for CAS call arguments, so `outcome.next_state` and a
+/// bare `next_state` binding both resolve to `next_state`).
+struct ExprIdentCollector<'a> {
+    idents: &'a mut BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for ExprIdentCollector<'_> {
+    fn visit_path_segment(&mut self, node: &'ast syn::PathSegment) {
+        self.idents.insert(node.ident.to_string());
+        syn::visit::visit_path_segment(self, node);
+    }
+
+    fn visit_member(&mut self, node: &'ast syn::Member) {
+        if let syn::Member::Named(ident) = node {
+            self.idents.insert(ident.to_string());
+        }
+        syn::visit::visit_member(self, node);
+    }
+}
+
+/// Collect rendered paths from a match-arm pattern
+/// (`FlowFrameLoopStorePlan::RunStateOnly { .. }` -> "FlowFrameLoopStorePlan::RunStateOnly").
+struct PatternPathCollector<'a> {
+    paths: &'a mut Vec<String>,
+}
+
+impl<'ast> Visit<'ast> for PatternPathCollector<'_> {
+    fn visit_path(&mut self, node: &'ast syn::Path) {
+        let rendered = node
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        self.paths.push(rendered);
+        syn::visit::visit_path(self, node);
+    }
+}
+
+/// True when an expression contains a `plan.machine_inputs()` method call.
+struct MachineInputsOnPlanFinder {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for MachineInputsOnPlanFinder {
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if node.method == "machine_inputs"
+            && matches!(node.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("plan"))
+        {
+            self.found = true;
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
 }
 
 /// AST visitor matching the banned flow-reducer shapes: a transition call, a
@@ -1548,6 +1668,11 @@ struct FlowReducerTransitionVisitor<'a> {
     frame_fields: &'a [&'a str],
     cas_write_methods: &'a [&'a str],
     hits: Vec<FlowReducerHit>,
+    /// Enclosing-function context stack (innermost last) for the structural
+    /// CAS allow-list.
+    fn_stack: Vec<FlowReducerFnContext>,
+    /// Enclosing `match`-arm pattern paths (innermost last).
+    arm_patterns: Vec<String>,
 }
 
 impl<'a> FlowReducerTransitionVisitor<'a> {
@@ -1563,6 +1688,99 @@ impl<'a> FlowReducerTransitionVisitor<'a> {
             frame_fields,
             cas_write_methods,
             hits: Vec::new(),
+            fn_stack: Vec::new(),
+            arm_patterns: Vec::new(),
+        }
+    }
+
+    fn enter_fn(&mut self, sig: &syn::Signature) {
+        let mut signature_type_idents = BTreeSet::new();
+        PathIdentCollector {
+            idents: &mut signature_type_idents,
+        }
+        .visit_signature(sig);
+        self.fn_stack.push(FlowReducerFnContext {
+            name: sig.ident.to_string(),
+            signature_type_idents,
+            ..FlowReducerFnContext::default()
+        });
+    }
+
+    fn exit_fn(&mut self) {
+        if let Some(context) = self.fn_stack.pop() {
+            for index in context.cas_hit_indices {
+                if let Some(allow) = self
+                    .hits
+                    .get_mut(index)
+                    .and_then(|hit| hit.cas_allow.as_mut())
+                {
+                    allow.fn_commits_prepared_inputs = context.commits_prepared_inputs;
+                    allow.fn_prepares_machine_inputs = context.prepares_machine_inputs;
+                }
+            }
+        }
+    }
+
+    /// Record whole-function preparation/commit facts and the source-ordered
+    /// callee set for a call with the given callee ident and arguments.
+    fn record_callee<'e>(
+        &mut self,
+        callee: &str,
+        args: impl Iterator<Item = &'e syn::Expr> + Clone,
+    ) {
+        let Some(context) = self.fn_stack.last_mut() else {
+            return;
+        };
+        context.callee_idents.insert(callee.to_string());
+        if callee == "commit_prepared_dsl_input"
+            && args
+                .clone()
+                .any(|arg| matches!(arg, syn::Expr::Path(path) if path.path.is_ident("prepared")))
+        {
+            context.commits_prepared_inputs = true;
+        }
+        if callee == "prepare_dsl_inputs" {
+            let mut finder = MachineInputsOnPlanFinder { found: false };
+            for arg in args {
+                finder.visit_expr(arg);
+            }
+            if finder.found {
+                context.prepares_machine_inputs = true;
+            }
+        }
+    }
+
+    /// Build the structural allow context for one CAS hit from the current
+    /// visitor position.
+    fn cas_allow_context<'e>(
+        &self,
+        method: &str,
+        args: impl Iterator<Item = &'e syn::Expr>,
+    ) -> CasWriteAllowContext {
+        let mut call_arg_idents = BTreeSet::new();
+        for arg in args {
+            ExprIdentCollector {
+                idents: &mut call_arg_idents,
+            }
+            .visit_expr(arg);
+        }
+        let fn_context = self.fn_stack.last();
+        CasWriteAllowContext {
+            cas_method: method.to_string(),
+            enclosing_fn: fn_context.map(|context| context.name.clone()),
+            signature_type_idents: fn_context
+                .map(|context| context.signature_type_idents.clone())
+                .unwrap_or_default(),
+            preceding_callee_idents: fn_context
+                .map(|context| context.callee_idents.clone())
+                .unwrap_or_default(),
+            preceding_path_idents: fn_context
+                .map(|context| context.path_idents.clone())
+                .unwrap_or_default(),
+            call_arg_idents,
+            enclosing_match_arm_patterns: self.arm_patterns.clone(),
+            fn_commits_prepared_inputs: false,
+            fn_prepares_machine_inputs: false,
         }
     }
 
@@ -1625,6 +1843,7 @@ impl<'a> FlowReducerTransitionVisitor<'a> {
             message: format!(
                 "direct live-flow reducer transition `{display}` is not MobMachine-command gated"
             ),
+            cas_allow: None,
         });
     }
 
@@ -1638,6 +1857,7 @@ impl<'a> FlowReducerTransitionVisitor<'a> {
             message: format!(
                 "direct live-flow reducer transition alias `{alias}` is not MobMachine-command gated"
             ),
+            cas_allow: None,
         });
     }
 
@@ -1653,6 +1873,7 @@ impl<'a> FlowReducerTransitionVisitor<'a> {
             message: format!(
                 "direct live-flow reducer input alias `{alias}` is not MobMachine-command gated"
             ),
+            cas_allow: None,
         });
     }
 
@@ -1702,14 +1923,20 @@ impl<'a> FlowReducerTransitionVisitor<'a> {
             message: format!(
                 "direct live-flow projection mutation `{token}` is not MobMachine-command gated"
             ),
+            cas_allow: None,
         });
     }
 
-    fn push_cas_store_write(&mut self, span: proc_macro2::Span, method: &str) {
+    fn push_cas_store_write(
+        &mut self,
+        span: proc_macro2::Span,
+        method: &str,
+        cas_allow: CasWriteAllowContext,
+    ) {
         // Keep the `.method(` token shape so the report matches the prior
-        // text scanner exactly and the structural-allow windows keep keying
-        // off the same line.
+        // text scanner exactly.
         let token = format!(".{method}(");
+        let hit_index = self.hits.len();
         self.hits.push(FlowReducerHit {
             line: span.start().line,
             kind: FlowReducerHitKind::CasStoreWrite,
@@ -1717,7 +1944,11 @@ impl<'a> FlowReducerTransitionVisitor<'a> {
             message: format!(
                 "direct live-flow projection mutation `{token}` is not MobMachine-command gated"
             ),
+            cas_allow: Some(cas_allow),
         });
+        if let Some(context) = self.fn_stack.last_mut() {
+            context.cas_hit_indices.push(hit_index);
+        }
     }
 
     /// `true` for a method that mutates the receiver in place (the set the
@@ -1728,8 +1959,32 @@ impl<'a> FlowReducerTransitionVisitor<'a> {
 }
 
 impl<'ast> Visit<'ast> for FlowReducerTransitionVisitor<'_> {
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        self.enter_fn(&node.sig);
+        syn::visit::visit_item_fn(self, node);
+        self.exit_fn();
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        self.enter_fn(&node.sig);
+        syn::visit::visit_impl_item_fn(self, node);
+        self.exit_fn();
+    }
+
+    fn visit_arm(&mut self, node: &'ast syn::Arm) {
+        let depth = self.arm_patterns.len();
+        let mut paths = Vec::new();
+        PatternPathCollector { paths: &mut paths }.visit_pat(&node.pat);
+        self.arm_patterns.extend(paths);
+        syn::visit::visit_arm(self, node);
+        self.arm_patterns.truncate(depth);
+    }
+
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
         if let syn::Expr::Path(path) = node.func.as_ref() {
+            if let Some(last) = path.path.segments.last() {
+                self.record_callee(&last.ident.to_string(), node.args.iter());
+            }
             if let Some((module, display)) = self.transition_call_for(&path.path) {
                 if display.ends_with("::transition(") {
                     self.push_transition(node.span(), module, display);
@@ -1742,7 +1997,8 @@ impl<'ast> Visit<'ast> for FlowReducerTransitionVisitor<'_> {
             if let Some(last) = path.path.segments.last() {
                 let name = last.ident.to_string();
                 if self.cas_write_methods.contains(&name.as_str()) {
-                    self.push_cas_store_write(last.ident.span(), &name);
+                    let cas_allow = self.cas_allow_context(&name, node.args.iter());
+                    self.push_cas_store_write(last.ident.span(), &name, cas_allow);
                 }
             }
         }
@@ -1751,6 +2007,11 @@ impl<'ast> Visit<'ast> for FlowReducerTransitionVisitor<'_> {
 
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
         self.record_input_path(&node.path);
+        if let Some(context) = self.fn_stack.last_mut() {
+            for segment in &node.path.segments {
+                context.path_idents.insert(segment.ident.to_string());
+            }
+        }
         syn::visit::visit_expr_path(self, node);
     }
 
@@ -1779,8 +2040,10 @@ impl<'ast> Visit<'ast> for FlowReducerTransitionVisitor<'_> {
             self.push_projection_write(node.span(), token);
         }
         let method = node.method.to_string();
+        self.record_callee(&method, node.args.iter());
         if self.cas_write_methods.contains(&method.as_str()) {
-            self.push_cas_store_write(node.method.span(), &method);
+            let cas_allow = self.cas_allow_context(&method, node.args.iter());
+            self.push_cas_store_write(node.method.span(), &method, cas_allow);
         }
         syn::visit::visit_expr_method_call(self, node);
     }
@@ -2251,110 +2514,81 @@ fn flow_reducer_direct_use_is_structurally_allowed(
 
 fn flow_reducer_projection_commit_is_structurally_allowed(
     path: &str,
-    lines: &[&str],
-    line_index: usize,
+    hit: &FlowReducerHit,
 ) -> bool {
-    let Some(function_start) = nearest_function_start(lines, line_index) else {
+    // K22(c): the allow decision keys off the AST-derived `CasWriteAllowContext`
+    // captured at the hit (same structural resolution as the denial leg), not
+    // line-text windows. Comments/strings cannot false-allow and calls split
+    // across lines are still classified correctly.
+    let Some(context) = hit.cas_allow.as_ref() else {
         return false;
     };
-    let function_name = function_name_from_signature(lines[function_start]);
-    let scope = &lines[function_start..=line_index];
-
+    // True when an enclosing match-arm pattern destructures the named
+    // `FlowFrameLoopStorePlan` variant.
+    let arm_matches = |variant: &str| {
+        context.enclosing_match_arm_patterns.iter().any(|pattern| {
+            let mut segments = pattern.rsplit("::");
+            segments.next() == Some(variant) && segments.next() == Some("FlowFrameLoopStorePlan")
+        })
+    };
     match path {
         "meerkat-mob/src/runtime/flow.rs" => {
-            let signature = compact_function_signature(lines, function_start);
-            let call_window = lines[line_index..(line_index + 8).min(lines.len())].join(" ");
-            let has_authority_setup = scope
-                .iter()
-                .any(|line| line.contains("project_machine_input("))
-                && scope
-                    .iter()
-                    .any(|line| line.contains("from_accepted_mob_machine_input("));
-            let has_typed_authority_args = signature.contains("MobMachineFlowRunCommand")
-                && signature.contains("MobMachineFlowAuthorityToken");
-            let has_typed_authority_token_and_command_source = signature
+            let has_authority_setup = context
+                .preceding_callee_idents
+                .contains("project_machine_input")
+                && context
+                    .preceding_callee_idents
+                    .contains("from_accepted_mob_machine_input");
+            let has_typed_authority_args = context
+                .signature_type_idents
+                .contains("MobMachineFlowRunCommand")
+                && context
+                    .signature_type_idents
+                    .contains("MobMachineFlowAuthorityToken");
+            let has_typed_authority_token_and_command_source = context
+                .signature_type_idents
                 .contains("MobMachineFlowAuthorityToken")
-                && (signature.contains("MobMachineFlowRunCommand")
-                    || scope
-                        .iter()
-                        .any(|line| line.contains("MobMachineFlowRunCommand::")));
-            scope
-                .iter()
-                .any(|line| line.contains("apply_mob_machine_flow_run_command("))
+                && (context
+                    .signature_type_idents
+                    .contains("MobMachineFlowRunCommand")
+                    || context
+                        .preceding_path_idents
+                        .contains("MobMachineFlowRunCommand"));
+            context
+                .preceding_callee_idents
+                .contains("apply_mob_machine_flow_run_command")
                 && (has_authority_setup
                     || has_typed_authority_args
                     || has_typed_authority_token_and_command_source)
-                && (call_window.contains("outcome.next_state")
-                    || call_window.contains("next_state"))
+                && context.call_arg_idents.contains("next_state")
         }
         "meerkat-mob/src/runtime/actor.rs" => {
-            if function_name.as_deref() != Some("commit_flow_frame_store_plan_in_actor") {
+            if context.enclosing_fn.as_deref() != Some("commit_flow_frame_store_plan_in_actor") {
                 return false;
             }
-            let function_commits_prepared_inputs = lines
-                .iter()
-                .skip(function_start)
-                .take(420)
-                .any(|line| line.contains("commit_prepared_dsl_input(prepared)"));
-            let function_prepares_machine_inputs = lines
-                .iter()
-                .skip(function_start)
-                .take(420)
-                .any(|line| line.contains("prepare_dsl_inputs(plan.machine_inputs()"));
-            if !function_prepares_machine_inputs || !function_commits_prepared_inputs {
+            if !context.fn_prepares_machine_inputs || !context.fn_commits_prepared_inputs {
                 return false;
             }
-            let window_start = line_index.saturating_sub(32);
-            let local_scope = &lines[window_start..=line_index];
-            let call_window = lines[line_index..(line_index + 12).min(lines.len())].join(" ");
-            (call_window.contains(".cas_flow_state(")
-                && call_window.contains("next_run_state")
-                && local_scope
-                    .iter()
-                    .any(|line| line.contains("FlowFrameLoopStorePlan::RunStateOnly")))
-                || (call_window.contains(".cas_frame_state(")
-                    && call_window.contains("next_frame")
-                    && local_scope
-                        .iter()
-                        .any(|line| line.contains("FlowFrameLoopStorePlan::FrameState")))
-                || (call_window.contains(".cas_frame_state(")
-                    && call_window.contains("initial_frame")
-                    && local_scope
-                        .iter()
-                        .any(|line| line.contains("FlowFrameLoopStorePlan::InsertFrame")))
-                || (call_window.contains(".cas_frame_state(")
-                    && call_window.contains("next_frame")
-                    && local_scope
-                        .iter()
-                        .any(|line| line.contains("FlowFrameLoopStorePlan::SealFrame")))
-                || (call_window.contains(".cas_complete_step_and_record_output(")
-                    && local_scope.iter().any(|line| {
-                        line.contains("FlowFrameLoopStorePlan::CompleteStepAndRecordOutput")
-                    }))
-                || (call_window.contains(".cas_grant_node_slot(")
-                    && local_scope
-                        .iter()
-                        .any(|line| line.contains("FlowFrameLoopStorePlan::GrantNodeSlot")))
-                || (call_window.contains(".cas_start_loop(")
-                    && local_scope
-                        .iter()
-                        .any(|line| line.contains("FlowFrameLoopStorePlan::StartLoop")))
-                || (call_window.contains(".cas_grant_body_frame_start(")
-                    && local_scope
-                        .iter()
-                        .any(|line| line.contains("FlowFrameLoopStorePlan::GrantBodyFrameStart")))
-                || (call_window.contains(".cas_complete_body_frame(")
-                    && local_scope
-                        .iter()
-                        .any(|line| line.contains("FlowFrameLoopStorePlan::CompleteBodyFrame")))
-                || (call_window.contains(".cas_loop_request_body_frame(")
-                    && local_scope
-                        .iter()
-                        .any(|line| line.contains("FlowFrameLoopStorePlan::LoopRequestBodyFrame")))
-                || (call_window.contains(".cas_complete_loop(")
-                    && local_scope
-                        .iter()
-                        .any(|line| line.contains("FlowFrameLoopStorePlan::CompleteLoop")))
+            match context.cas_method.as_str() {
+                "cas_flow_state" => {
+                    context.call_arg_idents.contains("next_run_state")
+                        && arm_matches("RunStateOnly")
+                }
+                "cas_frame_state" => {
+                    (context.call_arg_idents.contains("next_frame")
+                        && (arm_matches("FrameState") || arm_matches("SealFrame")))
+                        || (context.call_arg_idents.contains("initial_frame")
+                            && arm_matches("InsertFrame"))
+                }
+                "cas_complete_step_and_record_output" => arm_matches("CompleteStepAndRecordOutput"),
+                "cas_grant_node_slot" => arm_matches("GrantNodeSlot"),
+                "cas_start_loop" => arm_matches("StartLoop"),
+                "cas_grant_body_frame_start" => arm_matches("GrantBodyFrameStart"),
+                "cas_complete_body_frame" => arm_matches("CompleteBodyFrame"),
+                "cas_loop_request_body_frame" => arm_matches("LoopRequestBodyFrame"),
+                "cas_complete_loop" => arm_matches("CompleteLoop"),
+                _ => false,
+            }
         }
         "meerkat-mob/src/runtime/flow_frame_engine.rs" => false,
         _ => false,
@@ -2380,19 +2614,6 @@ fn nearest_impl_start(lines: &[&str], line_index: usize) -> Option<usize> {
         let compact = lines[*index].split_whitespace().collect::<String>();
         compact.starts_with("impl")
     })
-}
-
-fn compact_function_signature(lines: &[&str], function_start: usize) -> String {
-    let mut signature = String::new();
-    for line in &lines[function_start..] {
-        for part in line.split_whitespace() {
-            signature.push_str(part);
-        }
-        if line.contains('{') {
-            break;
-        }
-    }
-    signature
 }
 
 fn function_name_from_signature(line: &str) -> Option<String> {

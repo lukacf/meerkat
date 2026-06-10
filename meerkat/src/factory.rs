@@ -4796,15 +4796,10 @@ impl AgentFactory {
                         // this surface. We do not silently strip prompt activation.
                         if let Some(ref tx) = build_config.event_tx {
                             for (requested, reason) in &dropped {
-                                let reference =
-                                    format!("{}:{}", requested.source_uuid, requested.skill_name);
-                                let error = reason.to_string();
                                 let _ = tx
                                     .send(AgentEvent::SkillResolutionFailed {
                                         skill_key: Some(requested.clone()),
                                         reason: reason.clone(),
-                                        reference,
-                                        error,
                                     })
                                     .await;
                             }

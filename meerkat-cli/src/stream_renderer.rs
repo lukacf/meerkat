@@ -500,25 +500,12 @@ fn render_event(
             }
         }
 
-        AgentEvent::SkillResolutionFailed {
-            skill_key,
-            reason,
-            reference,
-            error,
-        } => {
-            let reference_display = if reference.is_empty() {
-                skill_key
-                    .as_ref()
-                    .map(std::string::ToString::to_string)
-                    .unwrap_or_else(|| "<unknown>".to_string())
-            } else {
-                reference.clone()
-            };
-            let error_display = if error.is_empty() {
-                reason.to_string()
-            } else {
-                error.clone()
-            };
+        AgentEvent::SkillResolutionFailed { skill_key, reason } => {
+            let reference_display = skill_key
+                .as_ref()
+                .map(std::string::ToString::to_string)
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let error_display = reason.to_string();
             chrome_line(
                 mux,
                 scope_id,

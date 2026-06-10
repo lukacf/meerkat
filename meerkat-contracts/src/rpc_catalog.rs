@@ -14,6 +14,10 @@ pub struct RpcMethodCatalogOptions {
     pub schedule_enabled: bool,
     pub workgraph_enabled: bool,
     pub skills_enabled: bool,
+    /// `live/webrtc/answer` is served only by builds with the non-default
+    /// `live-webrtc` feature; the catalog carries the same condition so
+    /// advertise == dispatch in every build lane.
+    pub live_webrtc_enabled: bool,
 }
 
 impl RpcMethodCatalogOptions {
@@ -29,6 +33,7 @@ impl RpcMethodCatalogOptions {
             schedule_enabled: true,
             workgraph_enabled: true,
             skills_enabled: true,
+            live_webrtc_enabled: true,
         }
     }
 }
@@ -531,12 +536,6 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "LiveOpenResult",
             ),
             RpcMethodDescriptor::typed(
-                "live/webrtc/answer",
-                "Answer a browser WebRTC offer for an already-open live channel",
-                "LiveWebrtcAnswerParams",
-                "LiveWebrtcAnswerResult",
-            ),
-            RpcMethodDescriptor::typed(
                 "live/status",
                 "Get the status of a live channel",
                 "LiveChannelParams",
@@ -579,6 +578,15 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "LiveRefreshResult",
             ),
         ]);
+    }
+
+    if options.runtime_available && options.live_webrtc_enabled {
+        methods.extend([RpcMethodDescriptor::typed(
+            "live/webrtc/answer",
+            "Answer a browser WebRTC offer for an already-open live channel",
+            "LiveWebrtcAnswerParams",
+            "LiveWebrtcAnswerResult",
+        )]);
     }
 
     if options.mob_enabled {

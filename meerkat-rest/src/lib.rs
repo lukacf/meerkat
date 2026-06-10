@@ -1358,16 +1358,18 @@ async fn apply_runtime_turn(
         }
         _ => Vec::new(),
     };
-    // The turn-metadata keep_alive carrier is typed (`KeepAlivePolicy`); the
-    // session recovery override and stored session metadata still track a
-    // boolean. Collapse the typed per-turn policy into the boolean used by
-    // the recovery path: presence of a policy is interpreted as "keep the
-    // materialized resources alive across this turn".
+    // The turn-metadata keep_alive carrier is the typed tri-state
+    // `KeepAliveDirective`; the session recovery override and stored session
+    // metadata still track a boolean. Map the full tri-state (Dogma K13):
+    // `Enable(_)` -> true, `Disable` -> false (explicit operator intent —
+    // never collapsed into "enable"), absent -> preserve the persisted
+    // session intent.
     let keep_alive = match primitive
         .turn_metadata()
         .and_then(|metadata| metadata.keep_alive.as_ref())
     {
-        Some(_policy) => true,
+        Some(meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Enable(_)) => true,
+        Some(meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Disable) => false,
         None => {
             let session = context
                 .session_service
@@ -1392,11 +1394,7 @@ async fn apply_runtime_turn(
         system_prompt: None,
         event_tx: Some(event_tx.clone()),
         runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-            None,
             meerkat_core::types::HandlingMode::Queue,
-            primitive
-                .turn_metadata()
-                .and_then(|meta| meta.skill_references.clone()),
             primitive
                 .turn_metadata()
                 .and_then(|meta| meta.flow_tool_overlay.clone()),
@@ -1585,11 +1583,7 @@ async fn apply_runtime_turn(
                         system_prompt: None,
                         event_tx: Some(event_tx.clone()),
                         runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                            None,
                             meerkat_core::types::HandlingMode::Queue,
-                            primitive
-                                .turn_metadata()
-                                .and_then(|meta| meta.skill_references.clone()),
                             primitive
                                 .turn_metadata()
                                 .and_then(|meta| meta.flow_tool_overlay.clone()),

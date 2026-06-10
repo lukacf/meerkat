@@ -605,9 +605,7 @@ export interface SkillsResolvedEvent {
 }
 
 export interface SkillResolutionFailedEvent {
-  error?: string;
   reason?: SkillResolutionFailureReason;
-  reference?: string;
   skill_key?: SkillKey | null;
   type: "skill_resolution_failed";
 }

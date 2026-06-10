@@ -1852,15 +1852,11 @@ pub enum AgentEvent {
         /// Canonical structured skill identity/reference, when resolution had one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         skill_key: Option<SkillKey>,
-        /// Structured reason for the failure. Legacy payloads deserialize as `unknown`.
+        /// Structured reason for the failure. Legacy payloads deserialize as
+        /// `unknown`. Display text is the `Display` projection of this typed
+        /// reason, never a separately-carried field.
         #[serde(default)]
         reason: SkillResolutionFailureReason,
-        /// Legacy display mirror for consumers still reading string references.
-        #[serde(default)]
-        reference: String,
-        /// Legacy display mirror for consumers still reading string errors.
-        #[serde(default)]
-        error: String,
     },
 
     // === Interaction-Scoped Streaming ===
@@ -2993,15 +2989,13 @@ mod tests {
     }
 
     #[test]
-    fn skill_resolution_failed_carries_typed_key_and_reason_with_legacy_mirrors() {
+    fn skill_resolution_failed_carries_typed_key_and_reason() {
         let key = SkillKey::builtin(SkillName::parse("test-skill").unwrap());
         let error = SkillError::NotFound { key: key.clone() };
         let reason = SkillResolutionFailureReason::from_skill_error(&error);
         let event = AgentEvent::SkillResolutionFailed {
             skill_key: Some(key.clone()),
             reason,
-            reference: key.to_string(),
-            error: error.to_string(),
         };
 
         let value = serde_json::to_value(&event).unwrap();
@@ -3019,24 +3013,20 @@ mod tests {
             value["reason"]["key"]["skill_name"],
             key.skill_name.as_str()
         );
-        assert_eq!(value["reference"], key.to_string());
-        assert_eq!(value["error"], error.to_string());
+        assert!(
+            value.get("reference").is_none(),
+            "legacy display mirror `reference` must not be serialized"
+        );
+        assert!(
+            value.get("error").is_none(),
+            "legacy display mirror `error` must not be serialized"
+        );
 
         let roundtrip: AgentEvent = serde_json::from_value(value).unwrap();
         match roundtrip {
-            AgentEvent::SkillResolutionFailed {
-                skill_key,
-                reason,
-                reference,
-                error: error_message,
-            } => {
+            AgentEvent::SkillResolutionFailed { skill_key, reason } => {
                 assert_eq!(skill_key, Some(key.clone()));
-                assert_eq!(
-                    reason,
-                    SkillResolutionFailureReason::NotFound { key: key.clone() }
-                );
-                assert_eq!(reference, key.to_string());
-                assert_eq!(error_message, error.to_string());
+                assert_eq!(reason, SkillResolutionFailureReason::NotFound { key });
             }
             other => unreachable!("unexpected event: {other:?}"),
         }
@@ -3044,6 +3034,8 @@ mod tests {
 
     #[test]
     fn legacy_skill_resolution_failed_payload_deserializes() {
+        // Legacy payloads carried `reference`/`error` display mirrors; those
+        // wire fields are now ignored and the typed fields default.
         let value = serde_json::json!({
             "type": "skill_resolution_failed",
             "reference": "legacy/ref",
@@ -3052,12 +3044,7 @@ mod tests {
 
         let event: AgentEvent = serde_json::from_value(value).unwrap();
         match event {
-            AgentEvent::SkillResolutionFailed {
-                skill_key,
-                reason,
-                reference,
-                error,
-            } => {
+            AgentEvent::SkillResolutionFailed { skill_key, reason } => {
                 assert_eq!(skill_key, None);
                 assert_eq!(
                     reason,
@@ -3065,8 +3052,6 @@ mod tests {
                         message: String::new()
                     }
                 );
-                assert_eq!(reference, "legacy/ref");
-                assert_eq!(error, "missing");
             }
             other => unreachable!("unexpected event: {other:?}"),
         }
@@ -3317,8 +3302,6 @@ mod tests {
                 reason: SkillResolutionFailureReason::Unknown {
                     message: "missing".to_string(),
                 },
-                reference: "skill".to_string(),
-                error: "missing".to_string(),
             },
             AgentEvent::InteractionComplete {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),

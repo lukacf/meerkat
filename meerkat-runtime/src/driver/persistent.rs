@@ -140,16 +140,27 @@ impl PersistentRuntimeDriver {
         ))
     }
 
-    async fn commit_lifecycle_with_rollback(
+    /// Snapshot + classify the lifecycle persistence payload, restoring the
+    /// caller's checkpoint on failure.
+    ///
+    /// Contract (Dogma K11): every fallible step between a staged `&mut` DSL
+    /// transition and the rollback-guarded durable commit restores the
+    /// caller's checkpoint. A bare `?` here would leave the staged lifecycle
+    /// live in driver state while reporting failure to the caller. The
+    /// checkpoint is returned on success so the durable commit arm can keep
+    /// using it.
+    fn lifecycle_persistence_payload_with_rollback(
         &mut self,
         checkpoint: super::ephemeral::EphemeralDriverRollbackSnapshot,
-        target_state: RuntimeState,
         context: &str,
-    ) -> Result<(), RuntimeDriverError> {
-        // Contract: every fallible step between the staged DSL transition and
-        // the durable commit restores the caller's checkpoint on failure. A
-        // bare `?` here would leave the staged lifecycle (e.g. Destroy) live
-        // in driver state while reporting failure to the caller.
+    ) -> Result<
+        (
+            super::ephemeral::EphemeralDriverRollbackSnapshot,
+            Vec<InputStatePersistenceRecord>,
+            MachineLifecycleCommit,
+        ),
+        RuntimeDriverError,
+    > {
         let input_states_result = self.inner.authorized_stored_input_states_snapshot();
         #[cfg(test)]
         let input_states_result = if self.force_input_snapshot_failure_for_test {
@@ -178,6 +189,21 @@ impl PersistentRuntimeDriver {
                 )));
             }
         };
+        Ok((checkpoint, input_states, commit))
+    }
+
+    async fn commit_lifecycle_with_rollback(
+        &mut self,
+        checkpoint: super::ephemeral::EphemeralDriverRollbackSnapshot,
+        target_state: RuntimeState,
+        context: &str,
+    ) -> Result<(), RuntimeDriverError> {
+        // Contract: every fallible step between the staged DSL transition and
+        // the durable commit restores the caller's checkpoint on failure. A
+        // bare `?` here would leave the staged lifecycle (e.g. Destroy) live
+        // in driver state while reporting failure to the caller.
+        let (checkpoint, input_states, commit) =
+            self.lifecycle_persistence_payload_with_rollback(checkpoint, context)?;
         let target_durable_state =
             match crate::meerkat_machine::classify_runtime_lifecycle_durable_state(target_state) {
                 Ok(target_durable_state) => target_durable_state,
@@ -501,8 +527,8 @@ impl PersistentRuntimeDriver {
                 return Err(err);
             }
         };
-        let input_states = self.inner.authorized_stored_input_states_snapshot()?;
-        let commit = self.lifecycle_commit_for_persistence()?;
+        let (checkpoint, input_states, commit) =
+            self.lifecycle_persistence_payload_with_rollback(checkpoint, "pending input abandon")?;
         if let Err(err) = self
             .store
             .commit_machine_lifecycle(&self.runtime_id, commit, &input_states)
@@ -529,8 +555,8 @@ impl PersistentRuntimeDriver {
                 return Err(err);
             }
         };
-        let input_states = self.inner.authorized_stored_input_states_snapshot()?;
-        let commit = self.lifecycle_commit_for_persistence()?;
+        let (checkpoint, input_states, commit) =
+            self.lifecycle_persistence_payload_with_rollback(checkpoint, "recycle")?;
         if let Err(err) = self
             .store
             .commit_machine_lifecycle(&self.runtime_id, commit, &input_states)
@@ -772,8 +798,13 @@ impl PersistentRuntimeDriver {
         recoverable: bool,
     ) -> Result<(), RuntimeDriverError> {
         let checkpoint = self.inner.rollback_snapshot();
-        self.inner
-            .machine_realize_run_failed(run_id, contributing_input_ids, replay_plan)?;
+        if let Err(err) =
+            self.inner
+                .machine_realize_run_failed(run_id, contributing_input_ids, replay_plan)
+        {
+            self.inner.restore_rollback_snapshot(checkpoint);
+            return Err(err);
+        }
         let failure_cause = runtime_apply_failure.map(|failure| failure.kind);
         tracing::debug!(
             run_id = ?run_id,
@@ -782,8 +813,8 @@ impl PersistentRuntimeDriver {
             failure_cause = ?failure_cause,
             "persistent driver realized machine-owned failed-run replay"
         );
-        let input_states = self.inner.authorized_stored_input_states_snapshot()?;
-        let commit = self.lifecycle_commit_for_persistence()?;
+        let (checkpoint, input_states, commit) = self
+            .lifecycle_persistence_payload_with_rollback(checkpoint, "failed-run terminal event")?;
         if let Err(err) = self
             .store
             .commit_machine_lifecycle(&self.runtime_id, commit, &input_states)
@@ -803,15 +834,22 @@ impl PersistentRuntimeDriver {
         contributing_input_ids: &[InputId],
     ) -> Result<(), RuntimeDriverError> {
         let checkpoint = self.inner.rollback_snapshot();
-        self.inner
-            .machine_realize_run_cancelled(run_id, contributing_input_ids)?;
+        if let Err(err) = self
+            .inner
+            .machine_realize_run_cancelled(run_id, contributing_input_ids)
+        {
+            self.inner.restore_rollback_snapshot(checkpoint);
+            return Err(err);
+        }
         tracing::debug!(
             run_id = ?run_id,
             contributors = contributing_input_ids.len(),
             "persistent driver realized machine-owned cancelled run"
         );
-        let input_states = self.inner.authorized_stored_input_states_snapshot()?;
-        let commit = self.lifecycle_commit_for_persistence()?;
+        let (checkpoint, input_states, commit) = self.lifecycle_persistence_payload_with_rollback(
+            checkpoint,
+            "cancelled-run terminal event",
+        )?;
         if let Err(err) = self
             .store
             .commit_machine_lifecycle(&self.runtime_id, commit, &input_states)
@@ -960,5 +998,38 @@ mod tests {
             "staged driver state must be restored to the pre-stage checkpoint"
         );
         assert!(driver.active_input_ids().is_empty());
+    }
+
+    /// Same K11 checkpoint-restore contract for `abandon_pending_inputs`: the
+    /// input-state snapshot / lifecycle-commit classification steps between
+    /// the staged `&mut` abandon and the durable commit used to escape with a
+    /// bare `?`, leaving the abandon applied in memory while reporting
+    /// failure (and never persisting it).
+    #[tokio::test]
+    async fn abandon_pending_inputs_snapshot_failure_restores_checkpoint() {
+        let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let blob_store: Arc<dyn BlobStore> = Arc::new(meerkat_store::MemoryBlobStore::new());
+        let rid = LogicalRuntimeId::new("abandon-rollback-contract");
+        let mut driver = PersistentRuntimeDriver::new(rid, store, blob_store);
+
+        // Accept a pending input so the abandon has staged work to mutate.
+        let input = make_prompt("pending work");
+        let input_id = input.id().clone();
+        let outcome = driver.accept_input(input).await.unwrap();
+        assert!(outcome.is_accepted());
+        assert!(driver.input_phase(&input_id).is_some());
+
+        // Inject a failure into the input-state snapshot step that runs after
+        // the staged abandon mutation.
+        driver.force_input_snapshot_failure_for_test = true;
+        let result = driver
+            .abandon_pending_inputs(InputAbandonReason::Reset)
+            .await;
+
+        assert!(result.is_err(), "forced snapshot failure must propagate");
+        assert!(
+            driver.input_phase(&input_id).is_some(),
+            "staged abandon must be rolled back: the pending input must still be live"
+        );
     }
 }

@@ -188,6 +188,55 @@ class McpLiveOpResponse:
     server_name: Optional[str] = None
 
 
+# Canonical skill slug (lowercase, dash-separated).
+SkillName = str
+
+# Where a skill was discovered.
+SkillScope = Literal['builtin', 'project', 'user']
+
+# Source lifecycle status in the identity registry.
+SourceIdentityStatus = Literal['active', 'disabled', 'retired']
+
+# Source transport class used for identity governance.
+SourceTransportKind = Literal['embedded', 'filesystem', 'git', 'http', 'stdio']
+
+# Canonical source identifier.
+SourceUuid = str
+
+@dataclass
+class SkillEntry:
+    """Wire representation of a skill entry (for list responses)."""
+    description: str
+    is_active: bool
+    key: SkillKey
+    name: str
+    scope: SkillScope
+    source: SkillSourceProvenance
+    shadowed_by: Optional[SkillSourceProvenance] = None
+
+
+@dataclass
+class SkillKey:
+    """Canonical runtime identity for a skill.
+
+This is the single identity carried across every surface — the wire parses
+directly into this struct, tools receive this struct, the registry stores
+this struct. There is no slash-delimited string path form."""
+    skill_name: SkillName
+    source_uuid: SourceUuid
+
+
+@dataclass
+class SkillSourceProvenance:
+    """Typed source provenance for a skill entry. `display_name` is presentation
+metadata only; `source_uuid` is the stable identity."""
+    display_name: str
+    fingerprint: str
+    source_uuid: SourceUuid
+    transport_kind: SourceTransportKind
+    status: Optional[SourceIdentityStatus] = None
+
+
 @dataclass
 class ConfigEnvelope:
     """Wire envelope returned by config APIs across surfaces."""
@@ -209,7 +258,10 @@ class ConfigPatchParams:
 
 @dataclass
 class ConfigWriteResult:
-    """Result of a `config/set` or `config/patch` write."""
+    """Result of a `config/set` or `config/patch` write.
+
+`cfg`-gated off wasm32 alongside `meerkat_core::config_runtime`, which
+owns the embedded envelope (the browser runtime serves no config writes)."""
     config: Any
     generation: int
     backend: Optional[str] = None
@@ -238,7 +290,7 @@ class ServerCapabilities:
 @dataclass
 class SkillListResponse:
     """Wire response for listing skills with introspection data."""
-    skills: list[dict[str, Any]]
+    skills: list[SkillEntry]
 
 
 @dataclass
@@ -816,7 +868,7 @@ retired `clear_*` split wire form) fail closed at the serde boundary via
     output_schema: Optional[Any] = None
     provider: Optional[str] = None
     provider_params: Optional[dict[str, Any]] = None
-    skill_refs: Optional[list[dict[str, Any]]] = None
+    skill_refs: Optional[list[SkillKey]] = None
     structured_output_retries: Optional[int] = None
     system_prompt: Optional[str] = None
 
@@ -3912,7 +3964,7 @@ class ContentBlockStructured(TypedDict, total=False):
     type: Required[Literal['structured']]
 
 class ContentBlockSkillContext(TypedDict, total=False):
-    skill_key: Required[Any]
+    skill_key: Required[SkillKey]
     text: Required[str]
     type: Required[Literal['skill_context']]
 

@@ -12,9 +12,7 @@ use crate::session::{PendingSystemContextAppend, SystemContextStageError};
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use crate::types::{
-    ContentInput, HandlingMode, Message, RenderMetadata, RunResult, SessionId, ToolDef, Usage,
-};
+use crate::types::{ContentInput, HandlingMode, Message, RunResult, SessionId, ToolDef, Usage};
 use crate::{
     AgentToolDispatcher, BudgetLimits, HookRunOverrides, OutputSchema, PeerMeta, Provider, Session,
     SessionLlmIdentity, ToolCategoryOverride,
@@ -1143,8 +1141,6 @@ impl std::fmt::Debug for SessionBuildOptions {
 /// metadata back into service-level request fields.
 #[derive(Debug)]
 pub struct StartTurnRuntimeSemantics {
-    /// Optional normalized rendering metadata for this turn prompt.
-    pub render_metadata: Option<RenderMetadata>,
     /// Handling mode for this turn's ordinary content-bearing work.
     ///
     /// This is a **runtime-owned semantic**: the runtime routes Queue/Steer
@@ -1152,8 +1148,6 @@ pub struct StartTurnRuntimeSemantics {
     /// to the `SessionAgent` but does not act on it. Non-Queue handling
     /// only works correctly on runtime-backed surfaces.
     pub handling_mode: HandlingMode,
-    /// Canonical SkillKeys to resolve and inject for this turn.
-    pub skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Optional per-turn flow tool overlay (ephemeral, non-persistent).
     pub flow_tool_overlay: Option<TurnToolOverlay>,
     /// Runtime-owned system-context appends that must be applied at this
@@ -1169,16 +1163,16 @@ pub struct StartTurnRuntimeSemantics {
     ///
     /// Runtime-backed callers populate this once at the machine boundary and
     /// the session layer derives per-turn policy from this typed carrier
-    /// instead of re-inferring or dropping fields.
+    /// instead of re-inferring or dropping fields. Render metadata and skill
+    /// references for the turn live ONLY here — there are no flat duplicates
+    /// on this request shape.
     pub turn_metadata: Option<RuntimeTurnMetadata>,
 }
 
 impl Default for StartTurnRuntimeSemantics {
     fn default() -> Self {
         Self {
-            render_metadata: None,
             handling_mode: HandlingMode::Queue,
-            skill_references: None,
             flow_tool_overlay: None,
             pre_turn_context_appends: Vec::new(),
             typed_turn_appends: Vec::new(),
@@ -1190,17 +1184,13 @@ impl Default for StartTurnRuntimeSemantics {
 impl StartTurnRuntimeSemantics {
     #[must_use]
     pub fn new(
-        render_metadata: Option<RenderMetadata>,
         handling_mode: HandlingMode,
-        skill_references: Option<Vec<crate::skills::SkillKey>>,
         flow_tool_overlay: Option<TurnToolOverlay>,
         pre_turn_context_appends: Vec<PendingSystemContextAppend>,
         turn_metadata: Option<RuntimeTurnMetadata>,
     ) -> Self {
         Self {
-            render_metadata,
             handling_mode,
-            skill_references,
             flow_tool_overlay,
             pre_turn_context_appends,
             typed_turn_appends: Vec::new(),

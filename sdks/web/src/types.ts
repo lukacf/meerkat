@@ -1,10 +1,5 @@
 import { KNOWN_AGENT_EVENT_TYPES } from './generated/events.js';
-import type {
-  AgentEvent,
-  SkillKey,
-  TurnTerminalCauseKind,
-  Usage,
-} from './generated/events.js';
+import type { AgentEvent, SkillKey } from './generated/events.js';
 import type { WireMobMemberStatus } from './generated/mob.js';
 
 // ─── Bootstrap / session config (generated wire parity) ─────────
@@ -70,19 +65,7 @@ export interface AppendSystemContextResult {
   status: 'staged' | 'duplicate';
 }
 
-/** Runtime-backed state for a direct browser session façade. */
-export interface SessionState {
-  handle: number;
-  session_id: string;
-  mob_id: string;
-  model: string;
-  usage: Usage;
-  /** @deprecated Direct browser sessions no longer expose a local run counter. */
-  run_counter?: number;
-  message_count: number;
-  is_active: boolean;
-  last_assistant_text?: string | null;
-}
+export type { SessionState, WireRunResult } from './generated/session.js';
 
 /** Result of appending runtime system context to a mob member session. */
 export interface MobAppendSystemContextResult {
@@ -114,28 +97,17 @@ export interface MobRespawnResult {
 /**
  * Result of a turn execution.
  *
- * Mirrors the canonical `WireRunResult` wire shape (the same envelope RPC's
- * `turn/start` returns). The runtime-owned terminal class is carried by
- * {@link terminal_cause_kind}; there is no fabricated in-band `status`
- * string. Agent-level faults reject the underlying promise instead of
- * resolving with a synthetic failure payload.
+ * The wire truth is the generated {@link WireRunResult} twin (the same
+ * envelope RPC's `turn/start` returns); this SDK type only adds the
+ * backward-compatible `response` alias for the canonical `text`. The
+ * runtime-owned terminal class is carried by `terminal_cause_kind`; there is
+ * no fabricated in-band `status` string. Agent-level faults reject the
+ * underlying promise instead of resolving with a synthetic failure payload.
  */
-export interface TurnResult {
-  /** Canonical text returned by the runtime. */
-  text: string;
-  /** Backward-compatible alias for {@link text}. */
+export type TurnResult = import('./generated/session.js').WireRunResult & {
+  /** Backward-compatible alias for the canonical `text`. */
   response: string;
-  usage: Usage;
-  tool_calls: number;
-  turns?: number;
-  session_id?: string;
-  /**
-   * Runtime-owned terminal cause for this turn (e.g. `budget_exhausted`,
-   * `turn_limit_reached`). Present only when the turn terminated on a typed
-   * terminal condition.
-   */
-  terminal_cause_kind?: TurnTerminalCauseKind | null;
-}
+};
 
 export type {
   AgentEvent,
@@ -577,9 +549,7 @@ function isKnownSkillResolutionEvent(event: { type: string }): boolean {
   if (event.type === 'skill_resolution_failed') {
     return (
       (value.skill_key == null || isWireSkillKey(value.skill_key)) &&
-      (value.reason == null || isSkillResolutionFailureReason(value.reason)) &&
-      (value.reference == null || typeof value.reference === 'string') &&
-      (value.error == null || typeof value.error === 'string')
+      (value.reason == null || isSkillResolutionFailureReason(value.reason))
     );
   }
 

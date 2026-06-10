@@ -4003,34 +4003,38 @@ async fn handle_meerkat_resume(
         // Live MCP resumes still use the runtime/machine service-turn receipt
         // path; the persistent service only owns the live mutation and post-
         // receipt projection, not lifecycle truth.
-        let turn_keep_alive_metadata =
-            keep_alive.then(
-                || meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                    keep_alive: Some(
-                        meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Enable(
-                            meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
-                                ttl: std::time::Duration::from_secs(30),
-                                policy:
-                                    meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
-                            },
-                        ),
-                    ),
-                    ..Default::default()
-                },
-            );
+        // Dogma K13: forward the full typed keep-alive tri-state to the
+        // machine. `Some(true)` -> Enable(policy), `Some(false)` -> Disable
+        // (explicit operator intent, never dropped into preserve), `None` ->
+        // preserve the persisted session intent.
+        let turn_seed_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+            skill_references: skill_references.clone(),
+            flow_tool_overlay: input.flow_tool_overlay.clone().map(Into::into),
+            keep_alive: keep_alive_override.map(|keep_alive| {
+                if keep_alive {
+                    meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Enable(
+                        meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
+                            ttl: std::time::Duration::from_secs(30),
+                            policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
+                        },
+                    )
+                } else {
+                    meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Disable
+                }
+            }),
+            ..Default::default()
+        };
         let turn_req = StartTurnRequest {
             prompt: prompt.clone().into(),
             system_prompt: None,
             event_tx: event_tx.clone(),
             runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                None,
                 meerkat_core::types::HandlingMode::Queue,
-                skill_references.clone(),
                 input.flow_tool_overlay.clone().map(Into::into),
                 Vec::new(),
-                Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(
-                    turn_keep_alive_metadata,
-                )),
+                Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(Some(
+                    turn_seed_metadata,
+                ))),
             ),
         };
         let admission = match live_turn_admission.take() {

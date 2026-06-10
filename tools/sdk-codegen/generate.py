@@ -2274,6 +2274,25 @@ def generate_web_runtime_types(output_dir: Path) -> None:
     content = """// Generated runtime bootstrap contracts for @rkat/web
 // Source: tools/sdk-codegen/generate.py (generate_web_runtime_types)
 
+/** Mobpack trust verification policy. 'strict' (the default) rejects
+ * unsigned and unknown-signer packs; 'permissive' is an explicit host
+ * opt-in, never the default. */
+export type MobpackTrustPolicy = 'strict' | 'permissive';
+
+/** Host-supplied mobpack trust configuration.
+ *
+ * The browser analogue of the native user/project trust stores: signer id ->
+ * Ed25519 public key (64 hex chars). Omitted means strict policy + empty
+ * store, so every pack ingress (`initFromMobpack`, `createSession`) fails
+ * closed.
+ */
+export interface MobpackTrustConfig {
+  /** Verification policy. Default: 'strict'. */
+  policy?: MobpackTrustPolicy;
+  /** Trusted signers: signer id -> Ed25519 public key hex. */
+  trustedSigners?: Record<string, string>;
+}
+
 /** Configuration for runtime initialization. */
 export interface RuntimeConfig {
   /** Anthropic API key. */
@@ -2293,6 +2312,8 @@ export interface RuntimeConfig {
   openaiBaseUrl?: string;
   /** Gemini base URL. */
   geminiBaseUrl?: string;
+  /** Mobpack trust store + policy for this runtime. */
+  mobpackTrust?: MobpackTrustConfig;
 }
 
 /** Result from runtime initialization. */

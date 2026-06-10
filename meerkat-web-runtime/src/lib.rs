@@ -189,6 +189,23 @@ fn default_max_tokens() -> u32 {
 // Credentials / Config for init_runtime
 // ═══════════════════════════════════════════════════════════
 
+/// Host-supplied mobpack trust configuration.
+///
+/// Native surfaces resolve trusted signers from the user/project trust stores
+/// (`meerkat_mob_pack::trust::load_trusted_signers`); the browser has no
+/// filesystem, so the embedding host supplies the same typed trust store
+/// in-band at bootstrap. The policy default stays
+/// [`meerkat_mob_pack::trust::TrustPolicy::Strict`] (fail-closed); accepting
+/// an unsigned/untrusted pack requires an explicit `permissive` opt-in from
+/// the host, never a fail-open default.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct MobpackTrustConfig {
+    #[serde(default)]
+    policy: meerkat_mob_pack::trust::TrustPolicy,
+    #[serde(default)]
+    trusted_signers: meerkat_mob_pack::trust::TrustedSigners,
+}
+
 #[derive(Debug, Deserialize)]
 struct Credentials {
     /// Per-provider API keys. At least one must be set.
@@ -212,6 +229,10 @@ struct Credentials {
     /// Maximum concurrent sessions for the bootstrapped service.
     #[serde(default = "default_max_sessions")]
     max_sessions: usize,
+    /// Mobpack trust store + policy for this runtime (Strict + empty when
+    /// omitted, so an unsigned or unknown-signer pack fails closed).
+    #[serde(default)]
+    mobpack_trust: MobpackTrustConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -236,6 +257,10 @@ struct RuntimeConfig {
     gemini_base_url: Option<String>,
     #[serde(default = "default_max_sessions")]
     max_sessions: usize,
+    /// Mobpack trust store + policy for this runtime (Strict + empty when
+    /// omitted). Consumed by `create_session` pack ingress.
+    #[serde(default)]
+    mobpack_trust: MobpackTrustConfig,
 }
 
 fn default_max_sessions() -> usize {
@@ -311,6 +336,10 @@ struct RuntimeState {
     /// `create_session_simple` builds a standalone session so the verified pack
     /// contributes its system prompt rather than being discarded at init.
     bootstrap_mobpack: Option<BootstrapMobpack>,
+    /// Host-supplied mobpack trust store, installed at bootstrap and consumed
+    /// by every later pack ingress (`create_session`). Single owner: trust is
+    /// a runtime-bootstrap fact, never a per-call argument.
+    mobpack_trust: MobpackTrustConfig,
     #[cfg(target_arch = "wasm32")]
     js_tools: Vec<JsToolEntry>,
 }
@@ -1263,11 +1292,16 @@ fn build_wasm_tool_dispatcher() -> Result<Arc<dyn meerkat_core::AgentToolDispatc
 /// Primary bootstrap: trust-verify a mobpack and create service infrastructure.
 ///
 /// `mobpack_bytes`: tar.gz mobpack archive. Verified via the canonical
-/// [`meerkat_mob_pack::trust`] authority under [`TrustPolicy::Strict`] — an
-/// unsigned or untrusted pack fails closed with a typed error.
+/// [`meerkat_mob_pack::trust`] authority under the host-supplied
+/// `mobpack_trust` configuration ([`TrustPolicy::Strict`] + empty trust store
+/// when omitted) — an unsigned or unknown-signer pack fails closed with a
+/// typed error unless the host registered the signer (or explicitly opted in
+/// to `permissive`).
 /// `credentials_json`: `{ "anthropic_api_key"?: "...", "openai_api_key"?: "...",
 /// "gemini_api_key"?: "...", "model"?: "<catalog default for configured provider>",
-/// "max_sessions"?: 100000 }`
+/// "max_sessions"?: 100000,
+/// "mobpack_trust"?: { "policy"?: "strict"|"permissive",
+///                     "trusted_signers"?: { "signers": { "<signer_id>": "<ed25519 pubkey hex>" } } } }`
 ///
 /// Stores an `EphemeralSessionService<FactoryAgentBuilder>` and a `MobMcpState`
 /// in a `thread_local! RuntimeState` for subsequent mob/comms calls.
@@ -1275,16 +1309,17 @@ fn build_wasm_tool_dispatcher() -> Result<Arc<dyn meerkat_core::AgentToolDispatc
 pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsValue, JsValue> {
     init_tracing();
     patch_fetch_response_url();
-    // Browser bootstrap must run canonical trust verification (Strict by
-    // default), not a local parser. The verified pack is consumed below.
-    let parsed = extract_verify_and_parse_mobpack(
-        mobpack_bytes,
-        meerkat_mob_pack::trust::TrustPolicy::Strict,
-        &meerkat_mob_pack::trust::TrustedSigners::default(),
-    )
-    .map_err(js_from_value)?;
     let creds: Credentials =
         serde_json::from_str(credentials_json).map_err(|e| err_str("invalid_credentials", e))?;
+    // Browser bootstrap must run canonical trust verification (Strict by
+    // default) over the host-supplied trust store, not a local parser. The
+    // verified pack is consumed below.
+    let parsed = extract_verify_and_parse_mobpack(
+        mobpack_bytes,
+        creds.mobpack_trust.policy,
+        &creds.mobpack_trust.trusted_signers,
+    )
+    .map_err(js_from_value)?;
 
     let api_keys = build_provider_api_keys(
         creds.anthropic_api_key.as_deref(),
@@ -1318,6 +1353,7 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
         sessions: BTreeMap::new(),
         next_handle: 1,
         bootstrap_mobpack: Some(bootstrap_mobpack),
+        mobpack_trust: creds.mobpack_trust,
         #[cfg(target_arch = "wasm32")]
         js_tools: Vec::new(),
     });
@@ -1376,6 +1412,7 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
         sessions: BTreeMap::new(),
         next_handle: 1,
         bootstrap_mobpack: None,
+        mobpack_trust: rt_config.mobpack_trust,
         #[cfg(target_arch = "wasm32")]
         js_tools: Vec::new(),
     });
@@ -1492,15 +1529,15 @@ fn create_runtime_backed_session(
 ///
 /// The pack's skills/definition become session prompt truth here, so this
 /// ingress runs the same canonical [`meerkat_mob_pack::trust`] verification
-/// as `init_runtime` (Strict, fail-closed) — never the local parse-only path.
+/// as `init_runtime` — never the local parse-only path. The trust store is
+/// the one the host installed at bootstrap (Strict + empty when none was
+/// supplied, so unsigned/unknown-signer packs fail closed).
 #[wasm_bindgen]
 pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, JsValue> {
-    let parsed = extract_verify_and_parse_mobpack(
-        mobpack_bytes,
-        meerkat_mob_pack::trust::TrustPolicy::Strict,
-        &meerkat_mob_pack::trust::TrustedSigners::default(),
-    )
-    .map_err(js_from_value)?;
+    let trust = with_runtime_state(|state| Ok(state.mobpack_trust.clone()))?;
+    let parsed =
+        extract_verify_and_parse_mobpack(mobpack_bytes, trust.policy, &trust.trusted_signers)
+            .map_err(js_from_value)?;
     let config: SessionConfig =
         serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
     let system_prompt = compile_system_prompt(
@@ -4068,6 +4105,44 @@ capabilities = [{capability_values}]
         assert_eq!(parsed.definition.id, "browser-test");
         let bootstrap = super::BootstrapMobpack::from_parsed(parsed);
         assert_eq!(bootstrap.name, "browser-test");
+    }
+
+    #[test]
+    fn mobpack_trust_config_defaults_to_strict_and_empty_store() {
+        // Omitted `mobpack_trust` must fail closed: Strict policy, no signers.
+        let creds: super::Credentials =
+            serde_json::from_str(r#"{"anthropic_api_key":"sk-test"}"#).expect("creds parse");
+        assert_eq!(
+            creds.mobpack_trust.policy,
+            meerkat_mob_pack::trust::TrustPolicy::Strict
+        );
+        assert!(creds.mobpack_trust.trusted_signers.signers.is_empty());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn host_supplied_trust_store_admits_signed_pack_under_strict() {
+        // The embedding host registers the signer in-band (the browser
+        // analogue of the native user/project trust stores); Strict
+        // verification then admits the signed pack without a permissive
+        // opt-out.
+        let (archive, trusted) = trusted_signed_mobpack();
+        let creds_json = serde_json::json!({
+            "anthropic_api_key": "sk-test",
+            "mobpack_trust": {
+                "policy": "strict",
+                "trusted_signers": serde_json::to_value(&trusted).expect("signers serialize"),
+            },
+        });
+        let creds: super::Credentials =
+            serde_json::from_value(creds_json).expect("creds with trust parse");
+        let parsed = extract_verify_and_parse_mobpack(
+            &archive,
+            creds.mobpack_trust.policy,
+            &creds.mobpack_trust.trusted_signers,
+        )
+        .expect("host-trusted signed pack must pass Strict verification");
+        assert_eq!(parsed.definition.id, "browser-test");
     }
 
     #[cfg(not(target_arch = "wasm32"))]

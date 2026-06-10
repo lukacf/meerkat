@@ -29,6 +29,16 @@ function toWasmConfig(config: RuntimeConfig): Record<string, unknown> {
     anthropic_base_url: config.anthropicBaseUrl,
     openai_base_url: config.openaiBaseUrl,
     gemini_base_url: config.geminiBaseUrl,
+    // Host-supplied mobpack trust store (strict + empty when omitted, so
+    // pack ingress fails closed on unsigned/unknown-signer packs).
+    mobpack_trust: config.mobpackTrust
+      ? {
+          policy: config.mobpackTrust.policy,
+          trusted_signers: config.mobpackTrust.trustedSigners
+            ? { signers: config.mobpackTrust.trustedSigners }
+            : undefined,
+        }
+      : undefined,
   };
 }
 

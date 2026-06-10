@@ -633,18 +633,26 @@ async fn e2e_smoke_mcp_multimodal_blob_current_turn_request_response_loop() {
     assert_eq!(b_messages.len(), 1);
     match &b_messages[0].content {
         meerkat_core::InteractionContent::Message { body, blocks } => {
-            assert_eq!(body, "A->B blob prelude");
+            // Single content authority: the caller supplied a text block, so the
+            // explicit `body` argument is ignored and the carried body is the
+            // projection of the text blocks (mcp/tools.rs `project_body_from_blocks`).
+            assert_eq!(
+                body,
+                "Prelude after the image so body synthesis has to decide what to do."
+            );
+            // Blocks keep caller order: [image, text].
             let blocks = blocks.as_ref().expect("message blocks");
+            assert_eq!(blocks.len(), 2);
             assert!(matches!(
                 &blocks[0],
-                ContentBlock::Text { text } if text == "A->B blob prelude"
-            ));
-            assert!(matches!(
-                &blocks[1],
                 ContentBlock::Image {
                     media_type,
                     data: ImageData::Inline { data }
                 } if media_type == "image/png" && data == "bWVzc2FnZS1ibG9i"
+            ));
+            assert!(matches!(
+                &blocks[1],
+                ContentBlock::Text { text } if text == "Prelude after the image so body synthesis has to decide what to do."
             ));
         }
         other => panic!("expected B message, got {other:?}"),

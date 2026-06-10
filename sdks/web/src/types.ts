@@ -11,6 +11,8 @@ import type { WireMobMemberStatus } from './generated/mob.js';
 export type {
   AuthBindingRef,
   InitResult,
+  MobpackTrustConfig,
+  MobpackTrustPolicy,
   RuntimeConfig,
   SessionConfig,
 } from './generated/runtime.js';

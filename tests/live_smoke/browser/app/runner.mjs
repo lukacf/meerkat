@@ -51,6 +51,15 @@ async function withTimeout(promise, timeoutMs, label) {
   }
 }
 
+// Trusted signer for the browser-safe mobpack fixture. The fixture is signed
+// with the repo dev key (hex '09' * 32); the committed
+// fixtures/browser_safe_mobpack/signature.toml carries this public key, and
+// the runtime config below registers it so the fixture verifies under the
+// default strict trust policy (no permissive opt-out).
+const FIXTURE_TRUSTED_SIGNERS = {
+  'browser-smoke': 'fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618',
+};
+
 function makeRuntimeConfig() {
   return {
     api_key: 'sk-browser-smoke',
@@ -58,7 +67,32 @@ function makeRuntimeConfig() {
     model: 'claude-sonnet-4-5',
     base_url: `${window.location.origin}/anthropic`,
     anthropic_base_url: `${window.location.origin}/anthropic`,
+    mobpack_trust: {
+      policy: 'strict',
+      trusted_signers: { signers: FIXTURE_TRUSTED_SIGNERS },
+    },
   };
+}
+
+// WASM content-bearing exports take the tagged content-input wire shape
+// ({"text": ...} | {"blocks": [...]}); raw strings fail closed with
+// INVALID_PARAMS.
+function taggedPrompt(text) {
+  return JSON.stringify({ text });
+}
+
+// `start_turn` resolves with the canonical WireRunResult (same shape as RPC
+// `turn/start`); failures reject with a typed error envelope — there is no
+// fabricated `status` field on success.
+function assertCompletedTurn(turn, label) {
+  assert(
+    typeof turn.session_id === 'string' && turn.session_id.length > 0,
+    `${label}: WireRunResult must carry session_id: ${JSON.stringify(turn)}`,
+  );
+  assert(
+    typeof turn.text === 'string' && turn.text.length > 0,
+    `${label}: WireRunResult must carry non-empty text: ${JSON.stringify(turn)}`,
+  );
 }
 
 async function loadRawWasm() {
@@ -107,9 +141,8 @@ async function scenarioRawSession001({ wasm }) {
   );
   assert(staged.status === 'staged', `append_system_context failed: ${JSON.stringify(staged)}`);
 
-  const turn = JSON.parse(await wasm.start_turn(handle, 'Say raw browser smoke ok.', '{}'));
-  assert(turn.status === 'completed', `raw session turn failed: ${JSON.stringify(turn)}`);
-  assert(turn.text.length > 0, `unexpected raw session text: ${turn.text}`);
+  const turn = JSON.parse(await wasm.start_turn(handle, taggedPrompt('Say raw browser smoke ok.')));
+  assertCompletedTurn(turn, 'raw session turn');
 
   const events = JSON.parse(wasm.poll_events(handle));
   const eventTypes = collectEventTypes(events);
@@ -122,18 +155,25 @@ async function scenarioRawSession001({ wasm }) {
   }
   assert(state.message_count >= 1, `expected canonical message_count >= 1, got ${JSON.stringify(state)}`);
 
+  // destroy_session retires the browser-local handle (fail-closed): later
+  // calls on the stale handle must fail with invalid_session_handle rather
+  // than resolving an addressable archived projection.
   wasm.destroy_session(handle);
-  const archived = JSON.parse(wasm.get_session_state(handle));
-  assert(archived.session_id === state.session_id, `destroyed handle must resolve canonical session id: ${JSON.stringify(archived)}`);
-  assert(archived.is_active === false, `destroyed handle must report canonical inactive state: ${JSON.stringify(archived)}`);
-
-  let canonicalNotFound = false;
+  let stateRetired = false;
   try {
-    await wasm.start_turn(handle, 'stale browser handle must not control archived session', '{}');
+    wasm.get_session_state(handle);
   } catch (error) {
-    canonicalNotFound = String(error).includes('SESSION_NOT_FOUND');
+    stateRetired = String(error).includes('invalid_session_handle');
   }
-  assert(canonicalNotFound, 'expected stale start_turn() to fail through canonical session authority');
+  assert(stateRetired, 'expected get_session_state() on a destroyed handle to fail closed with invalid_session_handle');
+
+  let turnRetired = false;
+  try {
+    await wasm.start_turn(handle, taggedPrompt('stale browser handle must not control archived session'));
+  } catch (error) {
+    turnRetired = String(error).includes('invalid_session_handle');
+  }
+  assert(turnRetired, 'expected start_turn() on a destroyed handle to fail closed with invalid_session_handle');
 }
 
 async function scenarioRawRecall002({ wasm }) {
@@ -162,18 +202,17 @@ async function scenarioRawRecall002({ wasm }) {
   assert(staged.status === 'staged', `append_system_context failed: ${JSON.stringify(staged)}`);
 
   const firstTurn = JSON.parse(
-    await wasm.start_turn(handle, 'Remember the codename BrowserNebula and reply briefly.', '{}'),
+    await wasm.start_turn(handle, taggedPrompt('Remember the codename BrowserNebula and reply briefly.')),
   );
-  assert(firstTurn.status === 'completed', `first recall turn failed: ${JSON.stringify(firstTurn)}`);
+  assertCompletedTurn(firstTurn, 'first recall turn');
 
   const secondTurn = JSON.parse(
     await wasm.start_turn(
       handle,
-      'What codename did I ask you to remember, and what marker should you include?',
-      '{}',
+      taggedPrompt('What codename did I ask you to remember, and what marker should you include?'),
     ),
   );
-  assert(secondTurn.status === 'completed', `second recall turn failed: ${JSON.stringify(secondTurn)}`);
+  assertCompletedTurn(secondTurn, 'second recall turn');
   const textLower = secondTurn.text.toLowerCase();
   assert(textLower.includes('browsernebula') || textLower.includes('browser nebula'), `unexpected recall text: ${secondTurn.text}`);
   assert(textLower.includes('browser_ctx_ok'), `expected browser context marker in ${secondTurn.text}`);
@@ -203,9 +242,8 @@ async function scenarioMobpackSession003({ wasm }) {
       system_prompt: 'Append a browser-safe verification line.',
     }),
   );
-  const turn = JSON.parse(await wasm.start_turn(handle, 'Summarize the browser-safe mobpack.', '{}'));
-  assert(turn.status === 'completed', `mobpack session turn failed: ${JSON.stringify(turn)}`);
-  assert(turn.text.length > 0, `unexpected mobpack text: ${turn.text}`);
+  const turn = JSON.parse(await wasm.start_turn(handle, taggedPrompt('Summarize the browser-safe mobpack.')));
+  assertCompletedTurn(turn, 'mobpack session turn');
 
   const state = JSON.parse(wasm.get_session_state(handle));
   assert(state.mob_id === 'browser-smoke-pack', `unexpected mobpack session state: ${JSON.stringify(state)}`);
@@ -305,7 +343,7 @@ async function scenarioRawMob004({ wasm }) {
   wasm.close_subscription(subscriptionHandle);
 
   await withTimeout(
-    wasm.mob_respawn(mobId, 'worker-1', 'Reset the browser smoke worker.'),
+    wasm.mob_respawn(mobId, 'worker-1', taggedPrompt('Reset the browser smoke worker.')),
     LIVE_LLM_TIMEOUT_MS,
     'mob_respawn',
   );

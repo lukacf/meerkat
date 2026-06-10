@@ -3610,7 +3610,14 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             id: Some(73),
             lane: Lane::Smoke,
             title: "CLI generate_image blob save",
-            timeout_secs: 900,
+            // The timed command compiles the live_smoke_cli test target in the
+            // per-lane target dir (cold, competing with the parallel lane
+            // storm) before the live run; the live phase alone measures ~400s
+            // (hosted OpenAI image generation + web search), with the inner
+            // rkat command capped at 600s. 900s was structurally too small for
+            // cold-compile + live; match the sibling image-generation lanes
+            // (s74/s77+) at 1800s.
+            timeout_secs: 1800,
             required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
             required_bins: &["cargo"],
             cwd: ".",

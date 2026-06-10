@@ -16,6 +16,7 @@ use std::path::Path;
 const DEPLOY_DEFAULTS_PATH: &str = "config/defaults.toml";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive] // construction is crate-internal; the public road is VerifiedMobpackArchive
 pub struct MobpackArchive {
     pub manifest: MobpackManifest,
     pub definition: MobDefinition,
@@ -30,7 +31,10 @@ pub struct MobpackArchive {
 }
 
 impl MobpackArchive {
-    pub fn new(
+    /// Crate-internal constructor: external consumers obtain archives only
+    /// through [`VerifiedMobpackArchive`], so archive truth cannot exist
+    /// without its trust witness.
+    pub(crate) fn new(
         manifest: MobpackManifest,
         definition: MobDefinition,
         skills: BTreeMap<String, Vec<u8>>,
@@ -48,12 +52,18 @@ impl MobpackArchive {
         }
     }
 
-    pub fn from_archive_bytes(bytes: &[u8]) -> Result<Self, PackValidationError> {
+    /// Crate-internal: the public road to archive truth is
+    /// [`VerifiedMobpackArchive::open_archive_bytes`], which binds the parsed
+    /// archive to its trust verification witness.
+    pub(crate) fn from_archive_bytes(bytes: &[u8]) -> Result<Self, PackValidationError> {
         let files = extract_targz_safe(bytes)?;
         Self::from_extracted_files(&files)
     }
 
-    pub fn from_extracted_files(
+    /// Crate-internal: the public road to archive truth is
+    /// [`VerifiedMobpackArchive::open`], which binds the parsed archive to its
+    /// trust verification witness.
+    pub(crate) fn from_extracted_files(
         files: &BTreeMap<String, Vec<u8>>,
     ) -> Result<Self, PackValidationError> {
         let ValidatedPackFiles {
@@ -93,11 +103,6 @@ impl MobpackArchive {
             mcp,
             deploy_policy,
         ))
-    }
-
-    pub fn from_archive_path(path: &Path) -> Result<Self, PackValidationError> {
-        let bytes = std::fs::read(path)?;
-        Self::from_archive_bytes(&bytes)
     }
 }
 
@@ -140,6 +145,16 @@ impl VerifiedMobpackArchive {
     ) -> Result<Self, PackValidationError> {
         let files = extract_targz_safe(bytes)?;
         Self::open(&files, trust_policy, trusted_signers)
+    }
+
+    /// Parse and trust-verify a tar.gz archive file on disk.
+    pub fn open_archive_path(
+        path: &Path,
+        trust_policy: TrustPolicy,
+        trusted_signers: &TrustedSigners,
+    ) -> Result<Self, PackValidationError> {
+        let bytes = std::fs::read(path)?;
+        Self::open_archive_bytes(&bytes, trust_policy, trusted_signers)
     }
 
     pub fn archive(&self) -> &MobpackArchive {

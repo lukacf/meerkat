@@ -112,6 +112,7 @@ describe("Transcript Rewrite Serialization", () => {
   it("serializes parsed block assistant messages back to wire-shaped blocks", () => {
     const parsed = MeerkatClient.parseSessionMessage({
       role: "block_assistant",
+          created_at: "2026-01-01T00:00:00Z",
       created_at: "2026-05-26T10:00:00Z",
       blocks: [
         {
@@ -132,6 +133,7 @@ describe("Transcript Rewrite Serialization", () => {
 
     assert.deepEqual(serialized, {
       role: "block_assistant",
+          created_at: "2026-01-01T00:00:00Z",
       created_at: "2026-05-26T10:00:00Z",
       blocks: [
         {
@@ -876,9 +878,10 @@ describe("Typed Events", () => {
       limit: 2,
       has_more: true,
       messages: [
-        { role: "system", content: "rules" },
+        { role: "system", content: "rules", created_at: "2026-01-01T00:00:00Z" },
         {
           role: "block_assistant",
+          created_at: "2026-01-01T00:00:00Z",
           blocks: [
             {
               block_type: "tool_use",
@@ -889,6 +892,7 @@ describe("Typed Events", () => {
         },
         {
           role: "block_assistant",
+          created_at: "2026-01-01T00:00:00Z",
           blocks: [
             {
               block_type: "tool_use",
@@ -917,6 +921,7 @@ describe("Typed Events", () => {
       messages: [
         {
           role: "block_assistant",
+          created_at: "2026-01-01T00:00:00Z",
           blocks: [
             {
               block_type: "image",
@@ -955,6 +960,7 @@ describe("Typed Events", () => {
       messages: [
         {
           role: "user",
+          created_at: "2026-01-01T00:00:00Z",
           content: [
             {
               type: "video",
@@ -1246,49 +1252,18 @@ describe("WorkGraph parsers", () => {
     evidence_refs: [{ kind: "message_draft", id: "draft-1" }],
   };
 
-  it("parses typed owners, claims, and read-only snapshots", () => {
-    const snapshot = MeerkatClient.parseWorkGraphSnapshot({
-      realm_id: "homecore",
-      namespace: "family/appointments",
-      all_namespaces: false,
-      captured_at: timestamp,
-      event_high_water_mark: 42,
-      items: [claimedItem],
-      edges: [
-        {
-          realm_id: "homecore",
-          namespace: "family/appointments",
-          kind: "blocks",
-          from_id: "notice-car-change",
-          to_id: "prep-dentist-ride",
-          created_at: timestamp,
-        },
-      ],
-      attention: [],
-      ready_item_ids: ["prep-dentist-ride"],
-    });
+  it("parses typed owners and claims", () => {
+    const item = MeerkatClient.parseWorkItem(claimedItem);
 
-    assert.equal(snapshot.realmId, "homecore");
-    assert.equal(snapshot.items[0].owner?.key.kind, "agent");
-    assert.equal(snapshot.items[0].claim?.owner.key.id, "homecore-kapellmeister");
-    assert.deepEqual(snapshot.items[0].completionPolicy, { kind: "host_confirmed" });
-    assert.equal(snapshot.edges[0].kind, "blocks");
-    assert.deepEqual(snapshot.readyItemIds, ["prep-dentist-ride"]);
+    assert.equal(item.realmId, "homecore");
+    assert.equal(item.owner?.key.kind, "agent");
+    assert.equal(item.claim?.owner.key.id, "homecore-kapellmeister");
+    assert.deepEqual(item.completionPolicy, { kind: "host_confirmed" });
   });
 
   it("rejects malformed WorkGraph lifecycle truth", () => {
     assert.throws(
-      () =>
-        MeerkatClient.parseWorkGraphSnapshot({
-          realm_id: "homecore",
-          namespace: "family/appointments",
-          all_namespaces: false,
-          captured_at: timestamp,
-          items: [{ ...claimedItem, status: undefined }],
-          edges: [],
-          attention: [],
-          ready_item_ids: [],
-        }),
+      () => MeerkatClient.parseWorkItem({ ...claimedItem, status: undefined }),
       (error) =>
         error instanceof MeerkatError &&
         error.code === "INVALID_RESPONSE" &&
@@ -1312,20 +1287,12 @@ describe("WorkGraph parsers", () => {
 
   it("defaults WorkGraph fields added after 0.6.23 for compatible older payloads", () => {
     const { completion_policy: _completionPolicy, ...legacyItem } = claimedItem;
-    const snapshot = MeerkatClient.parseWorkGraphSnapshot({
-      realm_id: "homecore",
-      all_namespaces: false,
-      captured_at: timestamp,
-      items: [legacyItem],
-      edges: [],
-      ready_item_ids: [],
-    });
+    const item = MeerkatClient.parseWorkItem(legacyItem);
 
-    assert.deepEqual(snapshot.items[0].completionPolicy, { kind: "self_attest" });
-    assert.deepEqual(snapshot.attention, []);
+    assert.deepEqual(item.completionPolicy, { kind: "self_attest" });
   });
 
-  it("rejects malformed WorkGraph attention authority enums", () => {
+  it("rejects malformed WorkGraph attention authority enums", async () => {
     const attention = {
       binding_id: "attention-1",
       target: { kind: "session", session_id: "session-1" },
@@ -1341,33 +1308,21 @@ describe("WorkGraph parsers", () => {
       updated_at: timestamp,
     };
 
-    assert.throws(
-      () =>
-        MeerkatClient.parseWorkGraphSnapshot({
-          realm_id: "homecore",
-          all_namespaces: false,
-          captured_at: timestamp,
-          items: [claimedItem],
-          edges: [],
-          attention: [{ ...attention, mode: "not_a_mode" }],
-          ready_item_ids: [],
-        }),
+    const clientFor = (entry) => {
+      const client = new MeerkatClient();
+      client.request = async () => ({ attention: [entry] });
+      return client;
+    };
+
+    await assert.rejects(
+      clientFor({ ...attention, mode: "not_a_mode" }).listWorkGraphAttention(),
       (error) =>
         error instanceof MeerkatError &&
         error.code === "INVALID_RESPONSE" &&
         String(error.message).includes("invalid mode"),
     );
-    assert.throws(
-      () =>
-        MeerkatClient.parseWorkGraphSnapshot({
-          realm_id: "homecore",
-          all_namespaces: false,
-          captured_at: timestamp,
-          items: [claimedItem],
-          edges: [],
-          attention: [{ ...attention, delegated_authority: "not_authority" }],
-          ready_item_ids: [],
-        }),
+    await assert.rejects(
+      clientFor({ ...attention, delegated_authority: "not_authority" }).listWorkGraphAttention(),
       (error) =>
         error instanceof MeerkatError &&
         error.code === "INVALID_RESPONSE" &&
@@ -1375,29 +1330,29 @@ describe("WorkGraph parsers", () => {
     );
   });
 
-  it("parses WorkGraph attention lifecycle events", () => {
-    const result = MeerkatClient.parseWorkGraphEventArray([
-      {
-        seq: 43,
-        realm_id: "homecore",
-        namespace: "family/appointments",
-        item_id: "prep-dentist-ride",
-        kind: "attention_created",
-        at: timestamp,
-        payload: { attention: { binding_id: "attention-1" } },
-      },
-      {
-        realm_id: "homecore",
-        namespace: "family/appointments",
-        item_id: "prep-dentist-ride",
-        kind: "attention_updated",
-        at: timestamp,
-      },
-    ]);
+  it("fails closed when WorkGraph list collections are not arrays", async () => {
+    const clientFor = (response) => {
+      const client = new MeerkatClient();
+      client.request = async () => response;
+      return client;
+    };
+    const invalidResponse = (error) =>
+      error instanceof MeerkatError && error.code === "INVALID_RESPONSE";
 
-    assert.equal(result[0].kind, "attention_created");
-    assert.equal(result[0].payload.attention.binding_id, "attention-1");
-    assert.equal(result[1].kind, "attention_updated");
+    await assert.rejects(
+      clientFor({ items: "oops" }).listWorkGraphItems({ realm_id: "homecore" }),
+      invalidResponse,
+    );
+    await assert.rejects(
+      clientFor({ items: { not: "a list" } }).listReadyWorkGraphItems({
+        realm_id: "homecore",
+      }),
+      invalidResponse,
+    );
+    await assert.rejects(
+      clientFor({ events: 42 }).listWorkGraphEvents({ realm_id: "homecore" }),
+      invalidResponse,
+    );
   });
 });
 
@@ -1903,9 +1858,10 @@ describe("Comms methods", () => {
         limit: params.limit,
         has_more: false,
         messages: [
-          { role: "user", content: "hello" },
+          { role: "user", content: "hello", created_at: "2026-01-01T00:00:00Z" },
           {
             role: "block_assistant",
+          created_at: "2026-01-01T00:00:00Z",
             blocks: [{ block_type: "text", data: { text: "ok" } }],
             stop_reason: "end_turn",
           },
@@ -2382,16 +2338,16 @@ describe("Parity wrappers", () => {
       realmId: "homecore",
       namespace: "family/appointments",
     });
-    const listed = await client.listWorkGraphItems({ realmId: "homecore", limit: 5 });
+    const listed = await client.listWorkGraphItems({ realm_id: "homecore", limit: 5 });
     const ready = await client.listReadyWorkGraphItems({
       namespace: "family/appointments",
       limit: 3,
     });
     const snapshot = await client.getWorkGraphSnapshot({
-      realmId: "homecore",
+      realm_id: "homecore",
       namespace: "family/appointments",
     });
-    const events = await client.listWorkGraphEvents({ realmId: "homecore", limit: 10 });
+    const events = await client.listWorkGraphEvents({ realm_id: "homecore", limit: 10 });
     const goal = await client.getWorkGraphGoalStatus({
       realmId: "homecore",
       namespace: "family/appointments",
@@ -2406,8 +2362,8 @@ describe("Parity wrappers", () => {
     assert.equal(fetched.id, "prep-dentist-ride");
     assert.equal(listed.items[0].priority, "high");
     assert.equal(ready.items[0].status, "open");
-    assert.deepEqual(snapshot.readyItemIds, ["prep-dentist-ride"]);
-    assert.equal(snapshot.attention[0].bindingId, "attention-1");
+    assert.deepEqual(snapshot.ready_item_ids, ["prep-dentist-ride"]);
+    assert.equal(snapshot.attention[0].binding_id, "attention-1");
     assert.equal(events.events[0].kind, "created");
     assert.equal(goal.item.id, "prep-dentist-ride");
     assert.equal(goal.attention.bindingId, "attention-1");
@@ -3770,5 +3726,75 @@ describe("Callback tool result content type (row 55)", () => {
     assert.equal(response.id, 42);
     assert.equal(response.result.is_error, false);
     assert.deepEqual(response.result.content, blocks);
+  });
+});
+
+describe("Session transcript fail-closed parsing", () => {
+  it("rejects messages missing identity facts instead of fabricating them", () => {
+    // Missing role.
+    assert.throws(
+      () => MeerkatClient.parseSessionMessage({ content: "no role" }),
+      /missing role/,
+    );
+    // Missing created_at (required on every WireSessionMessage variant).
+    assert.throws(
+      () => MeerkatClient.parseSessionMessage({ role: "user", content: "x" }),
+      /missing created_at/,
+    );
+    // Tool result missing tool_use_id.
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionMessage({
+          role: "tool_results",
+          created_at: "2026-05-26T10:00:00Z",
+          results: [{ content: "missing tool_use_id" }],
+        }),
+      /missing tool_use_id/,
+    );
+    // Present-but-non-list blocks.
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionMessage({
+          role: "block_assistant",
+          created_at: "2026-01-01T00:00:00Z",
+          created_at: "2026-05-26T10:00:00Z",
+          blocks: "not-a-list",
+        }),
+      /blocks must be a list/,
+    );
+    // Block missing block_type.
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionMessage({
+          role: "block_assistant",
+          created_at: "2026-01-01T00:00:00Z",
+          created_at: "2026-05-26T10:00:00Z",
+          blocks: [{ data: { text: "missing block_type" } }],
+        }),
+      /missing block_type/,
+    );
+  });
+
+  it("rejects transcript rewrite results missing identity facts", () => {
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionTranscriptRewriteResult({
+          revision: "r2",
+          parent_revision: "r1",
+          message_count: 1,
+          commit: {},
+        }),
+      /missing session_id/,
+    );
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionTranscriptRewriteResult({
+          session_id: "s1",
+          revision: "r2",
+          parent_revision: "r1",
+          message_count: 1,
+        }),
+      /commit must be an object/,
+    );
   });
 });

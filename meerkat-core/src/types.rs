@@ -120,6 +120,18 @@ pub enum ContentBlock {
         #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
         data: Box<RawValue>,
     },
+    /// Rendered skill context injected by per-turn skill activation.
+    ///
+    /// The typed `skill_key` preserves the activation provenance in the
+    /// durable transcript — activation is never folded into anonymous
+    /// operator text. `text` is the rendered skill body; the model-facing
+    /// representation is the text projection of this block.
+    SkillContext {
+        /// Canonical identity of the activated skill.
+        skill_key: crate::skills::SkillKey,
+        /// Rendered skill body delivered to the model.
+        text: String,
+    },
 }
 
 /// Serializes a `Box<RawValue>` structured payload as inline JSON (no double
@@ -153,6 +165,7 @@ impl ContentBlock {
             ContentBlock::Image { media_type, .. } => Cow::Owned(format!("[image: {media_type}]")),
             ContentBlock::Video { media_type, .. } => Cow::Owned(format!("[video: {media_type}]")),
             ContentBlock::Structured { data } => Cow::Owned(data.get().to_string()),
+            ContentBlock::SkillContext { text, .. } => Cow::Borrowed(text),
         }
     }
 
@@ -248,6 +261,16 @@ impl PartialEq for ContentBlock {
             (ContentBlock::Structured { data: d1 }, ContentBlock::Structured { data: d2 }) => {
                 d1.get() == d2.get()
             }
+            (
+                ContentBlock::SkillContext {
+                    skill_key: k1,
+                    text: t1,
+                },
+                ContentBlock::SkillContext {
+                    skill_key: k2,
+                    text: t2,
+                },
+            ) => k1 == k2 && t1 == t2,
             _ => false,
         }
     }

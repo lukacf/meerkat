@@ -95,3 +95,18 @@ inventory::submit! {
         status_resolver: None,
     }
 }
+
+/// Convert a [`meerkat_core::service::SessionControlError`] into the public
+/// [`meerkat_core::service::SessionError`] surface: session-tier causes pass
+/// through unchanged; control-tier causes surface as typed `Unsupported`.
+///
+/// Single shared owner for the ephemeral and persistent services (the
+/// persistent twin previously carried a private copy).
+pub(crate) fn control_error_into_session_error(
+    err: meerkat_core::service::SessionControlError,
+) -> meerkat_core::service::SessionError {
+    match err {
+        meerkat_core::service::SessionControlError::Session(session_err) => session_err,
+        other => meerkat_core::service::SessionError::Unsupported(other.to_string()),
+    }
+}

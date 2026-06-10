@@ -229,6 +229,6 @@ async fn persist_failure_triggers_rollback_to_previous_identity() {
 // require pulling the entire model catalog into the test binary.
 #[test]
 fn profile_to_capability_surface_symbol_resolves() {
-    let _: fn(&meerkat_models::profile::ModelProfile) -> SessionLlmCapabilitySurface =
+    let _: fn(&meerkat_core::model_profile::ModelProfile) -> SessionLlmCapabilitySurface =
         profile_to_capability_surface;
 }

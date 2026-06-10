@@ -308,13 +308,12 @@ pub struct ToolProvenance {
     serde::Deserialize,
 )]
 pub struct ToolVisibilityWitness {
-    pub stable_owner_key: Option<String>,
     pub last_seen_provenance: Option<ToolProvenance>,
 }
 
 impl ToolVisibilityWitness {
     fn len(&self) -> u64 {
-        u64::from(self.stable_owner_key.is_some()) + u64::from(self.last_seen_provenance.is_some())
+        u64::from(self.last_seen_provenance.is_some())
     }
 }
 
@@ -2607,6 +2606,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             completion_feed_terminal_payload: Map<String, String>,
             // Terminal-outcome discriminant. Payload (result/error/reason)
             // rides on the companion `op_terminal_payload` map as JSON.
+            // The machine OWNS the payload shape invariants: each terminal
+            // transition guards that the discriminant matches the transition
+            // (`outcome_matches_terminal`) and that the payload is non-empty
+            // for data-carrying kinds / empty for `Retired`
+            // (`payload_present_for_kind` / `payload_empty_for_retired`).
+            // The payload's inner content is wire-opaque pass-through (the
+            // `OperationResult` carries arbitrary tool/result JSON); the shell
+            // rehydrates it fail-closed at `terminal_outcome_from_parts`.
             op_terminal_outcomes: Map<String, Enum<OperationTerminalOutcomeKind>>,
             op_terminal_payload: Map<String, String>,
             op_kinds: Map<String, Enum<OperationKind>>,
@@ -3654,7 +3661,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 reason: Enum<InputAbandonReason>,
                 attempt_count: u64,
             },
-            RecordBoundarySeq { input_id: String, seq: u64 },
+            RecordBoundarySeq { input_id: String, run_id: RunId },
             // Ops lifecycle inputs.
             // Terminal transitions carry a typed outcome discriminant plus
             // an opaque `payload` string — the inner payload of the domain
@@ -5439,10 +5446,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
         }
 
-        // 2. RegisterSession: per-phase self-loop, no guard
+        // 2. RegisterSession: per-phase self-loop. Binding a NEW session id
+        // resets the per-session LLM state. Destroyed is intentionally absent:
+        // RegisterSession is a resurrection input the DestroyedShapeInvariant
+        // forbids, so the machine — not a shell preflight — rejects it there.
         transition RegisterSession {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input RegisterSession { session_id }
+            guard "new_session_binding" { self.session_id != Some(session_id) }
             update {
                 self.session_id = Some(session_id);
                 self.current_session_llm_identity = None;
@@ -5459,6 +5470,19 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.session_llm_reconfigure_revision_bumped = false;
                 self.session_llm_reconfigure_active_visibility_revision = 0;
             }
+            to Idle
+        }
+
+        // 2b. RegisterSessionIdempotent: re-registering the SAME session
+        // binding is a machine-owned no-op verdict. The shell stages
+        // RegisterSession unconditionally (no "already registered?" probe);
+        // the machine decides whether this is a fresh binding (reset above)
+        // or an idempotent re-registration (no state change here).
+        transition RegisterSessionIdempotent {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RegisterSession { session_id }
+            guard "same_session_binding" { self.session_id == Some(session_id) }
+            update {}
             to Idle
         }
 
@@ -15457,13 +15481,22 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit RecordTerminalOutcome
         }
 
-        // RecordBoundarySeq: record boundary sequence for crash recovery
+        // RecordBoundarySeq: record boundary sequence for crash recovery.
+        // The sequence is MACHINE-derived from the canonical per-run boundary
+        // counter (`live_boundary_context_sequence_by_run`), never accepted
+        // from the shell — there is exactly one producer of the boundary
+        // sequence fact. Runs without a live-boundary counter entry (direct
+        // service turns) record the base sequence 0.
         transition RecordBoundarySeq {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input RecordBoundarySeq { input_id, seq }
+            on input RecordBoundarySeq { input_id, run_id }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             update {
-                self.input_boundary_sequences.insert(input_id, seq);
+                if self.live_boundary_context_sequence_by_run.contains_key(run_id) {
+                    self.input_boundary_sequences.insert(input_id, self.live_boundary_context_sequence_by_run.get_cloned(run_id).get("value"));
+                } else {
+                    self.input_boundary_sequences.insert(input_id, 0);
+                }
             }
             to Idle
             emit RecordBoundarySequence
@@ -15738,6 +15771,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Running)
                 || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retiring)
             }
+            guard "outcome_matches_terminal" { outcome == OperationTerminalOutcomeKind::Completed }
+            guard "payload_present_for_kind" { payload != "" }
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Completed);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
@@ -15776,6 +15811,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Running)
                 || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retiring)
             }
+            guard "outcome_matches_terminal" { outcome == OperationTerminalOutcomeKind::Failed }
+            guard "payload_present_for_kind" { payload != "" }
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Failed);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
@@ -15810,6 +15847,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Running)
                 || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retiring)
             }
+            guard "outcome_matches_terminal" { outcome == OperationTerminalOutcomeKind::Cancelled }
+            guard "payload_present_for_kind" { payload != "" }
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Cancelled);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
@@ -15845,6 +15884,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "from_status_valid" {
                 self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Provisioning)
             }
+            guard "outcome_matches_terminal" { outcome == OperationTerminalOutcomeKind::Aborted }
+            guard "payload_present_for_kind" { payload != "" }
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Aborted);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
@@ -15936,6 +15977,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Running)
                 || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retiring)
             }
+            guard "outcome_matches_terminal" { outcome == OperationTerminalOutcomeKind::Retired }
+            guard "payload_empty_for_retired" { payload == "" }
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Retired);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
@@ -15975,6 +16018,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Running)
                 || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retiring)
             }
+            guard "outcome_matches_terminal" { outcome == OperationTerminalOutcomeKind::Terminated }
+            guard "payload_present_for_kind" { payload != "" }
             update {
                 self.op_statuses.insert(operation_id, OperationStatus::Terminated);
                 self.op_terminal_outcomes.insert(operation_id, outcome);

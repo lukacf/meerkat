@@ -331,14 +331,10 @@ impl HookEngine for DenyNextPreLlmHookEngine {
                 priority: 0,
                 registration_index: 0,
                 decision: Some(decision.clone()),
-                patches: Vec::new(),
-                published_patches: Vec::new(),
                 failure_reason: None,
                 duration_ms: None,
             }],
             decision: Some(decision),
-            patches: Vec::new(),
-            published_patches: Vec::new(),
         })
     }
 }

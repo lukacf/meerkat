@@ -695,6 +695,29 @@
               "data"
             ],
             "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -875,7 +898,7 @@
         "type": "string"
       },
       "InteractionFailureReason": {
-        "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation that\nthe `InteractionFailed` event carries as a fused mirror, never as the\nauthoritative cause.\n\n[`Display`]: std::fmt::Display",
+        "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-carried field.\n\n[`Display`]: std::fmt::Display",
         "oneOf": [
           {
             "description": "The interaction was cancelled before completing.",
@@ -1569,6 +1592,44 @@
           }
         ]
       },
+      "StreamTruncationReason": {
+        "description": "Typed reason a best-effort event stream dropped frames.\n\nThe variant is the typed owner of the truncation cause; the human-readable\nstring is a [`Display`](std::fmt::Display) derivation, never a\nseparately-carried field. `StreamTruncated` is a UI hint — the terminal\nevent remains authoritative.",
+        "oneOf": [
+          {
+            "description": "The per-interaction tap channel was full; streaming frames dropped.",
+            "properties": {
+              "kind": {
+                "const": "channel_full",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A broadcast event stream lagged and skipped events.",
+            "properties": {
+              "dropped": {
+                "description": "Number of events skipped by the lagging receiver.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "stream_lagged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dropped"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "SystemTime": {
         "properties": {
           "nanos_since_epoch": {
@@ -2204,11 +2265,6 @@
       {
         "description": "Hook invocation failed.",
         "properties": {
-          "error": {
-            "default": "",
-            "description": "Display projection of `reason`. Fused mirror retained for consumers\nstill reading a string error.",
-            "type": "string"
-          },
           "hook_id": {
             "$ref": "#/$defs/HookId"
           },
@@ -2217,7 +2273,7 @@
           },
           "reason": {
             "$ref": "#/$defs/HookFailureReason",
-            "description": "Typed failure cause."
+            "description": "Typed failure cause. The human-readable string is the `Display`\nprojection of this reason, never a separately-carried field."
           },
           "type": {
             "const": "hook_failed",
@@ -2680,35 +2736,10 @@
         "type": "object"
       },
       {
-        "description": "Retrying after error",
+        "description": "Retrying after a recoverable LLM failure.\n\nThe typed schedule is the single owner of the retry facts (failure\nkind/provider/diagnostic and plan attempt/delay); display strings are\nderived from it, never carried beside it.",
         "properties": {
-          "attempt": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "delay_ms": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "error": {
-            "type": "string"
-          },
-          "max_attempts": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
           "retry": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/LlmRetrySchedule"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/$defs/LlmRetrySchedule"
           },
           "type": {
             "const": "retrying",
@@ -2717,10 +2748,7 @@
         },
         "required": [
           "type",
-          "attempt",
-          "max_attempts",
-          "error",
-          "delay_ms"
+          "retry"
         ],
         "type": "object"
       },
@@ -2842,17 +2870,12 @@
       {
         "description": "An interaction failed (terminal event for tap subscribers).",
         "properties": {
-          "error": {
-            "default": "",
-            "description": "Display projection of `reason`. Fused mirror retained for consumers\nstill reading a string error.",
-            "type": "string"
-          },
           "interaction_id": {
             "$ref": "#/$defs/InteractionId"
           },
           "reason": {
             "$ref": "#/$defs/InteractionFailureReason",
-            "description": "Typed failure cause."
+            "description": "Typed failure cause. The human-readable string is the `Display`\nprojection of this reason, never a separately-carried field."
           },
           "type": {
             "const": "interaction_failed",
@@ -2870,7 +2893,7 @@
         "description": "Some streaming events were dropped due to channel backpressure.\nBest-effort marker — the terminal event is authoritative.",
         "properties": {
           "reason": {
-            "type": "string"
+            "$ref": "#/$defs/StreamTruncationReason"
           },
           "type": {
             "const": "stream_truncated",
@@ -3550,11 +3573,6 @@
           {
             "description": "Hook invocation failed.",
             "properties": {
-              "error": {
-                "default": "",
-                "description": "Display projection of `reason`. Fused mirror retained for consumers\nstill reading a string error.",
-                "type": "string"
-              },
               "hook_id": {
                 "$ref": "#/$defs/HookId"
               },
@@ -3563,7 +3581,7 @@
               },
               "reason": {
                 "$ref": "#/$defs/HookFailureReason",
-                "description": "Typed failure cause."
+                "description": "Typed failure cause. The human-readable string is the `Display`\nprojection of this reason, never a separately-carried field."
               },
               "type": {
                 "const": "hook_failed",
@@ -4026,35 +4044,10 @@
             "type": "object"
           },
           {
-            "description": "Retrying after error",
+            "description": "Retrying after a recoverable LLM failure.\n\nThe typed schedule is the single owner of the retry facts (failure\nkind/provider/diagnostic and plan attempt/delay); display strings are\nderived from it, never carried beside it.",
             "properties": {
-              "attempt": {
-                "format": "uint32",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "delay_ms": {
-                "format": "uint64",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "error": {
-                "type": "string"
-              },
-              "max_attempts": {
-                "format": "uint32",
-                "minimum": 0,
-                "type": "integer"
-              },
               "retry": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/LlmRetrySchedule"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+                "$ref": "#/$defs/LlmRetrySchedule"
               },
               "type": {
                 "const": "retrying",
@@ -4063,10 +4056,7 @@
             },
             "required": [
               "type",
-              "attempt",
-              "max_attempts",
-              "error",
-              "delay_ms"
+              "retry"
             ],
             "type": "object"
           },
@@ -4188,17 +4178,12 @@
           {
             "description": "An interaction failed (terminal event for tap subscribers).",
             "properties": {
-              "error": {
-                "default": "",
-                "description": "Display projection of `reason`. Fused mirror retained for consumers\nstill reading a string error.",
-                "type": "string"
-              },
               "interaction_id": {
                 "$ref": "#/$defs/InteractionId"
               },
               "reason": {
                 "$ref": "#/$defs/InteractionFailureReason",
-                "description": "Typed failure cause."
+                "description": "Typed failure cause. The human-readable string is the `Display`\nprojection of this reason, never a separately-carried field."
               },
               "type": {
                 "const": "interaction_failed",
@@ -4216,7 +4201,7 @@
             "description": "Some streaming events were dropped due to channel backpressure.\nBest-effort marker — the terminal event is authoritative.",
             "properties": {
               "reason": {
-                "type": "string"
+                "$ref": "#/$defs/StreamTruncationReason"
               },
               "type": {
                 "const": "stream_truncated",
@@ -4620,6 +4605,29 @@
               "data"
             ],
             "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -4800,7 +4808,7 @@
         "type": "string"
       },
       "InteractionFailureReason": {
-        "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation that\nthe `InteractionFailed` event carries as a fused mirror, never as the\nauthoritative cause.\n\n[`Display`]: std::fmt::Display",
+        "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-carried field.\n\n[`Display`]: std::fmt::Display",
         "oneOf": [
           {
             "description": "The interaction was cancelled before completing.",
@@ -5532,6 +5540,44 @@
               "scope",
               "flow_run_id",
               "agent_identity"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "StreamTruncationReason": {
+        "description": "Typed reason a best-effort event stream dropped frames.\n\nThe variant is the typed owner of the truncation cause; the human-readable\nstring is a [`Display`](std::fmt::Display) derivation, never a\nseparately-carried field. `StreamTruncated` is a UI hint — the terminal\nevent remains authoritative.",
+        "oneOf": [
+          {
+            "description": "The per-interaction tap channel was full; streaming frames dropped.",
+            "properties": {
+              "kind": {
+                "const": "channel_full",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A broadcast event stream lagged and skipped events.",
+            "properties": {
+              "dropped": {
+                "description": "Number of events skipped by the lagging receiver.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "stream_lagged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dropped"
             ],
             "type": "object"
           }

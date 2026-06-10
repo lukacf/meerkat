@@ -823,11 +823,18 @@ impl AgentMobToolSurface {
             );
         }
 
-        // Build spawn spec
-        let identity = AgentIdentity::from(
-            args.member_id
-                .unwrap_or_else(|| format!("helper-{}", uuid::Uuid::new_v4())),
-        );
+        // Build spawn spec.
+        // #115 twin: the tool surface must not mint mob-member identity. A
+        // missing `member_id` fails closed with typed invalid-arguments rather
+        // than fabricating a synthetic `helper-{uuid}` on the runtime identity
+        // path — identity allocation is the mob substrate's responsibility.
+        let Some(member_id) = args.member_id else {
+            return Err(ToolError::invalid_arguments(
+                call.name,
+                "delegate requires member_id; the tool surface does not allocate member identity",
+            ));
+        };
+        let identity = AgentIdentity::from(member_id);
         // Implicit mob always uses the "delegate" profile.
         let mut spec = SpawnMemberSpec::new(ProfileName::from("delegate"), identity.clone());
         spec.initial_message = Some(ContentInput::Text(args.task));
@@ -1546,7 +1553,7 @@ fn build_tool_defs_with_profile_support(
              Helpers run asynchronously in autonomous_host mode. After delegating, continue \
              your own work. To check if a helper finished:\n\
              1. Call mob_check_member with the mob_id (returned in the delegate response) and \
-                the member_id you provided (or the auto-generated one from the response).\n\
+                the member_id you provided.\n\
              2. Status will be 'running', 'completed', or 'failed'.\n\
              3. If wired=true, the helper may also send you a message via comms when done.\n\
              Avoid tight polling loops -- check after meaningful intervals or wait for a comms \
@@ -1817,7 +1824,8 @@ fn build_tool_defs_with_profile_support(
 struct DelegateArgs {
     /// The task description/prompt for the helper.
     task: String,
-    /// Unique identifier for this helper (auto-generated if omitted).
+    /// Unique identifier for this helper (required; the tool surface does
+    /// not allocate member identity).
     #[serde(default)]
     member_id: Option<String>,
     /// Extra instructions appended to the helper's system prompt.
@@ -3625,9 +3633,10 @@ mod tests {
             None,
         );
 
-        let delegate_args =
-            serde_json::value::RawValue::from_string(json!({ "task": "say hi" }).to_string())
-                .unwrap();
+        let delegate_args = serde_json::value::RawValue::from_string(
+            json!({ "task": "say hi", "member_id": "helper-bootstrap-test" }).to_string(),
+        )
+        .unwrap();
         let delegate_error = surface
             .dispatch(ToolCallView {
                 id: "delegate-1",

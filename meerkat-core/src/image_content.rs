@@ -4,15 +4,21 @@ use crate::blob::{BlobId, BlobStore, BlobStoreError};
 use crate::session::SessionDeferredTurnState;
 use crate::types::{ContentBlock, ContentInput, ImageData, Message, SystemNoticeBlock};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Policy for durable blobs that are missing at hydration time.
+///
+/// There is intentionally NO `Default`: every hydration seam must choose its
+/// behavior explicitly. Anything that feeds the model (LLM execution,
+/// deferred-turn continuation input) must use `Error` — a missing blob there
+/// is a typed terminal fault, never silently rewritten prompt text.
+/// `HistoricalPlaceholder` is only for read-side transcript/projection
+/// rendering, where an evicted blob must still display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissingBlobBehavior {
     /// A missing durable blob is a hard fault: hydration returns the typed
     /// `BlobStoreError::NotFound` so the caller can terminalize the turn.
     Error,
-    /// A missing durable blob degrades to a textual placeholder. This is the
-    /// safe default for resume/history hydration where a blob may have been
-    /// evicted but the transcript must still render.
-    #[default]
+    /// A missing durable blob degrades to a textual placeholder, for
+    /// read-side rendering of history whose blob may have been evicted.
     HistoricalPlaceholder,
 }
 

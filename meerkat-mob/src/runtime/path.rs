@@ -107,9 +107,10 @@ impl FlowRef {
 /// `Option`-returning resolver collapsed into a single `None`: an unparsable
 /// reference, a missing context root (step/loop iteration not yet produced), a
 /// missing object key / out-of-range array index, and an attempt to walk a path
-/// segment into a non-indexable scalar. Condition evaluation surfaces these as
-/// typed faults instead of silently evaluating false; template rendering may
-/// still choose to treat them as an absent placeholder.
+/// segment into a non-indexable scalar. Condition evaluation and template
+/// rendering surface the structural shapes as typed faults instead of silently
+/// evaluating false / rendering null; only an absent root remains a definite
+/// "not present".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathResolveError {
     /// The reference expression itself could not be parsed into a [`FlowRef`].
@@ -203,14 +204,6 @@ pub fn resolve_context_path<'a>(
         }
     };
     walk_json(base, &flow_ref.json_path, path)
-}
-
-/// Resolve a path to a present value, or `None` if it is absent / structurally
-/// invalid. Thin lossy wrapper over [`resolve_context_path`] for callers (e.g.
-/// template rendering) that legitimately treat an unresolved reference as an
-/// absent placeholder rather than a fault.
-pub fn resolve_context_path_opt<'a>(ctx: &'a FlowContext, path: &str) -> Option<&'a Value> {
-    resolve_context_path(ctx, path).ok()
 }
 
 fn walk_json<'a>(

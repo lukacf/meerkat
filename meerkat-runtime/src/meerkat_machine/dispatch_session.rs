@@ -87,6 +87,46 @@ impl MeerkatMachine {
         Ok(())
     }
 
+    /// Classify a generated-machine rejection of a session lifecycle input.
+    ///
+    /// The machine already made the legality decision (stage-first shape, same
+    /// as `dispatch_user_interrupt`); this only maps the rejection onto the
+    /// typed wire error: a `Destroyed` binding surfaces as the terminal
+    /// [`RuntimeDriverError::Destroyed`], every other rejection keeps its
+    /// reason as `ValidationFailed`. Reading the runtime state here is a
+    /// post-verdict projection read for classification, never a guard.
+    pub(super) async fn classify_session_dsl_rejection(
+        &self,
+        session_id: &SessionId,
+        reason: String,
+    ) -> RuntimeDriverError {
+        if matches!(
+            self.existing_session_runtime_state(session_id).await,
+            Some(RuntimeState::Destroyed)
+        ) {
+            return RuntimeDriverError::Destroyed;
+        }
+        RuntimeDriverError::ValidationFailed { reason }
+    }
+
+    /// Same stage-first classification for lifecycle errors that already carry
+    /// a typed [`RuntimeDriverError`]: a rejection observed on a `Destroyed`
+    /// binding is surfaced as the terminal `Destroyed` truth; everything else
+    /// propagates unchanged.
+    pub(super) async fn classify_session_driver_rejection(
+        &self,
+        session_id: &SessionId,
+        err: RuntimeDriverError,
+    ) -> RuntimeDriverError {
+        if matches!(
+            self.existing_session_runtime_state(session_id).await,
+            Some(RuntimeState::Destroyed)
+        ) {
+            return RuntimeDriverError::Destroyed;
+        }
+        err
+    }
+
     async fn generated_stop_deferred(&self, session_id: &SessionId) -> bool {
         let Ok(authority) = self.session_dsl_authority(session_id).await else {
             return false;
@@ -108,16 +148,6 @@ impl MeerkatMachine {
             ?preparation,
             "MeerkatMachine::prepare_session_runtime_bindings start"
         );
-        let existing_state = self.existing_session_runtime_state(&session_id).await;
-        tracing::debug!(
-            %session_id,
-            ?existing_state,
-            ?preparation,
-            "MeerkatMachine::prepare_session_runtime_bindings observed existing state"
-        );
-        if matches!(existing_state, Some(RuntimeState::Destroyed)) {
-            return Err(RuntimeDriverError::Destroyed);
-        }
         tracing::debug!(
             %session_id,
             ?preparation,
@@ -190,34 +220,29 @@ impl MeerkatMachine {
             )
         };
         let dsl_session_id = crate::meerkat_machine::dsl::SessionId::from_domain(&session_id);
-        let needs_generated_registration = {
-            let authority = dsl_authority_shared
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            authority.state().session_id.as_ref() != Some(&dsl_session_id)
-        };
-        tracing::debug!(
-            %session_id,
-            needs_generated_registration,
-            ?preparation,
-            "MeerkatMachine::prepare_session_runtime_bindings checked generated registration"
-        );
-        if needs_generated_registration
-            && let Err(reason) = self
-                .stage_session_dsl_input(
-                    &session_id,
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
-                        session_id: dsl_session_id.clone(),
-                    },
-                    "RegisterSession",
-                )
-                .await
+        // Stage RegisterSession unconditionally: the generated machine owns
+        // both the idempotence verdict (`RegisterSessionIdempotent` no-ops a
+        // same-binding re-registration) and the Destroyed rejection
+        // (RegisterSession is not declared from Destroyed). No shell probe of
+        // the authority state precedes the staging.
+        if let Err(reason) = self
+            .stage_session_dsl_input(
+                &session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+                    session_id: dsl_session_id,
+                },
+                "RegisterSession",
+            )
+            .await
         {
+            let err = self
+                .classify_session_dsl_rejection(&session_id, reason)
+                .await;
             if inserted_by_call {
                 self.unregister_session_inner_if_epoch(&session_id, &epoch_id)
                     .await;
             }
-            return Err(RuntimeDriverError::ValidationFailed { reason });
+            return Err(err);
         }
         tracing::debug!(
             %session_id,
@@ -386,34 +411,17 @@ impl MeerkatMachine {
     ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
         match command {
             MeerkatMachineCommand::RegisterSession { session_id } => {
-                // Guard: DestroyedShapeInvariant — a destroyed binding must
-                // never be resurrected. A session already resident in memory as
-                // Destroyed cannot be re-registered.
-                if matches!(
-                    self.existing_session_runtime_state(&session_id).await,
-                    Some(RuntimeState::Destroyed)
-                ) {
-                    return Err(RuntimeDriverError::Destroyed);
-                }
                 let sid = session_id.clone();
                 self.register_session_inner(session_id).await?;
-                // Cold re-registration (e.g. after a process restart) of a
-                // session whose DURABLE runtime state is Destroyed RECOVERS the
-                // canonical terminal truth rather than resurrecting it: the
-                // pre-recovery guard above could not observe it (the session was
-                // not yet resident), but `register_session_inner` has now loaded
-                // the Destroyed authority into memory. Staging RegisterSession on
-                // it would (correctly) be rejected by the DSL — RegisterSession
-                // is a resurrection input the DestroyedShapeInvariant forbids
-                // from Destroyed — so skip it: the recovered terminal state is
-                // already the canonical truth this command must preserve.
-                if matches!(
-                    self.existing_session_runtime_state(&sid).await,
-                    Some(RuntimeState::Destroyed)
-                ) {
-                    return Ok(MeerkatMachineCommandResult::Unit);
-                }
-                let _ = self
+                // Stage-first: the generated machine owns the legality verdict.
+                // RegisterSession is not declared from Destroyed (it is a
+                // resurrection input the DestroyedShapeInvariant forbids), so a
+                // resident OR cold-recovered Destroyed binding is rejected by
+                // the machine and classified as the terminal `Destroyed` truth
+                // — never silently skipped, never preflighted in the shell. A
+                // same-binding re-registration is the machine-owned
+                // `RegisterSessionIdempotent` no-op.
+                if let Err(reason) = self
                     .stage_session_dsl_input(
                         &sid,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
@@ -422,7 +430,9 @@ impl MeerkatMachine {
                         "RegisterSession",
                     )
                     .await
-                    .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+                {
+                    return Err(self.classify_session_dsl_rejection(&sid, reason).await);
+                }
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::UnregisterSession { session_id } => {
@@ -440,54 +450,47 @@ impl MeerkatMachine {
                 session_id,
                 intents,
             } => {
-                if matches!(
-                    self.existing_session_runtime_state(&session_id).await,
-                    Some(RuntimeState::Destroyed)
-                ) {
-                    return Err(RuntimeDriverError::Destroyed);
-                }
-
                 let gate = self.session_mutation_gate(&session_id).await;
                 let _gate_guard = match gate {
                     Some(ref g) => Some(g.lock().await),
                     None => None,
                 };
 
-                self.stage_session_dsl_input(
-                    &session_id,
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::SetSilentIntents {
-                        session_id: crate::meerkat_machine::dsl::SessionId::from_domain(
-                            &session_id,
-                        ),
-                        intents: intents.into_iter().collect(),
-                    },
-                    "SetSilentIntents",
-                )
-                .await
-                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+                // Stage-first: SetSilentIntents is not declared from Destroyed,
+                // so the machine rejects it there and the rejection is
+                // classified as the terminal `Destroyed` truth.
+                if let Err(reason) = self
+                    .stage_session_dsl_input(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::SetSilentIntents {
+                            session_id: crate::meerkat_machine::dsl::SessionId::from_domain(
+                                &session_id,
+                            ),
+                            intents: intents.into_iter().collect(),
+                        },
+                        "SetSilentIntents",
+                    )
+                    .await
+                {
+                    return Err(self
+                        .classify_session_dsl_rejection(&session_id, reason)
+                        .await);
+                }
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::CancelAfterBoundary { session_id } => {
-                // Guard: DestroyedShapeInvariant — no mutation on destroyed sessions.
-                if matches!(
-                    self.existing_session_runtime_state(&session_id).await,
-                    Some(RuntimeState::Destroyed)
-                ) {
-                    return Err(RuntimeDriverError::Destroyed);
-                }
-
+                // Stage-first: `cancel_after_boundary_inner` stages the
+                // CancelAfterBoundary DSL input; the machine rejects it on a
+                // Destroyed binding and the inner classification surfaces the
+                // terminal `Destroyed` truth.
                 self.cancel_after_boundary_inner(&session_id).await?;
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::StopRuntimeExecutor { session_id, reason } => {
-                // Guard: DestroyedShapeInvariant — no mutation on destroyed sessions.
-                if matches!(
-                    self.existing_session_runtime_state(&session_id).await,
-                    Some(RuntimeState::Destroyed)
-                ) {
-                    return Err(RuntimeDriverError::Destroyed);
-                }
-
+                // Stage-first: `stop_runtime_executor_inner` stages the
+                // StopRuntimeExecutor DSL input; the machine rejects it on a
+                // Destroyed binding and the inner classification surfaces the
+                // terminal `Destroyed` truth.
                 self.stop_runtime_executor_inner(&session_id, reason)
                     .await?;
                 Ok(MeerkatMachineCommandResult::Unit)
@@ -498,13 +501,6 @@ impl MeerkatMachine {
                 // `SessionService::start_turn`, not the runtime loop. After
                 // that call returns successfully, close the run binding here
                 // through the same machine-owned lifecycle authority.
-                if matches!(
-                    self.existing_session_runtime_state(&session_id).await,
-                    Some(RuntimeState::Destroyed)
-                ) {
-                    return Err(RuntimeDriverError::Destroyed);
-                }
-
                 let gate = self.session_mutation_gate(&session_id).await;
                 let _gate_guard = match gate {
                     Some(ref g) => Some(g.lock().await),
@@ -520,9 +516,18 @@ impl MeerkatMachine {
                         .driver
                         .clone()
                 };
-                {
+                let receipt_result = {
                     let mut driver = driver.lock().await;
-                    machine_commit_service_turn_terminal_receipt(&mut driver).await?;
+                    machine_commit_service_turn_terminal_receipt(&mut driver).await
+                };
+                // The driver-level receipt requires a Running machine-owned
+                // lifecycle (it rejects every other phase, including
+                // Destroyed); classify a rejection observed on a Destroyed
+                // binding as the terminal `Destroyed` truth.
+                if let Err(err) = receipt_result {
+                    return Err(self
+                        .classify_session_driver_rejection(&session_id, err)
+                        .await);
                 }
                 Ok(MeerkatMachineCommandResult::Unit)
             }
@@ -726,12 +731,6 @@ impl MeerkatMachine {
                         state: RuntimeState::Destroyed,
                     });
                 }
-                if matches!(
-                    self.existing_session_runtime_state(&session_id).await,
-                    Some(RuntimeState::Destroyed)
-                ) {
-                    return Err(RuntimeDriverError::Destroyed);
-                }
 
                 let gate = self.session_mutation_gate(&session_id).await;
                 let _gate_guard = match gate {
@@ -757,9 +756,20 @@ impl MeerkatMachine {
                 // input's `update {}` increments and stamps the revision
                 // under the authority lock; the owner reads the minted
                 // value back and projects it onto its own state.
-                let revision = owner
-                    .stage_persistent_filter(filter, witnesses)
-                    .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
+                // Stage-first: the owner fires the StageVisibilityFilter DSL
+                // input, which is not declared from Destroyed — classify a
+                // rejection on a Destroyed binding as the terminal truth.
+                let revision = match owner.stage_persistent_filter(filter, witnesses) {
+                    Ok(revision) => revision,
+                    Err(err) => {
+                        return Err(self
+                            .classify_session_driver_rejection(
+                                &session_id,
+                                RuntimeDriverError::Internal(err.to_string()),
+                            )
+                            .await);
+                    }
+                };
                 Ok(MeerkatMachineCommandResult::VisibilityRevision(revision))
             }
             MeerkatMachineCommand::RequestDeferredTools {
@@ -770,12 +780,6 @@ impl MeerkatMachine {
                     return Err(RuntimeDriverError::NotReady {
                         state: RuntimeState::Destroyed,
                     });
-                }
-                if matches!(
-                    self.existing_session_runtime_state(&session_id).await,
-                    Some(RuntimeState::Destroyed)
-                ) {
-                    return Err(RuntimeDriverError::Destroyed);
                 }
 
                 let gate = self.session_mutation_gate(&session_id).await;
@@ -797,10 +801,20 @@ impl MeerkatMachine {
                 };
                 // Delegate to the owner: `request_deferred_tools` applies one
                 // generated authority-bearing batch input and then mirrors the
-                // accepted machine state into the owner projection.
-                let revision = owner
-                    .request_deferred_tools(authorities)
-                    .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
+                // accepted machine state into the owner projection. Stage-first:
+                // the input is not declared from Destroyed — classify a
+                // rejection on a Destroyed binding as the terminal truth.
+                let revision = match owner.request_deferred_tools(authorities) {
+                    Ok(revision) => revision,
+                    Err(err) => {
+                        return Err(self
+                            .classify_session_driver_rejection(
+                                &session_id,
+                                RuntimeDriverError::Internal(err.to_string()),
+                            )
+                            .await);
+                    }
+                };
                 Ok(MeerkatMachineCommandResult::VisibilityRevision(revision))
             }
             MeerkatMachineCommand::PublishCommittedVisibleSet {
@@ -816,14 +830,6 @@ impl MeerkatMachine {
                     });
                 }
                 drop(sessions);
-
-                // Guard: DestroyedShapeInvariant — no mutation on destroyed sessions.
-                if matches!(
-                    self.existing_session_runtime_state(&session_id).await,
-                    Some(RuntimeState::Destroyed)
-                ) {
-                    return Err(RuntimeDriverError::Destroyed);
-                }
 
                 let gate = self.session_mutation_gate(&session_id).await;
                 let _gate_guard = match gate {
@@ -855,7 +861,7 @@ impl MeerkatMachine {
                 // via `stage_session_dsl_input`, so the hand-written shell
                 // pre-checks that previously duplicated these invariants have
                 // been deleted — the DSL guard is the single source of truth.
-                let previous_dsl_state = self
+                let previous_dsl_state = match self
                     .stage_session_dsl_input(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::PublishCommittedVisibleSet {
@@ -885,7 +891,17 @@ impl MeerkatMachine {
                         "PublishCommittedVisibleSet",
                     )
                     .await
-                    .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+                {
+                    Ok(previous) => previous,
+                    Err(reason) => {
+                        // Stage-first: PublishCommittedVisibleSet is declared
+                        // per non-Destroyed phase only — classify a rejection
+                        // on a Destroyed binding as the terminal truth.
+                        return Err(self
+                            .classify_session_dsl_rejection(&session_id, reason)
+                            .await);
+                    }
+                };
 
                 if let Err(err) = owner.replace_visibility_state(*visibility_state.clone()) {
                     self.restore_session_dsl_state(&session_id, previous_dsl_state)
@@ -912,16 +928,13 @@ impl MeerkatMachine {
                 session_id,
                 executor,
             } => {
-                if matches!(
-                    self.existing_session_runtime_state(&session_id).await,
-                    Some(RuntimeState::Destroyed)
-                ) {
-                    return Err(RuntimeDriverError::Destroyed);
-                }
-                // `inner` creates the session entry (if new), holds the
-                // per-session mutation gate across the generated registration
-                // claim and shell publication, attaches the executor, and
-                // spawns the runtime loop.
+                // Stage-first: `inner` stages the generated executor
+                // registration claim; the machine rejects it on a Destroyed
+                // binding and the inner classification surfaces the terminal
+                // `Destroyed` truth. `inner` creates the session entry (if
+                // new), holds the per-session mutation gate across the
+                // generated registration claim and shell publication, attaches
+                // the executor, and spawns the runtime loop.
                 self.ensure_session_with_executor_inner(session_id, executor)
                     .await?;
                 Ok(MeerkatMachineCommandResult::Unit)

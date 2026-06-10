@@ -2850,17 +2850,11 @@ impl AgentFactory {
             return Ok((client.provider(), None));
         }
         if let Some(client) = build_config.agent_llm_client_override.as_ref() {
-            // `AgentLlmClient::provider()` returns the client's own display
-            // label. `from_name` maps a canonical catalog name to its typed
-            // variant and ANY other label to `Provider::Other` — the typed
-            // "non-catalog provider" variant. That is correct for a
+            // `AgentLlmClient::provider()` is typed at the trait seam: a
             // caller-supplied custom client (the bring-your-own-client
-            // extension point): `Other` is a real typed variant, NOT a
-            // fabricated catalog identity, so this does not mint catalog
-            // provider identity from an arbitrary string. (Failing closed here
-            // would break legitimate custom clients; see the public-facade
-            // AgentBuilder canary.)
-            return Ok((Provider::from_name(client.provider()), None));
+            // extension point) declares its own `Provider` variant directly —
+            // no string parse-back, no minted catalog identity.
+            return Ok((client.provider(), None));
         }
 
         Err(BuildAgentError::UnknownProvider {
@@ -4596,11 +4590,19 @@ impl AgentFactory {
                 if build_config.resume_session.is_some()
                     && let Some(ids) = preload.as_mut()
                 {
+                    // An inventory-listing fault is an infrastructure failure,
+                    // not per-skill absence: collapsing it to an empty set
+                    // would mislabel every persisted skill as NotFound and
+                    // silently strip prompt activation. Fail the build closed.
                     let available: std::collections::HashSet<_> = engine
                         .list_skills(&meerkat_core::skills::SkillFilter::default())
                         .await
                         .map(|descs| descs.into_iter().map(|desc| desc.key).collect())
-                        .unwrap_or_default();
+                        .map_err(|e| {
+                            BuildAgentError::Config(format!(
+                                "failed to list skills while resolving persisted active skills: {e}"
+                            ))
+                        })?;
                     let requested_ids = std::mem::take(ids);
                     let mut retained = std::collections::HashSet::new();
                     // Track dropped persisted skills as typed (key, reason) pairs
@@ -4814,20 +4816,16 @@ impl AgentFactory {
         // chain (CompositeDispatcher → ToolGateway → McpRouterAdapter), so
         // this drains background MCP connection results regardless of how
         // many dispatchers are composed.
+        //
+        // The contract is unconditional: `wait_for_mcp` blocks until every
+        // server finishes connecting (success or failure). Connection-timeout
+        // policy is owned by the per-server `connect_timeout_secs` in the MCP
+        // client — the factory does NOT own a second, hard-coded timeout that
+        // silently releases the first turn while servers are still pending.
         if build_config.wait_for_mcp {
-            let timeout = std::time::Duration::from_secs(60);
-            let started = meerkat_core::time_compat::Instant::now();
             loop {
                 let update = tools.poll_external_updates().await;
                 if update.pending.is_empty() {
-                    break;
-                }
-                if started.elapsed() >= timeout {
-                    tracing::warn!(
-                        "wait_for_mcp timed out after {}s with {} server(s) still pending",
-                        timeout.as_secs(),
-                        update.pending.len()
-                    );
                     break;
                 }
                 #[cfg(not(target_arch = "wasm32"))]
@@ -5043,21 +5041,19 @@ impl AgentFactory {
                     // through usage_instructions strings.
                 }
                 Err(e) => {
-                    // An explicit memory Enable must deliver memory_search or
-                    // fail closed; an Inherit-default build degrades silently.
-                    if matches!(build_config.override_memory, ToolCategoryOverride::Enable) {
-                        return Err(BuildAgentError::CapabilityUnavailable {
-                            capability: "memory",
-                            reason: format!(
-                                "failed to open HnswMemoryStore at {}: {e}",
-                                memory_dir.display()
-                            ),
-                        });
-                    }
-                    tracing::warn!(
-                        "Failed to open HnswMemoryStore at {}: {e}",
-                        memory_dir.display()
-                    );
+                    // Memory is only effective when enabled explicitly — by a
+                    // per-build `Enable` override or by the surface-level
+                    // factory enable (which carries config truth). An enabled
+                    // capability must deliver memory_search or fail closed;
+                    // building an agent without the promised tool would
+                    // silently misreport the session's capability truth.
+                    return Err(BuildAgentError::CapabilityUnavailable {
+                        capability: "memory",
+                        reason: format!(
+                            "failed to open HnswMemoryStore at {}: {e}",
+                            memory_dir.display()
+                        ),
+                    });
                 }
             }
         }
@@ -6753,7 +6749,7 @@ mod tests {
                 remote_model: "gemma4:e2b".to_string(),
                 display_name: "Gemma 4 E2B".into(),
                 family: "gemma-4".to_string(),
-                tier: meerkat_models::ModelTier::Supported,
+                tier: meerkat_core::model_profile::catalog::ModelTier::Supported,
                 context_window: Some(128_000),
                 max_output_tokens: Some(8_192),
                 vision: true,
@@ -7197,8 +7193,10 @@ mod tests {
             requested_witnesses: [(
                 "deferred_existing".to_string(),
                 meerkat_core::ToolVisibilityWitness {
-                    stable_owner_key: Some("owner:deferred_existing".to_string()),
-                    last_seen_provenance: None,
+                    last_seen_provenance: Some(meerkat_core::ToolProvenance {
+                        kind: meerkat_core::ToolSourceKind::Callback,
+                        source_id: "deferred_existing".into(),
+                    }),
                 },
             )]
             .into_iter()
@@ -7207,15 +7205,19 @@ mod tests {
                 (
                     "active_secret".to_string(),
                     meerkat_core::ToolVisibilityWitness {
-                        stable_owner_key: Some("owner:active_secret".to_string()),
-                        last_seen_provenance: None,
+                        last_seen_provenance: Some(meerkat_core::ToolProvenance {
+                            kind: meerkat_core::ToolSourceKind::Callback,
+                            source_id: "active_secret".into(),
+                        }),
                     },
                 ),
                 (
                     "staged_visible".to_string(),
                     meerkat_core::ToolVisibilityWitness {
-                        stable_owner_key: Some("owner:staged_visible".to_string()),
-                        last_seen_provenance: None,
+                        last_seen_provenance: Some(meerkat_core::ToolProvenance {
+                            kind: meerkat_core::ToolSourceKind::Callback,
+                            source_id: "staged_visible".into(),
+                        }),
                     },
                 ),
             ]
@@ -8787,7 +8789,7 @@ mod tests {
                 remote_model: "gemma4:e2b".to_string(),
                 display_name: "Gemma 4 E2B".into(),
                 family: "gemma-4".to_string(),
-                tier: meerkat_models::ModelTier::Supported,
+                tier: meerkat_core::model_profile::catalog::ModelTier::Supported,
                 context_window: Some(128_000),
                 max_output_tokens: Some(8_192),
                 vision: true,
@@ -9195,7 +9197,10 @@ mod prompt_tests {
                         ToolCatalogEntry::session_deferred(
                             Arc::clone(tool),
                             true,
-                            "callback:registered".to_string(),
+                            meerkat_core::ToolProvenance {
+                                kind: meerkat_core::ToolSourceKind::Callback,
+                                source_id: "registered".into(),
+                            },
                         )
                     } else {
                         ToolCatalogEntry::session_inline(Arc::clone(tool), true)

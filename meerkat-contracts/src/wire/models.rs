@@ -135,7 +135,7 @@ pub struct ProviderCatalog {
 ///
 /// This is **not** a pure compiled-in snapshot. Surfaces build it from the
 /// config-backed `ModelRegistry`, which combines the compiled-in
-/// `meerkat-models` catalog with any config-declared self-hosted aliases
+/// `meerkat_core::model_profile` catalog with any config-declared self-hosted aliases
 /// (entries that carry a [`CatalogModelEntry::server_id`]). Two responses for
 /// the same binary can therefore differ when the active config declares
 /// different self-hosted models.

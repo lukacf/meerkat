@@ -189,6 +189,7 @@ mod tests {
                     handshake_failed: true,
                 },
                 quarantined: vec![],
+                collection_fault: None,
             }),
         };
 

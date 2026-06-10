@@ -9,7 +9,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Phase enum: `Active | Paused | Deleted`
 - `schedule_id`: `ScheduleId`
 - `revision`: `u64`
-- `trigger_key`: `TargetBindingId`
+- `trigger_key`: `TriggerKey`
 - `target_binding_key`: `TargetBindingId`
 - `misfire_policy`: `MisfirePolicy`
 - `overlap_policy`: `OverlapPolicy`
@@ -21,8 +21,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `superseded_ack_ids`: `Set<OccurrenceId>`
 
 ## Inputs
-- `Create`(schedule_id: ScheduleId, trigger_key: TargetBindingId, target_binding_key: TargetBindingId, misfire_policy: MisfirePolicy, overlap_policy: OverlapPolicy, missing_target_policy: MissingTargetPolicy, planning_horizon_days: Option<u64>, planning_horizon_occurrences: Option<u64>)
-- `Revise`(trigger_key: TargetBindingId, target_binding_key: TargetBindingId, misfire_policy: MisfirePolicy, overlap_policy: OverlapPolicy, missing_target_policy: MissingTargetPolicy, planning_horizon_days: u64, planning_horizon_occurrences: u64, at_utc_ms: u64)
+- `Create`(schedule_id: ScheduleId, trigger_key: TriggerKey, target_binding_key: TargetBindingId, misfire_policy: MisfirePolicy, overlap_policy: OverlapPolicy, missing_target_policy: MissingTargetPolicy, planning_horizon_days: Option<u64>, planning_horizon_occurrences: Option<u64>)
+- `Revise`(trigger_key: TriggerKey, target_binding_key: TargetBindingId, misfire_policy: MisfirePolicy, overlap_policy: OverlapPolicy, missing_target_policy: MissingTargetPolicy, planning_horizon_days: u64, planning_horizon_occurrences: u64, at_utc_ms: u64)
 - `UpdatePlanningConfig`(planning_horizon_days: u64, planning_horizon_occurrences: u64)
 - `RecordPlanningWindow`(planning_cursor_utc_ms: u64, next_occurrence_ordinal: u64)
 - `SyncTargetSnapshot`(target_binding_key: TargetBindingId)

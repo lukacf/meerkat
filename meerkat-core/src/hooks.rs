@@ -4,7 +4,6 @@ use crate::error::AgentError;
 use crate::event::{AgentErrorClass, AgentErrorReport, ToolCallArguments};
 use crate::types::{ContentBlock, ContentInput, SessionId, StopReason, ToolResult, Usage};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -196,37 +195,6 @@ impl HookDecision {
     }
 }
 
-/// Retired hook patch surface.
-///
-/// Hook patches previously allowed hooks to rewrite provider parameters,
-/// assistant text, tool arguments/results, and final run text. Those semantic
-/// mutations are no longer hook-authorized; this enum intentionally has no
-/// variants, so legacy patch payloads fail deserialization instead of being
-/// silently ignored or applied.
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "patch_type", rename_all = "snake_case")]
-pub enum HookPatch {}
-
-/// Monotonic patch revision metadata.
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(transparent)]
-pub struct HookRevision(pub u64);
-
-/// Retired envelope for legacy async patch publication.
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub struct HookPatchEnvelope {
-    pub revision: HookRevision,
-    pub hook_id: HookId,
-    pub point: HookPoint,
-    pub patch: HookPatch,
-    #[cfg_attr(feature = "schema", schemars(with = "String"))]
-    pub published_at: DateTime<Utc>,
-}
-
 /// LLM request view exposed to hooks.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -348,7 +316,15 @@ impl HookToolResult {
 }
 
 /// Full invocation payload passed into the hook engine.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+///
+/// `prompt_input` and `error_report` are the typed owners of the prompt and
+/// failure facts. The wire envelope additionally serializes `prompt` and
+/// `error` strings for external (command/HTTP) hook consumers; those fields
+/// are pure serialize-only derivations of the typed owners (precedent:
+/// [`HookToolResult`]'s `content`, row #331). They are never stored fields,
+/// never deserialize back as authority, and in-process policy code must steer
+/// on the typed owners.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct HookInvocation {
     pub point: HookPoint,
@@ -357,16 +333,10 @@ pub struct HookInvocation {
     pub turn_number: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_input: Option<ContentInput>,
-    /// Text-only projection of `prompt_input` for legacy hooks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_report: Option<AgentErrorReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_class: Option<AgentErrorClass>,
-    /// Display projection of `error_report.message` for legacy hooks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_request: Option<HookLlmRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -377,6 +347,68 @@ pub struct HookInvocation {
     pub tool_result: Option<HookToolResult>,
 }
 
+impl Serialize for HookInvocation {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        // `prompt` and `error` are serialize-only text projections derived
+        // from the typed owners at serialization time for external hook
+        // consumers; they are never stored and never deserialized back.
+        let prompt = self.prompt_input.as_ref().map(ContentInput::text_content);
+        let error = self
+            .error_report
+            .as_ref()
+            .map(|report| report.message.clone());
+        let len = 2
+            + usize::from(self.turn_number.is_some())
+            + usize::from(self.prompt_input.is_some())
+            + usize::from(prompt.is_some())
+            + usize::from(self.error_report.is_some())
+            + usize::from(self.error_class.is_some())
+            + usize::from(error.is_some())
+            + usize::from(self.llm_request.is_some())
+            + usize::from(self.llm_response.is_some())
+            + usize::from(self.tool_call.is_some())
+            + usize::from(self.tool_result.is_some());
+        let mut state = serializer.serialize_struct("HookInvocation", len)?;
+        state.serialize_field("point", &self.point)?;
+        state.serialize_field("session_id", &self.session_id)?;
+        if let Some(turn_number) = &self.turn_number {
+            state.serialize_field("turn_number", turn_number)?;
+        }
+        if let Some(prompt_input) = &self.prompt_input {
+            state.serialize_field("prompt_input", prompt_input)?;
+        }
+        if let Some(prompt) = &prompt {
+            state.serialize_field("prompt", prompt)?;
+        }
+        if let Some(error_report) = &self.error_report {
+            state.serialize_field("error_report", error_report)?;
+        }
+        if let Some(error_class) = &self.error_class {
+            state.serialize_field("error_class", error_class)?;
+        }
+        if let Some(error) = &error {
+            state.serialize_field("error", error)?;
+        }
+        if let Some(llm_request) = &self.llm_request {
+            state.serialize_field("llm_request", llm_request)?;
+        }
+        if let Some(llm_response) = &self.llm_response {
+            state.serialize_field("llm_response", llm_response)?;
+        }
+        if let Some(tool_call) = &self.tool_call {
+            state.serialize_field("tool_call", tool_call)?;
+        }
+        if let Some(tool_result) = &self.tool_result {
+            state.serialize_field("tool_result", tool_result)?;
+        }
+        state.end()
+    }
+}
+
 impl HookInvocation {
     pub fn new(point: HookPoint, session_id: SessionId) -> Self {
         Self {
@@ -384,10 +416,8 @@ impl HookInvocation {
             session_id,
             turn_number: None,
             prompt_input: None,
-            prompt: None,
             error_report: None,
             error_class: None,
-            error: None,
             llm_request: None,
             llm_response: None,
             tool_call: None,
@@ -396,10 +426,8 @@ impl HookInvocation {
     }
 
     pub fn run_started(session_id: SessionId, prompt_input: ContentInput) -> Self {
-        let prompt = prompt_input.text_content();
         Self {
             prompt_input: Some(prompt_input),
-            prompt: Some(prompt),
             ..Self::new(HookPoint::RunStarted, session_id)
         }
     }
@@ -415,7 +443,6 @@ impl HookInvocation {
         let error_report = AgentErrorReport::from_agent_error(error);
         Self {
             error_class: Some(error_report.class),
-            error: Some(error_report.message.clone()),
             error_report: Some(error_report),
             ..Self::new(HookPoint::RunFailed, session_id)
         }
@@ -432,10 +459,6 @@ pub struct HookOutcome {
     pub registration_index: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<HookDecision>,
-    #[serde(default)]
-    pub patches: Vec<HookPatch>,
-    #[serde(default)]
-    pub published_patches: Vec<HookPatchEnvelope>,
     /// Typed failure cause for this hook outcome, when the hook did not succeed.
     /// The string form is derived via [`HookOutcome::failure_message`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -462,10 +485,6 @@ pub struct HookExecutionReport {
     pub outcomes: Vec<HookOutcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<HookDecision>,
-    #[serde(default)]
-    pub patches: Vec<HookPatch>,
-    #[serde(default)]
-    pub published_patches: Vec<HookPatchEnvelope>,
 }
 
 impl HookExecutionReport {
@@ -550,14 +569,6 @@ pub trait HookEngine: Send + Sync {
         invocation: HookInvocation,
         overrides: Option<&crate::config::HookRunOverrides>,
     ) -> Result<HookExecutionReport, HookEngineError>;
-
-    /// Drain retired background patch publications for one session.
-    async fn drain_published_patches(
-        &self,
-        _session_id: &SessionId,
-    ) -> Result<Vec<HookPatchEnvelope>, HookEngineError> {
-        Ok(Vec::new())
-    }
 }
 
 #[cfg(test)]
@@ -814,39 +825,33 @@ mod tests {
     }
 
     #[test]
-    fn legacy_semantic_hook_patches_are_rejected_on_deserialize() {
-        let legacy_payloads = [
-            serde_json::json!({
-                "patch_type": "llm_request",
-                "max_tokens": 1,
-                "temperature": 0.1,
-                "provider_params": {"reasoning_effort": "low"}
-            }),
-            serde_json::json!({
-                "patch_type": "assistant_text",
-                "text": "patched"
-            }),
-            serde_json::json!({
-                "patch_type": "tool_args",
-                "args": {"value": "patched"}
-            }),
-            serde_json::json!({
-                "patch_type": "tool_result",
-                "content": "patched",
-                "is_error": false
-            }),
-            serde_json::json!({
-                "patch_type": "run_result",
-                "text": "patched"
-            }),
-        ];
+    fn hook_invocation_prompt_and_error_are_serialize_only_projections() {
+        let mut invocation = HookInvocation::run_started(
+            SessionId::new(),
+            ContentInput::Text("typed prompt".to_string()),
+        );
+        invocation.error_report = Some(AgentErrorReport {
+            class: AgentErrorClass::Llm,
+            reason: None,
+            message: "typed failure".to_string(),
+        });
 
-        for value in legacy_payloads {
-            let result = serde_json::from_value::<HookPatch>(value.clone());
-            assert!(
-                result.is_err(),
-                "legacy semantic hook patch payload must be rejected: {value}"
-            );
-        }
+        let json = serde_json::to_value(&invocation).expect("serialize");
+        // The wire envelope derives `prompt`/`error` from the typed owners at
+        // serialization time for external hook consumers.
+        assert_eq!(json["prompt"], serde_json::json!("typed prompt"));
+        assert_eq!(json["error"], serde_json::json!("typed failure"));
+
+        // Deserializing a payload with divergent string mirrors must NOT
+        // resurrect them as authority — only the typed owners survive.
+        let mut forged = json;
+        forged["prompt"] = serde_json::json!("forged prompt");
+        forged["error"] = serde_json::json!("forged failure");
+        let decoded: HookInvocation = serde_json::from_value(forged).expect("deserialize");
+        assert_eq!(decoded, invocation);
+        assert_eq!(
+            serde_json::to_value(&decoded).expect("re-serialize")["prompt"],
+            serde_json::json!("typed prompt")
+        );
     }
 }

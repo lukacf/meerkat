@@ -2801,7 +2801,6 @@ dependencies = [
  "meerkat-llm-core",
  "meerkat-mcp",
  "meerkat-memory",
- "meerkat-models",
  "meerkat-openai",
  "meerkat-providers",
  "meerkat-runtime",
@@ -3078,7 +3077,6 @@ dependencies = [
  "meerkat-machine-schema",
  "meerkat-mob",
  "meerkat-mob-mcp",
- "meerkat-models",
  "meerkat-providers",
  "meerkat-rpc",
  "meerkat-runtime",
@@ -3258,6 +3256,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -3365,15 +3364,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "meerkat-models"
-version = "0.7.0-alpha.0"
-dependencies = [
- "meerkat-core",
- "schemars 1.2.1",
- "serde_json",
-]
-
-[[package]]
 name = "meerkat-openai"
 version = "0.7.0-alpha.0"
 dependencies = [
@@ -3397,6 +3387,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite 0.26.2",
  "tokio_with_wasm",
  "tracing",
 ]
@@ -3468,7 +3459,6 @@ dependencies = [
  "meerkat-live",
  "meerkat-mob",
  "meerkat-mob-mcp",
- "meerkat-models",
  "meerkat-providers",
  "meerkat-runtime",
  "meerkat-store",
@@ -3660,7 +3650,6 @@ dependencies = [
  "meerkat-mob",
  "meerkat-mob-mcp",
  "meerkat-mob-pack",
- "meerkat-models",
  "meerkat-providers",
  "meerkat-session",
  "meerkat-store",

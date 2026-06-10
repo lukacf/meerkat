@@ -976,24 +976,23 @@ export interface ScheduleToolCallRequest {
 // schema's closed enums and re-exported above (see the `./generated/types.js`
 // import). They are no longer hand-declared here (dogma row #256).
 
-export type WorkGraphEdgeKind =
-  | "blocks"
-  | "parent"
-  | "related"
-  | "supersedes"
-  | "derived_from";
-
-export type WorkGraphEventKind =
-  | "created"
-  | "updated"
-  | "claimed"
-  | "released"
-  | "blocked"
-  | "closed"
-  | "linked"
-  | "evidence_added"
-  | "attention_created"
-  | "attention_updated";
+// Generated wire types for the workgraph read APIs — the signature-parity
+// gate enforces that client wrappers consume these generated shapes
+// (re-exported verbatim), not hand-rolled mirrors.
+export type {
+  ReadyWorkFilter,
+  WorkEdge,
+  WorkEdgeKind,
+  WorkGraphEvent,
+  WorkGraphEventFilter,
+  WorkGraphEventKind,
+  WorkGraphEventsResponse,
+  WorkGraphIdParams,
+  WorkGraphItemsResponse,
+  WorkGraphSnapshot,
+  WorkGraphSnapshotFilter,
+  WorkItemFilter,
+} from "./generated/types.js";
 
 export type WorkGraphOwnerKind = "principal" | "agent" | "session" | "mob" | "label";
 
@@ -1056,29 +1055,6 @@ export interface WorkItem {
   readonly evidenceRefs: readonly WorkEvidenceRef[];
 }
 
-export interface WorkGraphEdge {
-  readonly realmId: string;
-  readonly namespace: string;
-  readonly kind: WorkGraphEdgeKind;
-  readonly fromId: string;
-  readonly toId: string;
-  readonly createdAt: string;
-}
-
-export interface WorkGraphEvent {
-  readonly seq?: number;
-  readonly realmId: string;
-  readonly namespace: string;
-  readonly itemId?: string;
-  readonly kind: WorkGraphEventKind;
-  readonly at: string;
-  readonly payload?: unknown;
-}
-
-export interface WorkItemListResult {
-  readonly items: readonly WorkItem[];
-}
-
 export interface WorkGraphGoalResult {
   readonly item: WorkItem;
   readonly attention: WorkAttentionBinding;
@@ -1114,46 +1090,9 @@ export interface WorkGraphAttentionListResult {
   readonly attention: readonly WorkAttentionBinding[];
 }
 
-export interface WorkGraphEventsResult {
-  readonly events: readonly WorkGraphEvent[];
-}
-
-export interface WorkGraphSnapshot {
-  readonly realmId: string;
-  readonly namespace?: string;
-  readonly allNamespaces: boolean;
-  readonly capturedAt: string;
-  readonly eventHighWaterMark?: number;
-  readonly items: readonly WorkItem[];
-  readonly edges: readonly WorkGraphEdge[];
-  readonly attention: readonly WorkAttentionBinding[];
-  readonly readyItemIds: readonly string[];
-}
-
 export interface WorkGraphItemLookupOptions {
   readonly realmId?: string;
   readonly namespace?: string;
-}
-
-export interface WorkGraphItemFilter extends WorkGraphItemLookupOptions {
-  readonly allNamespaces?: boolean;
-  readonly statuses?: readonly WorkGraphStatus[];
-  readonly labels?: readonly string[];
-  readonly includeTerminal?: boolean;
-  readonly limit?: number;
-}
-
-export interface WorkGraphReadyFilter extends WorkGraphItemLookupOptions {
-  readonly labels?: readonly string[];
-  readonly limit?: number;
-}
-
-export interface WorkGraphSnapshotFilter extends WorkGraphItemFilter {}
-
-export interface WorkGraphEventFilter extends WorkGraphItemLookupOptions {
-  readonly allNamespaces?: boolean;
-  readonly afterSeq?: number;
-  readonly limit?: number;
 }
 
 /** Options for creating a new session. */

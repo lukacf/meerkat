@@ -168,7 +168,6 @@ impl ArchiveRuntimeMobState for RpcMobStateAdapter {
 // the existing call-sites and tests resolve the same symbols.
 use meerkat::session_runtime::live_orchestration::{
     LiveConfigPropagationReport, build_live_projection_snapshot_for_runtime,
-    extract_system_prompt_from_seed_messages_runtime,
     live_channel_requires_close_for_identity_change, realtime_projection_messages,
     realtime_projection_root_system_message, realtime_projection_runtime_system_context,
 };
@@ -187,21 +186,32 @@ impl RuntimePreAdmissionRestore for SessionRuntime {
     }
 }
 
-fn workgraph_default_realm_id(persistence: &PersistenceBundle) -> String {
+/// The WorkGraph store scope must come from the typed realm owner (the realm
+/// manifest) — never an invented `"default"` slug. `None` means this
+/// persistence bundle carries no realm identity, in which case no default
+/// WorkGraph dispatcher is composed and the factory's fail-closed rule
+/// (WorkGraph enabled with no dispatcher and no realm identity is a build
+/// error) applies.
+fn workgraph_default_realm_id(persistence: &PersistenceBundle) -> Option<String> {
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(manifest) = persistence.manifest() {
-        return manifest.realm.as_str().to_owned();
+        return Some(manifest.realm.as_str().to_owned());
     }
 
     let _ = persistence;
-    "default".to_string()
+    None
 }
 
 fn set_default_workgraph_tools(
     builder: &FactoryAgentBuilder,
     store: Arc<dyn meerkat::WorkGraphStore>,
-    default_realm_id: String,
+    default_realm_id: Option<String>,
 ) {
+    let Some(default_realm_id) = default_realm_id else {
+        // No realm identity: composing a dispatcher under an invented scope
+        // would mint surface-owned store truth. Leave the default slot empty.
+        return;
+    };
     let service = meerkat::WorkGraphService::with_scope(
         store,
         default_realm_id,
@@ -1192,7 +1202,7 @@ fn unsupported_model_capability_rpc_error(
 }
 
 fn profile_to_capability_surface(
-    profile: &meerkat_models::profile::ModelProfile,
+    profile: &meerkat_core::model_profile::ModelProfile,
 ) -> SessionLlmCapabilitySurface {
     SessionLlmCapabilitySurface {
         supports_temperature: profile.supports_temperature,
@@ -3168,16 +3178,26 @@ impl SessionRuntime {
         self.schedule_service.clone()
     }
 
-    pub fn workgraph_service(&self) -> meerkat::WorkGraphService {
+    /// Build the realm-scoped WorkGraph service.
+    ///
+    /// The store scope comes from the typed realm owner — never an invented
+    /// `"default"` slug. A runtime without realm identity has no WorkGraph
+    /// scope and fails closed.
+    pub fn workgraph_service(&self) -> Result<meerkat::WorkGraphService, RpcError> {
         let realm_id = self
             .realm_id()
             .map(|realm_id| realm_id.to_string())
-            .unwrap_or_else(|| "default".to_string());
-        meerkat::WorkGraphService::with_scope(
+            .ok_or_else(|| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: "WorkGraph requires a realm-scoped runtime; no realm identity is active"
+                    .to_string(),
+                data: None,
+            })?;
+        Ok(meerkat::WorkGraphService::with_scope(
             self.workgraph_store.clone(),
             realm_id,
             meerkat::WorkNamespace::default(),
-        )
+        ))
     }
 
     pub fn blob_store(&self) -> Arc<dyn meerkat_core::BlobStore> {
@@ -3267,38 +3287,56 @@ impl SessionRuntime {
         Some(profile_to_capability_surface(&profile).to_wire_resolved())
     }
 
+    /// Resolve the wire capability surface for a materialized session.
+    ///
+    /// The session-owned resolved capability surface (recorded by the
+    /// machine at build/hot-swap) is the only truth source here. `Ok(None)`
+    /// is honest absence — no resolved surface recorded — and a machine
+    /// fault propagates as a typed `RpcError`. The registry projection is
+    /// never re-derived as a fallback: that would open a divergence window
+    /// between the advertised capabilities and the session's actual
+    /// resolution. (Staged sessions advertise the identity-derived
+    /// projection explicitly via `wire_resolved_capabilities_for_identity`
+    /// before a resolution exists.)
     async fn wire_resolved_capabilities_for_session(
         &self,
         session_id: &SessionId,
-        identity: &SessionLlmIdentity,
-    ) -> Option<meerkat_contracts::WireResolvedModelCapabilities> {
-        if let Ok(Some(surface)) = self
+    ) -> Result<Option<meerkat_contracts::WireResolvedModelCapabilities>, RpcError> {
+        match self
             .runtime_adapter
             .resolved_session_llm_capabilities(session_id)
             .await
         {
-            return Some(surface.to_wire_resolved());
+            Ok(surface) => Ok(surface.map(|surface| surface.to_wire_resolved())),
+            // An absent or terminal runtime (archived/destroyed/never bound)
+            // has no machine-resolved capability surface; `None` is the honest
+            // absence answer, mirroring the staged-session pre-resolution
+            // path. Reads of archived sessions remain available.
+            Err(
+                meerkat_runtime::RuntimeDriverError::NotFound { .. }
+                | meerkat_runtime::RuntimeDriverError::Destroyed
+                | meerkat_runtime::RuntimeDriverError::NotReady { .. },
+            ) => Ok(None),
+            // Any other fault is a genuine control-plane failure and must not
+            // be laundered into a capability-free success.
+            Err(err) => Err(RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!(
+                    "failed to read resolved llm capabilities for session {session_id}: {err}"
+                ),
+                data: None,
+            }),
         }
-
-        self.wire_resolved_capabilities_for_identity(identity).await
     }
 
     async fn attach_resolved_capabilities_to_wire_info(
         &self,
         info: &mut meerkat_contracts::WireSessionInfo,
-    ) {
-        let provider = meerkat_core::Provider::parse_strict(&info.provider)
-            .unwrap_or(meerkat_core::Provider::Other);
-        let identity = SessionLlmIdentity {
-            model: info.model.clone(),
-            provider,
-            self_hosted_server_id: None,
-            provider_params: None,
-            auth_binding: None,
-        };
+    ) -> Result<(), RpcError> {
         info.resolved_capabilities = self
-            .wire_resolved_capabilities_for_session(&info.session_id, &identity)
-            .await;
+            .wire_resolved_capabilities_for_session(&info.session_id)
+            .await?;
+        Ok(())
     }
 
     async fn llm_identity_from_pending_build(
@@ -3954,14 +3992,6 @@ impl SessionRuntime {
         session_id: &SessionId,
         primitive: &RunPrimitive,
     ) -> bool {
-        if primitive
-            .turn_metadata()
-            .and_then(|metadata| metadata.handling_mode)
-            == Some(meerkat_core::types::HandlingMode::Steer)
-        {
-            return true;
-        }
-
         let contributing_input_ids = primitive.contributing_input_ids();
         if contributing_input_ids.is_empty() {
             return false;
@@ -3969,7 +3999,9 @@ impl SessionRuntime {
         // #338: the admission transition emits the typed `live_interrupt_required`
         // verdict, carried end-to-end on the per-input
         // `MeerkatAdmittedInputSnapshot`. The shell reads the machine-owned fact
-        // directly instead of re-scanning `handling_mode == Steer`.
+        // exclusively — there is no `handling_mode == Steer` re-derivation, not
+        // even from the primitive's own turn metadata (that projection carries
+        // the queue-normalized execution mode, not live-interrupt intent).
         self.runtime_adapter
             .meerkat_machine_spine_snapshot(session_id)
             .await
@@ -4117,13 +4149,15 @@ impl SessionRuntime {
         self: &Arc<Self>,
         session_id: &meerkat_core::types::SessionId,
         comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
-    ) {
+    ) -> Result<(), RpcError> {
         // Only store the comms context — don't create an executor yet.
         // The executor is created lazily on first turn/start, and it needs
         // the per-connection notification sink (not the startup noop sink).
         self.runtime_adapter
             .update_peer_ingress_context(session_id, true, Some(comms_runtime))
-            .await;
+            .await
+            .map_err(runtime_driver_error_to_rpc)?;
+        Ok(())
     }
 
     /// Wire an external comms runtime and eagerly attach the runtime executor.
@@ -4141,7 +4175,8 @@ impl SessionRuntime {
         self.ensure_runtime_executor(session_id).await?;
         self.runtime_adapter
             .update_peer_ingress_context(session_id, true, Some(comms_runtime))
-            .await;
+            .await
+            .map_err(runtime_driver_error_to_rpc)?;
         Ok(())
     }
 
@@ -4192,7 +4227,8 @@ impl SessionRuntime {
         if let Some(comms_rt) = comms_rt {
             self.runtime_adapter
                 .update_peer_ingress_context(session_id, true, Some(comms_rt))
-                .await;
+                .await
+                .map_err(runtime_driver_error_to_rpc)?;
         }
         Ok(())
     }
@@ -4572,7 +4608,8 @@ impl SessionRuntime {
                     if comms_rt.is_some() || peer_ingress_enabled {
                         self.runtime_adapter
                             .update_peer_ingress_context(session_id, peer_ingress_enabled, comms_rt)
-                            .await;
+                            .await
+                            .map_err(runtime_driver_error_to_rpc)?;
                     }
                 }
             }
@@ -5934,7 +5971,8 @@ impl SessionRuntime {
                 if !owner.is_mob_owned() {
                     self.runtime_adapter
                         .update_peer_ingress_context(session_id, keep_alive, comms_rt)
-                        .await;
+                        .await
+                        .map_err(runtime_driver_error_to_rpc)?;
                 }
             }
         }
@@ -6208,13 +6246,23 @@ impl SessionRuntime {
                         let comms_rt = service.comms_runtime(&session_id).await;
                         let peer_ingress_enabled =
                             keep_alive || runtime_adapter.session_has_comms(&session_id).await;
-                        runtime_adapter
+                        if let Err(error) = runtime_adapter
                             .update_peer_ingress_context(
                                 &session_id,
                                 peer_ingress_enabled,
                                 comms_rt,
                             )
-                            .await;
+                            .await
+                        {
+                            // The refresh callback seam is fire-and-forget by
+                            // construction; surface the typed fault instead of
+                            // silently dropping it.
+                            tracing::warn!(
+                                %session_id,
+                                %error,
+                                "comms context refresh after staged promotion failed"
+                            );
+                        }
                     }
                 })
             })
@@ -6929,7 +6977,16 @@ impl SessionRuntime {
                 .remove(session_id);
 
             #[cfg(feature = "comms")]
-            self.runtime_adapter.abort_comms_drain(session_id).await;
+            if let Err(error) = self.runtime_adapter.abort_comms_drain(session_id).await {
+                // The primary archive outcome owns `result`; the drain-abort
+                // fault is surfaced as a typed warning rather than overwriting
+                // the committed archive verdict.
+                tracing::warn!(
+                    %session_id,
+                    %error,
+                    "failed to abort comms drain during session archive cleanup"
+                );
+            }
         }
 
         result
@@ -7031,7 +7088,7 @@ impl SessionRuntime {
     ) -> Result<Option<meerkat_contracts::WireSessionInfo>, RpcError> {
         // Check pending sessions first.
         if let Some(info) = self.staged_sessions.project_info(session_id).await {
-            let mut wire = meerkat_contracts::WireSessionInfo {
+            let wire = meerkat_contracts::WireSessionInfo {
                 session_id: session_id.clone(),
                 session_ref: None,
                 created_at: info.created_at_secs,
@@ -7046,8 +7103,9 @@ impl SessionRuntime {
                     .await,
                 labels: info.labels,
             };
-            self.attach_resolved_capabilities_to_wire_info(&mut wire)
-                .await;
+            // Staged sessions have no machine-resolved capability surface
+            // yet; the identity-derived projection set above is the honest
+            // pre-resolution advertisement.
             return Ok(Some(wire));
         }
 
@@ -7066,7 +7124,7 @@ impl SessionRuntime {
                         Ok(view) => {
                             let mut info = view.state.into();
                             self.attach_resolved_capabilities_to_wire_info(&mut info)
-                                .await;
+                                .await?;
                             return Ok(Some(info));
                         }
                         // The session was archived between list() and read():
@@ -7100,7 +7158,7 @@ impl SessionRuntime {
                     labels: wire.labels,
                 };
                 self.attach_resolved_capabilities_to_wire_info(&mut info)
-                    .await;
+                    .await?;
                 return Ok(Some(info));
             }
         }
@@ -7112,7 +7170,7 @@ impl SessionRuntime {
             Ok(view) => {
                 let mut info = view.state.into();
                 self.attach_resolved_capabilities_to_wire_info(&mut info)
-                    .await;
+                    .await?;
                 Ok(Some(info))
             }
             Err(SessionError::NotFound { .. }) => Ok(None),
@@ -7244,9 +7302,9 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
         query: SessionHistoryQuery,
-    ) -> Option<meerkat_contracts::WireSessionHistory> {
+    ) -> Result<Option<meerkat_contracts::WireSessionHistory>, RpcError> {
         if self.staged_sessions.contains(session_id).await {
-            return Some(meerkat_contracts::WireSessionHistory {
+            return Ok(Some(meerkat_contracts::WireSessionHistory {
                 session_id: session_id.clone(),
                 session_ref: None,
                 message_count: 0,
@@ -7254,14 +7312,17 @@ impl SessionRuntime {
                 limit: query.limit,
                 has_more: false,
                 messages: Vec::new(),
-            });
+            }));
         }
 
-        self.service
-            .read_history(session_id, query)
-            .await
-            .ok()
-            .map(Into::into)
+        // A genuine not-found is Ok(None); any other store failure is a
+        // control-plane fault and propagates as a typed RpcError — collapsing
+        // it would launder a store fault into a "session not found".
+        match self.service.read_history(session_id, query).await {
+            Ok(history) => Ok(Some(history.into())),
+            Err(SessionError::NotFound { .. }) => Ok(None),
+            Err(other) => Err(session_error_to_rpc(other)),
+        }
     }
 
     /// Read a retained transcript revision through the authoritative session service.
@@ -7474,9 +7535,9 @@ impl SessionRuntime {
                             0,
                             None,
                             meerkat_core::event::AgentEvent::StreamTruncated {
-                                reason: format!(
-                                    "pending session event stream lagged; {dropped} events dropped (terminal event remains authoritative)"
-                                ),
+                                reason: meerkat_core::event::StreamTruncationReason::StreamLagged {
+                                    dropped,
+                                },
                             },
                         );
                         Some((marker, (rx, drop_guard, stream_session_id)))
@@ -7621,7 +7682,9 @@ impl SessionRuntime {
 
         // Abort all comms drain tasks.
         #[cfg(feature = "comms")]
-        self.runtime_adapter.abort_comms_drains().await;
+        if let Err(error) = self.runtime_adapter.abort_comms_drains().await {
+            tracing::warn!(%error, "failed to abort comms drains during runtime shutdown");
+        }
     }
 
     #[cfg(feature = "mcp")]
@@ -8324,52 +8387,6 @@ mod tests {
             .status
     }
 
-    #[test]
-    fn extract_system_prompt_runtime_returns_model_projection_for_first_system_notice() {
-        // R10 (review-3 follow-up): the runtime-side extractor must accept a
-        // leading `Message::SystemNotice` because
-        // `realtime_projection_messages` (lines 435-444 in this file) only
-        // rewrites `seed_messages[0]` when the root-system helper returns
-        // `Some`; sessions whose only lead is a runtime-injected
-        // `SystemNotice` (e.g. an idle pre-prompt session with an
-        // typed MCP-pending notice) would otherwise see refresh `session.update`
-        // wipe the provider's instructions to empty. We surface
-        // `model_projection_text()` to match the provider-visible projection
-        // without reviving prefix prose as transcript contract.
-        use meerkat_core::types::{Message, SystemNoticeKind, SystemNoticeMessage, UserMessage};
-
-        let notice =
-            SystemNoticeMessage::new(SystemNoticeKind::McpPending, "stub server connecting");
-        let expected = notice.model_projection_text();
-        let messages = vec![
-            Message::SystemNotice(notice),
-            Message::User(UserMessage::text("hi".to_string())),
-        ];
-        assert_eq!(
-            super::extract_system_prompt_from_seed_messages_runtime(&messages),
-            Some(expected),
-        );
-
-        // Also pin the `System` arm and the empty/non-system arms so the
-        // contract is fully covered from the runtime side.
-        use meerkat_core::types::SystemMessage;
-        let sys = vec![Message::System(SystemMessage::new("you are a meerkat"))];
-        assert_eq!(
-            super::extract_system_prompt_from_seed_messages_runtime(&sys),
-            Some("you are a meerkat".to_string()),
-        );
-        let user_only = vec![Message::User(UserMessage::text("hi"))];
-        assert_eq!(
-            super::extract_system_prompt_from_seed_messages_runtime(&user_only),
-            None,
-        );
-        let empty: Vec<Message> = Vec::new();
-        assert_eq!(
-            super::extract_system_prompt_from_seed_messages_runtime(&empty),
-            None,
-        );
-    }
-
     #[cfg(feature = "comms")]
     fn install_ephemeral_peer_request_response_authority(
         runtime: &Arc<meerkat::CommsRuntime>,
@@ -8968,7 +8985,7 @@ mod tests {
                 .await
         }
 
-        fn provider(&self) -> &'static str {
+        fn provider(&self) -> meerkat_core::Provider {
             self.inner.provider()
         }
 
@@ -11208,7 +11225,8 @@ mod tests {
             .expect("session comms runtime");
         runtime
             .enable_comms_drain(&session_id, operator_comms.clone())
-            .await;
+            .await
+            .expect("enable comms drain");
 
         let sender = Arc::new(
             meerkat::CommsRuntime::inproc_only("analyst-drain-test").expect("sender comms runtime"),
@@ -11532,7 +11550,8 @@ mod tests {
         runtime
             .runtime_adapter()
             .maybe_spawn_mob_comms_drain(&session_id, comms_runtime, mob_id)
-            .await;
+            .await
+            .expect("spawn mob comms drain");
 
         let mut durable = runtime
             .service
@@ -12418,7 +12437,7 @@ mod tests {
                 remote_model: "gemma4:e2b".to_string(),
                 display_name: "Gemma 4 E2B".to_string(),
                 family: "gemma-4".to_string(),
-                tier: meerkat_models::ModelTier::Supported,
+                tier: meerkat_core::model_profile::catalog::ModelTier::Supported,
                 context_window: Some(128_000),
                 max_output_tokens: Some(8_192),
                 vision: true,
@@ -19586,8 +19605,12 @@ mod tests {
         match &first.payload {
             AgentEvent::StreamTruncated { reason } => {
                 assert!(
-                    reason.contains("lagged"),
-                    "StreamTruncated reason should describe the lag: {reason}"
+                    matches!(
+                        reason,
+                        meerkat_core::event::StreamTruncationReason::StreamLagged { dropped }
+                            if *dropped > 0
+                    ),
+                    "StreamTruncated should carry the typed lag reason: {reason:?}"
                 );
             }
             other => panic!("expected StreamTruncated marker on lag, got {other:?}"),
@@ -21446,14 +21469,18 @@ mod tests {
         let mob_id = meerkat_runtime::meerkat_machine::dsl::MobId::from("mob-w2g-integration");
         adapter
             .maybe_spawn_mob_comms_drain(&session_id, Arc::clone(&mob_comms), mob_id.clone())
-            .await;
+            .await
+            .expect("spawn mob comms drain");
 
         // Simulate the s71 regression path: session-runtime code tries to
         // reconfigure peer-ingress with a different comms runtime. Before
         // W2-G this would silently swap the mob-owned drain. With W2-G the
         // DSL's `AttachSessionIngress` guard rejects the transition.
         let session_comms: Arc<dyn CommsRuntimeTrait> = Arc::new(StubCommsRuntime);
-        adapter
+        // W2-G: the generated guard may reject the session-owned reconfigure
+        // outright (typed verdict) or admit it as a no-op; either way the
+        // mob-owned drain identity below must be unchanged.
+        let _ = adapter
             .update_peer_ingress_context(&session_id, true, Some(Arc::clone(&session_comms)))
             .await;
 

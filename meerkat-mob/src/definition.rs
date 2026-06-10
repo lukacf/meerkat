@@ -397,6 +397,11 @@ pub struct TopologySpec {
 pub struct SupervisorSpec {
     pub role: ProfileName,
     pub escalation_threshold: u32,
+    /// Escalation turn timeout in milliseconds. Declared flow policy — the
+    /// typed owner of the escalation deadline — rather than a hard-coded
+    /// runtime constant. Absent means the runtime default applies.
+    #[serde(default)]
+    pub escalation_turn_timeout_ms: Option<u64>,
 }
 
 /// Runtime guardrails for flow execution.

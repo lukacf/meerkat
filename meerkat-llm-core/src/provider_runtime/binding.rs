@@ -107,8 +107,7 @@ impl NormalizedAuthMethod {
     ///
     /// This is the single typed projection consumed by every surface
     /// (RPC/REST/CLI) that holds a resolved `AuthProfile`, replacing the
-    /// per-surface inline `provider -> *AuthMethod::parse` copies and the
-    /// provider-agnostic `persisted_auth_mode_for_auth_method` string shim.
+    /// per-surface inline `provider -> *AuthMethod::parse` copies.
     pub fn from_auth_profile(auth_profile: &meerkat_core::AuthProfile) -> Option<Self> {
         let raw = auth_profile.auth_method.as_str();
         match auth_profile.provider {
@@ -125,9 +124,7 @@ impl NormalizedAuthMethod {
     /// hold no persisted secret.
     ///
     /// Delegates to the per-provider `*AuthMethod::persisted_auth_mode`, which
-    /// is the typed owner of the auth-method -> persisted-mode mapping. This is
-    /// the canonical replacement for the string-keyed
-    /// `persisted_auth_mode_for_auth_method` decision table.
+    /// is the typed owner of the auth-method -> persisted-mode mapping.
     pub fn persisted_auth_mode(self) -> Option<meerkat_core::auth::token_store::PersistedAuthMode> {
         match self {
             Self::OpenAi(method) => method.persisted_auth_mode(),

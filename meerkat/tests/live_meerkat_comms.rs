@@ -157,8 +157,8 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
         Ok(LlmStreamResult::new(blocks, stop_reason, usage))
     }
 
-    fn provider(&self) -> &'static str {
-        self.client.provider().as_str()
+    fn provider(&self) -> meerkat_core::Provider {
+        self.client.provider()
     }
 
     fn model(&self) -> &str {

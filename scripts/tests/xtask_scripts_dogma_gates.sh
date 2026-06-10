@@ -81,6 +81,21 @@ if printf '%s' "$edge_dogma" | grep -Fq 'wasm_changed=true'; then
 else
   bad "buildbuddy-edge-changes did not mark_all on a dogma doc"
 fi
+# Governance baselines are governance truth: a baseline-TOML-only diff must
+# escalate both the machine-authority lane and the edge lanes.
+for baseline in xtask/rmat-baseline.toml xtask/ownership-baseline.toml; do
+  if scripts/machine-authority-changed -- "$baseline" >/dev/null; then
+    ok "machine-authority-changed exits 0 (changed) for $baseline"
+  else
+    bad "machine-authority-changed did not flag $baseline"
+  fi
+  edge_baseline=$(printf '%s\n' "$baseline" | scripts/buildbuddy-edge-changes --paths-from-stdin)
+  if printf '%s' "$edge_baseline" | grep -Fq 'changed=true'; then
+    ok "buildbuddy-edge-changes marks $baseline as changed"
+  else
+    bad "buildbuddy-edge-changes ignored $baseline"
+  fi
+done
 
 # ── #296: governance/spec changes route formal/governance checks ─────────────
 echo "#296 agent gates route governance/spec changes:"

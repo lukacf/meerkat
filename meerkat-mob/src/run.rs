@@ -6462,6 +6462,7 @@ mod tests {
         definition.supervisor = Some(SupervisorSpec {
             role: ProfileName::from("lead"),
             escalation_threshold: 3,
+            escalation_turn_timeout_ms: None,
         });
         definition.limits = Some(LimitsSpec {
             max_flow_duration_ms: Some(60_000),

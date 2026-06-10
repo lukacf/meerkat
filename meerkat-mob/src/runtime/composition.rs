@@ -812,6 +812,67 @@ mod tests {
         );
     }
 
+    /// Schema-enumerated lift-completeness gate: the set of effect variants
+    /// liftable by [`MobSeamEffect::routed`] must EQUAL the set of effect
+    /// routes the `meerkat_mob_seam` composition schema declares from the
+    /// `mob` producer. If the composition gains a new routed effect variant
+    /// without a lift arm, the fail-closed `None` wildcard in `routed` would
+    /// silently drop it on the in-process drain path — this gate turns that
+    /// silent completeness window into a hard test failure.
+    #[test]
+    fn lift_covers_every_schema_declared_mob_effect_route() {
+        use std::collections::BTreeSet;
+
+        let schema = meerkat_machine_schema::catalog::meerkat_mob_seam_composition();
+        let declared: BTreeSet<String> = schema
+            .routes
+            .iter()
+            .filter(|route| route.from_machine == mob_producer_instance_id())
+            .map(|route| route.effect_variant.as_str().to_string())
+            .collect();
+
+        let liftable_bodies = vec![
+            mob_dsl::MobMachineEffect::RequestRuntimeBinding {
+                agent_identity: mob_dsl::AgentIdentity::from("agent"),
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
+                fence_token: mob_dsl::FenceToken(1),
+                generation: Some(mob_dsl::Generation(0)),
+                session_id: mob_dsl::SessionId::from("session-1"),
+            },
+            mob_dsl::MobMachineEffect::RequestRuntimeIngress {
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
+                fence_token: mob_dsl::FenceToken(1),
+                generation: Some(mob_dsl::Generation(0)),
+                session_id: mob_dsl::SessionId::from("session-1"),
+                work_id: mob_dsl::WorkId::from("work-1"),
+                origin: mob_dsl::WorkOrigin::External,
+            },
+            mob_dsl::MobMachineEffect::RequestRuntimeRetire {
+                session_id: mob_dsl::SessionId::from("session-1"),
+            },
+            mob_dsl::MobMachineEffect::RequestRuntimeDestroy {
+                session_id: mob_dsl::SessionId::from("session-1"),
+            },
+        ];
+        let liftable: BTreeSet<String> = liftable_bodies
+            .into_iter()
+            .map(|body| {
+                MobSeamEffect::routed(body)
+                    .expect("declared routed body must lift")
+                    .variant_id()
+                    .as_str()
+                    .to_string()
+            })
+            .collect();
+
+        assert_eq!(
+            declared, liftable,
+            "every schema-declared mob effect route must have a lift arm in \
+             MobSeamEffect::routed (and vice versa); update the constructor \
+             AND this gate together when the composition changes"
+        );
+    }
+
     #[tokio::test]
     async fn standalone_binding_skips_dispatch_without_error() {
         let binding: MobCompositionBinding = CompositionBinding::Standalone;

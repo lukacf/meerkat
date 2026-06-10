@@ -680,6 +680,7 @@ mod tests {
                     handshake_failed: false,
                 },
                 quarantined: vec![],
+                collection_fault: None,
             }),
         };
         let wire: CreateSessionResult = run.into();

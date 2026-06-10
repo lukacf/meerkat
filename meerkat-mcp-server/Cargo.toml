@@ -42,6 +42,7 @@ tracing = { workspace = true }
 schemars = { workspace = true }
 dirs = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
+uuid = { workspace = true }
 
 [features]
 default = ["comms", "mob", "schedule", "workgraph"]

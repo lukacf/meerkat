@@ -1195,21 +1195,20 @@ pub fn capability_base_filter_for_image_tool_results(image_tool_results: bool) -
 }
 
 /// Persisted witness for a durable tool-visibility name.
+///
+/// `last_seen_provenance` is the single typed identity owner. The formatted
+/// `stable_owner_key` string is a read-only projection derived on demand via
+/// [`crate::tool_catalog::stable_owner_key_from_provenance`], never stored
+/// beside the owner.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct ToolVisibilityWitness {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stable_owner_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen_provenance: Option<ToolProvenance>,
 }
 
 impl ToolVisibilityWitness {
     pub fn has_identity_witness(&self) -> bool {
-        self.stable_owner_key.is_some() || self.last_seen_provenance.is_some()
-    }
-
-    pub fn has_provenance_identity_witness(&self) -> bool {
         self.last_seen_provenance.is_some()
     }
 }

@@ -301,6 +301,34 @@ impl std::fmt::Display for TargetBindingId {
         f.write_str(&self.0)
     }
 }
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct TriggerKey(pub String);
+impl From<String> for TriggerKey {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for TriggerKey {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for TriggerKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -319,7 +347,7 @@ pub struct State {
     pub phase: Phase,
     pub schedule_id: ScheduleId,
     pub revision: u64,
-    pub trigger_key: TargetBindingId,
+    pub trigger_key: TriggerKey,
     pub target_binding_key: TargetBindingId,
     pub misfire_policy: MisfirePolicy,
     pub overlap_policy: OverlapPolicy,
@@ -342,7 +370,7 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Create {
         pub schedule_id: ScheduleId,
-        pub trigger_key: TargetBindingId,
+        pub trigger_key: TriggerKey,
         pub target_binding_key: TargetBindingId,
         pub misfire_policy: MisfirePolicy,
         pub overlap_policy: OverlapPolicy,
@@ -352,7 +380,7 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Revise {
-        pub trigger_key: TargetBindingId,
+        pub trigger_key: TriggerKey,
         pub target_binding_key: TargetBindingId,
         pub misfire_policy: MisfirePolicy,
         pub overlap_policy: OverlapPolicy,
@@ -560,7 +588,7 @@ pub fn initial_state() -> State {
         phase: Phase::Active,
         schedule_id: ScheduleId("schedule-0".to_string()),
         revision: 1,
-        trigger_key: TargetBindingId("trigger-0".to_string()),
+        trigger_key: TriggerKey("trigger-0".to_string()),
         target_binding_key: TargetBindingId("target-0".to_string()),
         misfire_policy: MisfirePolicy::Skip,
         overlap_policy: OverlapPolicy::SkipIfRunning,

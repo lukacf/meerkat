@@ -10,7 +10,7 @@ machine! {
             schedule_id: ScheduleId,
             lifecycle_phase: ScheduleLifecycleState,
             revision: u64,
-            trigger_key: TargetBindingId,
+            trigger_key: TriggerKey,
             target_binding_key: TargetBindingId,
             misfire_policy: Enum<MisfirePolicy>,
             overlap_policy: Enum<OverlapPolicy>,
@@ -53,7 +53,7 @@ machine! {
         input ScheduleLifecycleInput {
             Create {
                 schedule_id: ScheduleId,
-                trigger_key: TargetBindingId,
+                trigger_key: TriggerKey,
                 target_binding_key: TargetBindingId,
                 misfire_policy: Enum<MisfirePolicy>,
                 overlap_policy: Enum<OverlapPolicy>,
@@ -62,7 +62,7 @@ machine! {
                 planning_horizon_occurrences: Option<u64>,
             },
             Revise {
-                trigger_key: TargetBindingId,
+                trigger_key: TriggerKey,
                 target_binding_key: TargetBindingId,
                 misfire_policy: Enum<MisfirePolicy>,
                 overlap_policy: Enum<OverlapPolicy>,
@@ -387,12 +387,26 @@ impl<T: Into<String>> From<T> for ScheduleId {
     }
 }
 
-// Opaque trigger / target-binding handle. Replaces the prior raw `String`
-// `trigger_key`/`target_binding_key` schedule state fields so the schedule
-// authority owns a typed identifier rather than ferrying a bare string. The
-// typed atom (`NamedTypeBinding::string("TargetBindingId")`) registered in
-// `dsl/mod.rs` keeps schema emission consistent across the schedule and
-// occurrence machines that share this binding key.
+// Opaque trigger handle. Replaces the prior reuse of `TargetBindingId` for
+// the `trigger_key` field: trigger identity and target-binding identity are
+// DIFFERENT semantic facts, and sharing one newtype across them re-creates
+// the index-confusion the newtypes exist to prevent. The typed atom
+// (`NamedTypeBinding::string("TriggerKey")`) is registered in `dsl/mod.rs`
+// for both the schedule and occurrence machines.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct TriggerKey(pub String);
+impl<T: Into<String>> From<T> for TriggerKey {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+// Opaque target-binding handle. Replaces the prior raw `String`
+// `target_binding_key` schedule state field so the schedule authority owns a
+// typed identifier rather than ferrying a bare string. The typed atom
+// (`NamedTypeBinding::string("TargetBindingId")`) registered in `dsl/mod.rs`
+// keeps schema emission consistent across the schedule and occurrence
+// machines that share this binding key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct TargetBindingId(pub String);
 impl<T: Into<String>> From<T> for TargetBindingId {

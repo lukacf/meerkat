@@ -511,13 +511,18 @@ pub async fn handle_public_tools_call(
             Ok(json!({ "mob_id": mob_id }))
         }
         "meerkat_mob_list" => {
+            // Status is projected through the typed wire contract
+            // (`WireMobLifecycleStatus`), never via Display-string folklore.
             let mobs = state
                 .mob_list()
                 .await
                 .into_iter()
-                .map(|(mob_id, status)| json!({"mob_id": mob_id, "status": status.to_string()}))
+                .map(|(mob_id, status)| meerkat_contracts::MobStatusResult {
+                    mob_id: mob_id.to_string(),
+                    status: crate::wire_mob_lifecycle_status(status),
+                })
                 .collect::<Vec<_>>();
-            Ok(json!({ "mobs": mobs }))
+            Ok(json!(meerkat_contracts::MobListResult { mobs }))
         }
         "meerkat_mob_status" => {
             let input: MeerkatMobIdInput = parse_args(arguments)?;
@@ -526,7 +531,10 @@ pub async fn handle_public_tools_call(
                 .mob_status(&mob_id)
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            Ok(json!({ "mob_id": mob_id, "status": status.to_string() }))
+            Ok(json!(meerkat_contracts::MobStatusResult {
+                mob_id: mob_id.to_string(),
+                status: crate::wire_mob_lifecycle_status(status),
+            }))
         }
         "meerkat_mob_lifecycle" => {
             let input: MobLifecycleParams = parse_args(arguments)?;

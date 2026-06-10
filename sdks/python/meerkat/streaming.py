@@ -30,8 +30,7 @@ class _StdoutDispatcher:
         self._pending_responses: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._event_queues: dict[str, asyncio.Queue[dict[str, Any] | None]] = {}
         self._stream_queues: dict[str, asyncio.Queue[dict[str, Any] | None]] = {}
-        self._pending_stream_queue: asyncio.Queue[dict[str, Any] | None] | None = None
-        self._pending_stream_request_id: int | None = None
+        self._pending_stream_queues: dict[int, asyncio.Queue[dict[str, Any] | None]] = {}
         self._unmatched_buffer: dict[str, list[dict[str, Any]]] = {}
         self._unmatched_stream_buffer: dict[str, list[dict[str, Any]]] = {}
         self._stream_terminal: dict[str, dict[str, Any]] = {}
@@ -84,16 +83,16 @@ class _StdoutDispatcher:
         return self._stream_terminal.get(stream_id)
 
     def subscribe_pending_stream(self, request_id: int) -> asyncio.Queue[dict[str, Any] | None]:
-        if self._pending_stream_queue is not None:
-            raise RuntimeError("Only one pending stream at a time")
-        self._pending_stream_queue = asyncio.Queue()
-        self._pending_stream_request_id = request_id
-        return self._pending_stream_queue
+        # Per-request_id subscription: concurrent streaming creates each get
+        # their own pending queue keyed by request id, so a second create is
+        # not rejected by a client-local singleton invariant. Admission and
+        # rejection belong to the server.
+        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        self._pending_stream_queues[request_id] = queue
+        return queue
 
-    def unsubscribe_pending_stream(self) -> None:
-        self._pending_stream_queue = None
-        self._pending_stream_request_id = None
-        self._unmatched_buffer.clear()
+    def unsubscribe_pending_stream(self, request_id: int) -> None:
+        self._pending_stream_queues.pop(request_id, None)
 
     def set_tool_handler(self, handler: Any) -> None:
         """Set the tool registry for handling callback tool requests."""
@@ -137,6 +136,11 @@ class _StdoutDispatcher:
                     if data.get("error"):
                         err = data["error"]
                         raw_message = err.get("message", "Unknown error")
+                        # The server's typed error projection is `error.data`
+                        # ({code, message, details}). `error.message` is
+                        # presentation text only — it is never parsed as JSON
+                        # to recover typed fields, so SDK error semantics
+                        # cannot depend on message-string folklore.
                         nested_code = None
                         nested_message = None
                         nested_details = err.get("data")
@@ -147,15 +151,6 @@ class _StdoutDispatcher:
                                 "details",
                                 nested_details.get("reason", nested_details),
                             )
-                        if isinstance(raw_message, str):
-                            try:
-                                parsed = json.loads(raw_message)
-                            except json.JSONDecodeError:
-                                parsed = None
-                            if isinstance(parsed, dict):
-                                nested_code = parsed.get("code")
-                                nested_message = parsed.get("message")
-                                nested_details = parsed.get("details", parsed.get("reason", nested_details))
                         future.set_exception(
                             MeerkatError(
                                 str(nested_code or err.get("code", "UNKNOWN")),
@@ -163,21 +158,26 @@ class _StdoutDispatcher:
                                 nested_details,
                             )
                         )
+                        # The server rejected this request: tear down only this
+                        # request's pending stream so its consumer fails closed,
+                        # leaving concurrent pending streams untouched.
+                        rejected_queue = self._pending_stream_queues.pop(request_id, None)
+                        if rejected_queue is not None:
+                            rejected_queue.put_nowait(None)
                     else:
                         result = data.get("result", {})
                         future.set_result(result)
-                        if (
-                            request_id == self._pending_stream_request_id
-                            and self._pending_stream_queue is not None
-                        ):
+                        pending_queue = self._pending_stream_queues.pop(request_id, None)
+                        if pending_queue is not None:
                             sid = result.get("session_id", "")
                             if sid:
+                                # Drain only this session's pre-binding buffer —
+                                # events are buffered by session_id, so
+                                # concurrent pending streams do not
+                                # cross-deliver.
                                 for evt in self._unmatched_buffer.pop(sid, []):
-                                    await self._pending_stream_queue.put(evt)
-                                self._event_queues[sid] = self._pending_stream_queue
-                            self._pending_stream_queue = None
-                            self._pending_stream_request_id = None
-                            self._unmatched_buffer.clear()
+                                    await pending_queue.put(evt)
+                                self._event_queues[sid] = pending_queue
             elif "method" in data:
                 method = str(data.get("method", ""))
                 params = data.get("params", {})
@@ -216,7 +216,11 @@ class _StdoutDispatcher:
                 queue = self._event_queues.get(session_id)
                 if queue is not None:
                     await queue.put(event)
-                elif self._pending_stream_queue is not None:
+                elif self._pending_stream_queues:
+                    # A stream is pending but its session_id is not yet bound.
+                    # Buffer by session_id; the response that binds this
+                    # session_id drains exactly this buffer into the matching
+                    # request's queue.
                     self._unmatched_buffer.setdefault(session_id, []).append(event)
 
     async def _handle_callback_request(self, data: dict[str, Any]) -> None:
@@ -269,11 +273,10 @@ class _StdoutDispatcher:
         self._unmatched_stream_buffer.clear()
         self._unmatched_stream_end.clear()
         self._stream_terminal.clear()
-        if self._pending_stream_queue is not None:
-            self._pending_stream_queue.put_nowait(None)
-            self._pending_stream_queue = None
-            self._pending_stream_request_id = None
-            self._unmatched_buffer.clear()
+        for queue in self._pending_stream_queues.values():
+            queue.put_nowait(None)
+        self._pending_stream_queues.clear()
+        self._unmatched_buffer.clear()
 
 
 class EventStream:
@@ -303,6 +306,7 @@ class EventStream:
         parse_result: Callable[[dict[str, Any]], RunResult],
         pending_send: tuple[Any, bytes] | None = None,
         session: Session | None = None,
+        pending_request_id: int | None = None,
     ):
         self._session_id = session_id
         self._event_queue = event_queue
@@ -312,6 +316,7 @@ class EventStream:
         self._result: RunResult | None = None
         self._pending_send = pending_send
         self._session = session
+        self._pending_request_id = pending_request_id
 
     @property
     def session_id(self) -> str:
@@ -338,8 +343,8 @@ class EventStream:
     async def __aexit__(self, *_exc: object) -> None:
         if self._session_id:
             self._dispatcher.unsubscribe_events(self._session_id)
-        else:
-            self._dispatcher.unsubscribe_pending_stream()
+        elif self._pending_request_id is not None:
+            self._dispatcher.unsubscribe_pending_stream(self._pending_request_id)
 
     def __aiter__(self) -> AsyncIterator[Event]:
         return self._iter_events()
@@ -438,10 +443,14 @@ class EventSubscription:
     async def close(self) -> None:
         if self._closed:
             return
+        # Stream-close authority is server-owned: await the RPC close BEFORE
+        # surfacing closed terminal state locally. A rejected close propagates
+        # the typed error and leaves the subscription open (retryable); only
+        # an accepted close flips ``_closed`` and ends the local queue.
+        await self._close_remote(self._stream_id)
         self._closed = True
         self._dispatcher.unsubscribe_stream(self._stream_id)
         self._event_queue.put_nowait(None)
-        await self._close_remote(self._stream_id)
 
     def __aiter__(self) -> AsyncIterator[Any]:
         return self._iter_events()

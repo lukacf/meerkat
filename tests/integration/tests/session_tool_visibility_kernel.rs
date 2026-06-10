@@ -76,28 +76,22 @@ fn owner_witness(owner_key: &str) -> KernelValue {
         .to_string();
     named_value(
         "ToolVisibilityWitness",
-        KernelValue::Map(BTreeMap::from([
-            (
-                string_key("stable_owner_key"),
-                KernelValue::String(owner_key.to_string()),
+        KernelValue::Map(BTreeMap::from([(
+            string_key("last_seen_provenance"),
+            named_value(
+                "ToolProvenance",
+                KernelValue::Map(BTreeMap::from([
+                    (
+                        string_key("kind"),
+                        named_string("ToolSourceKind", "Callback"),
+                    ),
+                    (
+                        string_key("source_id"),
+                        KernelValue::String(provenance_source),
+                    ),
+                ])),
             ),
-            (
-                string_key("last_seen_provenance"),
-                named_value(
-                    "ToolProvenance",
-                    KernelValue::Map(BTreeMap::from([
-                        (
-                            string_key("kind"),
-                            named_string("ToolSourceKind", "Callback"),
-                        ),
-                        (
-                            string_key("source_id"),
-                            KernelValue::String(provenance_source),
-                        ),
-                    ])),
-                ),
-            ),
-        ])),
+        )])),
     )
 }
 

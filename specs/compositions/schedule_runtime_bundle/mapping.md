@@ -23,11 +23,11 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 
 ### Routes
 - `revision_supersede_enters_occurrence_authority`
-  - anchors: `schedule_driver`
+  - anchors: (unclaimed)
   - scenarios: `runtime-revision-supersede`
 - `occurrence_supersede_ack_returns_to_schedule`
-  - anchors: `schedule_driver`
-  - scenarios: `runtime-revision-supersede`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Scheduler Rules
 - `(none)`

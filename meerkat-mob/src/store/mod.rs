@@ -909,6 +909,59 @@ pub trait MobRunStore: Send + Sync {
         next_flow_state: &flow_run::State,
         authority_inputs: Vec<mob_dsl::MobMachineInput>,
     ) -> Result<bool, MobStoreError>;
+
+    /// Atomically commit a terminal run snapshot AND append its terminal mob
+    /// event, so terminal run-status truth and terminal-event truth cannot
+    /// split.
+    ///
+    /// Returns `Ok(Some(event))` when the snapshot CAS won and the terminal
+    /// event is committed, `Ok(None)` when the CAS lost (nothing appended).
+    ///
+    /// The default implementation validates the terminal event fail-closed
+    /// BEFORE any mutation, then commits through the two underlying seams; it
+    /// is only used by non-durable (in-memory / test-double) stores where a
+    /// process death loses both sides together. The SQLite store overrides
+    /// this with a true single-transaction commit that has no divergence
+    /// window.
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_run_snapshot_and_append_terminal_event_with_authority(
+        &self,
+        run_id: &RunId,
+        expected_status: MobRunStatus,
+        expected_flow_state: &flow_run::State,
+        next_status: MobRunStatus,
+        next_flow_state: &flow_run::State,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+        events: &dyn MobEventStore,
+        terminal_event: NewMobEvent,
+    ) -> Result<Option<MobEvent>, MobStoreError> {
+        validate_mob_event_write_authority(&terminal_event.kind)?;
+        if terminal_event_identity(&terminal_event.kind).is_none() {
+            return Err(MobStoreError::Internal(
+                "cas_run_snapshot_and_append_terminal_event_with_authority requires a terminal flow event".to_string(),
+            ));
+        }
+        let transitioned = self
+            .cas_run_snapshot_with_authority(
+                run_id,
+                expected_status,
+                expected_flow_state,
+                next_status,
+                next_flow_state,
+                authority_inputs,
+            )
+            .await?;
+        if !transitioned {
+            return Ok(None);
+        }
+        match events.append(terminal_event).await {
+            Ok(stored) => Ok(Some(stored)),
+            Err(append_error) => Err(MobStoreError::Internal(format!(
+                "terminal run status persisted but terminal event append failed for run '{run_id}': {append_error}"
+            ))),
+        }
+    }
+
     async fn append_step_entry_with_authority(
         &self,
         run_id: &RunId,
@@ -1192,6 +1245,49 @@ impl MobRunStore for AuthorityValidatingMobRunStore {
                 .await?;
         }
         Ok(changed)
+    }
+
+    async fn cas_run_snapshot_and_append_terminal_event_with_authority(
+        &self,
+        run_id: &RunId,
+        expected_status: MobRunStatus,
+        expected_flow_state: &flow_run::State,
+        next_status: MobRunStatus,
+        next_flow_state: &flow_run::State,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+        events: &dyn MobEventStore,
+        terminal_event: NewMobEvent,
+    ) -> Result<Option<MobEvent>, MobStoreError> {
+        // Forward to the inner store so durable backends keep their atomic
+        // single-transaction override (the default implementation would
+        // silently re-split the commit).
+        let stored = self
+            .inner
+            .cas_run_snapshot_and_append_terminal_event_with_authority(
+                run_id,
+                expected_status,
+                expected_flow_state,
+                next_status,
+                next_flow_state,
+                authority_inputs,
+                events,
+                terminal_event,
+            )
+            .await?;
+        if stored.is_some() {
+            self.validate_existing_run_by_id(
+                run_id,
+                "cas_run_snapshot_and_append_terminal_event_with_authority",
+            )
+            .await?;
+        } else {
+            self.validate_run_by_id_if_present(
+                run_id,
+                "cas_run_snapshot_and_append_terminal_event_with_authority",
+            )
+            .await?;
+        }
+        Ok(stored)
     }
 
     async fn append_step_entry_with_authority(

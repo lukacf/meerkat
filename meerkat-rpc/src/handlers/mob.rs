@@ -115,9 +115,16 @@ fn mob_backend_kind_from_wire(kind: WireMobBackendKind) -> MobBackendKind {
     }
 }
 
-fn profile_from_wire(profile: WireMobProfile) -> Profile {
+fn profile_from_wire(profile: WireMobProfile) -> Result<Profile, meerkat_core::SchemaError> {
     let tools = profile.tools;
-    Profile {
+    // Wire-decode validation: the profile output schema is validated into the
+    // typed `MeerkatSchema` owner here, at the boundary, instead of ferrying a
+    // raw `Value` into the mob domain.
+    let output_schema = profile
+        .output_schema
+        .map(meerkat_core::MeerkatSchema::new)
+        .transpose()?;
+    Ok(Profile {
         model: profile.model,
         skills: profile.skills,
         tools: ToolConfig {
@@ -137,9 +144,9 @@ fn profile_from_wire(profile: WireMobProfile) -> Profile {
         backend: profile.backend.map(mob_backend_kind_from_wire),
         runtime_mode: mob_runtime_mode_from_wire(profile.runtime_mode),
         max_inline_peer_notifications: profile.max_inline_peer_notifications,
-        output_schema: profile.output_schema,
+        output_schema,
         provider_params: profile.provider_params,
-    }
+    })
 }
 
 #[allow(clippy::result_large_err)]
@@ -268,7 +275,12 @@ pub async fn handle_list(id: Option<RpcId>, state: &Arc<MobMcpState>) -> RpcResp
         .mob_list()
         .await
         .into_iter()
-        .map(|(mob_id, status)| serde_json::json!({"mob_id": mob_id, "status": status.to_string()}))
+        .map(|(mob_id, status)| {
+            serde_json::json!({
+                "mob_id": mob_id,
+                "status": meerkat_mob_mcp::wire_mob_lifecycle_status(status),
+            })
+        })
         .collect::<Vec<_>>();
     RpcResponse::success(id, serde_json::json!({"mobs": mobs}))
 }
@@ -294,7 +306,10 @@ pub async fn handle_status(
     match state.mob_status(&mob_id).await {
         Ok(status) => RpcResponse::success(
             id,
-            serde_json::json!({"mob_id": mob_id, "status": status.to_string()}),
+            serde_json::json!({
+                "mob_id": mob_id,
+                "status": meerkat_mob_mcp::wire_mob_lifecycle_status(status),
+            }),
         ),
         Err(err) => invalid_params(id, err.to_string()),
     }
@@ -462,7 +477,12 @@ pub async fn handle_spawn(
         );
     }
     if let Some(override_profile) = params.override_profile {
-        spec.override_profile = Some(profile_from_wire(override_profile));
+        match profile_from_wire(override_profile) {
+            Ok(profile) => spec.override_profile = Some(profile),
+            Err(err) => {
+                return invalid_params(id, format!("override_profile.output_schema: {err}"));
+            }
+        }
     }
     if let Some(auth_binding) = params.auth_binding {
         spec.auth_binding = Some(auth_binding);

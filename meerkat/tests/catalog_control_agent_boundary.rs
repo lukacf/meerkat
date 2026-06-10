@@ -130,8 +130,8 @@ impl AgentLlmClient for CatalogLoadRouteClient {
         Ok(response)
     }
 
-    fn provider(&self) -> &'static str {
-        "mock"
+    fn provider(&self) -> meerkat::Provider {
+        meerkat::Provider::Other
     }
 
     fn model(&self) -> &str {
@@ -161,12 +161,18 @@ async fn agent_boundary_routes_tool_catalog_load_authority_from_control_plane() 
             ToolCatalogEntry::session_deferred(
                 Arc::clone(&deferred),
                 true,
-                "callback:test".to_string(),
+                ToolProvenance {
+                    kind: ToolSourceKind::Callback,
+                    source_id: "test".into(),
+                },
             ),
             ToolCatalogEntry::session_deferred(
                 Arc::clone(&deferred_two),
                 true,
-                "callback:test".to_string(),
+                ToolProvenance {
+                    kind: ToolSourceKind::Callback,
+                    source_id: "test".into(),
+                },
             ),
         ]
         .into(),
@@ -228,7 +234,6 @@ async fn agent_boundary_routes_tool_catalog_load_authority_from_control_plane() 
         .requested_witnesses
         .get("deferred_mcp_tool")
         .expect("catalog-load route should persist the provenance witness");
-    assert_eq!(witness.stable_owner_key.as_deref(), Some("callback:test"));
     assert_eq!(
         witness.last_seen_provenance.as_ref(),
         deferred.provenance.as_ref(),

@@ -454,25 +454,10 @@ class ScheduleToolCall(TypedDict, total=False):
 # `WorkGraphStatus` and `WorkGraphPriority` are generated from the WorkItem
 # schema's closed enums and imported/re-exported from `.generated.types` above
 # (dogma row #256). They are no longer hand-declared here.
-WorkGraphEdgeKind = Literal[
-    "blocks",
-    "parent",
-    "related",
-    "supersedes",
-    "derived_from",
-]
-WorkGraphEventKind = Literal[
-    "created",
-    "updated",
-    "claimed",
-    "released",
-    "blocked",
-    "closed",
-    "linked",
-    "evidence_added",
-    "attention_created",
-    "attention_updated",
-]
+# Generated closed unions for edge and event kinds (re-exported wire types).
+from .generated.types import WorkEdgeKind as WorkEdgeKind  # noqa: E402
+from .generated.types import WorkGraphEventKind as WorkGraphEventKind  # noqa: E402
+
 WorkGraphOwnerKind = Literal["principal", "agent", "session", "mob", "label"]
 
 
@@ -529,72 +514,24 @@ class WorkItem(TypedDict, total=False):
     evidence_refs: list[WorkEvidenceRef]
 
 
-class WorkGraphEdge(TypedDict, total=False):
-    realm_id: str
-    namespace: str
-    kind: WorkGraphEdgeKind
-    from_id: str
-    to_id: str
-    created_at: str
+# Re-exports of the generated wire types — the signature-parity gate enforces
+# that workgraph wrappers consume the generated shapes, not hand mirrors.
+from .generated.types import WorkEdge as WorkEdge  # noqa: E402
+from .generated.types import WorkGraphEvent as WorkGraphEvent  # noqa: E402
+from .generated.types import WorkGraphItemsResponse as WorkGraphItemsResponse  # noqa: E402
+from .generated.types import WorkGraphEventsResponse as WorkGraphEventsResponse  # noqa: E402
 
+# Re-export of the generated wire type — the contract inventory gate enforces
+# that the snapshot wrapper consumes the generated shape, not a hand mirror.
+from .generated.types import WorkGraphSnapshot as WorkGraphSnapshot  # noqa: E402
 
-class WorkGraphEvent(TypedDict, total=False):
-    seq: int
-    realm_id: str
-    namespace: str
-    item_id: str
-    kind: WorkGraphEventKind
-    at: str
-    payload: Any
-
-
-class WorkItemListResult(TypedDict):
-    items: list[WorkItem]
-
-
-class WorkGraphEventsResult(TypedDict):
-    events: list[WorkGraphEvent]
-
-
-class WorkGraphSnapshot(TypedDict):
-    realm_id: str
-    namespace: NotRequired[str]
-    all_namespaces: bool
-    captured_at: str
-    event_high_water_mark: NotRequired[int]
-    items: list[WorkItem]
-    edges: list[WorkGraphEdge]
-    attention: list[WorkAttentionBinding]
-    ready_item_ids: list[str]
-
-
-class WorkGraphItemFilter(TypedDict, total=False):
-    realm_id: str
-    namespace: str
-    all_namespaces: bool
-    statuses: list[WorkGraphStatus]
-    labels: list[str]
-    include_terminal: bool
-    limit: int
-
-
-class WorkGraphReadyFilter(TypedDict, total=False):
-    realm_id: str
-    namespace: str
-    labels: list[str]
-    limit: int
-
-
-class WorkGraphSnapshotFilter(WorkGraphItemFilter, total=False):
-    pass
-
-
-class WorkGraphEventFilter(TypedDict, total=False):
-    realm_id: str
-    namespace: str
-    all_namespaces: bool
-    after_seq: int
-    limit: int
+# Generated request/filter wire types for the workgraph read APIs
+# (see WorkGraphSnapshot note above).
+from .generated.types import WorkGraphIdParams as WorkGraphIdParams  # noqa: E402
+from .generated.types import WorkItemFilter as WorkItemFilter  # noqa: E402
+from .generated.types import ReadyWorkFilter as ReadyWorkFilter  # noqa: E402
+from .generated.types import WorkGraphSnapshotFilter as WorkGraphSnapshotFilter  # noqa: E402
+from .generated.types import WorkGraphEventFilter as WorkGraphEventFilter  # noqa: E402
 
 
 class MobEventCursorEntry(TypedDict, total=False):

@@ -1502,7 +1502,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::type_path_field_presence_set(
                 "ToolVisibilityWitness",
                 "crate::catalog::dsl::meerkat_machine::ToolVisibilityWitness",
-                &["stable_owner_key", "last_seen_provenance"],
+                &["last_seen_provenance"],
             ),
             NamedTypeBinding::string_enum(
                 "TurnPhase",
@@ -2438,6 +2438,10 @@ pub fn schedule_lifecycle_schema_metadata() -> MachineSchemaMetadata {
         vec![
             // WAVE G1 fold (#250): opaque typed target-binding identity newtype.
             NamedTypeBinding::string("TargetBindingId"),
+            // Typed trigger identity (#18): distinct from TargetBindingId —
+            // trigger identity and target-binding identity are different
+            // semantic facts.
+            NamedTypeBinding::string("TriggerKey"),
             NamedTypeBinding::string_enum("MisfirePolicy", &["Skip", "CatchUpWithin"]),
             NamedTypeBinding::string_enum("MissingTargetPolicy", &["MarkMisfired", "Skip"]),
             NamedTypeBinding::string("OccurrenceId"),
@@ -2462,6 +2466,14 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
         vec![
             NamedTypeBinding::string("ClaimToken"),
             NamedTypeBinding::string("SessionId"),
+            // Typed semantic handles (#18): trigger identity, target-binding
+            // identity, claim ownership, and delivery correlation are
+            // string-backed newtypes, never raw `String`s the machine could
+            // confuse with policy keys or free-form detail text.
+            NamedTypeBinding::string("TriggerKey"),
+            NamedTypeBinding::string("TargetBindingId"),
+            NamedTypeBinding::string("ClaimOwner"),
+            NamedTypeBinding::string("CorrelationId"),
             NamedTypeBinding::string_enum(
                 "DeliveryReceiptStage",
                 &[

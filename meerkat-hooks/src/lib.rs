@@ -31,14 +31,13 @@ inventory::submit! {
     }
 }
 
-use chrono::Utc;
 use futures::StreamExt;
 use meerkat_core::config::HookAdapterConfig;
 use meerkat_core::time_compat::Duration;
 use meerkat_core::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookEntryConfig, HookExecutionMode,
-    HookExecutionReport, HookFailureReason, HookId, HookInvocation, HookOutcome, HookPatch,
-    HookPatchEnvelope, HookRevision, HookRunOverrides, HooksConfig, SessionId,
+    HookExecutionReport, HookFailureReason, HookId, HookInvocation, HookOutcome, HookRunOverrides,
+    HooksConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -57,15 +56,15 @@ use tokio::time::timeout;
 pub use meerkat_core::config::HookInProcessHandlerId as InProcessHookHandlerId;
 
 /// Response returned by runtime adapters.
+///
+/// `deny_unknown_fields` keeps this contract fail-closed: a runtime that
+/// emits retired vocabulary (e.g. the deleted semantic `patches` machinery)
+/// gets an explicit deserialization error instead of silent acceptance.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct RuntimeHookResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<HookDecision>,
-    /// Retired compatibility field. `HookPatch` has no valid variants, so
-    /// non-empty legacy semantic patch payloads fail deserialization.
-    #[serde(default)]
-    pub patches: Vec<HookPatch>,
 }
 
 /// Typed owner for hook execution policy (ordering, timeout, and background
@@ -166,18 +165,25 @@ impl BackgroundDispatchLedger {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandlerRegistrationOutcome {
     /// The id was previously unregistered; this is a fresh registration.
-    Registered { revision: HookRevision },
+    Registered { revision: HookHandlerRevision },
     /// The id was already registered; the handler was replaced and its
     /// revision bumped to the carried value.
     Revised {
-        previous: HookRevision,
-        revision: HookRevision,
+        previous: HookHandlerRevision,
+        revision: HookHandlerRevision,
     },
 }
 
+/// Monotonic revision of an in-process hook handler registration.
+///
+/// Engine-local observable for handler re-registration (remediation row
+/// #289); unrelated to the deleted semantic hook-patch machinery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HookHandlerRevision(pub u64);
+
 impl HandlerRegistrationOutcome {
     /// The handler revision in effect after this registration.
-    pub fn revision(&self) -> HookRevision {
+    pub fn revision(&self) -> HookHandlerRevision {
         match self {
             Self::Registered { revision } | Self::Revised { revision, .. } => *revision,
         }
@@ -203,80 +209,7 @@ pub type InProcessHookHandler = Arc<dyn Fn(HookInvocation) -> HandlerFuture + Se
 /// rather than an anonymous map slot that can be silently overwritten.
 struct RegisteredHandler {
     handler: InProcessHookHandler,
-    revision: HookRevision,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct HookPatchDeliveryTarget {
-    session_id: SessionId,
-}
-
-impl HookPatchDeliveryTarget {
-    pub fn for_session(session_id: SessionId) -> Self {
-        Self { session_id }
-    }
-
-    pub fn session_id(&self) -> &SessionId {
-        &self.session_id
-    }
-}
-
-#[derive(Debug, Clone)]
-struct DeliveredHookPatch {
-    target: HookPatchDeliveryTarget,
-    envelope: HookPatchEnvelope,
-}
-
-#[derive(Debug, Clone)]
-struct LocalHookPatchDelivery {
-    queue: Arc<Mutex<Vec<DeliveredHookPatch>>>,
-}
-
-impl LocalHookPatchDelivery {
-    fn new() -> Self {
-        Self {
-            queue: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    async fn publish(&self, target: HookPatchDeliveryTarget, patches: Vec<HookPatchEnvelope>) {
-        if patches.is_empty() {
-            return;
-        }
-
-        let mut guard = self.queue.lock().await;
-        let mut patches = patches;
-        guard.reserve(patches.len());
-        let Some(last) = patches.pop() else {
-            return;
-        };
-        for envelope in patches {
-            guard.push(DeliveredHookPatch {
-                target: target.clone(),
-                envelope,
-            });
-        }
-        guard.push(DeliveredHookPatch {
-            target,
-            envelope: last,
-        });
-    }
-
-    async fn drain(&self, target: &HookPatchDeliveryTarget) -> Vec<HookPatchEnvelope> {
-        let mut guard = self.queue.lock().await;
-        let queued = guard.len();
-        let mut remaining = Vec::with_capacity(queued);
-        let mut drained = Vec::new();
-        for published in guard.drain(..) {
-            if &published.target == target {
-                drained.push(published.envelope);
-            } else {
-                remaining.push(published);
-            }
-        }
-        *guard = remaining;
-        drained
-    }
+    revision: HookHandlerRevision,
 }
 
 /// Effective hook entries plus their typed adapters for one run.
@@ -336,7 +269,6 @@ pub struct DefaultHookEngine {
     policy: HookExecutionPolicy,
     http_client: Arc<OnceLock<reqwest::Client>>,
     in_process_handlers: Arc<std::sync::RwLock<HashMap<InProcessHookHandlerId, RegisteredHandler>>>,
-    background_patch_delivery: LocalHookPatchDelivery,
     /// Typed, observable ledger of background-dispatch skip/drop signals so a
     /// full queue or a failed background run is never silently lost
     /// (remediation row #35).
@@ -346,10 +278,10 @@ pub struct DefaultHookEngine {
     ///
     /// On non-wasm targets the previously-detached background `tokio::spawn`
     /// is tracked here so (a) dropping the engine aborts the `JoinSet` instead
-    /// of leaking a zombie task that races a freed delivery queue, and (b) the
-    /// consumer seam (`drain_published_patches_for_session`) reaps finished
-    /// publishers before reading. Wasm has no detached-task-teardown hazard, so
-    /// the field is gated out and the wasm path keeps the existing spawn.
+    /// of leaking a zombie task, and (b) `execute` reaps finished tasks before
+    /// dispatching new background work, keeping the set bounded. Wasm has no
+    /// detached-task-teardown hazard, so the field is gated out and the wasm
+    /// path keeps the existing spawn.
     #[cfg(not(target_arch = "wasm32"))]
     inflight_background: Arc<Mutex<tokio::task::JoinSet<()>>>,
     revision: Arc<AtomicU64>,
@@ -383,7 +315,6 @@ impl DefaultHookEngine {
             policy,
             http_client: Arc::new(OnceLock::new()),
             in_process_handlers: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            background_patch_delivery: LocalHookPatchDelivery::new(),
             background_dispatch_ledger: BackgroundDispatchLedger::new(),
             background_slots: Arc::new(Semaphore::new(policy.background_max_concurrency())),
             #[cfg(not(target_arch = "wasm32"))]
@@ -476,8 +407,8 @@ impl DefaultHookEngine {
         }
     }
 
-    fn next_revision(&self) -> HookRevision {
-        HookRevision(self.revision.fetch_add(1, Ordering::SeqCst))
+    fn next_revision(&self) -> HookHandlerRevision {
+        HookHandlerRevision(self.revision.fetch_add(1, Ordering::SeqCst))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -557,35 +488,18 @@ impl DefaultHookEngine {
         Ok(ResolvedEntries::base(self))
     }
 
-    async fn drain_published_patches_for_session(
-        &self,
-        session_id: &SessionId,
-    ) -> Vec<HookPatchEnvelope> {
-        // Reap any background publishers that have already finished before
-        // reading the queue. We use the non-blocking `try_join_next` (not
-        // `join_next().await`) deliberately: it reaps completed tasks — whose
-        // publishes have already committed to the delivery queue — without
-        // blocking on still-running tasks, so it cannot deadlock against a
-        // background hook that is itself awaiting this same engine. Finished
-        // tasks are removed from the `JoinSet` here, so the set stays bounded
-        // and engine drop only has to abort genuinely-in-flight work.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut set = self.inflight_background.lock().await;
-            while set.try_join_next().is_some() {}
-        }
-        let target = HookPatchDeliveryTarget::for_session(session_id.clone());
-        self.background_patch_delivery.drain(&target).await
-    }
-
-    async fn publish_patches(
-        &self,
-        target: HookPatchDeliveryTarget,
-        patches: Vec<HookPatchEnvelope>,
-    ) {
-        self.background_patch_delivery
-            .publish(target, patches)
-            .await;
+    /// Reap background hook tasks that have already finished.
+    ///
+    /// Non-blocking `try_join_next` (not `join_next().await`) deliberately:
+    /// it removes completed tasks without blocking on still-running ones, so
+    /// it cannot deadlock against a background hook that is itself awaiting
+    /// this same engine. Called before dispatching new background work so the
+    /// `JoinSet` stays bounded and engine drop only has to abort
+    /// genuinely-in-flight work.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn reap_finished_background_tasks(&self) {
+        let mut set = self.inflight_background.lock().await;
+        while set.try_join_next().is_some() {}
     }
 
     fn validate_entry(entry: &HookEntryConfig) -> Result<(), HookEngineError> {
@@ -624,8 +538,6 @@ impl DefaultHookEngine {
             priority: entry.priority,
             registration_index,
             decision: None,
-            patches: Vec::new(),
-            published_patches: Vec::new(),
             failure_reason: None,
             duration_ms: None,
         };
@@ -646,31 +558,12 @@ impl DefaultHookEngine {
             Ok(response) => response?,
         };
         outcome.decision = runtime_decision_with_configured_hook_id(response.decision, &entry.id);
-        outcome.patches = response.patches;
 
         if entry.mode == HookExecutionMode::Background {
-            if entry.point.is_pre() {
-                if !outcome.patches.is_empty()
-                    || matches!(outcome.decision, Some(HookDecision::Deny { .. }))
-                {
-                    outcome.failure_reason = Some(HookFailureReason::ObserveOnlyViolation);
-                }
-                outcome.patches.clear();
-                outcome.decision = None;
-            } else if entry.point.is_post() {
-                let mut envelopes = Vec::new();
-                for patch in outcome.patches.drain(..) {
-                    envelopes.push(HookPatchEnvelope {
-                        revision: self.next_revision(),
-                        hook_id: entry.id.clone(),
-                        point: entry.point,
-                        patch,
-                        published_at: Utc::now(),
-                    });
-                }
-                outcome.published_patches = envelopes;
-                outcome.decision = None;
+            if entry.point.is_pre() && matches!(outcome.decision, Some(HookDecision::Deny { .. })) {
+                outcome.failure_reason = Some(HookFailureReason::ObserveOnlyViolation);
             }
+            outcome.decision = None;
         }
 
         outcome.duration_ms = Some(start.elapsed().as_millis() as u64);
@@ -1045,8 +938,6 @@ impl HookEngine for DefaultHookEngine {
                     }
                 }
             }
-            merged.patches.extend(outcome.patches.clone());
-
             let should_stop = matches!(outcome.decision, Some(HookDecision::Deny { .. }));
             merged.outcomes.push(outcome);
             if should_stop {
@@ -1055,6 +946,10 @@ impl HookEngine for DefaultHookEngine {
         }
 
         if !matches!(merged.decision, Some(HookDecision::Deny { .. })) {
+            #[cfg(not(target_arch = "wasm32"))]
+            if !background.is_empty() {
+                self.reap_finished_background_tasks().await;
+            }
             for (registration_index, entry, adapter) in background {
                 let permit = match self.background_slots.clone().try_acquire_owned() {
                     Ok(permit) => permit,
@@ -1076,8 +971,6 @@ impl HookEngine for DefaultHookEngine {
                 let task = async move {
                     let _permit = permit;
                     let hook_id = entry.id.clone();
-                    let delivery_target =
-                        HookPatchDeliveryTarget::for_session(invocation_cloned.session_id.clone());
                     let outcome = match engine
                         .execute_one(entry, adapter, registration_index, invocation_cloned)
                         .await
@@ -1121,16 +1014,11 @@ impl HookEngine for DefaultHookEngine {
                             "background hook execution produced an error"
                         );
                     }
-                    if !outcome.published_patches.is_empty() {
-                        engine
-                            .publish_patches(delivery_target, outcome.published_patches)
-                            .await;
-                    }
                 };
                 // Non-wasm: bind the task to the engine lifecycle via the owned
-                // `JoinSet` so engine drop aborts it and the consumer seam can
-                // reap finished publishers. Wasm: keep the existing detached
-                // spawn (no detached-task-teardown hazard there).
+                // `JoinSet` so engine drop aborts it and `execute` reaps
+                // finished tasks. Wasm: keep the existing detached spawn (no
+                // detached-task-teardown hazard there).
                 #[cfg(not(target_arch = "wasm32"))]
                 self.inflight_background.lock().await.spawn(task);
                 #[cfg(target_arch = "wasm32")]
@@ -1139,13 +1027,6 @@ impl HookEngine for DefaultHookEngine {
         }
 
         Ok(merged)
-    }
-
-    async fn drain_published_patches(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Vec<HookPatchEnvelope>, HookEngineError> {
-        Ok(self.drain_published_patches_for_session(session_id).await)
     }
 }
 
@@ -1221,10 +1102,7 @@ mod tests {
         engine
             .register_in_process_handler(
                 "a",
-                static_handler(RuntimeHookResponse {
-                    decision: None,
-                    patches: Vec::new(),
-                }),
+                static_handler(RuntimeHookResponse { decision: None }),
             )
             .await
             .expect("in-process handler registration must succeed");
@@ -1233,7 +1111,6 @@ mod tests {
                 "b",
                 static_handler(RuntimeHookResponse {
                     decision: Some(HookDecision::Allow),
-                    patches: Vec::new(),
                 }),
             )
             .await
@@ -1246,10 +1123,8 @@ mod tests {
                     session_id: SessionId::new(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: Some(HookLlmRequest {
                         max_tokens: 256,
                         temperature: None,
@@ -1275,7 +1150,6 @@ mod tests {
             vec![&HookId::new("hook-b"), &HookId::new("hook-a")]
         );
         assert!(matches!(report.decision, Some(HookDecision::Allow)));
-        assert!(report.patches.is_empty());
     }
 
     #[tokio::test]
@@ -1294,10 +1168,7 @@ mod tests {
         engine
             .register_in_process_handler(
                 "post-bg",
-                static_handler(RuntimeHookResponse {
-                    decision: None,
-                    patches: Vec::new(),
-                }),
+                static_handler(RuntimeHookResponse { decision: None }),
             )
             .await
             .expect("in-process handler registration must succeed");
@@ -1310,10 +1181,8 @@ mod tests {
                     session_id: session_id.clone(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: None,
                     llm_response: None,
                     tool_call: None,
@@ -1325,25 +1194,23 @@ mod tests {
             .unwrap();
 
         tokio::time::sleep(Duration::from_millis(10)).await;
-        assert!(report.patches.is_empty());
-        assert!(report.published_patches.is_empty());
         assert!(
-            engine
-                .drain_published_patches(&session_id)
-                .await
-                .unwrap()
-                .is_empty()
+            report
+                .outcomes
+                .iter()
+                .all(|outcome| outcome.decision.is_none()),
+            "background hooks are observation-only"
         );
     }
 
     #[tokio::test]
     async fn background_post_hook_task_is_tracked_and_reaped_not_leaked() {
         // R2 regression: the background post-hook task used to be a detached
-        // `tokio::spawn` tied to nothing, so on engine/runtime teardown a task
-        // parked between `execute_one` and `publish_patches` would vanish with
-        // no signal. The task is now owned by the engine's `JoinSet`, so it is
-        // (a) observable as in-flight after `execute()` and (b) reaped at the
-        // consumer seam (`drain_published_patches`) once it completes.
+        // `tokio::spawn` tied to nothing, so on engine/runtime teardown an
+        // in-flight task would vanish with no signal. The task is now owned by
+        // the engine's `JoinSet`, so it is (a) observable as in-flight after
+        // `execute()` and (b) reaped by `reap_finished_background_tasks` once
+        // it completes.
         let mut config = HooksConfig::default();
         config.entries = vec![HookEntryConfig {
             id: HookId::new("tracked-post-bg"),
@@ -1360,13 +1227,7 @@ mod tests {
         engine
             .register_in_process_handler(
                 "tracked-post-bg",
-                delayed_handler(
-                    20,
-                    RuntimeHookResponse {
-                        decision: None,
-                        patches: Vec::new(),
-                    },
-                ),
+                delayed_handler(20, RuntimeHookResponse { decision: None }),
             )
             .await
             .expect("in-process handler registration must succeed");
@@ -1379,10 +1240,8 @@ mod tests {
                     session_id: session_id.clone(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: None,
                     llm_response: None,
                     tool_call: None,
@@ -1392,24 +1251,24 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(report.published_patches.is_empty());
+        assert!(
+            report.outcomes.is_empty(),
+            "background outcomes are not merged"
+        );
 
-        // The background publisher is owned by the engine's JoinSet, not
-        // detached: it is tracked as in-flight right after `execute()` returns.
+        // The background task is owned by the engine's JoinSet, not detached:
+        // it is tracked as in-flight right after `execute()` returns.
         assert_eq!(
             engine.inflight_background.lock().await.len(),
             1,
             "background post-hook task must be tracked in the engine JoinSet, not detached"
         );
 
-        // The consumer seam reaps the finished publisher (non-blocking
-        // `try_join_next`). Drain repeatedly until the task has run and been
-        // reaped, proving the task is reaped (lifecycle-bound) rather than
-        // leaked. `HookPatch` is uninhabited, so no envelope can ever be
-        // published; the observable contract here is the reaped, empty JoinSet.
-        let mut drained = Vec::new();
+        // The reap seam removes the finished task (non-blocking
+        // `try_join_next`). Reap repeatedly until the task has run and been
+        // reaped, proving the task is lifecycle-bound rather than leaked.
         for _ in 0..200 {
-            drained = engine.drain_published_patches(&session_id).await.unwrap();
+            engine.reap_finished_background_tasks().await;
             if engine.inflight_background.lock().await.is_empty() {
                 break;
             }
@@ -1417,11 +1276,7 @@ mod tests {
         }
         assert!(
             engine.inflight_background.lock().await.is_empty(),
-            "finished background publisher must be reaped from the engine JoinSet, not leaked"
-        );
-        assert!(
-            drained.is_empty(),
-            "uninhabited HookPatch means no envelope is ever published"
+            "finished background task must be reaped from the engine JoinSet, not leaked"
         );
     }
 
@@ -1455,10 +1310,8 @@ mod tests {
                     session_id: SessionId::new(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: Some(HookLlmRequest {
                         max_tokens: 256,
                         temperature: None,
@@ -1507,26 +1360,14 @@ mod tests {
         engine
             .register_in_process_handler(
                 "slow",
-                delayed_handler(
-                    100,
-                    RuntimeHookResponse {
-                        decision: None,
-                        patches: Vec::new(),
-                    },
-                ),
+                delayed_handler(100, RuntimeHookResponse { decision: None }),
             )
             .await
             .expect("in-process handler registration must succeed");
         engine
             .register_in_process_handler(
                 "fast",
-                delayed_handler(
-                    1,
-                    RuntimeHookResponse {
-                        decision: None,
-                        patches: Vec::new(),
-                    },
-                ),
+                delayed_handler(1, RuntimeHookResponse { decision: None }),
             )
             .await
             .expect("in-process handler registration must succeed");
@@ -1538,10 +1379,8 @@ mod tests {
                     session_id: SessionId::new(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: Some(HookLlmRequest {
                         max_tokens: 256,
                         temperature: None,
@@ -1569,7 +1408,6 @@ mod tests {
                 &HookId::new("slow-low-priority")
             ]
         );
-        assert!(report.patches.is_empty());
     }
 
     #[tokio::test]
@@ -1591,10 +1429,8 @@ mod tests {
                     session_id: SessionId::new(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: None,
                     llm_response: None,
                     tool_call: None,
@@ -1631,10 +1467,8 @@ mod tests {
                     session_id: SessionId::new(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: None,
                     llm_response: None,
                     tool_call: None,
@@ -1688,7 +1522,6 @@ mod tests {
                         "deny",
                         None,
                     )),
-                    patches: Vec::new(),
                 }),
             )
             .await
@@ -1702,7 +1535,6 @@ mod tests {
                         observer_runs.fetch_add(1, AtomicOrdering::SeqCst);
                         Ok(RuntimeHookResponse {
                             decision: Some(HookDecision::Allow),
-                            patches: Vec::new(),
                         })
                     })
                 }),
@@ -1717,10 +1549,8 @@ mod tests {
                     session_id: SessionId::new(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: None,
                     llm_response: None,
                     tool_call: None,
@@ -1761,7 +1591,6 @@ mod tests {
                         "deny",
                         None,
                     )),
-                    patches: Vec::new(),
                 }),
             )
             .await
@@ -1774,10 +1603,8 @@ mod tests {
                     session_id: SessionId::new(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: None,
                     llm_response: None,
                     tool_call: None,
@@ -1825,10 +1652,8 @@ mod tests {
                     session_id: SessionId::new(),
                     turn_number: Some(0),
                     prompt_input: None,
-                    prompt: Some("hi".to_string()),
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: None,
                     llm_response: None,
                     tool_call: None,
@@ -1852,7 +1677,7 @@ mod tests {
                 HookRuntimeKind::Command,
                 Some(serde_json::json!({
                     "command": "sh",
-                    "args": ["-c", "cat >/dev/null; printf '{\"patches\":[]}'"],
+                    "args": ["-c", "cat >/dev/null; printf '{}'"],
                     "env": {}
                 })),
             )
@@ -1868,10 +1693,8 @@ mod tests {
                     session_id: SessionId::new(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: None,
                     llm_response: None,
                     tool_call: None,
@@ -1907,7 +1730,7 @@ mod tests {
                 tokio::spawn(async move {
                     let mut buf = vec![0_u8; 4096];
                     let _ = socket.read(&mut buf).await;
-                    let body = r#"{"patches":[]}"#;
+                    let body = "{}";
                     let response = format!(
                         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                         body.len(),
@@ -1945,10 +1768,8 @@ mod tests {
                     session_id: SessionId::new(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: None,
                     llm_response: None,
                     tool_call: None,
@@ -1972,10 +1793,8 @@ mod tests {
             session_id,
             turn_number: Some(1),
             prompt_input: None,
-            prompt: None,
             error_report: None,
             error_class: None,
-            error: None,
             llm_request: None,
             llm_response: None,
             tool_call: None,
@@ -1999,10 +1818,7 @@ mod tests {
         let first = engine
             .register_in_process_handler(
                 "shared-id",
-                static_handler(RuntimeHookResponse {
-                    decision: None,
-                    patches: Vec::new(),
-                }),
+                static_handler(RuntimeHookResponse { decision: None }),
             )
             .await
             .expect("first registration must succeed");
@@ -2016,7 +1832,6 @@ mod tests {
                 "shared-id",
                 static_handler(RuntimeHookResponse {
                     decision: Some(HookDecision::Allow),
-                    patches: Vec::new(),
                 }),
             )
             .await
@@ -2109,7 +1924,6 @@ mod tests {
                         keep_counter.fetch_add(1, AtomicOrdering::SeqCst);
                         Ok(RuntimeHookResponse {
                             decision: Some(HookDecision::Allow),
-                            patches: Vec::new(),
                         })
                     })
                 }),
@@ -2121,7 +1935,6 @@ mod tests {
                 "drop",
                 static_handler(RuntimeHookResponse {
                     decision: Some(HookDecision::Allow),
-                    patches: Vec::new(),
                 }),
             )
             .await
@@ -2233,13 +2046,7 @@ mod tests {
         engine
             .register_in_process_handler(
                 "bg-slow",
-                delayed_handler(
-                    500,
-                    RuntimeHookResponse {
-                        decision: None,
-                        patches: Vec::new(),
-                    },
-                ),
+                delayed_handler(500, RuntimeHookResponse { decision: None }),
             )
             .await
             .expect("register bg-slow handler");

@@ -442,7 +442,6 @@ fn agent_event_all_variants_roundtrip() {
             hook_id: HookId::new("h1"),
             point: HookPoint::RunStarted,
             reason: HookFailureReason::execution_failed("hook error"),
-            error: "hook error".to_string(),
         },
         AgentEvent::HookDenied {
             hook_id: HookId::new("h1"),
@@ -519,11 +518,24 @@ fn agent_event_all_variants_roundtrip() {
             percent: 0.8,
         },
         AgentEvent::Retrying {
-            attempt: 1,
-            max_attempts: 3,
-            error: "rate limited".to_string(),
-            delay_ms: 1000,
-            retry: None,
+            retry: meerkat_core::LlmRetrySchedule {
+                failure: meerkat_core::LlmRetryFailure {
+                    provider: "anthropic".to_string(),
+                    kind: meerkat_core::LlmRetryFailureKind::RateLimited,
+                    retry_after_ms: Some(1000),
+                    duration_ms: None,
+                    message: "rate limited".to_string(),
+                },
+                plan: meerkat_core::LlmRetryPlan {
+                    attempt: 1,
+                    max_retries: 3,
+                    computed_delay_ms: 1000,
+                    selected_delay_ms: 1000,
+                    retry_after_hint_ms: Some(1000),
+                    rate_limit_floor_applied: false,
+                    budget_capped: false,
+                },
+            },
         },
         AgentEvent::SkillsResolved {
             skills: vec![meerkat_core::skills::SkillKey::builtin(
@@ -542,7 +554,7 @@ fn agent_event_all_variants_roundtrip() {
         // InteractionComplete and InteractionFailed are constructed via JSON
         // below to avoid a direct uuid crate dependency.
         AgentEvent::StreamTruncated {
-            reason: "channel full".to_string(),
+            reason: meerkat_core::event::StreamTruncationReason::ChannelFull,
         },
         AgentEvent::ToolConfigChanged {
             payload: ToolConfigChangedPayload::new(
@@ -676,7 +688,6 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             hook_id: HookId::new("hook-1"),
             point: HookPoint::RunStarted,
             reason: HookFailureReason::execution_failed("boom"),
-            error: "boom".to_string(),
         },
         AgentEvent::HookDenied {
             hook_id: HookId::new("hook-1"),
@@ -753,11 +764,24 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             percent: 50.0,
         },
         AgentEvent::Retrying {
-            attempt: 1,
-            max_attempts: 2,
-            error: "retry".to_string(),
-            delay_ms: 100,
-            retry: None,
+            retry: meerkat_core::LlmRetrySchedule {
+                failure: meerkat_core::LlmRetryFailure {
+                    provider: "openai".to_string(),
+                    kind: meerkat_core::LlmRetryFailureKind::RetryableProviderError,
+                    retry_after_ms: None,
+                    duration_ms: None,
+                    message: "retry".to_string(),
+                },
+                plan: meerkat_core::LlmRetryPlan {
+                    attempt: 1,
+                    max_retries: 2,
+                    computed_delay_ms: 100,
+                    selected_delay_ms: 100,
+                    retry_after_hint_ms: None,
+                    rate_limit_floor_applied: false,
+                    budget_capped: false,
+                },
+            },
         },
         AgentEvent::SkillsResolved {
             skills: vec![],
@@ -785,10 +809,9 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             ))
             .unwrap(),
             reason: InteractionFailureReason::abandoned("failed"),
-            error: "failed".to_string(),
         },
         AgentEvent::StreamTruncated {
-            reason: "lag".to_string(),
+            reason: meerkat_core::event::StreamTruncationReason::StreamLagged { dropped: 3 },
         },
         AgentEvent::ToolConfigChanged {
             payload: ToolConfigChangedPayload::new(

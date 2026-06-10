@@ -570,6 +570,14 @@ pub struct SkillQuarantineDiagnostic {
 pub struct SkillRuntimeDiagnostics {
     pub source_health: SourceHealthSnapshot,
     pub quarantined: Vec<SkillQuarantineDiagnostic>,
+    /// Typed fault recorded when run-terminal diagnostics collection failed.
+    ///
+    /// When set, `source_health` and `quarantined` are vacuous defaults — NOT
+    /// observed truth. Surfaces must read this fault instead of treating the
+    /// default snapshot as a successful healthy observation (dogma row #239:
+    /// collection faults are typed run-result facts, never silently dropped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection_fault: Option<crate::event::SkillResolutionFailureReason>,
 }
 
 /// Determine health state from invalid ratio + failure streak + handshake state.

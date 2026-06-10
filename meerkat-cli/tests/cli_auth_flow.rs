@@ -361,7 +361,7 @@ fn rkat_auth_status_hides_token_metadata_without_lifecycle() {
 }
 
 #[test]
-fn rkat_auth_status_ignores_malformed_token_storage_without_lifecycle() {
+fn rkat_auth_status_fails_closed_on_malformed_token_storage() {
     let Some(rkat) = rkat_binary() else {
         eprintln!("SKIP: rkat binary unavailable");
         return;
@@ -388,23 +388,23 @@ fn rkat_auth_status_ignores_malformed_token_storage_without_lifecycle() {
         .stdin(Stdio::null())
         .output()
         .expect("rkat auth status must spawn");
-    if !status.status.success() {
-        let stderr = String::from_utf8_lossy(&status.stderr);
-        if stderr.contains("requires the `anthropic`, `openai`, and `gemini`") {
-            eprintln!("SKIP: auth provider features unavailable");
-            return;
-        }
-        panic!("status must not be owned by malformed token storage; stderr={stderr}");
+    let stderr = String::from_utf8_lossy(&status.stderr);
+    if stderr.contains("requires the `anthropic`, `openai`, and `gemini`") {
+        eprintln!("SKIP: auth provider features unavailable");
+        return;
     }
 
-    let stdout = String::from_utf8_lossy(&status.stdout);
+    // A malformed token store is an auth-truth fault the surface cannot
+    // vouch for: status must fail closed with the typed rehydration fault,
+    // never report a fabricated missing_credential success.
     assert!(
-        stdout.contains("state:       missing_credential"),
-        "status should report missing_credential without token-store truth; stdout:\n{stdout}"
+        !status.status.success(),
+        "status must fail closed on malformed token storage; stdout:\n{}",
+        String::from_utf8_lossy(&status.stdout)
     );
     assert!(
-        !stdout.contains("auth_mode:"),
-        "status must not expose token-derived metadata without lifecycle; stdout:\n{stdout}"
+        stderr.contains("TokenStore rehydration failed"),
+        "failure must surface the typed token-store fault; stderr:\n{stderr}"
     );
 }
 

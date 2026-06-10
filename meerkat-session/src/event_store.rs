@@ -606,10 +606,7 @@ mod tests {
 
         let projected_seq = projector.resume(&store, &session_id).await?;
         assert_eq!(projected_seq, 2);
-        let checkpoint = tokio::fs::read_to_string(session_projection_dir.join("checkpoint"))
-            .await
-            .unwrap();
-        assert_eq!(checkpoint.trim(), "2");
+        assert_eq!(projector.read_checkpoint(&session_id).await, 2);
         Ok(())
     }
 

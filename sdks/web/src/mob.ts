@@ -1,4 +1,5 @@
 import { EventSubscription } from './events.js';
+import { isKnownEvent } from './types.js';
 import type {
   AuthBindingRef,
   ContentInput,
@@ -570,7 +571,15 @@ function normalizeEventSourceIdentity(raw: unknown, context: string): EventSourc
 
 function parseEventPayload(raw: unknown, context: string): EventEnvelope['payload'] {
   const payload = requireRecord(raw, `${context}: missing payload`);
-  requireStringField(payload, 'type', `${context}: payload missing type`);
+  const type = requireStringField(payload, 'type', `${context}: payload missing type`);
+  // Fail closed on an unrecognized event type: validate the full record
+  // against the generated `AgentEvent` inventory via `isKnownEvent` instead
+  // of blindly casting an arbitrary record. An unknown discriminant is a
+  // malformed/forward-incompatible wire shape — mirroring session.ts and the
+  // TS SDK's parseCoreEvent policy.
+  if (!isKnownEvent(payload as { type: string })) {
+    throw new Error(`${context}: unknown event type "${type}"`);
+  }
   return payload as EventEnvelope['payload'];
 }
 
@@ -1100,11 +1109,16 @@ export class Mob {
     );
   }
 
-  /** Spawn a short-lived helper and return its terminal result. */
+  /**
+   * Spawn a short-lived helper and return its terminal result.
+   *
+   * `agentIdentity` is required: the surface does not allocate member
+   * identity (#115) — the runtime fails closed without it.
+   */
   async spawnHelper(
     prompt: string,
-    options?: {
-      agentIdentity?: string;
+    options: {
+      agentIdentity: string;
       profileName?: string;
       authBinding?: AuthBindingRef;
       runtimeMode?: string;
@@ -1115,11 +1129,11 @@ export class Mob {
       this.mobId,
         JSON.stringify({
           prompt,
-          agent_identity: options?.agentIdentity,
-          profile_name: options?.profileName,
-          auth_binding: options?.authBinding,
-          runtime_mode: options?.runtimeMode,
-          backend: options?.backend,
+          agent_identity: options.agentIdentity,
+          profile_name: options.profileName,
+          auth_binding: options.authBinding,
+          runtime_mode: options.runtimeMode,
+          backend: options.backend,
         }),
     );
     return parseMobHelperResult(
@@ -1128,12 +1142,17 @@ export class Mob {
     );
   }
 
-  /** Fork a helper from an existing member and return its terminal result. */
+  /**
+   * Fork a helper from an existing member and return its terminal result.
+   *
+   * `agentIdentity` is required: the surface does not allocate member
+   * identity (#115) — the runtime fails closed without it.
+   */
   async forkHelper(
     sourceMemberId: string,
     prompt: string,
-    options?: {
-      agentIdentity?: string;
+    options: {
+      agentIdentity: string;
       profileName?: string;
       authBinding?: AuthBindingRef;
       forkContext?: Record<string, unknown>;
@@ -1146,12 +1165,12 @@ export class Mob {
         JSON.stringify({
           source_member_id: sourceMemberId,
           prompt,
-          agent_identity: options?.agentIdentity,
-          profile_name: options?.profileName,
-          auth_binding: options?.authBinding,
-          fork_context: options?.forkContext,
-          runtime_mode: options?.runtimeMode,
-          backend: options?.backend,
+          agent_identity: options.agentIdentity,
+          profile_name: options.profileName,
+          auth_binding: options.authBinding,
+          fork_context: options.forkContext,
+          runtime_mode: options.runtimeMode,
+          backend: options.backend,
         }),
     );
     return parseMobHelperResult(

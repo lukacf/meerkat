@@ -3270,13 +3270,52 @@ fn map_openai_live_error(error: OpenAiLiveError) -> LlmError {
         OpenAiLiveError::Serialization(error) => LlmError::StreamParseError {
             message: error.to_string(),
         },
-        OpenAiLiveError::WebSocket(error) => LlmError::NetworkTimeout {
-            duration_ms: u64::from(error.to_string().contains("timed out")) * 30_000,
-        },
+        OpenAiLiveError::WebSocket(error) => map_openai_websocket_error(error),
         OpenAiLiveError::Http(error) => LlmError::ServerError {
             status: error.status().map_or(500, |status| status.as_u16()),
             message: error.to_string(),
         },
+        other => LlmError::Unknown {
+            message: other.to_string(),
+        },
+    }
+}
+
+/// Classify a realtime websocket fault from the TYPED `tungstenite::Error`
+/// discriminants — never from `to_string()` substring folklore.
+fn map_openai_websocket_error(error: tokio_tungstenite::tungstenite::Error) -> LlmError {
+    use tokio_tungstenite::tungstenite::Error as WsError;
+    match error {
+        WsError::Io(io)
+            if matches!(
+                io.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ) =>
+        {
+            // The websocket transport surfaced an OS-level timeout; no
+            // configured duration is observable at this seam.
+            LlmError::NetworkTimeout { duration_ms: 0 }
+        }
+        WsError::Io(io) if io.kind() == std::io::ErrorKind::ConnectionReset => {
+            LlmError::ConnectionReset
+        }
+        WsError::ConnectionClosed | WsError::AlreadyClosed => LlmError::ConnectionReset,
+        WsError::Http(response) => {
+            let status = response.status();
+            match status.as_u16() {
+                401 | 403 => LlmError::AuthenticationFailed {
+                    message: format!("websocket upgrade rejected with status {status}"),
+                },
+                429 => LlmError::RateLimited {
+                    retry_after_ms: None,
+                },
+                503 => LlmError::ServerOverloaded,
+                code => LlmError::ServerError {
+                    status: code,
+                    message: format!("websocket upgrade rejected with status {status}"),
+                },
+            }
+        }
         other => LlmError::Unknown {
             message: other.to_string(),
         },
@@ -4248,7 +4287,7 @@ async fn execute_openai_live_command(
         }
         LiveAdapterCommand::SubmitToolResult { result } => {
             let tool_result = CoreToolResult {
-                tool_use_id: result.call_id,
+                tool_use_id: result.call_id.0,
                 content: result.content,
                 is_error: result.is_error,
             };
@@ -4256,7 +4295,7 @@ async fn execute_openai_live_command(
             Ok(())
         }
         LiveAdapterCommand::SubmitToolError { call_id, error } => {
-            session.submit_tool_error(call_id, error).await?;
+            session.submit_tool_error(call_id.0, error).await?;
             Ok(())
         }
         LiveAdapterCommand::Close => Ok(()),
@@ -5271,6 +5310,42 @@ mod tests {
             event_id: None,
         }));
         assert!(matches!(auth_failed, LlmError::AuthenticationFailed { .. }));
+    }
+
+    #[test]
+    fn websocket_error_mapping_classifies_typed_discriminants_not_strings() {
+        use tokio_tungstenite::tungstenite::Error as WsError;
+
+        // An OS-level timed-out IO error classifies as NetworkTimeout from
+        // its TYPED ErrorKind — not from a "timed out" substring.
+        let timeout = map_openai_live_error(OpenAiLiveError::WebSocket(WsError::Io(
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "anything"),
+        )));
+        assert!(matches!(timeout, LlmError::NetworkTimeout { .. }));
+
+        // Regression: a NON-timeout websocket fault whose display text happens
+        // to contain "timed out" must NOT be classified as a timeout.
+        let reset = map_openai_live_error(OpenAiLiveError::WebSocket(WsError::Io(
+            std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "peer said: your request timed out",
+            ),
+        )));
+        assert!(
+            matches!(reset, LlmError::ConnectionReset),
+            "connection reset must classify from the typed kind, got {reset:?}"
+        );
+
+        // Closed-connection discriminants classify as ConnectionReset.
+        let closed = map_openai_live_error(OpenAiLiveError::WebSocket(WsError::ConnectionClosed));
+        assert!(matches!(closed, LlmError::ConnectionReset));
+
+        // Other websocket faults are NOT laundered into NetworkTimeout{0}.
+        let other = map_openai_live_error(OpenAiLiveError::WebSocket(WsError::Utf8));
+        assert!(
+            !matches!(other, LlmError::NetworkTimeout { .. }),
+            "non-timeout websocket faults must not fabricate a timeout, got {other:?}"
+        );
     }
 
     #[test]

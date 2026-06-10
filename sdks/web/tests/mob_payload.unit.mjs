@@ -333,6 +333,21 @@ test('Mob.subscribeEvents projects canonical attributed WASM EventEnvelope paylo
   assert.equal('event' in items[0].envelope, false);
 });
 
+test('Mob.subscribeMemberEvents rejects envelopes with unknown payload event types', async () => {
+  // parseEventPayload must classify the payload discriminant against the
+  // generated AgentEvent inventory (isKnownEvent) — an unknown type is a
+  // malformed/forward-incompatible wire shape, never blindly cast through.
+  const envelope = canonicalEnvelope();
+  envelope.payload = { type: 'totally_unknown_event', x: 1 };
+  const mob = makeSubscriptionMob(() => JSON.stringify([envelope]));
+
+  const subscription = await mob.subscribeMemberEvents('worker-1');
+  assert.throws(
+    () => subscription.poll(),
+    /unknown event type "totally_unknown_event"/,
+  );
+});
+
 test('Mob subscriptions reject source-id-only EventEnvelope payloads', async () => {
   const sourceIdOnly = {
     event_id: '00000000-0000-0000-0000-000000000001',
@@ -744,14 +759,14 @@ test('Mob result decoders reject missing generated truth instead of fabricating 
   const malformedHelperResults = [
     {
       method: 'spawnHelper',
-      call: (mob) => mob.spawnHelper('summarize'),
+      call: (mob) => mob.spawnHelper('summarize', { agentIdentity: 'helper-1' }),
       binding: 'mob_spawn_helper',
       response: { agent_identity: 'helper-1', member_ref: 'ref-helper-1' },
       pattern: /Invalid mob spawn_helper response: tokens_used must be number/,
     },
     {
       method: 'forkHelper',
-      call: (mob) => mob.forkHelper('worker-1', 'review'),
+      call: (mob) => mob.forkHelper('worker-1', 'review', { agentIdentity: 'fork-1' }),
       binding: 'mob_fork_helper',
       response: { agent_identity: 'fork-1', member_ref: 'ref-fork-1' },
       pattern: /Invalid mob fork_helper response: tokens_used must be number/,

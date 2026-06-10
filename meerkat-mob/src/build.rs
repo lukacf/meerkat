@@ -264,15 +264,11 @@ pub async fn build_agent_config(
     config.shell_env = shell_env;
     config.provider_params = profile.provider_params.clone();
 
-    // Structured output: convert JSON schema value to OutputSchema
-    if let Some(schema_value) = &profile.output_schema {
-        let schema = meerkat_core::MeerkatSchema::new(schema_value.clone()).map_err(|e| {
-            MobError::WiringError(format!(
-                "invalid output_schema for profile '{profile_name}': {e}"
-            ))
-        })?;
+    // Structured output: the profile carries the typed, already-validated
+    // schema (validated once at profile ingress).
+    if let Some(schema) = &profile.output_schema {
         config.output_schema = Some(meerkat_core::OutputSchema {
-            schema,
+            schema: schema.clone(),
             name: Some(format!("{mob_id}_{profile_name}")),
             strict: true,
             compat: Default::default(),
@@ -1353,8 +1349,10 @@ mod tests {
             requested_witnesses: [(
                 "deferred_active".to_string(),
                 meerkat_core::ToolVisibilityWitness {
-                    stable_owner_key: Some("owner:deferred_active".to_string()),
-                    last_seen_provenance: None,
+                    last_seen_provenance: Some(meerkat_core::ToolProvenance {
+                        kind: meerkat_core::ToolSourceKind::Callback,
+                        source_id: "deferred_active".into(),
+                    }),
                 },
             )]
             .into_iter()
@@ -1362,8 +1360,10 @@ mod tests {
             filter_witnesses: [(
                 "active_secret".to_string(),
                 meerkat_core::ToolVisibilityWitness {
-                    stable_owner_key: Some("owner:active_secret".to_string()),
-                    last_seen_provenance: None,
+                    last_seen_provenance: Some(meerkat_core::ToolProvenance {
+                        kind: meerkat_core::ToolSourceKind::Callback,
+                        source_id: "active_secret".into(),
+                    }),
                 },
             )]
             .into_iter()

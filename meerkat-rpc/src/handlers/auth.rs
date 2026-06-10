@@ -65,12 +65,12 @@ async fn load_config(runtime: &SessionRuntime) -> Result<meerkat_core::Config, R
 /// Row 100: the auth-status / create surfaces hold a typed
 /// `meerkat_core::AuthProfile` (which carries a typed `Provider` and the
 /// declared `auth_method` string). Rather than re-deriving the persisted mode
-/// through the provider-agnostic `persisted_auth_mode_for_auth_method` string
-/// shim (which guesses the provider by trying each matrix in order), these
-/// surfaces parse the method against the profile's known provider and then ask
-/// the typed enum directly via [`NormalizedAuthMethod::persisted_auth_mode`] —
-/// the single owner of the auth-method -> persisted-mode mapping. `None` when
-/// the declared method is not a member of the provider's auth matrix.
+/// through a provider-agnostic string shim that guesses the provider by trying
+/// each matrix in order (now deleted), these surfaces parse the method against
+/// the profile's known provider and then ask the typed enum directly via
+/// [`NormalizedAuthMethod::persisted_auth_mode`] — the single owner of the
+/// auth-method -> persisted-mode mapping. `None` when the declared method is
+/// not a member of the provider's auth matrix.
 fn normalized_auth_method(
     auth_profile: &meerkat_core::AuthProfile,
 ) -> Option<meerkat_providers::NormalizedAuthMethod> {
@@ -1780,28 +1780,49 @@ pub async fn handle_auth_status_get(
     let token_store = runtime.token_store();
     let mut stored = None;
     if source_uses_store {
-        if phase.is_no_live_lease()
-            && let Some(expected_mode) = expected_mode
-            && let Some(store) = token_store.as_ref()
-            && let Ok(Some(rehydrated)) = meerkat_core::rehydrate_marked_tokens_for_status(
-                store.as_ref(),
-                &generated_auth_lease,
-                &auth_binding,
-                expected_mode,
-                now,
-            )
-            .await
-        {
-            stored = Some(rehydrated);
-            snapshot = auth_lease.snapshot(&lease_key);
-        } else if !phase.is_no_live_lease()
-            && let Some(store) = token_store.as_ref()
-        {
-            stored = store
+        if phase.is_no_live_lease() {
+            if let (Some(expected_mode), Some(store)) = (expected_mode, token_store.as_ref()) {
+                // A store fault during rehydration is a real error, not
+                // absent credentials: collapsing it would report a store
+                // failure as "no credentials"/Unknown status.
+                match meerkat_core::rehydrate_marked_tokens_for_status(
+                    store.as_ref(),
+                    &generated_auth_lease,
+                    &auth_binding,
+                    expected_mode,
+                    now,
+                )
+                .await
+                {
+                    Ok(Some(rehydrated)) => {
+                        stored = Some(rehydrated);
+                        snapshot = auth_lease.snapshot(&lease_key);
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        return RpcResponse::error(
+                            id,
+                            error::INTERNAL_ERROR,
+                            format!("TokenStore rehydration failed: {err}"),
+                        );
+                    }
+                }
+            }
+        } else if let Some(store) = token_store.as_ref() {
+            // A store-load fault is a real error, not absent credentials.
+            stored = match store
                 .load(&TokenKey::from_auth_binding(&auth_binding))
                 .await
-                .ok()
-                .flatten();
+            {
+                Ok(stored) => stored,
+                Err(err) => {
+                    return RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("TokenStore load failed: {err}"),
+                    );
+                }
+            };
         }
     }
     if stored
@@ -3440,7 +3461,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auth_status_reports_lease_phase_when_token_load_fails() {
+    async fn auth_status_fails_closed_when_token_load_fails() {
         let runtime = test_runtime_with_config_and_token_store(
             config_with_openai_managed_store_binding(),
             Arc::new(LoadFailingTokenStore),
@@ -3470,11 +3491,20 @@ mod tests {
         let resp =
             handle_auth_status_get(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime).await;
 
-        let status = auth_status_value(resp);
-        assert_eq!(status["state"], "valid");
-        assert!(status.get("expires_at").is_some());
-        assert!(status.get("account_id").is_none());
-        assert_eq!(status["has_refresh_token"], false);
+        // A token-store load fault is auth truth the surface cannot vouch
+        // for: it must propagate as a typed failure, never be laundered into
+        // a lease-phase success.
+        let error = resp.error.expect("token load fault must fail closed");
+        assert_eq!(error.code, crate::error::INTERNAL_ERROR);
+        assert!(
+            error.message.contains("TokenStore load failed"),
+            "error must carry the token-store fault, got: {}",
+            error.message
+        );
+        assert!(
+            resp.result.is_none(),
+            "fail-closed status must not carry a result"
+        );
     }
 
     #[tokio::test]

@@ -879,15 +879,19 @@ mod tests {
             (
                 "send".to_string(),
                 meerkat_core::ToolVisibilityWitness {
-                    stable_owner_key: Some("test-owner:send".to_string()),
-                    last_seen_provenance: None,
+                    last_seen_provenance: Some(meerkat_core::ToolProvenance {
+                        kind: meerkat_core::ToolSourceKind::Callback,
+                        source_id: "send".into(),
+                    }),
                 },
             ),
             (
                 "read_file".to_string(),
                 meerkat_core::ToolVisibilityWitness {
-                    stable_owner_key: Some("test-owner:read_file".to_string()),
-                    last_seen_provenance: None,
+                    last_seen_provenance: Some(meerkat_core::ToolProvenance {
+                        kind: meerkat_core::ToolSourceKind::Callback,
+                        source_id: "read_file".into(),
+                    }),
                 },
             ),
         ]
@@ -925,8 +929,10 @@ mod tests {
                 tool_filter_witnesses: [(
                     "send".to_string(),
                     meerkat_core::ToolVisibilityWitness {
-                        stable_owner_key: Some("test-owner:send".to_string()),
-                        last_seen_provenance: None,
+                        last_seen_provenance: Some(meerkat_core::ToolProvenance {
+                            kind: meerkat_core::ToolSourceKind::Callback,
+                            source_id: "send".into(),
+                        }),
                     },
                 )]
                 .into_iter()

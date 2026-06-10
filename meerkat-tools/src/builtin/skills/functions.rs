@@ -73,6 +73,18 @@ impl BuiltinTool for SkillInvokeFunctionTool {
         let args: SkillInvokeFunctionArgs = serde_json::from_value(args)
             .map_err(|err| BuiltinToolError::InvalidArgs(err.to_string()))?;
         let raw_key = parse_key(&args.source_uuid, &args.skill_name)?;
+        // Fail closed on degenerate function identity at the same ingress
+        // where source_uuid/skill_name parse fail-closed. Full typed
+        // ownership (a `SkillFunctionName` newtype on the core
+        // `SkillSource::invoke_function` contract) is tracked as the root
+        // fix; until that lands, the surface refuses obviously-invalid
+        // identity instead of ferrying it to the engine.
+        let function_name = args.function_name.trim();
+        if function_name.is_empty() {
+            return Err(BuiltinToolError::InvalidArgs(
+                "function_name must be a non-empty skill function identifier".to_string(),
+            ));
+        }
         // Apply source-identity lineage remaps before dispatch.
         let key = self
             .engine
@@ -81,14 +93,14 @@ impl BuiltinTool for SkillInvokeFunctionTool {
             .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?;
         let output = self
             .engine
-            .invoke_function(&key, &args.function_name, args.arguments)
+            .invoke_function(&key, function_name, args.arguments)
             .await
             .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?;
 
         Ok(ToolOutput::Json(json!({
             "source_uuid": key.source_uuid.to_string(),
             "skill_name": key.skill_name.as_str(),
-            "function_name": args.function_name,
+            "function_name": function_name,
             "output": output,
         })))
     }

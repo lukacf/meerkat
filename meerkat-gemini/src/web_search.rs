@@ -84,12 +84,13 @@ async fn execute_native_web_search(
         provider_tag: Some(provider_tag(request.provider_params.clone())),
         ..Default::default()
     };
+    // Propagate the typed provider failure class instead of laundering every
+    // failure into a stringly-typed LlmError::Unknown that erases whether the
+    // search was rate-limited, auth-rejected, content-filtered, etc.
     let result = client
         .stream_response(&messages, &[], 2048, None, Some(&provider_params))
         .await
-        .map_err(|err| LlmError::Unknown {
-            message: err.to_string(),
-        })?;
+        .map_err(map_agent_error_to_llm_error)?;
 
     let mut answer_parts = Vec::new();
     let mut native_events = Vec::new();
@@ -113,6 +114,29 @@ async fn execute_native_web_search(
         }
     }
 
+    // Gate Completed on a typed witness that the provider actually ran its
+    // native search: a `ServerToolContent` native-search event must have been
+    // observed. A stream that produced only assistant prose (no native search
+    // event) is NOT verified evidence of a search having run, so it reports
+    // Unavailable rather than laundering an unverified turn into Completed.
+    if native_events.is_empty() {
+        return Ok(WebSearchResult {
+            status: WebSearchStatus::Unavailable,
+            query: request.query,
+            provider: Some(provider),
+            model: Some(ModelId::new(model.to_string())),
+            answer: (!answer_parts.is_empty()).then(|| answer_parts.join("\n\n")),
+            evidence,
+            native_events,
+            error: Some(
+                "provider stream produced no native web-search event; \
+                 search execution is unverified"
+                    .to_string(),
+            ),
+            checked_at: chrono::Utc::now(),
+        });
+    }
+
     Ok(WebSearchResult {
         status: WebSearchStatus::Completed,
         query: request.query,
@@ -124,6 +148,71 @@ async fn execute_native_web_search(
         error: None,
         checked_at: chrono::Utc::now(),
     })
+}
+
+/// Translate the agent-loop [`AgentError`](meerkat_core::AgentError) returned
+/// by `stream_response` into a typed [`LlmError`], preserving the failure
+/// class instead of collapsing every failure into [`LlmError::Unknown`]. There
+/// is intentionally no blanket `From<AgentError> for LlmError`: the web-search
+/// executor owns this narrow projection at its provider seam.
+fn map_agent_error_to_llm_error(err: meerkat_core::AgentError) -> LlmError {
+    use meerkat_core::AgentError;
+    use meerkat_core::error::{LlmFailureReason, LlmProviderErrorKind};
+
+    match err {
+        AgentError::Llm {
+            reason, message, ..
+        } => match reason {
+            LlmFailureReason::RateLimited { retry_after } => LlmError::RateLimited {
+                retry_after_ms: retry_after.map(|d| d.as_millis() as u64),
+            },
+            LlmFailureReason::ContextExceeded { max, requested } => {
+                LlmError::ContextLengthExceeded {
+                    max: max as usize,
+                    requested: requested as usize,
+                }
+            }
+            LlmFailureReason::AuthError => LlmError::AuthenticationFailed { message },
+            LlmFailureReason::InvalidModel(model) => LlmError::ModelNotFound { model },
+            LlmFailureReason::NetworkTimeout { duration_ms }
+            | LlmFailureReason::CallTimeout { duration_ms } => {
+                LlmError::NetworkTimeout { duration_ms }
+            }
+            LlmFailureReason::ProviderError(provider_error) => match provider_error.kind {
+                LlmProviderErrorKind::InvalidRequest => LlmError::InvalidRequest { message },
+                LlmProviderErrorKind::ContentFiltered => {
+                    LlmError::ContentFiltered { reason: message }
+                }
+                LlmProviderErrorKind::ServerError => LlmError::ServerError {
+                    status: 500,
+                    message,
+                },
+                LlmProviderErrorKind::ServerOverloaded => LlmError::ServerOverloaded,
+                LlmProviderErrorKind::ConnectionReset => LlmError::ConnectionReset,
+                LlmProviderErrorKind::StreamParseError => LlmError::StreamParseError { message },
+                LlmProviderErrorKind::IncompleteResponse => {
+                    LlmError::IncompleteResponse { message }
+                }
+                LlmProviderErrorKind::Unknown => LlmError::Unknown { message },
+            },
+            // LlmFailureReason is #[non_exhaustive]: a future reason maps to a
+            // typed Unknown carrying the provider message, never silently dropped.
+            _ => LlmError::Unknown { message },
+        },
+        AgentError::TokenBudgetExceeded { .. }
+        | AgentError::TimeBudgetExceeded { .. }
+        | AgentError::ToolCallBudgetExceeded { .. }
+        | AgentError::MaxTurnsReached { .. }
+        | AgentError::MaxTokensReached { .. } => LlmError::InvalidRequest {
+            message: err.to_string(),
+        },
+        AgentError::ContentFiltered { .. } => LlmError::ContentFiltered {
+            reason: err.to_string(),
+        },
+        other => LlmError::Unknown {
+            message: other.to_string(),
+        },
+    }
 }
 
 fn merge_object(body: &mut serde_json::Value, provider_params: Option<serde_json::Value>) {
@@ -184,5 +273,157 @@ fn collect_evidence(value: &serde_json::Value, out: &mut Vec<WebSearchEvidence>)
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use meerkat_core::ServerToolKind;
+    use meerkat_core::agent::LlmStreamResult;
+    use meerkat_core::error::LlmFailureReason;
+    use meerkat_core::types::Usage;
+    use meerkat_core::{AgentError, StopReason, ToolDef};
+    use std::sync::Mutex;
+
+    /// A fake LLM client that yields one canned outcome per call. The outcome
+    /// is moved out so a single configured result is consumed exactly once.
+    struct FakeClient {
+        outcome: Mutex<Option<Result<LlmStreamResult, AgentError>>>,
+    }
+
+    impl FakeClient {
+        fn ok(blocks: Vec<AssistantBlock>) -> Arc<dyn AgentLlmClient> {
+            Arc::new(Self {
+                outcome: Mutex::new(Some(Ok(LlmStreamResult::new(
+                    blocks,
+                    StopReason::EndTurn,
+                    Usage::default(),
+                )))),
+            })
+        }
+
+        fn err(err: AgentError) -> Arc<dyn AgentLlmClient> {
+            Arc::new(Self {
+                outcome: Mutex::new(Some(Err(err))),
+            })
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for FakeClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<
+                &meerkat_core::lifecycle::run_primitive::ProviderParamsOverride,
+            >,
+        ) -> Result<LlmStreamResult, AgentError> {
+            self.outcome
+                .lock()
+                .expect("fake outcome lock")
+                .take()
+                .expect("FakeClient outcome consumed more than once")
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Gemini
+        }
+
+        fn model(&self) -> &'static str {
+            "gemini-3.5-flash"
+        }
+    }
+
+    fn request() -> WebSearchRequest {
+        WebSearchRequest {
+            query: "what is meerkat".to_string(),
+            provider: None,
+            provider_params: None,
+            context: None,
+        }
+    }
+
+    fn server_tool_block() -> AssistantBlock {
+        AssistantBlock::ServerToolContent {
+            id: Some("ws_1".to_string()),
+            kind: ServerToolKind::WebSearch,
+            content: serde_json::json!({
+                "url": "https://example.com",
+                "title": "Meerkat",
+                "summary": "A small mammal."
+            }),
+            meta: None,
+        }
+    }
+
+    fn text_block(text: &str) -> AssistantBlock {
+        AssistantBlock::Text {
+            text: text.to_string(),
+            meta: None,
+        }
+    }
+
+    // Row #355: a stream that produced only assistant prose (no native
+    // search event) is NOT verified evidence of a search and must NOT report
+    // Completed.
+    #[tokio::test]
+    async fn stream_without_native_search_event_is_not_completed() {
+        let client = FakeClient::ok(vec![text_block("I think meerkats are small.")]);
+        let executor = GeminiWebSearchExecutor::new("gemini-3.5-flash".to_string(), client);
+        let result = executor
+            .execute_web_search(request())
+            .await
+            .expect("a successful stream must still resolve to a typed result");
+        assert_ne!(
+            result.status,
+            WebSearchStatus::Completed,
+            "no native web-search event ran; status must not be Completed"
+        );
+        assert_eq!(result.status, WebSearchStatus::Unavailable);
+        assert!(
+            result.error.is_some(),
+            "an unverified search must carry an explanatory witness"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_with_native_search_event_is_completed() {
+        let client = FakeClient::ok(vec![text_block("Meerkats are small."), server_tool_block()]);
+        let executor = GeminiWebSearchExecutor::new("gemini-3.5-flash".to_string(), client);
+        let result = executor
+            .execute_web_search(request())
+            .await
+            .expect("native search event present");
+        assert_eq!(result.status, WebSearchStatus::Completed);
+        assert!(
+            !result.native_events.is_empty(),
+            "the native-search witness must be retained"
+        );
+    }
+
+    // Row #355: a stream error must propagate the typed failure class, not be
+    // laundered into LlmError::Unknown.
+    #[tokio::test]
+    async fn stream_error_propagates_typed_llm_error() {
+        let client = FakeClient::err(AgentError::Llm {
+            provider: "gemini",
+            reason: LlmFailureReason::RateLimited { retry_after: None },
+            message: "rate limited".to_string(),
+        });
+        let executor = GeminiWebSearchExecutor::new("gemini-3.5-flash".to_string(), client);
+        let err = executor
+            .execute_web_search(request())
+            .await
+            .expect_err("a stream error must surface as a typed LlmError");
+        assert!(
+            matches!(err, LlmError::RateLimited { .. }),
+            "expected the typed RateLimited class to survive, got Unknown laundering: {err:?}"
+        );
     }
 }

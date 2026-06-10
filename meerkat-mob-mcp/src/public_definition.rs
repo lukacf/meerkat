@@ -62,6 +62,7 @@ pub fn decode_public_mob_definition(input: MobDefinitionInput) -> Result<MobDefi
     definition.supervisor = input.supervisor.map(|supervisor| SupervisorSpec {
         role: ProfileName::from(supervisor.role),
         escalation_threshold: supervisor.escalation_threshold,
+        escalation_turn_timeout_ms: supervisor.escalation_turn_timeout_ms,
     });
     definition.limits = input.limits.map(decode_limits);
     definition.spawn_policy = input.spawn_policy.map(decode_spawn_policy);
@@ -109,10 +110,9 @@ fn decode_profile(input: MobProfileInput) -> Result<Profile, String> {
         backend: input.backend.map(decode_backend_kind),
         runtime_mode: decode_runtime_mode(input.runtime_mode),
         max_inline_peer_notifications: input.max_inline_peer_notifications,
-        output_schema: input
-            .output_schema
-            .map(|schema| serde_json::to_value(schema).map_err(|error| error.to_string()))
-            .transpose()?,
+        // The wire input already carries a typed, validated OutputSchema; keep
+        // its typed MeerkatSchema instead of erasing it back to JSON.
+        output_schema: input.output_schema.map(|schema| schema.schema),
         provider_params: input
             .provider_params
             .map(|wire| serde_json::to_value(wire).map_err(|error| error.to_string()))

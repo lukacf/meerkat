@@ -74,10 +74,15 @@ pub enum LiveDegradationReason {
 /// Tool result at the adapter seam. Carries structured content blocks so
 /// callers can preserve fidelity (text, image, video) instead of stringifying
 /// into a single text block.
+///
+/// `call_id` is the typed provider-call identity (#270): the same
+/// [`ToolCallId`] newtype the observation seam emits in
+/// [`LiveAdapterObservation::ToolCallRequested`] correlates the result back —
+/// raw provider strings are never the identity carrier across this seam.
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LiveToolResult {
-    pub call_id: String,
+    pub call_id: ToolCallId,
     pub content: Vec<ContentBlock>,
     pub is_error: bool,
 }
@@ -192,7 +197,9 @@ pub enum LiveAdapterCommand {
         result: LiveToolResult,
     },
     SubmitToolError {
-        call_id: String,
+        /// Typed provider-call identity the error correlates to (same
+        /// [`ToolCallId`] newtype as the observation seam — #270).
+        call_id: ToolCallId,
         error: String,
     },
     Close,
@@ -1083,16 +1090,18 @@ mod tests {
     fn command_submit_tool_result_round_trips() {
         let cmd = LiveAdapterCommand::SubmitToolResult {
             result: LiveToolResult {
-                call_id: "call_123".into(),
+                call_id: ToolCallId::new("call_123"),
                 content: vec![ContentBlock::Text { text: "42".into() }],
                 is_error: false,
             },
         };
         let json = serde_json::to_string(&cmd).unwrap();
+        // Wire shape stays a plain string (ToolCallId is serde-transparent).
+        assert!(json.contains("\"call_id\":\"call_123\""));
         let deser: LiveAdapterCommand = serde_json::from_str(&json).unwrap();
         match deser {
             LiveAdapterCommand::SubmitToolResult { result } => {
-                assert_eq!(result.call_id, "call_123");
+                assert_eq!(result.call_id, ToolCallId::new("call_123"));
                 assert!(!result.is_error);
                 assert_eq!(result.content.len(), 1);
                 match &result.content[0] {
@@ -2061,7 +2070,7 @@ mod tests {
     #[test]
     fn live_tool_result_round_trips() {
         let result = LiveToolResult {
-            call_id: "call_abc".into(),
+            call_id: ToolCallId::new("call_abc"),
             content: vec![ContentBlock::Text {
                 text: "answer is 42".into(),
             }],
@@ -2075,7 +2084,7 @@ mod tests {
     #[test]
     fn live_tool_result_error_flag_round_trips() {
         let result = LiveToolResult {
-            call_id: "call_err".into(),
+            call_id: ToolCallId::new("call_err"),
             content: vec![ContentBlock::Text {
                 text: "tool not found".into(),
             }],
@@ -2089,7 +2098,7 @@ mod tests {
     #[test]
     fn live_tool_result_preserves_multiple_content_blocks() {
         let result = LiveToolResult {
-            call_id: "call_multi".into(),
+            call_id: ToolCallId::new("call_multi"),
             content: vec![
                 ContentBlock::Text {
                     text: "first".into(),

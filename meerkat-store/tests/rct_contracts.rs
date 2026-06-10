@@ -1,4 +1,4 @@
-use meerkat_core::{AgentSessionStore, Session, SessionMeta};
+use meerkat_core::{AgentSessionStore, Session};
 use meerkat_store::{JsonlStore, MemoryStore, SessionStore, StoreAdapter};
 use std::sync::Arc;
 
@@ -123,9 +123,11 @@ async fn test_regression_session_index_removes_stale_updated_at()
 
 /// Regression: Session index reconciles even when counts match.
 ///
-/// Previously: Reconciliation only ran when sidecar_count > index_count, so
-/// a crash between updating sidecar and index left stale metadata.
-/// Fix: Always reconcile when sidecars exist to handle updated timestamps.
+/// The per-session `.jsonl` file is the SINGLE durable truth (no `.meta`
+/// sidecar exists). When the session file carries newer state than the index
+/// projection — e.g. a crash between the session-file rename and the index
+/// insert — a fresh store must re-derive the listing metadata from the file,
+/// even though the entry counts match.
 #[tokio::test]
 async fn test_regression_session_index_reconciles_when_counts_match()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -156,33 +158,24 @@ async fn test_regression_session_index_reconciles_when_counts_match()
         "should have updated timestamp"
     );
 
-    // Now simulate a scenario where sidecar was updated but index wasn't:
-    // Rewrite sidecar with newer timestamp but don't touch index
+    // Now simulate a scenario where the session file was updated but the
+    // index wasn't: write the newer session state directly to the `.jsonl`
+    // file (bypassing the index update).
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     session.touch();
+    let session_path = dir.path().join(format!("{}.jsonl", session_id.0));
+    tokio::fs::write(&session_path, serde_json::to_vec(&session)?).await?;
 
-    // Write directly to sidecar file (bypassing index update)
-    // Meta files are stored as {store_dir}/{session_id}.meta
-    let meta_path = dir.path().join(format!("{}.meta", session_id.0));
-    let meta = SessionMeta {
-        id: session_id.clone(),
-        created_at: session.created_at(),
-        updated_at: session.updated_at(),
-        message_count: session.messages().len(),
-        total_tokens: session.total_tokens(),
-        metadata: session.metadata().clone(),
-    };
-    tokio::fs::write(&meta_path, serde_json::to_vec(&meta)?).await?;
-
-    // Create fresh store (simulating restart) - counts match but metadata is stale
+    // Create fresh store (simulating restart) - counts match but the index
+    // projection is stale relative to the durable session file.
     let store2 = JsonlStore::new(dir.path().to_path_buf());
     let sessions = store2.list(meerkat_store::SessionFilter::default()).await?;
 
-    // Should have the newer timestamp from reconciliation
+    // Reconciliation re-derives metadata from the session file truth.
     assert_eq!(sessions.len(), 1);
     assert!(
         sessions[0].updated_at > second_updated,
-        "reconciliation should have picked up newer sidecar timestamp"
+        "reconciliation should have re-derived the newer timestamp from the session file"
     );
 
     Ok(())

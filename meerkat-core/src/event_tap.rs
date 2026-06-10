@@ -70,7 +70,7 @@ pub fn tap_try_send(tap: &EventTap, event: &AgentEvent) {
             if !state.truncated.swap(true, Ordering::Relaxed) {
                 // First truncation — attempt one-time marker (also best-effort)
                 let _ = state.tx.try_send(AgentEvent::StreamTruncated {
-                    reason: "channel full".to_string(),
+                    reason: crate::event::StreamTruncationReason::ChannelFull,
                 });
             }
         }

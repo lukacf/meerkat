@@ -1751,6 +1751,29 @@
               "data"
             ],
             "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -1837,6 +1860,30 @@
           "completed",
           "failed"
         ],
+        "type": "string"
+      },
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
         "type": "string"
       }
     },
@@ -2493,6 +2540,29 @@
             "required": [
               "type",
               "data"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
             ],
             "type": "object"
           }
@@ -3902,6 +3972,29 @@
               "data"
             ],
             "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -4108,6 +4201,30 @@
           "provider",
           "meerkat_projection"
         ],
+        "type": "string"
+      },
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
         "type": "string"
       },
       "SystemNoticeBlock": {
@@ -5756,6 +5873,29 @@
               "data"
             ],
             "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -5905,6 +6045,30 @@
       },
       "PeerId": {
         "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
+        "type": "string"
+      },
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
         "type": "string"
       },
       "SystemNoticeBlock": {
@@ -7725,6 +7889,15 @@
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
+          },
+          "escalation_turn_timeout_ms": {
+            "description": "Declared escalation turn timeout in milliseconds. Absent means the\nruntime default applies (mirrors the domain `SupervisorSpec` owner).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "role": {
             "type": "string"
@@ -14426,6 +14599,29 @@
               "data"
             ],
             "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -14632,6 +14828,30 @@
           "provider",
           "meerkat_projection"
         ],
+        "type": "string"
+      },
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
         "type": "string"
       },
       "SystemNoticeBlock": {
@@ -16471,6 +16691,29 @@
             "required": [
               "type",
               "data"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
             ],
             "type": "object"
           }

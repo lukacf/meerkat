@@ -390,20 +390,22 @@ impl CompositeDispatcher {
     /// Get usage instructions for all enabled tools.
     pub fn usage_instructions(&self) -> String {
         let mut out = String::from("# Available Tools\n\n");
-        let mut seen_names: HashSet<String> = HashSet::new();
         for tool in &self.builtin_tools {
-            if self.allowed_tools.contains(tool.name()) {
-                seen_names.insert(tool.name().to_string());
-                {
-                    use std::fmt::Write;
-                    let _ = write!(out, "## {}\n{}\n\n", tool.name(), tool.def().description);
-                }
+            if matches!(
+                self.resolve_tool_owner(tool.name()),
+                ResolvedToolOwner::Builtin(_)
+            ) {
+                use std::fmt::Write;
+                let _ = write!(out, "## {}\n{}\n\n", tool.name(), tool.def().description);
             }
         }
         if let Some(ref ext) = self.external {
             let mut wrote_external_header = false;
             for tool in ext.tools().iter() {
-                if seen_names.contains(tool.name.as_str()) {
+                if !matches!(
+                    self.resolve_tool_owner(&tool.name),
+                    ResolvedToolOwner::External
+                ) {
                     continue;
                 }
                 if !wrote_external_header {
@@ -412,7 +414,6 @@ impl CompositeDispatcher {
                     );
                     wrote_external_header = true;
                 }
-                seen_names.insert(tool.name.to_string());
                 {
                     use std::fmt::Write;
                     let _ = write!(out, "## {}\n{}\n\n", tool.name, tool.description);
@@ -422,6 +423,111 @@ impl CompositeDispatcher {
         out
     }
 
+    /// Single owner of the tool-name precedence decision.
+    ///
+    /// Every surface that answers "who owns tool name X?" — advertisement
+    /// ([`AgentToolDispatcher::tools`], [`AgentToolDispatcher::tool_catalog`],
+    /// [`Self::usage_instructions`]) and execution
+    /// ([`AgentToolDispatcher::dispatch_with_context`]) — derives the winner
+    /// from this one function, so the advertised contract and the dispatch
+    /// behavior can never disagree.
+    ///
+    /// Precedence: policy-allowed builtin > policy-allowed skill tool >
+    /// external. A builtin/skill tool that exists but is policy-disabled does
+    /// NOT shadow a colliding external tool: the external tool both advertises
+    /// and dispatches. Only when no other source claims the name does the
+    /// disabled local tool resolve to [`ResolvedToolOwner::PolicyDenied`]
+    /// (a 403-shaped fault, distinct from 404).
+    fn resolve_tool_owner(&self, name: &str) -> ResolvedToolOwner<'_> {
+        let builtin = self
+            .builtin_tools
+            .iter()
+            .find(|tool| tool.name() == name)
+            .map(Arc::as_ref);
+        if let Some(tool) = builtin
+            && self.allowed_tools.contains(name)
+        {
+            return ResolvedToolOwner::Builtin(tool);
+        }
+        #[cfg(feature = "skills")]
+        let skill = self
+            .skill_tools
+            .as_ref()
+            .and_then(|set| set.tools().into_iter().find(|tool| tool.name() == name));
+        #[cfg(feature = "skills")]
+        if let Some(tool) = skill
+            && self.allowed_tools.contains(name)
+        {
+            return ResolvedToolOwner::Skill(tool);
+        }
+        if let Some(ref ext) = self.external {
+            let advertised = if ext.tool_catalog_capabilities().exact_catalog {
+                ext.tool_catalog()
+                    .iter()
+                    .any(|entry| entry.tool.name == name)
+            } else {
+                ext.tools().iter().any(|tool| tool.name == name)
+            };
+            if advertised {
+                return ResolvedToolOwner::External;
+            }
+        }
+        let local_exists = builtin.is_some();
+        #[cfg(feature = "skills")]
+        let local_exists = local_exists || skill.is_some();
+        if local_exists {
+            ResolvedToolOwner::PolicyDenied
+        } else {
+            ResolvedToolOwner::NotFound
+        }
+    }
+
+    /// Execute a locally-owned (builtin or skill) tool and convert its output
+    /// into a [`ToolDispatchOutcome`]. Shared by the builtin and skill dispatch
+    /// arms so the output-conversion policy has exactly one implementation.
+    async fn call_local_tool(
+        &self,
+        tool: &dyn BuiltinTool,
+        call: ToolCallView<'_>,
+        args: Value,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
+        let output = tool.call(args).await.map_err(|e| match e {
+            BuiltinToolError::InvalidArgs(msg) => ToolError::InvalidArguments {
+                name: call.name.into(),
+                reason: msg,
+            },
+            BuiltinToolError::ExecutionFailed(msg) => ToolError::ExecutionFailed { message: msg },
+            BuiltinToolError::TaskError(te) => ToolError::ExecutionFailed { message: te },
+        })?;
+        let async_ops = tool.async_ops_for_output(&output);
+        match output {
+            ToolOutput::Json(value) => {
+                let content = json_output_content(call.name, &value)?;
+                Ok(ToolDispatchOutcome::new(
+                    ToolResult::new(call.id.to_string(), content, false),
+                    async_ops,
+                    vec![],
+                ))
+            }
+            ToolOutput::JsonWithEffects {
+                value,
+                session_effects,
+            } => {
+                let content = json_output_content(call.name, &value)?;
+                Ok(ToolDispatchOutcome::new(
+                    ToolResult::new(call.id.to_string(), content, false),
+                    async_ops,
+                    session_effects,
+                ))
+            }
+            ToolOutput::Blocks(blocks) => Ok(ToolDispatchOutcome::new(
+                ToolResult::with_blocks(call.id.to_string(), blocks, false),
+                async_ops,
+                vec![],
+            )),
+        }
+    }
+
     /// Return the shared shell job manager when shell tools are enabled.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn shell_job_manager(&self) -> Option<Arc<JobManager>> {
@@ -429,40 +535,68 @@ impl CompositeDispatcher {
     }
 }
 
+/// The winner of a tool-name precedence decision, resolved exclusively by
+/// [`CompositeDispatcher::resolve_tool_owner`]. Advertisement and dispatch
+/// both consume this single derivation; neither re-derives precedence locally.
+enum ResolvedToolOwner<'a> {
+    /// A policy-allowed builtin tool owns the name.
+    Builtin(&'a dyn BuiltinTool),
+    /// A policy-allowed skill tool owns the name.
+    #[cfg(feature = "skills")]
+    Skill(&'a dyn BuiltinTool),
+    /// The external dispatcher advertises and owns the name.
+    External,
+    /// A local (builtin/skill) tool exists under this name but is
+    /// policy-disabled, and no other source claims the name: the call is
+    /// denied, not missing.
+    PolicyDenied,
+    /// No source claims the name.
+    NotFound,
+}
+
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentToolDispatcher for CompositeDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         let mut tools = Vec::new();
-        let mut seen_names = HashSet::new();
 
-        // Add allowed builtin tools first (they take precedence)
+        // Each source advertises exactly the names it wins per the single
+        // precedence owner (`resolve_tool_owner`), so advertisement can never
+        // disagree with dispatch about who handles a colliding name.
         for tool in &self.builtin_tools {
-            if self.allowed_tools.contains(tool.name()) {
-                seen_names.insert(tool.name().to_string());
+            if matches!(
+                self.resolve_tool_owner(tool.name()),
+                ResolvedToolOwner::Builtin(_)
+            ) {
                 tools.push(Arc::new(tool.def()));
             }
         }
 
-        // Add skill tools
         #[cfg(feature = "skills")]
         if let Some(ref skill) = self.skill_tools {
             for tool in skill.tools() {
-                if self.allowed_tools.contains(tool.name()) {
-                    seen_names.insert(tool.name().to_string());
+                if matches!(
+                    self.resolve_tool_owner(tool.name()),
+                    ResolvedToolOwner::Skill(_)
+                ) {
                     tools.push(Arc::new(tool.def()));
                 }
             }
         }
 
-        // Add external tools, skipping duplicates to avoid LLM confusion
         if let Some(ref ext) = self.external {
+            // Intra-source dedup only; precedence against local tools is
+            // owned by `resolve_tool_owner`.
+            let mut seen_external = HashSet::new();
             for tool in ext.tools().iter() {
-                if !seen_names.contains(tool.name.as_str()) {
-                    seen_names.insert(tool.name.to_string());
+                if seen_external.insert(tool.name.to_string())
+                    && matches!(
+                        self.resolve_tool_owner(&tool.name),
+                        ResolvedToolOwner::External
+                    )
+                {
                     tools.push(Arc::clone(tool));
                 }
-                // Note: duplicates are silently skipped; builtins take precedence
             }
         }
 
@@ -492,11 +626,14 @@ impl AgentToolDispatcher for CompositeDispatcher {
 
     fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
         let mut catalog = Vec::new();
-        let mut seen_names = HashSet::new();
 
+        // Each source contributes exactly the names it wins per the single
+        // precedence owner (`resolve_tool_owner`).
         for tool in &self.builtin_tools {
-            if self.allowed_tools.contains(tool.name()) {
-                seen_names.insert(tool.name().to_string());
+            if matches!(
+                self.resolve_tool_owner(tool.name()),
+                ResolvedToolOwner::Builtin(_)
+            ) {
                 catalog.push(ToolCatalogEntry::session_inline(Arc::new(tool.def()), true));
             }
         }
@@ -504,24 +641,38 @@ impl AgentToolDispatcher for CompositeDispatcher {
         #[cfg(feature = "skills")]
         if let Some(ref skill) = self.skill_tools {
             for tool in skill.tools() {
-                if self.allowed_tools.contains(tool.name())
-                    && seen_names.insert(tool.name().to_string())
-                {
+                if matches!(
+                    self.resolve_tool_owner(tool.name()),
+                    ResolvedToolOwner::Skill(_)
+                ) {
                     catalog.push(ToolCatalogEntry::session_inline(Arc::new(tool.def()), true));
                 }
             }
         }
 
         if let Some(ref ext) = self.external {
+            // Intra-source dedup only; precedence against local tools is
+            // owned by `resolve_tool_owner`.
+            let mut seen_external = HashSet::new();
             if ext.tool_catalog_capabilities().exact_catalog {
                 for entry in ext.tool_catalog().iter() {
-                    if seen_names.insert(entry.tool.name.to_string()) {
+                    if seen_external.insert(entry.tool.name.to_string())
+                        && matches!(
+                            self.resolve_tool_owner(&entry.tool.name),
+                            ResolvedToolOwner::External
+                        )
+                    {
                         catalog.push(entry.clone());
                     }
                 }
             } else {
                 for tool in ext.tools().iter() {
-                    if seen_names.insert(tool.name.to_string()) {
+                    if seen_external.insert(tool.name.to_string())
+                        && matches!(
+                            self.resolve_tool_owner(&tool.name),
+                            ResolvedToolOwner::External
+                        )
+                    {
                         catalog.push(ToolCatalogEntry::session_inline(Arc::clone(tool), true));
                     }
                 }
@@ -546,119 +697,41 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 name: call.name.into(),
                 reason: e.to_string(),
             })?;
-        // Check builtin tools. Wave B (V7): a builtin tool that exists but
-        // is not in `allowed_tools` is policy-denied, not missing — callers
-        // see `AccessDenied` so surfaces can distinguish 403 from 404.
-        for tool in &self.builtin_tools {
-            if tool.name() == call.name {
-                if !self.allowed_tools.contains(tool.name()) {
-                    return Err(ToolError::AccessDenied {
+        // Dispatch consumes the same winner derivation advertisement uses
+        // (`resolve_tool_owner`): an advertised tool always dispatches to the
+        // advertised owner, and a policy-disabled local tool never shadows a
+        // colliding external tool. Wave B (V7): a local tool that exists but
+        // is policy-disabled — with no other owner for the name — is denied,
+        // not missing, so surfaces can distinguish 403 from 404.
+        match self.resolve_tool_owner(call.name) {
+            ResolvedToolOwner::Builtin(tool) => self.call_local_tool(tool, call, args).await,
+            #[cfg(feature = "skills")]
+            ResolvedToolOwner::Skill(tool) => self.call_local_tool(tool, call, args).await,
+            ResolvedToolOwner::External => {
+                let Some(ext) = self.external.as_ref() else {
+                    // `External` is only resolved when an external dispatcher
+                    // exists; fail closed rather than fabricate a result.
+                    return Err(ToolError::NotFound {
                         name: call.name.into(),
                     });
-                }
-                let output = tool.call(args.clone()).await.map_err(|e| match e {
-                    BuiltinToolError::InvalidArgs(msg) => ToolError::InvalidArguments {
-                        name: call.name.into(),
-                        reason: msg,
-                    },
-                    BuiltinToolError::ExecutionFailed(msg) => {
-                        ToolError::ExecutionFailed { message: msg }
-                    }
-                    BuiltinToolError::TaskError(te) => ToolError::ExecutionFailed { message: te },
-                })?;
-                let async_ops = tool.async_ops_for_output(&output);
-                let result = match output {
-                    ToolOutput::Json(value) => {
-                        let content = json_output_content(call.name, &value)?;
-                        ToolResult::new(call.id.to_string(), content, false)
-                    }
-                    ToolOutput::JsonWithEffects {
-                        value,
-                        session_effects,
-                    } => {
-                        let content = json_output_content(call.name, &value)?;
-                        return Ok(ToolDispatchOutcome::new(
-                            ToolResult::new(call.id.to_string(), content, false),
-                            async_ops,
-                            session_effects,
-                        ));
-                    }
-                    ToolOutput::Blocks(blocks) => {
-                        ToolResult::with_blocks(call.id.to_string(), blocks, false)
-                    }
                 };
-                return Ok(ToolDispatchOutcome::new(result, async_ops, vec![]));
-            }
-        }
-
-        // Check skill tools
-        #[cfg(feature = "skills")]
-        if let Some(ref skill) = self.skill_tools {
-            for tool in skill.tools() {
-                if tool.name() == call.name {
-                    if !self.allowed_tools.contains(tool.name()) {
-                        return Err(ToolError::AccessDenied {
-                            name: call.name.into(),
-                        });
-                    }
-                    let output = tool.call(args.clone()).await.map_err(|e| match e {
-                        BuiltinToolError::InvalidArgs(msg) => ToolError::InvalidArguments {
-                            name: call.name.into(),
-                            reason: msg,
-                        },
-                        BuiltinToolError::ExecutionFailed(msg) => {
-                            ToolError::ExecutionFailed { message: msg }
-                        }
-                        BuiltinToolError::TaskError(te) => {
-                            ToolError::ExecutionFailed { message: te }
-                        }
-                    })?;
-                    let async_ops = tool.async_ops_for_output(&output);
-                    let result = match output {
-                        ToolOutput::Json(value) => {
-                            let content = json_output_content(call.name, &value)?;
-                            ToolResult::new(call.id.to_string(), content, false)
-                        }
-                        ToolOutput::JsonWithEffects {
-                            value,
-                            session_effects,
-                        } => {
-                            let content = json_output_content(call.name, &value)?;
-                            return Ok(ToolDispatchOutcome::new(
-                                ToolResult::new(call.id.to_string(), content, false),
-                                async_ops,
-                                session_effects,
-                            ));
-                        }
-                        ToolOutput::Blocks(blocks) => {
-                            ToolResult::with_blocks(call.id.to_string(), blocks, false)
-                        }
-                    };
-                    return Ok(ToolDispatchOutcome::new(result, async_ops, vec![]));
-                }
-            }
-        }
-
-        if let Some(ref ext) = self.external {
-            if ext.tool_catalog_capabilities().exact_catalog {
-                if let Some(entry) = ext
-                    .tool_catalog()
-                    .iter()
-                    .find(|entry| entry.tool.name == call.name)
-                {
-                    if let Some(reason) = entry.callability.unavailable_reason() {
+                if ext.tool_catalog_capabilities().exact_catalog {
+                    let catalog = ext.tool_catalog();
+                    if let Some(entry) = catalog.iter().find(|entry| entry.tool.name == call.name)
+                        && let Some(reason) = entry.callability.unavailable_reason()
+                    {
                         return Err(ToolError::unavailable(call.name, reason));
                     }
-                    return ext.dispatch_with_context(call, context).await;
                 }
-            } else if ext.tools().iter().any(|t| t.name == call.name) {
-                return ext.dispatch_with_context(call, context).await;
+                ext.dispatch_with_context(call, context).await
             }
+            ResolvedToolOwner::PolicyDenied => Err(ToolError::AccessDenied {
+                name: call.name.into(),
+            }),
+            ResolvedToolOwner::NotFound => Err(ToolError::NotFound {
+                name: call.name.into(),
+            }),
         }
-
-        Err(ToolError::NotFound {
-            name: call.name.into(),
-        })
     }
 
     async fn poll_external_updates(&self) -> ExternalToolUpdate {
@@ -1185,6 +1258,97 @@ mod tests {
         };
         let result = dispatcher.dispatch(call).await;
         assert!(matches!(result, Err(ToolError::Unavailable { .. })));
+    }
+
+    #[tokio::test]
+    async fn disabled_builtin_does_not_shadow_colliding_external_tool() {
+        // The single precedence owner (`resolve_tool_owner`) must make
+        // advertisement and dispatch agree: when a builtin is policy-disabled
+        // and an external tool collides on its name, the external tool is the
+        // winner on BOTH surfaces — it is advertised AND it dispatches.
+        // (Previously dispatch returned AccessDenied for a name the catalog
+        // advertised as an external tool.)
+        let store = Arc::new(MemoryTaskStore::new());
+        let config = BuiltinToolConfig {
+            policy: ToolPolicyLayer::new().disable_tool("datetime"),
+            ..Default::default()
+        };
+        let external: Arc<dyn AgentToolDispatcher> =
+            Arc::new(ExactExternalDispatcher::new(&[("datetime", true)]));
+
+        let dispatcher = CompositeDispatcher::new(
+            store,
+            &config,
+            Some(test_project_root()),
+            None,
+            Some(external),
+            None,
+            true,
+        )
+        .expect("composite dispatcher should build");
+
+        // Advertised exactly once, as the external entry.
+        let catalog = dispatcher.tool_catalog();
+        let datetime_entries: Vec<_> = catalog
+            .iter()
+            .filter(|entry| entry.tool.name == "datetime")
+            .collect();
+        assert_eq!(datetime_entries.len(), 1, "exactly one winner per name");
+        assert_eq!(
+            datetime_entries[0].tool.description, "external tool: datetime",
+            "the external tool must be the advertised winner"
+        );
+
+        // Dispatch agrees with advertisement: it routes to the external tool.
+        let call_json = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "collide-1",
+            name: "datetime",
+            args: &call_json,
+        };
+        let outcome = dispatcher
+            .dispatch(call)
+            .await
+            .expect("advertised external winner must dispatch, not AccessDenied");
+        assert_eq!(outcome.result.text_content(), "{}");
+    }
+
+    #[tokio::test]
+    async fn disabled_builtin_without_collision_is_policy_denied_not_missing() {
+        // Wave B (V7) semantics preserved: a policy-disabled builtin with no
+        // other owner for the name is AccessDenied (403), not NotFound (404).
+        let store = Arc::new(MemoryTaskStore::new());
+        let config = BuiltinToolConfig {
+            policy: ToolPolicyLayer::new().disable_tool("datetime"),
+            ..Default::default()
+        };
+        let dispatcher = CompositeDispatcher::new(
+            store,
+            &config,
+            Some(test_project_root()),
+            None,
+            None,
+            None,
+            true,
+        )
+        .expect("composite dispatcher should build");
+
+        assert!(
+            !dispatcher
+                .tool_catalog()
+                .iter()
+                .any(|entry| entry.tool.name == "datetime"),
+            "a policy-denied builtin must not be advertised"
+        );
+
+        let call_json = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "denied-1",
+            name: "datetime",
+            args: &call_json,
+        };
+        let err = dispatcher.dispatch(call).await.unwrap_err();
+        assert!(matches!(err, ToolError::AccessDenied { .. }));
     }
 
     #[tokio::test]

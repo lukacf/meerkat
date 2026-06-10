@@ -110,6 +110,40 @@ fn session_id_from_event(event: &meerkat_core::event::AgentEvent) -> Option<Sess
 /// projection failure is recorded as a typed degraded-projection signal (carrying
 /// the typed [`crate::projector::ProjectionError`]) rather than being laundered
 /// into the same bare warn as a true durability hole.
+/// Typed owner of halted event-projection faults, keyed by session.
+///
+/// The detached projection tasks have no caller to return to, so a durable
+/// append failure inside them cannot propagate as a function result. Instead
+/// of terminating the typed fault in a log line, the task records it here and
+/// replay reads ([`PersistentSessionService::event_log_read_from`]) fail
+/// closed on it rather than serving an event stream with a silent durability
+/// hole.
+type EventProjectionFaultRegistry = Arc<Mutex<HashMap<SessionId, Arc<SessionError>>>>;
+
+/// Typed error surfaced by replay APIs after the session's event-projection
+/// task halted on a durable event-log append failure. The canonical log has a
+/// sequence hole from the halt point onward, so replay must not be served as
+/// complete surface-visible truth.
+#[derive(Debug, thiserror::Error)]
+#[error("event projection halted for session {session_id}: durable event append failed")]
+pub struct EventProjectionHalted {
+    session_id: SessionId,
+    #[source]
+    cause: Arc<SessionError>,
+}
+
+async fn record_event_projection_fault(
+    faults: &EventProjectionFaultRegistry,
+    session_id: &SessionId,
+    error: SessionError,
+) {
+    faults
+        .lock()
+        .await
+        .entry(session_id.clone())
+        .or_insert_with(|| Arc::new(error));
+}
+
 async fn append_and_project_event(
     event_store: &Arc<dyn EventStore>,
     projector: &Arc<SessionProjector>,
@@ -159,6 +193,7 @@ async fn project_create_time_events(
     caller_event_tx: Option<
         mpsc::Sender<meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>>,
     >,
+    projection_faults: EventProjectionFaultRegistry,
 ) {
     let mut session_id = session_rx.borrow().clone();
     let mut pending = Vec::new();
@@ -189,12 +224,15 @@ async fn project_create_time_events(
                         // Terminal durability fault: the canonical event log
                         // append failed, leaving a sequence hole. Stop the
                         // projection loop rather than continuing to append past
-                        // the hole and compounding it.
+                        // the hole and compounding it, and record the typed
+                        // fault so replay reads fail closed instead of serving
+                        // a stream with a silent hole.
                         tracing::error!(
                             session_id = %session_id,
                             error = %error,
                             "create-time event projection halted: durable event append failed"
                         );
+                        record_event_projection_fault(&projection_faults, session_id, error).await;
                         break;
                     }
                 } else {
@@ -215,6 +253,7 @@ async fn project_create_time_events(
                         error = %error,
                         "create-time event projection halted: durable event append failed"
                     );
+                    record_event_projection_fault(&projection_faults, session_id, error).await;
                     break;
                 }
             }
@@ -230,6 +269,7 @@ async fn project_create_time_events(
             error = %error,
             "final create-time event projection flush failed: durable event append failed"
         );
+        record_event_projection_fault(&projection_faults, session_id, error).await;
     }
 }
 
@@ -269,13 +309,6 @@ fn rollback_tool_visibility_state_snapshot(
             "invalid canonical tool visibility state: {err}"
         )))
     })
-}
-
-fn control_error_into_session_error(err: SessionControlError) -> SessionError {
-    match err {
-        SessionControlError::Session(session_err) => session_err,
-        other => SessionError::Unsupported(other.to_string()),
-    }
 }
 
 fn is_durable_session_sync_unsupported(err: &SessionError) -> bool {
@@ -1225,6 +1258,10 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// Runtime snapshots quarantined after rejecting a checkpoint may fall back
     /// to the latest store projection for recovery in this service process.
     quarantined_runtime_projection_fallbacks: Mutex<HashSet<SessionId>>,
+    /// Typed faults recorded by detached event-projection tasks that halted on
+    /// a durable append failure. Replay reads fail closed on these instead of
+    /// serving an event stream with a silent sequence hole.
+    event_projection_faults: EventProjectionFaultRegistry,
 }
 
 /// Extract session labels from a metadata map.
@@ -2455,7 +2492,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         };
         self.reject_if_archived_session(id, &stored)
             .await
-            .map_err(control_error_into_session_error)?;
+            .map_err(crate::control_error_into_session_error)?;
 
         let _ = stored;
         Err(SessionError::Agent(AgentError::InternalError(
@@ -2514,7 +2551,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
         self.reject_if_archived_session(id, &session)
             .await
-            .map_err(control_error_into_session_error)?;
+            .map_err(crate::control_error_into_session_error)?;
         Ok(session)
     }
 
@@ -3306,6 +3343,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             checkpointer_gates: Mutex::new(HashMap::new()),
             recovery_gates: Mutex::new(HashMap::new()),
             quarantined_runtime_projection_fallbacks: Mutex::new(HashSet::new()),
+            event_projection_faults: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -3376,7 +3414,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         if let Some(session) = self.load_authoritative_session_base(id).await? {
             self.reject_if_archived_session(id, &session)
                 .await
-                .map_err(control_error_into_session_error)?;
+                .map_err(crate::control_error_into_session_error)?;
         }
         match self.inner.acquire_runtime_context_admission(id).await {
             Ok(admission) => Ok(admission),
@@ -3707,6 +3745,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let Some(event_store) = self.event_store.as_ref() else {
             return Ok(None);
         };
+        // Fail closed if this session's projection task halted on a durable
+        // append failure: the log has a sequence hole from the halt point, so
+        // serving it as replay truth would launder the recorded typed fault.
+        if let Some(cause) = self.event_projection_faults.lock().await.get(id) {
+            return Err(SessionError::Store(Box::new(EventProjectionHalted {
+                session_id: id.clone(),
+                cause: Arc::clone(cause),
+            })));
+        }
         event_store
             .read_from(id, from_seq)
             .await
@@ -3739,6 +3786,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             projection_rx,
             session_rx,
             caller_event_tx,
+            Arc::clone(&self.event_projection_faults),
         ));
 
         Some(session_tx)
@@ -3756,6 +3804,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             return;
         };
 
+        let projection_faults = Arc::clone(&self.event_projection_faults);
         tokio::spawn(async move {
             while let Some(envelope) = stream.next().await {
                 if let Err(error) =
@@ -3763,12 +3812,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 {
                     // Terminal durability fault: the canonical event log append
                     // failed, leaving a sequence hole. Stop draining the stream
-                    // rather than appending past the hole and compounding it.
+                    // rather than appending past the hole and compounding it,
+                    // and record the typed fault so replay reads fail closed
+                    // instead of serving a stream with a silent hole.
                     tracing::error!(
                         session_id = %session_id,
                         error = %error,
                         "event projection halted: durable event append failed"
                     );
+                    record_event_projection_fault(&projection_faults, &session_id, error).await;
                     break;
                 }
             }
@@ -4151,7 +4203,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .collect::<Vec<_>>();
         let (snapshot_state, staged_state) = state_handle
             .stage_active_turn_appends_with_snapshot(stage_inputs)
-            .map_err(|err| control_error_into_session_error(err.into_control_error(id)))?;
+            .map_err(|err| crate::control_error_into_session_error(err.into_control_error(id)))?;
         let staged_token = EphemeralSessionService::<B>::active_turn_boundary_staging_token(
             turn_state_handle.as_ref(),
         )
@@ -4181,9 +4233,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
             self.reject_if_archived_session(id, &session)
                 .await
-                .map_err(control_error_into_session_error)?;
+                .map_err(crate::control_error_into_session_error)?;
             write_system_context_state(&mut session, staged_state.clone())
-                .map_err(control_error_into_session_error)?;
+                .map_err(crate::control_error_into_session_error)?;
             let session = self.normalized_session_for_persistence(session).await?;
             serde_json::to_vec(&session).map_err(|err| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
@@ -4384,7 +4436,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         if let Some(session) = self.load_authoritative_session_base(id).await? {
             self.reject_if_archived_session(id, &session)
                 .await
-                .map_err(control_error_into_session_error)?;
+                .map_err(crate::control_error_into_session_error)?;
         }
         Ok(guard)
     }
@@ -4437,7 +4489,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         if let Some(session) = self.load_authoritative_session_base(id).await? {
             self.reject_if_archived_session(id, &session)
                 .await
-                .map_err(control_error_into_session_error)?;
+                .map_err(crate::control_error_into_session_error)?;
         }
         Ok(guard)
     }
@@ -4461,6 +4513,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             contributing_input_ids,
             conversation_digest: Some(digest),
             message_count: session.messages().len(),
+            // Read-only projection of the machine-owned boundary counter, not
+            // a producer: `RecordBoundarySeq` derives the durable sequence
+            // from `live_boundary_context_sequence_by_run` inside the
+            // generated machine and ignores receipt-carried values. Direct
+            // service turns have no live-boundary counter entry, so the
+            // machine derives the same base sequence 0 projected here.
             sequence: 0,
         })
     }
@@ -4990,7 +5048,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         {
             self.reject_if_archived_session(id, &session)
                 .await
-                .map_err(control_error_into_session_error)
+                .map_err(crate::control_error_into_session_error)
                 .map_err(|error| (error, None))?;
         }
         let mut active_guard = Some(admission);
@@ -5033,7 +5091,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         if let Some(session) = self.load_authoritative_session_base(id).await? {
             self.reject_if_archived_session(id, &session)
                 .await
-                .map_err(control_error_into_session_error)?;
+                .map_err(crate::control_error_into_session_error)?;
         }
         let _active_guard = match admission {
             Some(admission) => admission,
@@ -5114,7 +5172,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             {
                 self.reject_if_archived_session(resume_session_id, &session)
                     .await
-                    .map_err(control_error_into_session_error)?;
+                    .map_err(crate::control_error_into_session_error)?;
             }
             Some(guard)
         } else {
@@ -5413,7 +5471,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         {
             self.reject_if_archived_session(id, &session)
                 .await
-                .map_err(control_error_into_session_error)?;
+                .map_err(crate::control_error_into_session_error)?;
             return Ok(view_from_authoritative_session(&session));
         }
 
@@ -5425,7 +5483,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
                 };
                 self.reject_if_archived_session(id, &session)
                     .await
-                    .map_err(control_error_into_session_error)?;
+                    .map_err(crate::control_error_into_session_error)?;
                 Ok(view_from_authoritative_session(&session))
             }
             Err(err) => Err(err),
@@ -6058,9 +6116,9 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
 
                 self.reject_if_archived_session(id, &session)
                     .await
-                    .map_err(control_error_into_session_error)?;
+                    .map_err(crate::control_error_into_session_error)?;
                 write_deferred_turn_state(&mut session, persisted_state)
-                    .map_err(control_error_into_session_error)?;
+                    .map_err(crate::control_error_into_session_error)?;
                 self.save_normalized_session(session).await?;
 
                 let commit_result = {
@@ -6124,11 +6182,12 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
         };
         self.reject_if_archived_session(id, &session)
             .await
-            .map_err(control_error_into_session_error)?;
+            .map_err(crate::control_error_into_session_error)?;
         let mut state = session.deferred_turn_state().unwrap_or_default();
         let accepted =
             state.stage_tool_results(req.results, meerkat_core::time_compat::SystemTime::now());
-        write_deferred_turn_state(&mut session, state).map_err(control_error_into_session_error)?;
+        write_deferred_turn_state(&mut session, state)
+            .map_err(crate::control_error_into_session_error)?;
         self.save_normalized_session(session).await?;
         Ok(StageToolResultsResult {
             accepted_result_count: accepted,
@@ -6377,6 +6436,83 @@ mod tests {
         let replayed = event_store.read_from(&session_id, 0).await?;
         assert_eq!(replayed.len(), 1);
         assert_eq!(replayed[0].seq, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn halted_event_projection_fails_replay_closed()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Gate: a detached projection task that halts on a durable append
+        // failure must not terminate the typed fault in a log line. The fault
+        // is recorded in the service's typed fault registry and replay reads
+        // fail closed on it instead of serving a stream with a silent hole.
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let event_store = Arc::new(RecordingEventStore::default());
+        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
+        let dir = tempfile::tempdir()?;
+        let projector = Arc::new(SessionProjector::new(dir.path().join(".rkat")));
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        )
+        .with_event_projection(event_store_trait.clone(), Arc::clone(&projector));
+
+        let session_id = SessionId::new();
+        event_store.fail_appends();
+
+        // Drive the create-time projection conduit against the service's typed
+        // fault registry, exactly as `install_create_time_event_projection`
+        // wires it for real sessions.
+        let (projection_tx, projection_rx) = mpsc::channel(4);
+        let (session_tx, session_rx) = watch::channel(Some(session_id.clone()));
+        let task = tokio::spawn(project_create_time_events(
+            event_store_trait,
+            projector,
+            projection_rx,
+            session_rx,
+            None,
+            Arc::clone(&service.event_projection_faults),
+        ));
+        projection_tx
+            .send(meerkat_core::event::EventEnvelope::new_session(
+                session_id.clone(),
+                0,
+                None,
+                AgentEvent::RunStarted {
+                    session_id: session_id.clone(),
+                    prompt: ContentInput::Text("seed".to_string()),
+                },
+            ))
+            .await?;
+        drop(projection_tx);
+        drop(session_tx);
+        task.await?;
+
+        let err = service
+            .event_log_read_from(&session_id, 0)
+            .await
+            .expect_err("replay after a halted projection must fail closed");
+        match err {
+            SessionError::Store(source) => {
+                assert!(
+                    source.downcast_ref::<EventProjectionHalted>().is_some(),
+                    "expected typed EventProjectionHalted fault, got: {source}"
+                );
+            }
+            other => panic!("expected SessionError::Store, got: {other}"),
+        }
+
+        // Unrelated sessions still replay normally.
+        let other_session = SessionId::new();
+        assert!(
+            service
+                .event_log_read_from(&other_session, 0)
+                .await?
+                .is_some_and(|events| events.is_empty())
+        );
         Ok(())
     }
 
@@ -8633,7 +8769,6 @@ mod tests {
 
     fn expected_tool_dispatch_witness(tool_name: &str) -> meerkat_core::ToolVisibilityWitness {
         meerkat_core::ToolVisibilityWitness {
-            stable_owner_key: Some(format!("callback:{tool_name}")),
             last_seen_provenance: Some(meerkat_core::ToolProvenance {
                 kind: meerkat_core::ToolSourceKind::Callback,
                 source_id: tool_name.to_string().into(),

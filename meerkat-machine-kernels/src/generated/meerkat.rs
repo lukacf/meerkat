@@ -11276,7 +11276,7 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordBoundarySeq {
         pub input_id: String,
-        pub seq: u64,
+        pub run_id: RunId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RegisterOp {
@@ -14046,6 +14046,11 @@ pub enum TransitionId {
     RegisterSessionRunning,
     RegisterSessionRetired,
     RegisterSessionStopped,
+    RegisterSessionIdempotentIdle,
+    RegisterSessionIdempotentAttached,
+    RegisterSessionIdempotentRunning,
+    RegisterSessionIdempotentRetired,
+    RegisterSessionIdempotentStopped,
     StageDeferredSession,
     UpdateDeferredSessionKeepAlive,
     BeginDeferredSessionPromotion,

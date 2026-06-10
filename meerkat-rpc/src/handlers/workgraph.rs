@@ -50,6 +50,18 @@ fn map_workgraph_public_error_class(
     }
 }
 
+/// Resolve the realm-scoped WorkGraph service or surface the typed
+/// no-realm-identity fault (never an invented "default" scope).
+#[allow(clippy::result_large_err)]
+fn workgraph_service_or_error(
+    id: &Option<RpcId>,
+    runtime: &SessionRuntime,
+) -> Result<meerkat::WorkGraphService, RpcResponse> {
+    runtime
+        .workgraph_service()
+        .map_err(|err| RpcResponse::error(id.clone(), err.code, err.message))
+}
+
 pub async fn handle_get(
     id: Option<RpcId>,
     params: Option<&RawValue>,
@@ -59,8 +71,11 @@ pub async fn handle_get(
         Ok(params) => params,
         Err(response) => return response.with_id(id),
     };
-    match runtime
-        .workgraph_service()
+    let service = match workgraph_service_or_error(&id, &runtime) {
+        Ok(service) => service,
+        Err(response) => return response,
+    };
+    match service
         .get(params.realm_id, params.namespace, params.id)
         .await
     {
@@ -78,7 +93,11 @@ pub async fn handle_goal_status(
         Ok(params) => params,
         Err(response) => return response.with_id(id),
     };
-    match runtime.workgraph_service().goal_status(request).await {
+    let service = match workgraph_service_or_error(&id, &runtime) {
+        Ok(service) => service,
+        Err(response) => return response,
+    };
+    match service.goal_status(request).await {
         Ok(result) => RpcResponse::success(id, result),
         Err(error) => map_workgraph_error(id, error),
     }
@@ -102,7 +121,11 @@ pub async fn handle_attention_list(
         },
         None => AttentionListRequest::default(),
     };
-    match runtime.workgraph_service().list_attention(request).await {
+    let service = match workgraph_service_or_error(&id, &runtime) {
+        Ok(service) => service,
+        Err(response) => return response,
+    };
+    match service.list_attention(request).await {
         Ok(result) => RpcResponse::success(id, result),
         Err(error) => map_workgraph_error(id, error),
     }
@@ -126,7 +149,11 @@ pub async fn handle_list(
         },
         None => WorkItemFilter::default(),
     };
-    match runtime.workgraph_service().list(filter).await {
+    let service = match workgraph_service_or_error(&id, &runtime) {
+        Ok(service) => service,
+        Err(response) => return response,
+    };
+    match service.list(filter).await {
         Ok(items) => RpcResponse::success(id, serde_json::json!({ "items": items })),
         Err(error) => map_workgraph_error(id, error),
     }
@@ -150,7 +177,11 @@ pub async fn handle_ready(
         },
         None => ReadyWorkFilter::default(),
     };
-    match runtime.workgraph_service().ready(filter).await {
+    let service = match workgraph_service_or_error(&id, &runtime) {
+        Ok(service) => service,
+        Err(response) => return response,
+    };
+    match service.ready(filter).await {
         Ok(items) => RpcResponse::success(id, serde_json::json!({ "items": items })),
         Err(error) => map_workgraph_error(id, error),
     }
@@ -174,7 +205,11 @@ pub async fn handle_snapshot(
         },
         None => WorkGraphSnapshotFilter::default(),
     };
-    match runtime.workgraph_service().snapshot(filter).await {
+    let service = match workgraph_service_or_error(&id, &runtime) {
+        Ok(service) => service,
+        Err(response) => return response,
+    };
+    match service.snapshot(filter).await {
         Ok(snapshot) => RpcResponse::success(id, snapshot),
         Err(error) => map_workgraph_error(id, error),
     }
@@ -198,7 +233,11 @@ pub async fn handle_events(
         },
         None => WorkGraphEventFilter::default(),
     };
-    match runtime.workgraph_service().events(filter).await {
+    let service = match workgraph_service_or_error(&id, &runtime) {
+        Ok(service) => service,
+        Err(response) => return response,
+    };
+    match service.events(filter).await {
         Ok(events) => RpcResponse::success(id, serde_json::json!({ "events": events })),
         Err(error) => map_workgraph_error(id, error),
     }

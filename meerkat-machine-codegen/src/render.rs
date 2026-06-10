@@ -814,25 +814,28 @@ fn render_semantic_mapping_section(
         pushln!(
             out,
             "  - anchors: {}",
-            entry
-                .anchor_ids
-                .iter()
-                .map(|id| format!("`{id}`"))
-                .collect::<Vec<_>>()
-                .join(", ")
+            render_semantic_id_list(&entry.anchor_ids)
         );
         pushln!(
             out,
             "  - scenarios: {}",
-            entry
-                .scenario_ids
-                .iter()
-                .map(|id| format!("`{id}`"))
-                .collect::<Vec<_>>()
-                .join(", ")
+            render_semantic_id_list(&entry.scenario_ids)
         );
     }
     out.push('\n');
+}
+
+/// Render a semantic id list; an empty list is an honest UNCLAIMED verdict
+/// under full-containment matching, not a rendering omission.
+#[cfg(not(test))]
+fn render_semantic_id_list(ids: &[String]) -> String {
+    if ids.is_empty() {
+        return "(unclaimed)".to_owned();
+    }
+    ids.iter()
+        .map(|id| format!("`{id}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(not(test))]

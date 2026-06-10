@@ -22,441 +22,441 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `auth_lease_handle`
   - scenarios: `acquire_expire_refresh_complete`
 - `MarkExpiring`
-  - anchors: `auth_lease_handle`, `oauth_flow_handle`
-  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ObserveCredentialFreshnessValid`
-  - anchors: `auth_lease_handle`
+  - anchors: (unclaimed)
   - scenarios: `reauth_release_and_publication`
 - `ObserveCredentialFreshnessExpiringFromValid`
-  - anchors: `auth_lease_handle`
+  - anchors: (unclaimed)
   - scenarios: `reauth_release_and_publication`
 - `ObserveCredentialFreshnessExpiredFromValid`
-  - anchors: `auth_lease_handle`
+  - anchors: (unclaimed)
   - scenarios: `reauth_release_and_publication`
 - `ObserveCredentialFreshnessExpiring`
   - anchors: `auth_lease_handle`
   - scenarios: `reauth_release_and_publication`
 - `ObserveCredentialFreshnessExpiredFromExpiring`
-  - anchors: `auth_lease_handle`
+  - anchors: (unclaimed)
   - scenarios: `reauth_release_and_publication`
 - `ObserveCredentialFreshnessExpired`
   - anchors: `auth_lease_handle`
   - scenarios: `reauth_release_and_publication`
 - `ObserveCredentialFreshnessRefreshing`
-  - anchors: `auth_lease_handle`
+  - anchors: (unclaimed)
   - scenarios: `reauth_release_and_publication`
 - `ObserveCredentialFreshnessReauthRequired`
-  - anchors: `auth_lease_handle`
+  - anchors: (unclaimed)
   - scenarios: `reauth_release_and_publication`
 - `ObserveCredentialFreshnessReleased`
-  - anchors: `auth_lease_handle`
+  - anchors: (unclaimed)
   - scenarios: `reauth_release_and_publication`
 - `BeginRefreshFromValid`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BeginRefreshFromExpiring`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BeginRefreshFromExpired`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CompleteRefresh`
-  - anchors: `auth_lease_handle`, `oauth_flow_handle`
+  - anchors: (unclaimed)
   - scenarios: `acquire_expire_refresh_complete`
 - `RefreshFailedTransient`
-  - anchors: `auth_lease_handle`, `oauth_flow_handle`
-  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RefreshFailedPermanent`
-  - anchors: `auth_lease_handle`, `oauth_flow_handle`
-  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `MarkReauthRequiredFromValid`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `MarkReauthRequiredFromExpiring`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `MarkReauthRequiredFromExpired`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `MarkReauthRequiredFromRefreshing`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClearCredentialLifecycle`
-  - anchors: `auth_lease_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ReleaseCredentialLifecycleWithOAuth`
-  - anchors: `auth_lease_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ReleaseCredentialLifecycleWithoutOAuth`
-  - anchors: `auth_lease_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `Release`
   - anchors: `auth_lease_handle`
   - scenarios: `reauth_release_and_publication`
 - `RestoreCredentialLifecycleSnapshotValid`
-  - anchors: `auth_lease_handle`, `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreCredentialLifecycleSnapshotExpiring`
-  - anchors: `auth_lease_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreCredentialLifecycleSnapshotRefreshing`
-  - anchors: `auth_lease_handle`, `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreCredentialLifecycleSnapshotExpired`
-  - anchors: `auth_lease_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreCredentialLifecycleSnapshotReauthRequired`
-  - anchors: `auth_lease_handle`, `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreCredentialLifecycleSnapshotNoCredentialWithOAuth`
-  - anchors: `auth_lease_handle`, `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreCredentialLifecycleSnapshotNoCredentialWithoutOAuth`
-  - anchors: `auth_lease_handle`, `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreAuthoritySnapshotValid`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreAuthoritySnapshotExpiring`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreAuthoritySnapshotRefreshing`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreAuthoritySnapshotExpired`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreAuthoritySnapshotReauthRequired`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreAuthoritySnapshotReleased`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreOAuthBrowserFlowValid`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreOAuthBrowserFlowExpiring`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreOAuthBrowserFlowExpired`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreOAuthBrowserFlowRefreshing`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreOAuthBrowserFlowReauthRequired`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreOAuthDeviceFlowValid`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreOAuthDeviceFlowExpiring`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreOAuthDeviceFlowExpired`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreOAuthDeviceFlowRefreshing`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreOAuthDeviceFlowReauthRequired`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreOAuthDevicePollValid`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreOAuthDevicePollExpiring`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreOAuthDevicePollExpired`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreOAuthDevicePollRefreshing`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreOAuthDevicePollReauthRequired`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdmitOAuthBrowserFlowValid`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `AdmitOAuthBrowserFlowExpiring`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `AdmitOAuthBrowserFlowExpired`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `AdmitOAuthBrowserFlowRefreshing`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `AdmitOAuthBrowserFlowReauthRequired`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ReopenReleasedForOAuthBrowserFlowAdmission`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `VerifyOAuthBrowserFlowValid`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `VerifyOAuthBrowserFlowExpiring`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `VerifyOAuthBrowserFlowExpired`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `VerifyOAuthBrowserFlowRefreshing`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `VerifyOAuthBrowserFlowReauthRequired`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ConsumeOAuthBrowserFlowValid`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ConsumeOAuthBrowserFlowExpiring`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ConsumeOAuthBrowserFlowExpired`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ConsumeOAuthBrowserFlowRefreshing`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ConsumeOAuthBrowserFlowReauthRequired`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ExpireOAuthBrowserFlowValid`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ExpireOAuthBrowserFlowExpiring`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ExpireOAuthBrowserFlowExpired`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ExpireOAuthBrowserFlowRefreshing`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ExpireOAuthBrowserFlowReauthRequired`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `AdmitOAuthDeviceFlowValid`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `AdmitOAuthDeviceFlowExpiring`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `AdmitOAuthDeviceFlowExpired`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `AdmitOAuthDeviceFlowRefreshing`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `AdmitOAuthDeviceFlowReauthRequired`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ReopenReleasedForOAuthDeviceFlowAdmission`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ConfirmOAuthDurableAdmissionValid`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ConfirmOAuthDurableAdmissionExpiring`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ConfirmOAuthDurableAdmissionExpired`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ConfirmOAuthDurableAdmissionRefreshing`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ConfirmOAuthDurableAdmissionReauthRequired`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `VerifyOAuthDeviceFlowValid`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `VerifyOAuthDeviceFlowExpiring`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `VerifyOAuthDeviceFlowExpired`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `VerifyOAuthDeviceFlowRefreshing`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `VerifyOAuthDeviceFlowReauthRequired`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `BeginOAuthDevicePollValid`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `BeginOAuthDevicePollExpiring`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `BeginOAuthDevicePollExpired`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `BeginOAuthDevicePollRefreshing`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `BeginOAuthDevicePollReauthRequired`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `FinishOAuthDevicePollValid`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `FinishOAuthDevicePollExpiring`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `FinishOAuthDevicePollExpired`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `FinishOAuthDevicePollRefreshing`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `FinishOAuthDevicePollReauthRequired`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ConsumeOAuthDeviceFlowValid`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ConsumeOAuthDeviceFlowExpiring`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ConsumeOAuthDeviceFlowExpired`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ConsumeOAuthDeviceFlowRefreshing`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ConsumeOAuthDeviceFlowReauthRequired`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ExpireOAuthDeviceFlowValid`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ExpireOAuthDeviceFlowExpiring`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ExpireOAuthDeviceFlowExpired`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ExpireOAuthDeviceFlowRefreshing`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ExpireOAuthDeviceFlowReauthRequired`
   - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_device_flow_lifecycle`
+  - scenarios: (unclaimed)
 - `ResolveCredentialUseAdmissionValidUseAuthorizedValid`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveCredentialUseAdmissionValidHoldAuthorizedValid`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveCredentialUseAdmissionValidBeginRefreshValid`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveCredentialUseAdmissionValidNoCredentialValid`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveCredentialUseAdmissionExpiringUseRefreshExpiring`
-  - anchors: `auth_lease_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveCredentialUseAdmissionExpiringHoldAuthorizedExpiring`
-  - anchors: `auth_lease_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveCredentialUseAdmissionExpiringBeginRefreshExpiring`
-  - anchors: `auth_lease_handle`, `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveCredentialUseAdmissionExpiringNoCredentialExpiring`
-  - anchors: `auth_lease_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveCredentialUseAdmissionExpiredUseRefreshExpired`
-  - anchors: `auth_lease_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveCredentialUseAdmissionExpiredHoldRefreshExpired`
-  - anchors: `auth_lease_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveCredentialUseAdmissionExpiredBeginRefreshExpired`
-  - anchors: `auth_lease_handle`, `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveCredentialUseAdmissionExpiredNoCredentialExpired`
-  - anchors: `auth_lease_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveCredentialUseAdmissionRefreshingUseRefreshRefreshing`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveCredentialUseAdmissionRefreshingHoldAuthorizedRefreshing`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveCredentialUseAdmissionRefreshingBeginAlreadyRefreshingRefreshing`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveCredentialUseAdmissionRefreshingNoCredentialUseOrHoldRefreshing`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveCredentialUseAdmissionReauthRequiredReauthRequired`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveCredentialUseAdmissionReleasedReleased`
-  - anchors: `auth_lease_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOAuthLoginCredentialDispositionUseCachedValid`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOAuthLoginCredentialDispositionRefreshValidValid`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOAuthLoginCredentialDispositionRefreshDisallowedValidValid`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOAuthLoginCredentialDispositionRefreshNonValidExpiring`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOAuthLoginCredentialDispositionRefreshNonValidExpired`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOAuthLoginCredentialDispositionRefreshNonValidRefreshing`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOAuthLoginCredentialDispositionRefreshNonValidReauthRequired`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOAuthLoginCredentialDispositionRefreshNonValidReleased`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpiring`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpired`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidRefreshing`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReauthRequired`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReleased`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `EmitLifecycleEvent`
-  - anchors: `auth_lease_handle`
+  - anchors: (unclaimed)
   - scenarios: `reauth_release_and_publication`
 - `WakeRefreshLoop`
   - anchors: `auth_lease_handle`
   - scenarios: `reauth_release_and_publication`
 - `CredentialUseAdmissionResolved`
-  - anchors: `auth_lease_handle`
-  - scenarios: `reauth_release_and_publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `oauth_flow_membership_consistent`
-  - anchors: `oauth_flow_handle`
-  - scenarios: `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 
 <!-- GENERATED_COVERAGE_END -->

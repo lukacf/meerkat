@@ -464,7 +464,10 @@ mod tests {
             vec![ToolCatalogEntry::session_deferred(
                 Arc::clone(&self.tool),
                 true,
-                "callback:secret_lookup".to_string(),
+                meerkat_core::types::ToolProvenance {
+                    kind: meerkat_core::types::ToolSourceKind::Callback,
+                    source_id: "secret_lookup".into(),
+                },
             )]
             .into()
         }

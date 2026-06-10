@@ -178,7 +178,6 @@ fn core_tool_visibility_witness(
     witness: &super::dsl::ToolVisibilityWitness,
 ) -> ToolVisibilityWitness {
     ToolVisibilityWitness {
-        stable_owner_key: witness.stable_owner_key.clone(),
         last_seen_provenance: witness.last_seen_provenance.as_ref().map(|provenance| {
             meerkat_core::types::ToolProvenance {
                 kind: core_tool_source_kind(provenance.kind),

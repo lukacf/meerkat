@@ -109,7 +109,7 @@ fn gemini_api_key() -> Option<String> {
 }
 
 fn default_gemini_flow_smoke_model() -> &'static str {
-    meerkat_core::model_profile::catalog::default_model("gemini")
+    meerkat_core::model_profile::catalog::default_model(meerkat_core::Provider::Gemini)
         .expect("Gemini must have a catalog default model")
 }
 
@@ -117,7 +117,7 @@ fn default_gemini_flow_smoke_model() -> &'static str {
 fn flow_runtime_smoke_gemini_default_tracks_catalog() {
     assert_eq!(
         default_gemini_flow_smoke_model(),
-        meerkat_core::model_profile::catalog::default_model("gemini")
+        meerkat_core::model_profile::catalog::default_model(meerkat_core::Provider::Gemini)
             .expect("Gemini must have a catalog default model")
     );
     assert_eq!(default_gemini_flow_smoke_model(), "gemini-3.5-flash");
@@ -2577,7 +2577,8 @@ impl ProductionExternalTcpTarget {
     }
 
     async fn shutdown(&self) {
-        self.adapter.abort_comms_drain(&self.session_id).await;
+        // Teardown: tolerate already-stopped/unknown drains (typed result).
+        let _aborted: Result<(), _> = self.adapter.abort_comms_drain(&self.session_id).await;
     }
 }
 
@@ -2703,7 +2704,8 @@ async fn spawn_production_external_tcp_target(peer_name: &str) -> ProductionExte
             true,
             Some(runtime.clone() as Arc<dyn meerkat_core::agent::CommsRuntime>),
         )
-        .await;
+        .await
+        .expect("update_peer_ingress_context must succeed");
     assert!(spawned, "target must run production comms_drain");
 
     ProductionExternalTcpTarget {

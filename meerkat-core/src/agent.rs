@@ -71,8 +71,13 @@ pub trait AgentLlmClient: Send + Sync {
         provider_params: Option<&ProviderParamsOverride>,
     ) -> Result<LlmStreamResult, AgentError>;
 
-    /// Get the provider name
-    fn provider(&self) -> &'static str;
+    /// Get the typed catalog provider identity for this client.
+    ///
+    /// Clients return the typed [`crate::provider::Provider`] directly so no
+    /// boundary ever parses a caller-supplied string back into catalog
+    /// identity. String projections are derived via
+    /// [`crate::provider::Provider::as_str`].
+    fn provider(&self) -> crate::provider::Provider;
 
     /// Get the current effective model identifier.
     ///
@@ -1268,12 +1273,6 @@ where
     /// composition seam via `AgentBuilder::with_tools_config`; defaults to
     /// `ToolsConfig::default()` for standalone/test construction.
     pub(crate) tools_config: crate::config::ToolsConfig,
-    /// Policy governing how the live LLM-execution hydration seam treats a
-    /// durable image blob that is missing from the blob store. Defaults to
-    /// `HistoricalPlaceholder` (resume hydration degrades gracefully); a
-    /// surface that requires a hard fault on a missing live blob selects
-    /// `Error` via the composition seam (`with_missing_blob_behavior`).
-    pub(crate) missing_blob_behavior: crate::image_content::MissingBlobBehavior,
 }
 
 #[cfg(test)]

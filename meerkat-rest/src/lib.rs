@@ -1314,10 +1314,7 @@ async fn apply_runtime_turn(
                         agent_llm_client_decorator: None,
                         external_tools: None,
                         checkpointer: None,
-                        runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(
-                            bindings,
-                        )),
-                        require_runtime_build_mode: true,
+                        runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
                         realm_id: Some(context.realm.clone()),
                         instance_id: context.instance_id.clone(),
                         backend: Some(context.backend.clone()),
@@ -1565,10 +1562,7 @@ async fn apply_runtime_turn(
                     agent_llm_client_decorator: None,
                     external_tools: None,
                     checkpointer: None,
-                    runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(
-                        bindings,
-                    )),
-                    require_runtime_build_mode: true,
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
                     realm_id: Some(context.realm.clone()),
                     instance_id: context.instance_id.clone(),
                     backend: Some(context.backend.clone()),
@@ -2475,10 +2469,17 @@ async fn mob_spawn_helper(
     Json(req): Json<SpawnHelperRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let mob_id = meerkat_mob::MobId::from(id.as_str());
-    let identity = meerkat_mob::AgentIdentity::from(
-        req.agent_identity
-            .unwrap_or_else(|| format!("helper-{}", uuid::Uuid::new_v4())),
-    );
+    // #115: the surface must not mint mob-member identity. A missing
+    // `agent_identity` fails closed rather than fabricating a synthetic
+    // `helper-{uuid}` on the runtime identity path — identity allocation is
+    // the mob substrate's responsibility.
+    let Some(agent_identity) = req.agent_identity else {
+        return Err(ApiError::BadRequest(
+            "spawn-helper requires agent_identity; the surface does not allocate member identity"
+                .to_string(),
+        ));
+    };
+    let identity = meerkat_mob::AgentIdentity::from(agent_identity);
     let mut options = meerkat_mob::HelperOptions::default();
     if let Some(role) = req.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role));
@@ -2613,10 +2614,15 @@ async fn mob_fork_helper(
 ) -> Result<Json<Value>, ApiError> {
     let mob_id = meerkat_mob::MobId::from(id.as_str());
     let source_identity = meerkat_mob::AgentIdentity::from(req.source_member_id.as_str());
-    let identity = meerkat_mob::AgentIdentity::from(
-        req.agent_identity
-            .unwrap_or_else(|| format!("fork-{}", uuid::Uuid::new_v4())),
-    );
+    // #115: the surface must not mint mob-member identity (no synthetic
+    // `fork-{uuid}` fallback).
+    let Some(agent_identity) = req.agent_identity else {
+        return Err(ApiError::BadRequest(
+            "fork-helper requires agent_identity; the surface does not allocate member identity"
+                .to_string(),
+        ));
+    };
+    let identity = meerkat_mob::AgentIdentity::from(agent_identity);
     let fork_context = req
         .fork_context
         .unwrap_or(meerkat_mob::ForkContext::FullHistory);
@@ -3368,7 +3374,10 @@ fn rest_runtime_host_surface_options(
     options.session_events = true;
     options.session_streams = true;
     options.schedules = cfg!(feature = "schedule");
-    options.skills = true;
+    // Skills availability is owned by the runtime capability seam (the
+    // resolved skill runtime), mirroring the RPC initialize pattern — never
+    // a hardcoded `true` that diverges when `config.skills.enabled = false`.
+    options.skills = state.skill_runtime.is_some();
     options.approvals = false;
     options.rest_base_url = Some(format!("http://{}:{}", state.rest_host, state.rest_port));
     // Derive advertised paths from the SAME cfg-gated option set the axum
@@ -4584,9 +4593,16 @@ async fn create_session_inner(
     #[cfg(feature = "comms")]
     {
         let comms_rt = state.session_service.comms_runtime(&session_id).await;
-        adapter
+        if let Err(error) = adapter
             .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
-            .await;
+            .await
+        {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(format!(
+                "failed to update peer ingress context: {error}"
+            ))));
+        }
     }
 
     // Create input and route through runtime
@@ -4718,16 +4734,14 @@ async fn schedule_tools() -> Json<Value> {
     Json(json!({ "tools": schedule_tools_list() }))
 }
 
-#[derive(Debug, Deserialize)]
-struct ScheduleToolCallRequest {
-    name: String,
-    #[serde(default)]
-    arguments: Value,
-}
-
 async fn schedule_call(
     State(state): State<AppState>,
-    Json(req): Json<ScheduleToolCallRequest>,
+    // The canonical wire contract for a schedule tool call is
+    // `meerkat_contracts::ScheduleToolCallParams` (shared with the RPC
+    // `schedule/call` method and the generated SDK schemas). REST
+    // deserializes that contract type directly instead of owning a private
+    // handler-local mirror that could drift.
+    Json(req): Json<meerkat_contracts::wire::ScheduleToolCallParams>,
 ) -> Result<Json<Value>, ApiError> {
     state
         .ensure_schedule_host_started()
@@ -5680,9 +5694,16 @@ async fn continue_session_inner(
         #[cfg(feature = "comms")]
         {
             let comms_rt = state.session_service.comms_runtime(&session_id).await;
-            adapter
+            if let Err(error) = adapter
                 .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
-                .await;
+                .await
+            {
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(format!(
+                    "failed to update peer ingress context: {error}"
+                ))));
+            }
         }
         if let Err(error) =
             ensure_rest_session_runtime_executor(state, &create_result.session_id).await
@@ -6073,9 +6094,16 @@ async fn continue_session_inner(
         }
         #[cfg(feature = "comms")]
         {
-            adapter
+            if let Err(error) = adapter
                 .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
-                .await;
+                .await
+            {
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(format!(
+                    "failed to update peer ingress context: {error}"
+                ))));
+            }
         }
         let (outcome, handle) = match adapter
             .accept_input_with_completion(&session_id, input)
@@ -6791,7 +6819,7 @@ async fn cleanup_archived_session_runtime(
     #[cfg(feature = "mcp")]
     cleanup_mcp_session(state, session_id).await;
     #[cfg(feature = "comms")]
-    state.runtime_adapter.abort_comms_drain(session_id).await;
+    abort_comms_drain_for_archived_session(state, session_id).await?;
     state.runtime_adapter.unregister_session(session_id).await;
     Ok(())
 }
@@ -6803,9 +6831,34 @@ async fn cleanup_archived_session_surface_runtime(
     #[cfg(feature = "mcp")]
     cleanup_mcp_session(state, session_id).await;
     #[cfg(feature = "comms")]
-    state.runtime_adapter.abort_comms_drain(session_id).await;
+    abort_comms_drain_for_archived_session(state, session_id).await?;
     state.runtime_adapter.unregister_session(session_id).await;
     Ok(())
+}
+
+/// Abort a session's comms drain during archive cleanup.
+///
+/// The session's runtime may already be absent or terminal by the time this
+/// cleanup runs (the archive destroyed it, or the session never had a REST
+/// surface runtime). The machine legitimately rejects drain commands for such
+/// runtimes; those verdicts prove no drain remains running, which is exactly
+/// the post-condition this cleanup wants. Any other fault is propagated.
+#[cfg(feature = "comms")]
+async fn abort_comms_drain_for_archived_session(
+    state: &AppState,
+    session_id: &SessionId,
+) -> Result<(), SessionError> {
+    match state.runtime_adapter.abort_comms_drain(session_id).await {
+        Ok(()) => Ok(()),
+        Err(
+            meerkat_runtime::RuntimeDriverError::NotFound { .. }
+            | meerkat_runtime::RuntimeDriverError::Destroyed
+            | meerkat_runtime::RuntimeDriverError::NotReady { .. },
+        ) => Ok(()),
+        Err(error) => Err(SessionError::Agent(
+            meerkat_core::error::AgentError::InternalError(error.to_string()),
+        )),
+    }
 }
 
 async fn archive_session_with_runtime_cleanup(
@@ -9519,7 +9572,7 @@ mod tests {
 
         let Json(created) = schedule_call(
             State(state.clone()),
-            Json(ScheduleToolCallRequest {
+            Json(meerkat_contracts::wire::ScheduleToolCallParams {
                 name: "meerkat_schedule_create".into(),
                 arguments: missing_target_schedule_tool_args(),
             }),
@@ -11766,6 +11819,7 @@ mod tests {
                     handshake_failed: false,
                 },
                 quarantined: vec![],
+                collection_fault: None,
             }),
         };
 
@@ -12243,6 +12297,45 @@ mod tests {
         assert!(
             payload.get("agent_runtime_id").is_none(),
             "binding-era agent_runtime_id must not leak to app-facing responses"
+        );
+    }
+
+    /// #115: the REST surface must not mint mob-member identity. A
+    /// spawn-helper request without `agent_identity` fails closed with 400
+    /// instead of fabricating a synthetic `helper-{uuid}`.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_mob_spawn_helper_without_agent_identity_fails_closed() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+
+        let app = router(state);
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/mob/some-mob/spawn-helper")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "prompt": "Hello from helper" }).to_string(),
+            ))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "missing agent_identity must be a 400, got: {}",
+            String::from_utf8_lossy(&body)
+        );
+        assert!(
+            String::from_utf8_lossy(&body).contains("agent_identity"),
+            "error must name the missing field"
         );
     }
 

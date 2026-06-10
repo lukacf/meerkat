@@ -472,6 +472,36 @@ pub enum MemoryStoreError {
     #[error("memory store task join failed: {0}")]
     TaskJoin(String),
 
+    /// Durable memory text bytes are not valid UTF-8. Corrupt durable bytes
+    /// are a typed store-corruption fault, never lossy-decoded into
+    /// searchable/returned memory content.
+    #[error("memory text corruption at point {point_id}: stored bytes are not valid UTF-8")]
+    TextCorruption { point_id: i64 },
+
+    /// The live nearest-neighbor index referenced a point that has no durable
+    /// row. The index and the durable store have diverged; results derived
+    /// from the divergent candidate set must not be silently filtered.
+    #[error(
+        "memory index/store divergence at point {point_id}: live index references a missing durable row"
+    )]
+    IndexDivergence { point_id: i64 },
+
+    /// The scoped live index is poisoned: a failed batch could not be
+    /// repaired from durable state, so reads fail closed until the scope is
+    /// rebuilt (next successful index attempt or store reopen).
+    #[error("memory scope index is poisoned pending rebuild from durable state")]
+    ScopePoisoned,
+
+    /// A failed batch could not be rolled back/repaired from durable state.
+    /// The scoped live index is poisoned (fails closed) until rebuilt.
+    #[error(
+        "memory scope repair failed after partial index failure: {repair} (original failure: {original})"
+    )]
+    ScopeRepairFailed {
+        original: Box<MemoryStoreError>,
+        repair: Box<MemoryStoreError>,
+    },
+
     /// An underlying filesystem operation failed.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -492,6 +522,10 @@ impl MemoryStoreError {
             Self::PointIdOutOfRange => "memory_point_id_out_of_range",
             Self::PointIdOverflow => "memory_point_id_overflow",
             Self::TaskJoin(_) => "memory_task_join",
+            Self::TextCorruption { .. } => "memory_text_corruption",
+            Self::IndexDivergence { .. } => "memory_index_divergence",
+            Self::ScopePoisoned => "memory_scope_poisoned",
+            Self::ScopeRepairFailed { .. } => "memory_scope_repair_failed",
             Self::Io(_) => "memory_io",
         }
     }

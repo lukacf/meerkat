@@ -2045,6 +2045,29 @@
               "data"
             ],
             "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/components/schemas/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -3168,7 +3191,7 @@
         "type": "object"
       },
       "ModelsCatalogResponse": {
-        "description": "Response for `models/catalog` — the resolved model catalog.\n\nThis is **not** a pure compiled-in snapshot. Surfaces build it from the\nconfig-backed `ModelRegistry`, which combines the compiled-in\n`meerkat-models` catalog with any config-declared self-hosted aliases\n(entries that carry a [`CatalogModelEntry::server_id`]). Two responses for\nthe same binary can therefore differ when the active config declares\ndifferent self-hosted models.\n\nProvider resolution for these entries is exact-catalog-match, not name\nprefix inference: an entry's provider is the one recorded for its catalog\nid (or its self-hosted alias config), never inferred from a `claude-*` /\n`gpt-*` / `gemini-*` name prefix. Uncatalogued model names resolve through\nthe registry, not by prefix guessing.",
+        "description": "Response for `models/catalog` — the resolved model catalog.\n\nThis is **not** a pure compiled-in snapshot. Surfaces build it from the\nconfig-backed `ModelRegistry`, which combines the compiled-in\n`meerkat_core::model_profile` catalog with any config-declared self-hosted aliases\n(entries that carry a [`CatalogModelEntry::server_id`]). Two responses for\nthe same binary can therefore differ when the active config declares\ndifferent self-hosted models.\n\nProvider resolution for these entries is exact-catalog-match, not name\nprefix inference: an entry's provider is the one recorded for its catalog\nid (or its self-hosted alias config), never inferred from a `claude-*` /\n`gpt-*` / `gemini-*` name prefix. Uncatalogued model names resolve through\nthe registry, not by prefix guessing.",
         "properties": {
           "contract_version": {
             "$ref": "#/components/schemas/ContractVersion",
@@ -5343,9 +5366,240 @@
           }
         ]
       },
+      "SkillResolutionFailureReason": {
+        "oneOf": [
+          {
+            "properties": {
+              "key": {
+                "$ref": "#/components/schemas/SkillKey"
+              },
+              "reason_type": {
+                "const": "not_found",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "key"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "capability": {
+                "$ref": "#/components/schemas/CapabilityId"
+              },
+              "key": {
+                "$ref": "#/components/schemas/SkillKey"
+              },
+              "reason_type": {
+                "const": "capability_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "key",
+              "capability"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "load",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "parse",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "existing_fingerprint": {
+                "type": "string"
+              },
+              "new_fingerprint": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "source_uuid_collision",
+                "type": "string"
+              },
+              "source_uuid": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "source_uuid",
+              "existing_fingerprint",
+              "new_fingerprint"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "existing_source_uuid": {
+                "type": "string"
+              },
+              "fingerprint": {
+                "type": "string"
+              },
+              "mutated_source_uuid": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "source_uuid_mutation_without_lineage",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "fingerprint",
+              "existing_source_uuid",
+              "mutated_source_uuid"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "event_id": {
+                "type": "string"
+              },
+              "event_kind": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "missing_skill_remaps",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "event_id",
+              "event_kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "from_skill_name": {
+                "type": "string"
+              },
+              "from_source_uuid": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "remap_without_lineage",
+                "type": "string"
+              },
+              "to_skill_name": {
+                "type": "string"
+              },
+              "to_source_uuid": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "from_source_uuid",
+              "from_skill_name",
+              "to_source_uuid",
+              "to_skill_name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "alias": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "unknown_skill_alias",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "alias"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason_type": {
+                "const": "remap_cycle",
+                "type": "string"
+              },
+              "skill_name": {
+                "type": "string"
+              },
+              "source_uuid": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "source_uuid",
+              "skill_name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "message"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "SkillRuntimeDiagnostics": {
         "description": "Runtime-visible diagnostics for skill health and quarantined entries.",
         "properties": {
+          "collection_fault": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SkillResolutionFailureReason"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed fault recorded when run-terminal diagnostics collection failed.\n\nWhen set, `source_health` and `quarantined` are vacuous defaults — NOT\nobserved truth. Surfaces must read this fault instead of treating the\ndefault snapshot as a successful healthy observation (dogma row #239:\ncollection faults are typed run-result facts, never silently dropped)."
+          },
           "quarantined": {
             "items": {
               "$ref": "#/components/schemas/SkillQuarantineDiagnostic"

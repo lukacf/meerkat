@@ -16,7 +16,7 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 
 ### Routes
 - `work_item_close_stops_attention`
-  - anchors: `workgraph_attention_service_close`
+  - anchors: (unclaimed)
   - scenarios: `close-stops-attention`
 
 ### Scheduler Rules
@@ -24,11 +24,11 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 
 ### Invariants
 - `closed_work_item_routes_to_attention_stop`
-  - anchors: `workgraph_attention_service_close`
-  - scenarios: `close-stops-attention`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `attention_stop_originates_from_work_item_close`
-  - anchors: `workgraph_attention_service_close`
-  - scenarios: `close-stops-attention`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 
 <!-- GENERATED_COVERAGE_END -->

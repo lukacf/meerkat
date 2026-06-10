@@ -992,6 +992,17 @@ void liveChannelWithOpts;
 const maybeChannelId: string | undefined = liveChannel.channelId;
 void maybeChannelId;
 
+// commitInput() only accepts the typed response-modality distinction the
+// contract owns — arbitrary strings are not widened into the generated union.
+type LiveCommitInputModality = Parameters<LiveChannel["commitInput"]>[0];
+const liveCommitAudio: LiveCommitInputModality = "audio";
+const liveCommitText: LiveCommitInputModality = "text";
+// @ts-expect-error arbitrary strings are not a live response modality.
+const liveCommitArbitrary: LiveCommitInputModality = "speech";
+void liveCommitAudio;
+void liveCommitText;
+void liveCommitArbitrary;
+
 // sessionId is always a string.
 const liveSessionId: string = liveChannel.sessionId;
 void liveSessionId;

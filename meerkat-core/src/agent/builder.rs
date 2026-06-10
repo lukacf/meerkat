@@ -87,7 +87,6 @@ pub struct AgentBuilder {
     pub(super) model_defaults_resolver: Option<Arc<dyn ModelOperationalDefaultsResolver>>,
     pub(super) call_timeout_override: CallTimeoutOverride,
     pub(super) tools_config: ToolsConfig,
-    pub(super) missing_blob_behavior: crate::image_content::MissingBlobBehavior,
     pub(super) epoch_cursor_state: Option<Arc<crate::runtime_epoch::EpochCursorState>>,
     pub(super) tool_visibility_owner: Option<GeneratedToolVisibilityOwner>,
     pub(super) capability_base_filter_override: Option<ToolFilter>,
@@ -134,6 +133,8 @@ pub enum AgentBuildPolicyError {
     ToolVisibilityPersist { message: String },
     #[error("failed to seed agent completion cursor from generated ops authority: {message}")]
     OpsCursorSeed { message: String },
+    #[error("failed to establish session compaction cadence: {message}")]
+    CompactionCadence { message: String },
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -241,7 +242,6 @@ impl AgentBuilder {
             model_defaults_resolver: None,
             call_timeout_override: CallTimeoutOverride::default(),
             tools_config: ToolsConfig::default(),
-            missing_blob_behavior: crate::image_content::MissingBlobBehavior::default(),
             epoch_cursor_state: None,
             tool_visibility_owner: None,
             capability_base_filter_override: None,
@@ -580,7 +580,12 @@ impl AgentBuilder {
                 deferred_tool_names,
             ),
         };
-        let compaction_cadence = crate::agent::compact::load_compaction_cadence(&session);
+        // Cadence metadata is the single typed owner; ingress fails closed on
+        // corrupt metadata and persists the one-time migration immediately.
+        let compaction_cadence = crate::agent::compact::load_compaction_cadence(&mut session)
+            .map_err(|err| AgentBuildPolicyError::CompactionCadence {
+                message: err.to_string(),
+            })?;
 
         // Seed only from generated cursor authority. A completion feed without
         // ops-lifecycle authority is read-only storage, not cursor truth for
@@ -664,7 +669,6 @@ impl AgentBuilder {
             tool_dispatch_context: Default::default(),
             turn_tool_dispatch_metadata: Default::default(),
             tools_config: self.tools_config,
-            missing_blob_behavior: self.missing_blob_behavior,
         };
 
         let has_canonical_visibility_state = agent
@@ -1017,22 +1021,6 @@ impl AgentBuilder {
         self.tools_config = tools_config;
         self
     }
-
-    /// Select the policy for a durable image blob that is missing from the
-    /// blob store at the live LLM-execution hydration seam.
-    ///
-    /// - `HistoricalPlaceholder` (default): degrade to a textual placeholder.
-    /// - `Error`: terminalize the turn with a typed fault on a missing blob.
-    ///
-    /// The composition seam owns this policy; standalone/test construction
-    /// keeps the graceful `HistoricalPlaceholder` default.
-    pub fn with_missing_blob_behavior(
-        mut self,
-        behavior: crate::image_content::MissingBlobBehavior,
-    ) -> Self {
-        self.missing_blob_behavior = behavior;
-        self
-    }
 }
 
 #[cfg(test)]
@@ -1076,8 +1064,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -1312,12 +1300,18 @@ mod tests {
                     crate::ToolCatalogEntry::session_deferred(
                         deferred_a,
                         true,
-                        "callback:restore-fixture".to_string(),
+                        crate::ToolProvenance {
+                            kind: crate::ToolSourceKind::Callback,
+                            source_id: "restore-fixture".into(),
+                        },
                     ),
                     crate::ToolCatalogEntry::session_deferred(
                         deferred_b,
                         true,
-                        "callback:restore-fixture".to_string(),
+                        crate::ToolProvenance {
+                            kind: crate::ToolSourceKind::Callback,
+                            source_id: "restore-fixture".into(),
+                        },
                     ),
                     crate::ToolCatalogEntry::control_inline(control, true),
                 ]
@@ -1714,7 +1708,6 @@ mod tests {
             serde_json::json!("not-a-visibility-state"),
         );
         let secret_witness = crate::ToolVisibilityWitness {
-            stable_owner_key: Some("callback:secret".to_string()),
             last_seen_provenance: secret_tool.provenance.clone(),
         };
         let original_state = SessionToolVisibilityState {
@@ -1866,7 +1859,6 @@ mod tests {
         let store = Arc::new(MockStore);
         let inherited_filter = ToolFilter::Deny(["secret".to_string()].into_iter().collect());
         let secret_witness = crate::ToolVisibilityWitness {
-            stable_owner_key: Some("callback:secret".to_string()),
             last_seen_provenance: secret_tool.provenance.clone(),
         };
         let mut session = Session::new();

@@ -105,9 +105,7 @@ pub enum SkillRepoTransport {
     Http {
         url: String,
         #[serde(default)]
-        auth_header: Option<String>,
-        #[serde(default)]
-        auth_token: Option<String>,
+        auth: Option<HttpSkillRepoAuth>,
         #[serde(default = "default_refresh_seconds")]
         refresh_seconds: u64,
         #[serde(default = "default_external_timeout_seconds")]
@@ -122,14 +120,71 @@ pub enum SkillRepoTransport {
         #[serde(default)]
         skills_root: Option<String>,
         #[serde(default)]
-        auth_token: Option<String>,
-        #[serde(default)]
-        ssh_key: Option<String>,
+        auth: Option<GitSkillRepoAuth>,
         #[serde(default = "default_refresh_seconds")]
         refresh_seconds: u64,
         #[serde(default = "default_clone_depth")]
         depth: Option<usize>,
     },
+}
+
+/// Typed HTTP skill-repository credential, parsed at config ingress.
+///
+/// Replaces the untagged `auth_header: Option<String>` + `auth_token:
+/// Option<String>` string pair, whose half-set combinations were
+/// unrepresentable as a real credential. The variant IS the auth scheme;
+/// `meerkat-skills` folds it into its transport auth owner without
+/// re-deriving meaning from optional strings. `Debug` redacts secret
+/// material.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "scheme", rename_all = "kebab-case")]
+pub enum HttpSkillRepoAuth {
+    /// `Authorization: Bearer <token>`.
+    Bearer { token: String },
+    /// Custom header credential (`<name>: <value>`).
+    Header { name: String, value: String },
+}
+
+impl std::fmt::Debug for HttpSkillRepoAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bearer { .. } => f
+                .debug_struct("Bearer")
+                .field("token", &"<redacted>")
+                .finish(),
+            Self::Header { name, .. } => f
+                .debug_struct("Header")
+                .field("name", name)
+                .field("value", &"<redacted>")
+                .finish(),
+        }
+    }
+}
+
+/// Typed Git skill-repository credential, parsed at config ingress.
+///
+/// Replaces the untagged `auth_token: Option<String>` + `ssh_key:
+/// Option<String>` string pair (both-set was ambiguous). `Debug` redacts the
+/// token.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "scheme", rename_all = "kebab-case")]
+pub enum GitSkillRepoAuth {
+    /// HTTPS token auth.
+    Token { token: String },
+    /// SSH private-key path.
+    SshKey { path: String },
+}
+
+impl std::fmt::Debug for GitSkillRepoAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Token { .. } => f
+                .debug_struct("Token")
+                .field("token", &"<redacted>")
+                .finish(),
+            Self::SshKey { path } => f.debug_struct("SshKey").field("path", path).finish(),
+        }
+    }
 }
 
 fn default_refresh_seconds() -> u64 {
@@ -403,26 +458,28 @@ fn expand_env_in_config(config: &mut SkillsConfig) -> Result<(), SkillsConfigErr
                     *value = expand_env_in_string(value, "repositories[].env[]")?;
                 }
             }
-            SkillRepoTransport::Http {
-                auth_token, url, ..
-            } => {
+            SkillRepoTransport::Http { auth, url, .. } => {
                 *url = expand_env_in_string(url, "repositories[].url")?;
-                if let Some(token) = auth_token {
-                    *token = expand_env_in_string(token, "repositories[].auth_token")?;
+                match auth {
+                    Some(HttpSkillRepoAuth::Bearer { token }) => {
+                        *token = expand_env_in_string(token, "repositories[].auth.token")?;
+                    }
+                    Some(HttpSkillRepoAuth::Header { value, .. }) => {
+                        *value = expand_env_in_string(value, "repositories[].auth.value")?;
+                    }
+                    None => {}
                 }
             }
-            SkillRepoTransport::Git {
-                auth_token,
-                url,
-                ssh_key,
-                ..
-            } => {
+            SkillRepoTransport::Git { auth, url, .. } => {
                 *url = expand_env_in_string(url, "repositories[].url")?;
-                if let Some(token) = auth_token {
-                    *token = expand_env_in_string(token, "repositories[].auth_token")?;
-                }
-                if let Some(key) = ssh_key {
-                    *key = expand_env_in_string(key, "repositories[].ssh_key")?;
+                match auth {
+                    Some(GitSkillRepoAuth::Token { token }) => {
+                        *token = expand_env_in_string(token, "repositories[].auth.token")?;
+                    }
+                    Some(GitSkillRepoAuth::SshKey { path }) => {
+                        *path = expand_env_in_string(path, "repositories[].auth.path")?;
+                    }
+                    None => {}
                 }
             }
             SkillRepoTransport::Filesystem { .. } => {}
@@ -535,16 +592,14 @@ name = "elephant"
 source_uuid = "dc256086-0d2f-4f61-a307-320d4148107f"
 type = "http"
 url = "http://localhost:8080/api"
-auth_header = "X-API-Key"
-auth_token = "secret"
 refresh_seconds = 60
+auth = { scheme = "header", name = "X-API-Key", value = "secret" }
 "#;
         let config: SkillsConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.repositories.len(), 1);
         let SkillRepoTransport::Http {
             url,
-            auth_header,
-            auth_token,
+            auth,
             refresh_seconds,
             ..
         } = &config.repositories[0].transport
@@ -552,9 +607,79 @@ refresh_seconds = 60
             unreachable!("Expected Http transport");
         };
         assert_eq!(url, "http://localhost:8080/api");
-        assert_eq!(auth_header.as_deref(), Some("X-API-Key"));
-        assert_eq!(auth_token.as_deref(), Some("secret"));
+        assert_eq!(
+            auth,
+            &Some(HttpSkillRepoAuth::Header {
+                name: "X-API-Key".into(),
+                value: "secret".into(),
+            })
+        );
         assert_eq!(*refresh_seconds, 60);
+    }
+
+    #[test]
+    fn test_parse_http_repo_bearer_auth() {
+        let toml = r#"
+[[repositories]]
+name = "elephant"
+source_uuid = "dc256086-0d2f-4f61-a307-320d4148107f"
+type = "http"
+url = "https://skills.example/api"
+auth = { scheme = "bearer", token = "secret" }
+"#;
+        let config: SkillsConfig = toml::from_str(toml).unwrap();
+        let SkillRepoTransport::Http { auth, .. } = &config.repositories[0].transport else {
+            unreachable!("Expected Http transport");
+        };
+        assert_eq!(
+            auth,
+            &Some(HttpSkillRepoAuth::Bearer {
+                token: "secret".into()
+            })
+        );
+    }
+
+    #[test]
+    fn test_repo_credentials_are_redacted_in_debug() {
+        let http = HttpSkillRepoAuth::Bearer {
+            token: "super-secret".into(),
+        };
+        let header = HttpSkillRepoAuth::Header {
+            name: "X-API-Key".into(),
+            value: "super-secret".into(),
+        };
+        let git = GitSkillRepoAuth::Token {
+            token: "ghp_super_secret".into(),
+        };
+        for debug in [
+            format!("{http:?}"),
+            format!("{header:?}"),
+            format!("{git:?}"),
+        ] {
+            assert!(
+                !debug.contains("secret"),
+                "credential material must not leak through Debug: {debug}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_partial_typed_credential_is_rejected_at_ingress() {
+        // A typed credential must be complete: a bearer scheme without its
+        // token (or a header scheme without name/value) fails closed at parse
+        // time — no half-set credential state is representable.
+        let toml = r#"
+[[repositories]]
+name = "elephant"
+source_uuid = "dc256086-0d2f-4f61-a307-320d4148107f"
+type = "http"
+url = "https://skills.example/api"
+auth = { scheme = "bearer" }
+"#;
+        assert!(
+            toml::from_str::<SkillsConfig>(toml).is_err(),
+            "incomplete typed credentials must be rejected"
+        );
     }
 
     #[test]
@@ -596,7 +721,7 @@ type = "git"
 url = "https://github.com/company/skills.git"
 git_ref = "v1.2.0"
 ref_type = "tag"
-auth_token = "ghp_token"
+auth = { scheme = "token", token = "ghp_token" }
 "#;
         let config: SkillsConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.repositories.len(), 1);
@@ -604,7 +729,7 @@ auth_token = "ghp_token"
             url,
             git_ref,
             ref_type,
-            auth_token,
+            auth,
             ..
         } = &config.repositories[0].transport
         else {
@@ -613,7 +738,12 @@ auth_token = "ghp_token"
         assert_eq!(url, "https://github.com/company/skills.git");
         assert_eq!(git_ref, "v1.2.0");
         assert!(matches!(ref_type, GitRefType::Tag));
-        assert_eq!(auth_token.as_deref(), Some("ghp_token"));
+        assert_eq!(
+            auth,
+            &Some(GitSkillRepoAuth::Token {
+                token: "ghp_token".into()
+            })
+        );
     }
 
     #[test]

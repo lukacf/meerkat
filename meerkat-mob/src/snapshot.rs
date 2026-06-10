@@ -241,7 +241,7 @@ mod tests {
             .expect("external tool should have provenance witness");
 
         assert!(
-            witness.has_provenance_identity_witness(),
+            witness.has_identity_witness(),
             "inherited filters need provenance-backed witnesses"
         );
         assert_eq!(

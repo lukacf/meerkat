@@ -4,7 +4,6 @@ use crate::session::{
     AuthorizedSessionToolVisibilityState, DeferredToolLoadAuthority, SessionToolVisibilityState,
     ToolVisibilityWitness, WitnessedToolFilter,
 };
-use crate::tool_catalog::stable_owner_key_for_tool;
 use crate::types::{ToolDef, ToolNameSet};
 use std::collections::BTreeSet;
 use std::collections::HashSet;
@@ -817,12 +816,6 @@ mod generated_visibility_test_owner {
 
     fn witness_value(witness: &ToolVisibilityWitness) -> KernelValue {
         let mut fields = BTreeMap::new();
-        if let Some(owner) = witness.stable_owner_key.as_ref() {
-            fields.insert(
-                KernelValue::String("stable_owner_key".to_string()),
-                KernelValue::String(owner.clone()),
-            );
-        }
         if let Some(provenance) = witness.last_seen_provenance.as_ref() {
             fields.insert(
                 KernelValue::String("last_seen_provenance".to_string()),
@@ -844,23 +837,12 @@ mod generated_visibility_test_owner {
                 "ToolVisibilityWitness payload was not generated map",
             ));
         };
-        let stable_owner_key =
-            match fields.get(&KernelValue::String("stable_owner_key".to_string())) {
-                Some(KernelValue::String(value)) => Some(value.clone()),
-                Some(_) => {
-                    return Err(owner_projection_error(
-                        "ToolVisibilityWitness `stable_owner_key` was not string",
-                    ));
-                }
-                None => None,
-            };
         let last_seen_provenance =
             match fields.get(&KernelValue::String("last_seen_provenance".to_string())) {
                 Some(value) => Some(tool_provenance_from_value(value)?),
                 None => None,
             };
         Ok(ToolVisibilityWitness {
-            stable_owner_key,
             last_seen_provenance,
         })
     }
@@ -1800,11 +1782,6 @@ impl ToolScope {
         let Some(witness) = witness else {
             return true;
         };
-        if let Some(expected_owner) = witness.stable_owner_key.as_deref()
-            && stable_owner_key_for_tool(tool).as_deref() != Some(expected_owner)
-        {
-            return false;
-        }
         if let Some(expected_provenance) = witness.last_seen_provenance.as_ref()
             && tool.provenance.as_ref() != Some(expected_provenance)
         {
@@ -1818,8 +1795,7 @@ impl ToolScope {
         tool: &ToolDef,
     ) -> bool {
         witness.is_some_and(|witness| {
-            witness.has_provenance_identity_witness()
-                && Self::witness_matches_tool(Some(witness), tool)
+            witness.has_identity_witness() && Self::witness_matches_tool(Some(witness), tool)
         })
     }
 
@@ -2439,11 +2415,6 @@ fn filter_witness_matches_catalog(
     witness: &ToolVisibilityWitness,
     expected: &ToolVisibilityWitness,
 ) -> bool {
-    if let Some(owner) = witness.stable_owner_key.as_deref()
-        && expected.stable_owner_key.as_deref() != Some(owner)
-    {
-        return false;
-    }
     if let Some(provenance) = witness.last_seen_provenance.as_ref()
         && expected.last_seen_provenance.as_ref() != Some(provenance)
     {
@@ -2464,7 +2435,6 @@ fn deferred_authority_catalog_for_base_tools(
             Some((
                 tool.name.to_string(),
                 ToolVisibilityWitness {
-                    stable_owner_key: stable_owner_key_for_tool(tool),
                     last_seen_provenance: Some(provenance.clone()),
                 },
             ))
@@ -2626,7 +2596,6 @@ fn extend_filter_witnesses(
 
 fn filter_witness_for_tool(tool: &ToolDef) -> ToolVisibilityWitness {
     ToolVisibilityWitness {
-        stable_owner_key: stable_owner_key_for_tool(tool),
         last_seen_provenance: tool.provenance.clone(),
     }
 }
@@ -2956,7 +2925,6 @@ mod tests {
             .add_requested_deferred_authorities(&[crate::DeferredToolLoadAuthority::new(
                 "deferred",
                 crate::ToolVisibilityWitness {
-                    stable_owner_key: Some("callback:owner-a".to_string()),
                     last_seen_provenance: deferred.provenance.clone(),
                 },
             )])
@@ -3196,7 +3164,6 @@ mod tests {
             .add_requested_deferred_authorities(&[crate::DeferredToolLoadAuthority::new(
                 "deferred",
                 crate::ToolVisibilityWitness {
-                    stable_owner_key: Some("callback:owner-a".to_string()),
                     last_seen_provenance: requested.provenance.clone(),
                 },
             )])
@@ -3282,7 +3249,6 @@ mod tests {
                 requested_witnesses: [(
                     "deferred".to_string(),
                     crate::ToolVisibilityWitness {
-                        stable_owner_key: Some("callback:owner-b".to_string()),
                         last_seen_provenance: Some(ToolProvenance {
                             kind: ToolSourceKind::Callback,
                             source_id: "owner-b".into(),
@@ -3338,38 +3304,6 @@ mod tests {
     }
 
     #[test]
-    fn requested_deferred_authorities_require_provenance_witnesses() {
-        let requested = tool_with_provenance("deferred", "owner-a");
-        let scope = scope_with_generated_projection_names(
-            vec![Arc::clone(&requested)].into(),
-            raw_set(&["deferred"]),
-        );
-
-        let err = scope
-            .add_requested_deferred_authorities(&[crate::DeferredToolLoadAuthority::new(
-                "deferred",
-                crate::ToolVisibilityWitness {
-                    stable_owner_key: Some("callback:owner-a".to_string()),
-                    last_seen_provenance: None,
-                },
-            )])
-            .expect_err("requesting a deferred tool without provenance authority must fail");
-
-        assert!(
-            err.to_string().contains("RequestDeferredTools"),
-            "generated visibility authority should reject missing provenance authority: {err}"
-        );
-        assert!(
-            scope
-                .visibility_state()
-                .unwrap()
-                .staged_requested_deferred_names
-                .is_empty(),
-            "failed witness validation must not stage deferred names"
-        );
-    }
-
-    #[test]
     fn requested_deferred_names_reject_empty_witnesses() {
         let requested = tool_with_provenance("deferred", "owner-a");
         let scope = scope_with_generated_projection_names(
@@ -3410,7 +3344,6 @@ mod tests {
             .add_requested_deferred_authorities(&[crate::DeferredToolLoadAuthority::new(
                 "deferred",
                 crate::ToolVisibilityWitness {
-                    stable_owner_key: Some("callback:owner-b".to_string()),
                     last_seen_provenance: Some(ToolProvenance {
                         kind: ToolSourceKind::Callback,
                         source_id: "owner-b".into(),
@@ -3446,14 +3379,12 @@ mod tests {
                 crate::DeferredToolLoadAuthority::new(
                     "deferred",
                     crate::ToolVisibilityWitness {
-                        stable_owner_key: Some("callback:owner-a".to_string()),
                         last_seen_provenance: requested.provenance.clone(),
                     },
                 ),
                 crate::DeferredToolLoadAuthority::new(
                     "deferred",
                     crate::ToolVisibilityWitness {
-                        stable_owner_key: Some("callback:forged".to_string()),
                         last_seen_provenance: Some(ToolProvenance {
                             kind: ToolSourceKind::Callback,
                             source_id: "forged".into(),
@@ -3490,7 +3421,6 @@ mod tests {
             .add_requested_deferred_authorities(&[crate::DeferredToolLoadAuthority::new(
                 "deferred_a",
                 crate::ToolVisibilityWitness {
-                    stable_owner_key: Some("callback:owner-a".to_string()),
                     last_seen_provenance: requested_a.provenance.clone(),
                 },
             )])
@@ -3500,7 +3430,6 @@ mod tests {
             .add_requested_deferred_authorities(&[crate::DeferredToolLoadAuthority::new(
                 "deferred_b",
                 crate::ToolVisibilityWitness {
-                    stable_owner_key: Some("callback:owner-b".to_string()),
                     last_seen_provenance: requested_b.provenance.clone(),
                 },
             )])
@@ -3589,7 +3518,6 @@ mod tests {
                 filter_witnesses: [(
                     "a".to_string(),
                     crate::ToolVisibilityWitness {
-                        stable_owner_key: Some("callback:owner-a".to_string()),
                         last_seen_provenance: original.provenance.clone(),
                     },
                 )]

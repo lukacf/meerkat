@@ -1,6 +1,6 @@
 //! Live per-model catalog validation lane.
 //!
-//! For every model in [`meerkat_models::catalog`], this lane exercises the
+//! For every model in [`meerkat_core::model_profile::catalog`], this lane exercises the
 //! capabilities advertised by that model's [`ModelCapabilities`] row against
 //! the real provider API. Each test iterates the catalog, skips models whose
 //! provider key is absent, and reports per-model pass/fail.
@@ -24,10 +24,11 @@ use meerkat_client::{
     AnthropicClient, GeminiClient, LlmDoneOutcome, LlmEvent, LlmRequest, OpenAiClient,
     types::LlmClient,
 };
-use meerkat_core::{Message, Provider, UserMessage};
-use meerkat_models::{
-    CatalogEntry, EffortLevel, ModelCapabilities, ThinkingSupport, capabilities_for, catalog,
+use meerkat_core::model_profile::capabilities::{
+    EffortLevel, ModelCapabilities, ThinkingSupport, capabilities_for,
 };
+use meerkat_core::model_profile::catalog::{CatalogEntry, catalog};
+use meerkat_core::{Message, Provider, UserMessage};
 
 // ---------------------------------------------------------------------------
 // API key resolution

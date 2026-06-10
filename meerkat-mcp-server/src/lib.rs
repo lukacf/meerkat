@@ -522,9 +522,9 @@ pub struct MeerkatMcpState {
     runtime_sessions: runtime_ingress::SharedMcpRuntimeSessions,
     runtime_pre_admissions: runtime_ingress::SharedMcpRuntimePreAdmissions,
     runtime_registration_locks: runtime_ingress::SharedMcpRuntimeRegistrationLocks,
-    session_event_streams: Arc<Mutex<HashMap<String, Arc<SessionEventStreamHandle>>>>,
+    session_event_streams: Arc<Mutex<HashMap<McpStreamId, Arc<SessionEventStreamHandle>>>>,
     #[cfg(feature = "mob")]
-    mob_event_streams: Arc<Mutex<HashMap<String, Arc<MobEventStreamInner>>>>,
+    mob_event_streams: Arc<Mutex<HashMap<McpStreamId, Arc<MobEventStreamInner>>>>,
     schedule_host: StdMutex<Option<meerkat::surface::ScheduleHostHandle>>,
     /// Runtime adapter for comms drain lifecycle and runtime operations.
     #[allow(dead_code)] // Only used with `comms` feature
@@ -535,6 +535,36 @@ pub struct MeerkatMcpState {
 
 struct SessionEventStreamHandle {
     stream: Mutex<meerkat_core::EventStream>,
+}
+
+/// Typed owner of an MCP event-stream identity.
+///
+/// Stream identity is its own domain fact — it is NOT a session id (the
+/// previous code minted stream ids through `SessionId::new()`, conflating two
+/// identity spaces). A stream id is minted as a fresh UUID at stream open and
+/// parsed fail-closed from the untrusted wire `stream_id` on read/close,
+/// mirroring the RPC `StreamRef` ownership shape. The stream registries are
+/// keyed by this type — there is no bare-string stream key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct McpStreamId(uuid::Uuid);
+
+impl McpStreamId {
+    fn mint() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+
+    /// Parse an untrusted wire `stream_id`, failing closed on malformed input.
+    fn parse(raw: &str) -> Result<Self, String> {
+        uuid::Uuid::parse_str(raw)
+            .map(Self)
+            .map_err(|e| format!("invalid stream_id '{raw}': {e}"))
+    }
+}
+
+impl std::fmt::Display for McpStreamId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
 }
 
 #[cfg(feature = "mob")]
@@ -1581,9 +1611,8 @@ fn empty_input_schema() -> Value {
 /// This is the authority for both the advertised descriptor JSON and the
 /// per-tool request lifecycle. Tools contributed by other crates
 /// (`schedule_tools_list`, `workgraph_tools_list`, the mob/comms surfaces)
-/// are not listed here and therefore resolve to
-/// [`RequestLifecycle::LongRunningObservation`] via
-/// [`mcp_tool_request_lifecycle`].
+/// declare their lifecycle in [`contributed_tool_lifecycles`], keyed by the
+/// surface's own advertised list.
 fn base_tool_descriptors() -> Vec<BaseToolDescriptor> {
     vec![
         BaseToolDescriptor {
@@ -1716,23 +1745,70 @@ fn base_tools_list() -> Vec<Value> {
         .collect()
 }
 
-/// Default lifecycle for any MCP tool whose name is not declared in the typed
-/// [`base_tool_descriptors`] table (e.g. schedule/workgraph/mob/comms tools).
-const MCP_TOOL_DEFAULT_LIFECYCLE: RequestLifecycle = RequestLifecycle::LongRunningObservation;
+/// Feature-owned lifecycle declarations for contributed tool surfaces.
+///
+/// Each contributed surface composed into [`tools_list`] (schedule,
+/// workgraph, mob host tools, mob event streams, comms) declares exactly one
+/// [`RequestLifecycle`] for the tools it advertises. The name set is read
+/// from the surface's own advertised list — the same projection
+/// [`tools_list`] extends — so the lifecycle key set can never drift from
+/// advertisement, and no name-string fall-through exists.
+fn contributed_tool_lifecycles() -> Vec<(Vec<String>, RequestLifecycle)> {
+    fn advertised_names(tools: Vec<Value>) -> Vec<String> {
+        tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
+            .collect()
+    }
+    #[allow(unused_mut)]
+    let mut surfaces = vec![
+        (
+            advertised_names(meerkat::schedule_tools_list()),
+            RequestLifecycle::LongRunningObservation,
+        ),
+        (
+            advertised_names(meerkat::workgraph_tools_list()),
+            RequestLifecycle::LongRunningObservation,
+        ),
+    ];
+    #[cfg(feature = "mob")]
+    surfaces.push((
+        advertised_names(mob_host_tools_list()),
+        RequestLifecycle::LongRunningObservation,
+    ));
+    #[cfg(feature = "mob")]
+    surfaces.push((
+        advertised_names(mob_event_stream_tools_list()),
+        RequestLifecycle::LongRunningObservation,
+    ));
+    #[cfg(feature = "comms")]
+    surfaces.push((
+        advertised_names(comms_tools_list()),
+        RequestLifecycle::LongRunningObservation,
+    ));
+    surfaces
+}
 
 /// Resolve the [`RequestLifecycle`] for a tools/call by name.
 ///
-/// Owner-of-record for MCP tool lifecycle: the classification is read directly
-/// off the typed [`BaseToolDescriptor`] co-located with the tool's
-/// name/description/schema, falling back to [`MCP_TOOL_DEFAULT_LIFECYCLE`] for
-/// tools contributed by other surfaces. This replaces the former string-keyed
-/// `meerkat_contracts::MCP_TOOL_REQUEST_LIFECYCLE_CATALOG`.
-pub fn mcp_tool_request_lifecycle(tool_name: &str) -> RequestLifecycle {
-    base_tool_descriptors()
+/// Owner-of-record for MCP tool lifecycle: base tools read the
+/// classification straight off the typed [`BaseToolDescriptor`] co-located
+/// with the tool's name/description/schema; contributed tools read the
+/// lifecycle their owning surface declares in
+/// [`contributed_tool_lifecycles`]. Unknown names resolve to `None` — the
+/// caller must fail closed (reject the call as an unknown tool) instead of
+/// classifying an unadvertised name under a default lifecycle.
+pub fn mcp_tool_request_lifecycle(tool_name: &str) -> Option<RequestLifecycle> {
+    if let Some(descriptor) = base_tool_descriptors()
         .into_iter()
         .find(|descriptor| descriptor.name == tool_name)
-        .map(|descriptor| descriptor.request_lifecycle)
-        .unwrap_or(MCP_TOOL_DEFAULT_LIFECYCLE)
+    {
+        return Some(descriptor.request_lifecycle);
+    }
+    contributed_tool_lifecycles()
+        .into_iter()
+        .find(|(names, _)| names.iter().any(|name| name == tool_name))
+        .map(|(_, lifecycle)| lifecycle)
 }
 
 #[cfg(feature = "mob")]
@@ -1777,7 +1853,28 @@ fn comms_tools_list() -> Vec<Value> {
     ]
 }
 
-/// Returns the list of tools exposed by this MCP server
+impl MeerkatMcpState {
+    /// Advertised tools for THIS runtime instance.
+    ///
+    /// The static composition ([`tools_list`]) is filtered by the runtime
+    /// capability seam: `meerkat_skills` advertises only when the resolved
+    /// skill runtime exists, so the advertised availability can never split
+    /// from the handler that would otherwise reject the call with
+    /// "skills not enabled".
+    pub fn advertised_tools_list(&self) -> Vec<Value> {
+        let mut tools = tools_list();
+        if self.skill_runtime.is_none() {
+            tools.retain(|tool| tool.get("name").and_then(Value::as_str) != Some("meerkat_skills"));
+        }
+        tools
+    }
+}
+
+/// Returns the full static list of tools composable by this MCP server.
+///
+/// Runtime-conditional availability (e.g. skills) is applied by
+/// [`MeerkatMcpState::advertised_tools_list`]; serving this static catalog
+/// directly would advertise tools the runtime cannot dispatch.
 pub fn tools_list() -> Vec<Value> {
     let mut tools = base_tools_list();
     tools.extend(meerkat::schedule_tools_list());
@@ -2642,11 +2739,29 @@ async fn handle_meerkat_mcp_reload(
                 .map_err(|e| format!("failed to stage reload: {e}"))?;
         }
         None => {
+            // Staging is sequential and each accepted intent is durable in
+            // the surface owner (there is no unstage input), so a mid-loop
+            // rejection cannot roll earlier intents back. The fault must be
+            // explicit: the error names the servers whose reload is already
+            // staged — those reloads WILL still apply at the next boundary —
+            // so a partial staging is never laundered into an apparently
+            // effect-free failure.
+            let mut staged: Vec<String> = Vec::new();
             for name in adapter.active_server_names().await {
-                adapter
-                    .stage_reload(McpReloadTarget::ServerName(name))
+                if let Err(e) = adapter
+                    .stage_reload(McpReloadTarget::ServerName(name.clone()))
                     .await
-                    .map_err(|e| format!("failed to stage reload: {e}"))?;
+                {
+                    return Err(if staged.is_empty() {
+                        format!("failed to stage reload for '{name}': {e}")
+                    } else {
+                        format!(
+                            "failed to stage reload for '{name}': {e}; reload already staged for [{}] and will still apply at the next boundary",
+                            staged.join(", ")
+                        )
+                    });
+                }
+                staged.push(name);
             }
         }
     }
@@ -2688,16 +2803,16 @@ async fn handle_meerkat_event_stream_open(
         .subscribe_session_events(&session_id)
         .await
         .map_err(|e| format!("Failed to open session event stream: {e}"))?;
-    let stream_id = meerkat::SessionId::new().to_string();
+    let stream_id = McpStreamId::mint();
     state.session_event_streams.lock().await.insert(
-        stream_id.clone(),
+        stream_id,
         Arc::new(SessionEventStreamHandle {
             stream: Mutex::new(stream),
         }),
     );
 
     wrap_tool_payload(json!({
-        "stream_id": stream_id,
+        "stream_id": stream_id.to_string(),
         "session_id": session_id.to_string()
     }))
 }
@@ -2706,13 +2821,15 @@ async fn handle_meerkat_event_stream_read(
     state: &MeerkatMcpState,
     input: MeerkatSessionEventStreamReadInput,
 ) -> Result<Value, String> {
+    let stream_id = McpStreamId::parse(&input.stream_id)?;
+    let stream_id_str = stream_id.to_string();
     let handle = state
         .session_event_streams
         .lock()
         .await
-        .get(&input.stream_id)
+        .get(&stream_id)
         .cloned()
-        .ok_or_else(|| format!("Stream not found: {}", input.stream_id))?;
+        .ok_or_else(|| format!("Stream not found: {stream_id}"))?;
 
     let read_timeout = input.timeout.policy.duration();
     let next_event = {
@@ -2723,7 +2840,7 @@ async fn handle_meerkat_event_stream_read(
                 Ok(item) => item,
                 Err(_) => {
                     return stream_read_payload(
-                        &input.stream_id,
+                        &stream_id_str,
                         meerkat_contracts::StreamReadStatus::Timeout,
                     );
                 }
@@ -2734,18 +2851,11 @@ async fn handle_meerkat_event_stream_read(
     match next_event {
         Some(envelope) => {
             let status = stream_read_event_status(&envelope)?;
-            stream_read_payload(&input.stream_id, status)
+            stream_read_payload(&stream_id_str, status)
         }
         None => {
-            state
-                .session_event_streams
-                .lock()
-                .await
-                .remove(&input.stream_id);
-            stream_read_payload(
-                &input.stream_id,
-                meerkat_contracts::StreamReadStatus::Closed,
-            )
+            state.session_event_streams.lock().await.remove(&stream_id);
+            stream_read_payload(&stream_id_str, meerkat_contracts::StreamReadStatus::Closed)
         }
     }
 }
@@ -2754,13 +2864,10 @@ async fn handle_meerkat_event_stream_close(
     state: &MeerkatMcpState,
     input: MeerkatSessionEventStreamCloseInput,
 ) -> Result<Value, String> {
-    let removed = state
-        .session_event_streams
-        .lock()
-        .await
-        .remove(&input.stream_id);
+    let stream_id = McpStreamId::parse(&input.stream_id)?;
+    let removed = state.session_event_streams.lock().await.remove(&stream_id);
     wrap_tool_payload(json!({
-        "stream_id": input.stream_id,
+        "stream_id": stream_id.to_string(),
         "closed": removed.is_some()
     }))
 }
@@ -2771,7 +2878,7 @@ async fn handle_meerkat_mob_event_stream_open(
     input: MeerkatMobEventStreamOpenInput,
 ) -> Result<Value, String> {
     let mob_id = meerkat_mob::MobId::from(input.mob_id.as_str());
-    let stream_id = meerkat::SessionId::new().to_string();
+    let stream_id = McpStreamId::mint();
 
     let inner = if let Some(member_id) = &input.member_id {
         let identity = meerkat_mob::AgentIdentity::from(member_id.as_str());
@@ -2794,10 +2901,10 @@ async fn handle_meerkat_mob_event_stream_open(
         .mob_event_streams
         .lock()
         .await
-        .insert(stream_id.clone(), Arc::new(inner));
+        .insert(stream_id, Arc::new(inner));
 
     wrap_tool_payload(json!({
-        "stream_id": stream_id,
+        "stream_id": stream_id.to_string(),
         "mob_id": input.mob_id,
         "member_id": input.member_id,
     }))
@@ -2808,13 +2915,15 @@ async fn handle_meerkat_mob_event_stream_read(
     state: &MeerkatMcpState,
     input: MeerkatMobEventStreamReadInput,
 ) -> Result<Value, String> {
+    let stream_id = McpStreamId::parse(&input.stream_id)?;
+    let stream_id_str = stream_id.to_string();
     let handle = state
         .mob_event_streams
         .lock()
         .await
-        .get(&input.stream_id)
+        .get(&stream_id)
         .cloned()
-        .ok_or_else(|| format!("Mob event stream not found: {}", input.stream_id))?;
+        .ok_or_else(|| format!("Mob event stream not found: {stream_id}"))?;
 
     let read_timeout = input.timeout.policy.duration();
 
@@ -2828,7 +2937,7 @@ async fn handle_meerkat_mob_event_stream_read(
                         Ok(item) => item,
                         Err(_) => {
                             return stream_read_payload(
-                                &input.stream_id,
+                                &stream_id_str,
                                 meerkat_contracts::StreamReadStatus::Timeout,
                             );
                         }
@@ -2838,18 +2947,11 @@ async fn handle_meerkat_mob_event_stream_read(
             match next_event {
                 Some(envelope) => {
                     let status = stream_read_event_status(&envelope)?;
-                    stream_read_payload(&input.stream_id, status)
+                    stream_read_payload(&stream_id_str, status)
                 }
                 None => {
-                    state
-                        .mob_event_streams
-                        .lock()
-                        .await
-                        .remove(&input.stream_id);
-                    stream_read_payload(
-                        &input.stream_id,
-                        meerkat_contracts::StreamReadStatus::Closed,
-                    )
+                    state.mob_event_streams.lock().await.remove(&stream_id);
+                    stream_read_payload(&stream_id_str, meerkat_contracts::StreamReadStatus::Closed)
                 }
             }
         }
@@ -2863,7 +2965,7 @@ async fn handle_meerkat_mob_event_stream_read(
                             Ok(item) => item,
                             Err(_) => {
                                 return stream_read_payload(
-                                    &input.stream_id,
+                                    &stream_id_str,
                                     meerkat_contracts::StreamReadStatus::Timeout,
                                 );
                             }
@@ -2874,18 +2976,11 @@ async fn handle_meerkat_mob_event_stream_read(
             match next_event {
                 Some(attributed) => {
                     let status = stream_read_event_status(&attributed)?;
-                    stream_read_payload(&input.stream_id, status)
+                    stream_read_payload(&stream_id_str, status)
                 }
                 None => {
-                    state
-                        .mob_event_streams
-                        .lock()
-                        .await
-                        .remove(&input.stream_id);
-                    stream_read_payload(
-                        &input.stream_id,
-                        meerkat_contracts::StreamReadStatus::Closed,
-                    )
+                    state.mob_event_streams.lock().await.remove(&stream_id);
+                    stream_read_payload(&stream_id_str, meerkat_contracts::StreamReadStatus::Closed)
                 }
             }
         }
@@ -2897,13 +2992,10 @@ async fn handle_meerkat_mob_event_stream_close(
     state: &MeerkatMcpState,
     input: MeerkatMobEventStreamCloseInput,
 ) -> Result<Value, String> {
-    let removed = state
-        .mob_event_streams
-        .lock()
-        .await
-        .remove(&input.stream_id);
+    let stream_id = McpStreamId::parse(&input.stream_id)?;
+    let removed = state.mob_event_streams.lock().await.remove(&stream_id);
     wrap_tool_payload(json!({
-        "stream_id": input.stream_id,
+        "stream_id": stream_id.to_string(),
         "closed": removed.is_some()
     }))
 }
@@ -3429,7 +3521,12 @@ async fn handle_meerkat_run(
         state
             .runtime_adapter
             .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
-            .await;
+            .await
+            .map_err(|error| {
+                ToolCallError::internal(format!(
+                    "failed to update peer ingress context for {session_id}: {error}"
+                ))
+            })?;
     }
     match result {
         Ok(run_result) => format_agent_result_tool(Ok(run_result), &session_id),
@@ -3878,7 +3975,12 @@ async fn handle_meerkat_resume(
             state
                 .runtime_adapter
                 .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
-                .await;
+                .await
+                .map_err(|error| {
+                    ToolCallError::internal(format!(
+                        "failed to update peer ingress context for {session_id}: {error}"
+                    ))
+                })?;
         }
         // Live MCP resumes still use the runtime/machine service-turn receipt
         // path; the persistent service only owns the live mutation and post-
@@ -4140,7 +4242,12 @@ async fn handle_meerkat_resume(
         state
             .runtime_adapter
             .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
-            .await;
+            .await
+            .map_err(|error| {
+                ToolCallError::internal(format!(
+                    "failed to update peer ingress context for {session_id}: {error}"
+                ))
+            })?;
     }
 
     format_agent_result_tool(result, &session_id)
@@ -4965,36 +5072,53 @@ mod tests {
 
     #[test]
     fn base_tool_descriptor_owns_request_lifecycle() {
-        // The typed descriptor table is the single owner of MCP tool lifecycle:
-        // the resolver reads the classification straight off the descriptor
-        // co-located with name/description/schema, and unknown (other-surface)
-        // tools fall back to the default observation lifecycle.
+        // The typed descriptor table is the single owner of base MCP tool
+        // lifecycle: the resolver reads the classification straight off the
+        // descriptor co-located with name/description/schema.
         assert_eq!(
             mcp_tool_request_lifecycle("meerkat_help"),
-            RequestLifecycle::LongRunningPublishOnSuccess
+            Some(RequestLifecycle::LongRunningPublishOnSuccess)
         );
         assert_eq!(
             mcp_tool_request_lifecycle("meerkat_run"),
-            RequestLifecycle::LongRunningPublishOnSuccess
+            Some(RequestLifecycle::LongRunningPublishOnSuccess)
         );
         assert_eq!(
             mcp_tool_request_lifecycle("meerkat_resume"),
-            RequestLifecycle::LongRunningPublishOnSuccess
+            Some(RequestLifecycle::LongRunningPublishOnSuccess)
         );
         assert_eq!(
             mcp_tool_request_lifecycle("meerkat_sessions"),
-            RequestLifecycle::LongRunningObservation
+            Some(RequestLifecycle::LongRunningObservation)
         );
-        // A tool contributed by another surface (not in the typed table) and an
-        // outright-unknown name both resolve to the default.
+        // A tool contributed by another surface resolves through that
+        // surface's feature-owned declaration, not a default fall-through.
         assert_eq!(
             mcp_tool_request_lifecycle("meerkat_schedule_create"),
-            MCP_TOOL_DEFAULT_LIFECYCLE
+            Some(RequestLifecycle::LongRunningObservation)
         );
-        assert_eq!(
-            mcp_tool_request_lifecycle("definitely_not_a_tool"),
-            MCP_TOOL_DEFAULT_LIFECYCLE
-        );
+        // An unadvertised name has no lifecycle: the resolver fails closed
+        // with `None` rather than classifying it under a default.
+        assert_eq!(mcp_tool_request_lifecycle("definitely_not_a_tool"), None);
+    }
+
+    #[test]
+    fn every_advertised_tool_has_an_owned_lifecycle() {
+        // Completeness gate: every tool `tools_list` advertises — base AND
+        // contributed (schedule/workgraph/mob/comms) — must resolve to a
+        // feature-owned lifecycle. A `None` here means a contributed surface
+        // was composed into the advertisement without declaring its
+        // lifecycle.
+        for tool in tools_list() {
+            let name = tool
+                .get("name")
+                .and_then(Value::as_str)
+                .expect("advertised tool carries a name");
+            assert!(
+                mcp_tool_request_lifecycle(name).is_some(),
+                "advertised tool '{name}' has no feature-owned request lifecycle"
+            );
+        }
     }
 
     #[test]
@@ -5172,6 +5296,7 @@ mod tests {
                     handshake_failed: true,
                 },
                 quarantined: vec![],
+                collection_fault: None,
             }),
         };
 
@@ -7280,10 +7405,10 @@ mod tests {
     async fn test_event_stream_read_default_timeout_and_close_behavior() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let state = MeerkatMcpState::new_with_store(store).await;
-        let stream_id = "stream-timeout-default".to_string();
+        let stream_id = McpStreamId::mint();
         let pending_stream: meerkat_core::EventStream = Box::pin(stream::pending());
         state.session_event_streams.lock().await.insert(
-            stream_id.clone(),
+            stream_id,
             Arc::new(SessionEventStreamHandle {
                 stream: Mutex::new(pending_stream),
             }),
@@ -7292,7 +7417,7 @@ mod tests {
         let read = Box::pin(handle_tools_call(
             &state,
             "meerkat_event_stream_read",
-            &json!({ "stream_id": stream_id }),
+            &json!({ "stream_id": stream_id.to_string() }),
         ))
         .await
         .expect("read should complete with timeout");
@@ -7302,7 +7427,7 @@ mod tests {
         let closed = Box::pin(handle_tools_call(
             &state,
             "meerkat_event_stream_close",
-            &json!({ "stream_id": "stream-timeout-default" }),
+            &json!({ "stream_id": stream_id.to_string() }),
         ))
         .await
         .expect("close should succeed");
@@ -7314,10 +7439,10 @@ mod tests {
     async fn test_event_stream_read_no_timeout_opt_in_blocks() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let state = MeerkatMcpState::new_with_store(store).await;
-        let stream_id = "stream-no-timeout".to_string();
+        let stream_id = McpStreamId::mint();
         let pending_stream: meerkat_core::EventStream = Box::pin(stream::pending());
         state.session_event_streams.lock().await.insert(
-            stream_id.clone(),
+            stream_id,
             Arc::new(SessionEventStreamHandle {
                 stream: Mutex::new(pending_stream),
             }),
@@ -7328,7 +7453,7 @@ mod tests {
             handle_tools_call(
                 &state,
                 "meerkat_event_stream_read",
-                &json!({ "stream_id": stream_id, "no_timeout": true }),
+                &json!({ "stream_id": stream_id.to_string(), "no_timeout": true }),
             ),
         ))
         .await;
@@ -7339,10 +7464,10 @@ mod tests {
     async fn test_event_stream_read_empty_stream_reports_closed_and_removes_entry() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let state = MeerkatMcpState::new_with_store(store).await;
-        let stream_id = "stream-closed".to_string();
+        let stream_id = McpStreamId::mint();
         let empty_stream: meerkat_core::EventStream = Box::pin(stream::empty());
         state.session_event_streams.lock().await.insert(
-            stream_id.clone(),
+            stream_id,
             Arc::new(SessionEventStreamHandle {
                 stream: Mutex::new(empty_stream),
             }),
@@ -7351,7 +7476,7 @@ mod tests {
         let read = Box::pin(handle_tools_call(
             &state,
             "meerkat_event_stream_read",
-            &json!({ "stream_id": stream_id }),
+            &json!({ "stream_id": stream_id.to_string() }),
         ))
         .await
         .expect("read should succeed");
@@ -7361,12 +7486,33 @@ mod tests {
         let close = Box::pin(handle_tools_call(
             &state,
             "meerkat_event_stream_close",
-            &json!({ "stream_id": "stream-closed" }),
+            &json!({ "stream_id": stream_id.to_string() }),
         ))
         .await
         .expect("close should succeed");
         let close_payload = unwrap_payload(close);
         assert_eq!(close_payload["closed"], false);
+    }
+
+    #[tokio::test]
+    async fn test_event_stream_read_rejects_malformed_stream_id() {
+        // Stream identity is a typed fact parsed fail-closed at ingress
+        // (`McpStreamId::parse`): a malformed wire stream_id is rejected
+        // outright, never treated as a probe into the string-keyed registry.
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let err = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_event_stream_read",
+            &json!({ "stream_id": "not-a-stream-id" }),
+        ))
+        .await
+        .expect_err("malformed stream_id must fail closed");
+        assert!(
+            err.message.contains("invalid stream_id"),
+            "expected fail-closed parse error, got: {}",
+            err.message
+        );
     }
 
     #[cfg(feature = "comms")]

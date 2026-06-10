@@ -774,7 +774,7 @@ def test_parse_session_history():
         "limit": 2,
         "has_more": True,
         "messages": [
-            {"role": "system", "content": "rules"},
+            {"role": "system", "content": "rules", "created_at": "2026-05-26T10:00:00Z"},
             {
                 "role": "block_assistant",
                 "blocks": [
@@ -784,10 +784,12 @@ def test_parse_session_history():
                     }
                 ],
                 "stop_reason": "tool_use",
+                "created_at": "2026-05-26T10:00:01Z",
             },
             {
                 "role": "tool_results",
                 "results": [{"tool_use_id": "tc_1", "content": "done", "is_error": False}],
+                "created_at": "2026-05-26T10:00:02Z",
             },
         ],
     }
@@ -826,6 +828,7 @@ def test_parse_session_history_preserves_assistant_image_blocks():
                             },
                         }
                     ],
+                    "created_at": "2026-05-26T10:00:00Z",
                 }
             ],
         }
@@ -840,6 +843,68 @@ def test_parse_session_history_preserves_assistant_image_blocks():
     assert block.height == 1536
     assert block.revised_prompt == {"disposition": "not_requested"}
     assert block.meta == {"provider": "open_ai", "target_model": "gpt-image-1"}
+
+
+def test_parse_session_message_fails_closed_on_missing_identity_facts():
+    # Transcript truth is never fabricated: a message without role/created_at
+    # or with malformed collections raises INVALID_RESPONSE instead of
+    # coercing to ""/[] placeholder truth.
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_session_message({"content": "no role"})
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_session_message({"role": "user", "content": "no created_at"})
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_session_message(
+            {
+                "role": "tool_results",
+                "created_at": "2026-05-26T10:00:00Z",
+                "results": [{"content": "missing tool_use_id"}],
+            }
+        )
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_session_message(
+            {
+                "role": "block_assistant",
+                "created_at": "2026-05-26T10:00:00Z",
+                "blocks": "not-a-list",
+            }
+        )
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_session_message(
+            {
+                "role": "block_assistant",
+                "created_at": "2026-05-26T10:00:00Z",
+                "blocks": [{"data": {"text": "missing block_type"}}],
+            }
+        )
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+def test_parse_session_transcript_rewrite_result_fails_closed():
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_session_transcript_rewrite_result(
+            {"revision": "r2", "parent_revision": "r1", "message_count": 1, "commit": {}}
+        )
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_session_transcript_rewrite_result(
+            {
+                "session_id": "s1",
+                "revision": "r2",
+                "parent_revision": "r1",
+                "message_count": 1,
+            }
+        )
+    assert excinfo.value.code == "INVALID_RESPONSE"
 
 
 def test_transcript_rewrite_serializes_edited_parsed_message_over_raw_payload():
@@ -2254,11 +2319,12 @@ async def test_client_read_session_history_calls_expected_rpc_method():
             "limit": params.get("limit"),
             "has_more": False,
             "messages": [
-                {"role": "user", "content": "hello"},
+                {"role": "user", "content": "hello", "created_at": "2026-05-26T10:00:00Z"},
                 {
                     "role": "block_assistant",
                     "blocks": [{"block_type": "text", "data": {"text": "ok"}}],
                     "stop_reason": "end_turn",
+                    "created_at": "2026-05-26T10:00:01Z",
                 },
             ],
         }
@@ -3370,6 +3436,20 @@ async def test_send_mob_member_content_rejects_malformed_receipt() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
+async def test_live_commit_input_rejects_unknown_response_modality():
+    """The live helper boundary must not widen ``response_modality`` beyond
+    the typed distinction the wire contract owns (``audio`` | ``text``).
+    Arbitrary strings fail closed client-side instead of being tunneled into
+    the generated union."""
+    from meerkat import MeerkatClient
+
+    client = MeerkatClient()
+    with pytest.raises(MeerkatError) as exc_info:
+        await client.live_commit_input("live_1", response_modality="speech")  # type: ignore[arg-type]
+    assert exc_info.value.code == "INVALID_ARGS"
+
+
 def test_generated_wire_live_channel_capabilities_exposes_typed_booleans():
     """CC5: SDK consumers must see typed access to every capability boolean.
 
@@ -4062,6 +4142,51 @@ async def test_wait_mob_ready_rejects_non_list_members() -> None:
 
     with pytest.raises(MeerkatError) as excinfo:
         await client.wait_mob_ready("mob-1")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_wait_mob_kickoff_rejects_non_list_members() -> None:
+    # Present-but-non-list `members` is a wire-contract violation: it must
+    # raise INVALID_RESPONSE, never collapse to empty success.
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {"members": {"agent_identity": "lead"}}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.wait_mob_kickoff("mob-1")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_list_mob_members_rejects_non_list_members() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {"members": "not-a-list"}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.list_mob_members("mob-1")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_list_mobs_rejects_non_list_mobs() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {"mobs": {"mob_id": "mob-1"}}
+
+    client._request = fake_request  # type: ignore[method-assign]
+    client.require_capability = lambda _cap: None  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.list_mobs()
     assert excinfo.value.code == "INVALID_RESPONSE"
 
 

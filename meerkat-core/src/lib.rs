@@ -170,10 +170,10 @@ pub use event::{
     AgentErrorClass, AgentErrorReport, AgentEvent, AssistantImageEvent, BudgetType,
     CompactionFailureReason, EventEnvelope, EventSourceIdentity, ExternalToolDelta,
     ExternalToolDeltaPhase, InteractionFailureReason, ScopedAgentEvent,
-    SkillResolutionFailureReason, StreamScopeFrame, ToolCallArguments, ToolCallArgumentsError,
-    ToolConfigChangeOperation, ToolConfigChangeStatus, ToolConfigChangedPayload, TurnErrorMetadata,
-    VerboseEventConfig, agent_event_type, compare_event_envelopes, format_verbose_event,
-    format_verbose_event_with_config,
+    SkillResolutionFailureReason, StreamScopeFrame, StreamTruncationReason, ToolCallArguments,
+    ToolCallArgumentsError, ToolConfigChangeOperation, ToolConfigChangeStatus,
+    ToolConfigChangedPayload, TurnErrorMetadata, VerboseEventConfig, agent_event_type,
+    compare_event_envelopes, format_verbose_event, format_verbose_event_with_config,
 };
 pub use event_injector::{EventInjector, EventInjectorError};
 pub use event_tap::{
@@ -193,8 +193,7 @@ pub use handles::{
 pub use hooks::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookExecutionMode,
     HookExecutionReport, HookFailureReason, HookId, HookInvocation, HookLlmRequest,
-    HookLlmResponse, HookOutcome, HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode,
-    HookRevision, HookToolCall, HookToolResult,
+    HookLlmResponse, HookOutcome, HookPoint, HookReasonCode, HookToolCall, HookToolResult,
 };
 pub use image_content::{
     MissingBlobBehavior, collect_blob_ids_from_blocks, collect_blob_ids_from_messages,

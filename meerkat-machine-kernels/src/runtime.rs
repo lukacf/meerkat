@@ -226,14 +226,6 @@ fn tool_visibility_witness_matches(
 
     fields.iter().all(|(key, value)| match key {
         KernelValue::String(key)
-            if key == "stable_owner_key"
-                && allowed_fields
-                    .iter()
-                    .any(|field| field.as_str() == "stable_owner_key") =>
-        {
-            matches!(value, KernelValue::String(_))
-        }
-        KernelValue::String(key)
             if key == "last_seen_provenance"
                 && allowed_fields
                     .iter()
@@ -262,12 +254,6 @@ fn tool_visibility_witness_identity_len(
     };
 
     let mut len = 0;
-    if matches!(
-        fields.get(&string_key("stable_owner_key")),
-        Some(KernelValue::String(_))
-    ) {
-        len += 1;
-    }
     if matches!(
         fields.get(&string_key("last_seen_provenance")),
         Some(provenance) if tool_provenance_matches(schema, provenance)
@@ -1887,12 +1873,20 @@ fn named_type_inner_matches(
 ) -> bool {
     match named_type_atom(schema, name) {
         Some(meerkat_machine_schema::RustTypeAtom::Bool) => matches!(value, KernelValue::Bool(_)),
-        Some(
-            meerkat_machine_schema::RustTypeAtom::U8
-            | meerkat_machine_schema::RustTypeAtom::U16
-            | meerkat_machine_schema::RustTypeAtom::U32
-            | meerkat_machine_schema::RustTypeAtom::U64,
-        ) => matches!(value, KernelValue::U64(_)),
+        // dogma #172 (runtime half, named-atom leg): U8/U16/U32/U64 named-type
+        // atoms are distinct bounded domains, not a collapsed numeric alias. A
+        // value bound to a narrower atom must fit that atom's width; the kernel
+        // rejects out-of-range values fail-closed rather than silently widening.
+        Some(meerkat_machine_schema::RustTypeAtom::U8) => {
+            matches!(value, KernelValue::U64(value) if u8::try_from(*value).is_ok())
+        }
+        Some(meerkat_machine_schema::RustTypeAtom::U16) => {
+            matches!(value, KernelValue::U64(value) if u16::try_from(*value).is_ok())
+        }
+        Some(meerkat_machine_schema::RustTypeAtom::U32) => {
+            matches!(value, KernelValue::U64(value) if u32::try_from(*value).is_ok())
+        }
+        Some(meerkat_machine_schema::RustTypeAtom::U64) => matches!(value, KernelValue::U64(_)),
         Some(
             meerkat_machine_schema::RustTypeAtom::String
             | meerkat_machine_schema::RustTypeAtom::TypePath(_),
@@ -2301,8 +2295,23 @@ mod tests {
         KernelValue::Named {
             type_name: named_type_id("ToolVisibilityWitness"),
             value: Box::new(KernelValue::Map(BTreeMap::from([(
-                KernelValue::String("stable_owner_key".to_string()),
-                KernelValue::String(owner.to_string()),
+                KernelValue::String("last_seen_provenance".to_string()),
+                KernelValue::Named {
+                    type_name: named_type_id("ToolProvenance"),
+                    value: Box::new(KernelValue::Map(BTreeMap::from([
+                        (
+                            KernelValue::String("kind".to_string()),
+                            KernelValue::NamedVariant {
+                                enum_name: enum_type_id("ToolSourceKind"),
+                                variant: enum_variant_id("Callback"),
+                            },
+                        ),
+                        (
+                            KernelValue::String("source_id".to_string()),
+                            KernelValue::String(owner.to_string()),
+                        ),
+                    ]))),
+                },
             )]))),
         }
     }
@@ -2814,6 +2823,67 @@ mod tests {
             ),
             "missing named-type bindings must not fall back to arbitrary string matching"
         );
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn numeric_widths_are_distinct_bounded_domains_in_kernel_matching() {
+        let schema = meerkat_machine();
+
+        // Structural leg: a `u32` field rejects values outside u32 width.
+        assert!(value_matches_type(
+            &schema,
+            &KernelValue::U64(u64::from(u32::MAX)),
+            &meerkat_machine_schema::TypeRef::U32,
+        ));
+        assert!(
+            !value_matches_type(
+                &schema,
+                &KernelValue::U64(u64::from(u32::MAX) + 1),
+                &meerkat_machine_schema::TypeRef::U32,
+            ),
+            "u32 fields must reject values wider than u32 fail-closed"
+        );
+
+        // Named-atom leg: a named type bound to a narrow numeric atom enforces
+        // the same width instead of collapsing into a generic U64 domain.
+        for (atom, max) in [
+            (meerkat_machine_schema::RustTypeAtom::U8, u64::from(u8::MAX)),
+            (
+                meerkat_machine_schema::RustTypeAtom::U16,
+                u64::from(u16::MAX),
+            ),
+            (
+                meerkat_machine_schema::RustTypeAtom::U32,
+                u64::from(u32::MAX),
+            ),
+        ] {
+            let mut narrow_schema = schema.clone();
+            narrow_schema
+                .named_types
+                .iter_mut()
+                .find(|binding| binding.name.as_str() == "OperationStatus")
+                .expect("OperationStatus binding")
+                .rust = atom.clone();
+            let narrow_ty =
+                meerkat_machine_schema::TypeRef::Named(named_type_id("OperationStatus"));
+            assert!(
+                value_matches_type(
+                    &narrow_schema,
+                    &named_u64("OperationStatus", max),
+                    &narrow_ty
+                ),
+                "{atom:?} named atoms must accept in-width values"
+            );
+            assert!(
+                !value_matches_type(
+                    &narrow_schema,
+                    &named_u64("OperationStatus", max + 1),
+                    &narrow_ty,
+                ),
+                "{atom:?} named atoms must reject out-of-width values fail-closed"
+            );
+        }
     }
 
     #[allow(clippy::expect_used)]

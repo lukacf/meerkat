@@ -171,9 +171,10 @@ fn rebuild_scoped_index_from_db(
         if &metadata.session_id != session_id {
             continue;
         }
+        let text = decode_memory_text(point_id, text)?;
         let point_id =
             usize::try_from(point_id).map_err(|_| MemoryStoreError::PointIdOutOfRange)?;
-        scoped.push((point_id, String::from_utf8_lossy(&text).into_owned()));
+        scoped.push((point_id, text));
     }
 
     let index = ScopedHnswIndex::new(scoped.len(), params);
@@ -182,6 +183,27 @@ fn rebuild_scoped_index_from_db(
         index.insert(&embedding, *point_id);
     }
     Ok(index)
+}
+
+/// Decode durable memory text bytes, failing closed on corruption.
+///
+/// Corrupt durable bytes must surface as the typed
+/// [`MemoryStoreError::TextCorruption`] fault — never lossy-decoded into
+/// searchable/returned memory content.
+fn decode_memory_text(point_id: i64, bytes: Vec<u8>) -> Result<String, MemoryStoreError> {
+    String::from_utf8(bytes).map_err(|_| MemoryStoreError::TextCorruption { point_id })
+}
+
+/// Live state of one session-scoped HNSW index.
+///
+/// `Poisoned` is the fail-closed marker for a scope whose live index could not
+/// be repaired from durable state after a partial batch failure: reads return
+/// the typed [`MemoryStoreError::ScopePoisoned`] fault instead of serving a
+/// candidate set known to diverge from the durable store. The next index
+/// attempt (or a store reopen) rebuilds the scope from durable rows.
+enum ScopedIndexState {
+    Live(ScopedHnswIndex),
+    Poisoned,
 }
 
 struct ScopedHnswIndex {
@@ -206,11 +228,15 @@ impl ScopedHnswIndex {
 }
 
 /// HNSW-backed memory store with SQLite metadata persistence.
+///
+/// Manual `Debug`: the scoped HNSW indices are large native structures with
+/// no useful (or derivable) `Debug` form, so the projection prints the
+/// durable identity facts only.
 pub struct HnswMemoryStore {
     // SAFETY NOTE: we use `'static` because `hnsw_rs` 0.3 copies inserted vectors
     // into owned internal storage. If a future `hnsw_rs` release changes this to
     // borrow caller memory, this type must be revisited before upgrading.
-    indices: Arc<std::sync::RwLock<HashMap<SessionId, ScopedHnswIndex>>>,
+    indices: Arc<std::sync::RwLock<HashMap<SessionId, ScopedIndexState>>>,
     db_path: PathBuf,
     next_id: AtomicUsize,
     insert_lock: Mutex<()>,
@@ -224,6 +250,15 @@ pub struct HnswMemoryStore {
     /// exercised deterministically. Production builds never carry this field.
     #[cfg(test)]
     fail_hnsw_insert_after: Arc<std::sync::atomic::AtomicI64>,
+}
+
+impl std::fmt::Debug for HnswMemoryStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HnswMemoryStore")
+            .field("db_path", &self.db_path)
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
 }
 
 impl HnswMemoryStore {
@@ -279,7 +314,7 @@ impl HnswMemoryStore {
             }
         }
 
-        let mut indices = HashMap::<SessionId, ScopedHnswIndex>::new();
+        let mut indices = HashMap::<SessionId, ScopedIndexState>::new();
 
         let mut stmt = conn
             .prepare(
@@ -301,19 +336,22 @@ impl HnswMemoryStore {
         for row in rows {
             let (point_id, text, metadata_json) =
                 row.map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
+            let text = decode_memory_text(point_id, text)?;
             let point_id =
                 usize::try_from(point_id).map_err(|_| MemoryStoreError::PointIdOutOfRange)?;
             let metadata: MemoryMetadata = serde_json::from_slice(&metadata_json)
                 .map_err(|e| MemoryStoreError::Embedding(e.to_string()))?;
-            let text = String::from_utf8_lossy(&text);
             let embedding = policy.embed(&text);
             let max_elements_hint = *session_counts
                 .get(&metadata.session_id)
                 .unwrap_or(&MIN_INDEX_ELEMENTS_HINT);
-            indices
-                .entry(metadata.session_id)
-                .or_insert_with(|| ScopedHnswIndex::new(max_elements_hint, hnsw_params))
-                .insert(&embedding, point_id);
+            match indices.entry(metadata.session_id).or_insert_with(|| {
+                ScopedIndexState::Live(ScopedHnswIndex::new(max_elements_hint, hnsw_params))
+            }) {
+                ScopedIndexState::Live(index) => index.insert(&embedding, point_id),
+                // `open` only ever constructs Live scopes.
+                ScopedIndexState::Poisoned => return Err(MemoryStoreError::ScopePoisoned),
+            }
         }
 
         Ok(Self {
@@ -346,7 +384,10 @@ impl HnswMemoryStore {
             .read()
             .unwrap()
             .values()
-            .map(|index| index.index.get_nb_point())
+            .map(|state| match state {
+                ScopedIndexState::Live(index) => index.index.get_nb_point(),
+                ScopedIndexState::Poisoned => 0,
+            })
             .sum()
     }
 
@@ -357,7 +398,10 @@ impl HnswMemoryStore {
             .read()
             .unwrap()
             .values()
-            .map(|index| index.max_elements_hint)
+            .filter_map(|state| match state {
+                ScopedIndexState::Live(index) => Some(index.max_elements_hint),
+                ScopedIndexState::Poisoned => None,
+            })
             .collect()
     }
 
@@ -444,9 +488,27 @@ impl MemoryStore for HnswMemoryStore {
                 let mut indices = indices
                     .write()
                     .map_err(|_| MemoryStoreError::LockPoisoned)?;
-                let index = indices
-                    .entry(session_id.clone())
-                    .or_insert_with(|| ScopedHnswIndex::new(indexed_entries, hnsw_params));
+                // Self-heal: a previously poisoned scope is rebuilt wholesale
+                // from the committed durable rows (which now include this
+                // batch), restoring the durable-derived live index instead of
+                // failing the scope forever.
+                if matches!(indices.get(&session_id), Some(ScopedIndexState::Poisoned)) {
+                    let rebuilt = rebuild_scoped_index_from_db(
+                        &conn,
+                        &session_id,
+                        embedding_model.as_ref(),
+                        hnsw_params,
+                    )?;
+                    indices.insert(session_id.clone(), ScopedIndexState::Live(rebuilt));
+                    return Ok(());
+                }
+                let state = indices.entry(session_id.clone()).or_insert_with(|| {
+                    ScopedIndexState::Live(ScopedHnswIndex::new(indexed_entries, hnsw_params))
+                });
+                let ScopedIndexState::Live(index) = state else {
+                    // Unreachable: the poisoned case returned above.
+                    return Err(MemoryStoreError::ScopePoisoned);
+                };
                 // The enumerate index is consumed only by the `cfg(test)`
                 // fault-injection seam below; in non-test builds it is unused.
                 #[allow(clippy::unused_enumerate_index)]
@@ -472,45 +534,60 @@ impl MemoryStore for HnswMemoryStore {
             })();
 
             if let Err(error) = index_result {
-                let mut cleanup = open_connection(&db_path)?;
-                let tx = cleanup
-                    .transaction()
-                    .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
-                for point_id_i64 in &point_ids {
-                    tx.execute(
-                        "DELETE FROM memory_metadata WHERE point_id = ?1",
-                        params![point_id_i64],
-                    )
-                    .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
-                    tx.execute(
-                        "DELETE FROM memory_text WHERE point_id = ?1",
-                        params![point_id_i64],
-                    )
-                    .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
-                }
-                tx.commit()
-                    .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
-
+                // Roll back this batch's committed rows, then repair the live
+                // scoped index purely from the surviving durable rows.
                 // `hnsw_rs` cannot remove already-inserted points, so a partial
                 // insert above may have left live neighbor slots for point_ids
-                // we just deleted from the DB. Rebuild the scope's live index
-                // purely from the surviving committed rows so a subsequent
-                // search in this same process never selects phantom (DB-deleted)
-                // neighbor slots. This mirrors the full re-index that crash
-                // recovery performs on `open`. Fail closed: if the rebuild
-                // cannot be derived from the DB, surface the typed fault rather
-                // than leaving a stale live index.
-                let repaired = rebuild_scoped_index_from_db(
-                    &cleanup,
-                    &session_id,
-                    embedding_model.as_ref(),
-                    hnsw_params,
-                )?;
+                // the rollback deletes; the rebuild mirrors the full re-index
+                // crash recovery performs on `open`.
+                let repair_result = (|| -> Result<ScopedHnswIndex, MemoryStoreError> {
+                    let mut cleanup = open_connection(&db_path)?;
+                    let tx = cleanup
+                        .transaction()
+                        .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
+                    for point_id_i64 in &point_ids {
+                        tx.execute(
+                            "DELETE FROM memory_metadata WHERE point_id = ?1",
+                            params![point_id_i64],
+                        )
+                        .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
+                        tx.execute(
+                            "DELETE FROM memory_text WHERE point_id = ?1",
+                            params![point_id_i64],
+                        )
+                        .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
+                    }
+                    tx.commit()
+                        .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
+                    rebuild_scoped_index_from_db(
+                        &cleanup,
+                        &session_id,
+                        embedding_model.as_ref(),
+                        hnsw_params,
+                    )
+                })();
+
+                // Fail closed in BOTH repair outcomes: a repaired scope serves
+                // the durable-derived index; an unrepairable scope is poisoned
+                // so reads surface the typed fault instead of phantom
+                // (rolled-back) neighbor slots — the stale live index is never
+                // left serving.
                 let mut indices = indices
                     .write()
                     .map_err(|_| MemoryStoreError::LockPoisoned)?;
-                indices.insert(session_id, repaired);
-                return Err(error);
+                match repair_result {
+                    Ok(repaired) => {
+                        indices.insert(session_id, ScopedIndexState::Live(repaired));
+                        return Err(error);
+                    }
+                    Err(repair) => {
+                        indices.insert(session_id, ScopedIndexState::Poisoned);
+                        return Err(MemoryStoreError::ScopeRepairFailed {
+                            original: Box::new(error),
+                            repair: Box::new(repair),
+                        });
+                    }
+                }
             }
 
             Ok::<(), MemoryStoreError>(())
@@ -550,10 +627,18 @@ impl MemoryStore for HnswMemoryStore {
             let embedding = embedding_model.embed(&query);
             let neighbors = {
                 let indices = indices.read().map_err(|_| MemoryStoreError::LockPoisoned)?;
-                let Some(index) = indices.get(scope.session_id()) else {
-                    return Ok(Vec::new());
-                };
-                index.index.search(&embedding, limit, limit.max(ef_search))
+                match indices.get(scope.session_id()) {
+                    None => return Ok(Vec::new()),
+                    // Fail closed: a poisoned scope's candidate set is known to
+                    // diverge from durable truth; surface the typed fault
+                    // rather than serving phantom or partial results.
+                    Some(ScopedIndexState::Poisoned) => {
+                        return Err(MemoryStoreError::ScopePoisoned);
+                    }
+                    Some(ScopedIndexState::Live(index)) => {
+                        index.index.search(&embedding, limit, limit.max(ef_search))
+                    }
+                }
             };
 
             let conn = open_connection(&db_path)?;
@@ -562,6 +647,10 @@ impl MemoryStore for HnswMemoryStore {
                 let point_id = i64::try_from(neighbor.d_id)
                     .map_err(|_| MemoryStoreError::PointIdOutOfRange)?;
 
+                // A live neighbor slot without a durable row is index/store
+                // divergence: fail closed with the typed fault instead of
+                // silently skipping a candidate that consumed a
+                // nearest-neighbor slot.
                 let content = match conn
                     .query_row(
                         "SELECT content FROM memory_text WHERE point_id = ?1",
@@ -571,8 +660,8 @@ impl MemoryStore for HnswMemoryStore {
                     .optional()
                     .map_err(|e| MemoryStoreError::Storage(e.to_string()))?
                 {
-                    Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-                    None => continue,
+                    Some(bytes) => decode_memory_text(point_id, bytes)?,
+                    None => return Err(MemoryStoreError::IndexDivergence { point_id }),
                 };
 
                 let metadata = match conn
@@ -586,7 +675,7 @@ impl MemoryStore for HnswMemoryStore {
                 {
                     Some(bytes) => serde_json::from_slice(&bytes)
                         .map_err(|e| MemoryStoreError::Embedding(e.to_string()))?,
-                    None => continue,
+                    None => return Err(MemoryStoreError::IndexDivergence { point_id }),
                 };
                 if !scope.includes(&metadata) {
                     continue;
@@ -1017,6 +1106,159 @@ mod tests {
         );
     }
 
+    /// Overwrite a point's durable text bytes with invalid UTF-8, out-of-band.
+    fn corrupt_text_bytes(db_path: &std::path::Path, bytes: &[u8]) {
+        let conn = Connection::open(db_path).unwrap();
+        let updated = conn
+            .execute("UPDATE memory_text SET content = ?1", params![bytes])
+            .unwrap();
+        assert!(updated > 0, "corruption fixture must hit at least one row");
+    }
+
+    /// Gate: corrupt durable text bytes are a typed store-corruption fault on
+    /// rehydration (`open`), never lossy-decoded into searchable content.
+    #[tokio::test]
+    async fn test_corrupt_text_bytes_fail_closed_on_open() {
+        let dir = TempDir::new().unwrap();
+        let memory_dir = dir.path().join("memory");
+        let session_id = SessionId::new();
+        {
+            let store = HnswMemoryStore::open(&memory_dir).unwrap();
+            store
+                .index_scoped(request("clean entry before corruption", &session_id))
+                .await
+                .unwrap();
+        }
+        corrupt_text_bytes(&memory_dir.join("memory.sqlite3"), &[0xff, 0xfe, 0x41]);
+
+        let err = HnswMemoryStore::open(&memory_dir).unwrap_err();
+        assert_eq!(err.error_code(), "memory_text_corruption");
+    }
+
+    /// Gate: corrupt durable text bytes surface as the typed fault on the
+    /// search rehydration path instead of returning mojibake content.
+    #[tokio::test]
+    async fn test_corrupt_text_bytes_fail_closed_on_search() {
+        let dir = TempDir::new().unwrap();
+        let memory_dir = dir.path().join("memory");
+        let store = HnswMemoryStore::open(&memory_dir).unwrap();
+        let session_id = SessionId::new();
+        let scope = MemorySearchScope::for_session(session_id.clone());
+        store
+            .index_scoped(request("entry destined for corruption", &session_id))
+            .await
+            .unwrap();
+        corrupt_text_bytes(&memory_dir.join("memory.sqlite3"), &[0xc3, 0x28]);
+
+        let err = store
+            .search(&scope, "entry destined for corruption", 5)
+            .await
+            .unwrap_err();
+        assert_eq!(err.error_code(), "memory_text_corruption");
+    }
+
+    /// Gate: a live neighbor slot whose durable row is gone is typed
+    /// index/store divergence, not a silently skipped candidate.
+    #[tokio::test]
+    async fn test_missing_durable_row_is_typed_divergence_not_skip() {
+        let dir = TempDir::new().unwrap();
+        let memory_dir = dir.path().join("memory");
+        let store = HnswMemoryStore::open(&memory_dir).unwrap();
+        let session_id = SessionId::new();
+        let scope = MemorySearchScope::for_session(session_id.clone());
+        store
+            .index_scoped(request("row deleted out of band", &session_id))
+            .await
+            .unwrap();
+        {
+            let conn = Connection::open(memory_dir.join("memory.sqlite3")).unwrap();
+            conn.execute("DELETE FROM memory_text", []).unwrap();
+        }
+
+        let err = store
+            .search(&scope, "row deleted out of band", 5)
+            .await
+            .unwrap_err();
+        assert_eq!(err.error_code(), "memory_index_divergence");
+    }
+
+    /// Gate: when the post-rollback repair rebuild itself fails, the scope is
+    /// poisoned (search fails closed with the typed fault, never phantom
+    /// neighbors), and the next successful index attempt self-heals the scope
+    /// by rebuilding it from durable rows.
+    #[tokio::test]
+    async fn test_repair_failure_poisons_scope_then_next_index_self_heals() {
+        let dir = TempDir::new().unwrap();
+        let memory_dir = dir.path().join("memory");
+        let db_path = memory_dir.join("memory.sqlite3");
+        let store = HnswMemoryStore::open(&memory_dir).unwrap();
+        let session_id = SessionId::new();
+        let scope = MemorySearchScope::for_session(session_id.clone());
+
+        // A committed survivor whose text we corrupt so the repair rebuild
+        // fails with a typed fault.
+        store
+            .index_scoped(request("survivor pending corruption", &session_id))
+            .await
+            .unwrap();
+        corrupt_text_bytes(&db_path, &[0xff, 0x00, 0x41]);
+
+        // Partial mid-batch in-memory failure: rollback succeeds, but the
+        // repair rebuild hits the corrupt survivor and fails.
+        store.arm_hnsw_insert_failure_after(1);
+        let batch = MemoryIndexBatch::new(
+            MemoryIndexScope::for_session(session_id.clone()),
+            vec![
+                request("doomed one", &session_id),
+                request("doomed two", &session_id),
+            ],
+        )
+        .unwrap();
+        let err = store.index_scoped_batch(batch).await.unwrap_err();
+        assert_eq!(err.error_code(), "memory_scope_repair_failed");
+        store.arm_hnsw_insert_failure_after(-1);
+
+        // The poisoned scope fails reads closed.
+        let err = store.search(&scope, "survivor", 5).await.unwrap_err();
+        assert_eq!(err.error_code(), "memory_scope_poisoned");
+
+        // Restore valid durable bytes, then index again: the scope self-heals
+        // by rebuilding from durable rows (survivor + the new entry).
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute(
+                "UPDATE memory_text SET content = ?1",
+                params![b"survivor restored text".as_slice()],
+            )
+            .unwrap();
+        }
+        store
+            .index_scoped(request("fresh entry after heal", &session_id))
+            .await
+            .unwrap();
+
+        let results = store
+            .search(&scope, "fresh entry after heal", 5)
+            .await
+            .unwrap();
+        assert!(
+            results
+                .iter()
+                .any(|r| r.content.contains("fresh entry after heal")),
+            "self-healed scope must serve durable-derived candidates"
+        );
+        let survivor = store
+            .search(&scope, "survivor restored text", 5)
+            .await
+            .unwrap();
+        assert!(
+            survivor
+                .iter()
+                .any(|r| r.content.contains("survivor restored text")),
+            "self-healed scope must include pre-existing durable rows"
+        );
+    }
+
     #[tokio::test]
     async fn test_distinct_failures_surface_as_distinct_typed_variants() {
         // Embedding/metadata serialization failures vs storage faults are
@@ -1040,6 +1282,26 @@ mod tests {
         assert_eq!(
             MemoryStoreError::PointIdOutOfRange.error_code(),
             "memory_point_id_out_of_range"
+        );
+        assert_eq!(
+            MemoryStoreError::TextCorruption { point_id: 7 }.error_code(),
+            "memory_text_corruption"
+        );
+        assert_eq!(
+            MemoryStoreError::IndexDivergence { point_id: 7 }.error_code(),
+            "memory_index_divergence"
+        );
+        assert_eq!(
+            MemoryStoreError::ScopePoisoned.error_code(),
+            "memory_scope_poisoned"
+        );
+        assert_eq!(
+            MemoryStoreError::ScopeRepairFailed {
+                original: Box::new(MemoryStoreError::LockPoisoned),
+                repair: Box::new(MemoryStoreError::TextCorruption { point_id: 7 }),
+            }
+            .error_code(),
+            "memory_scope_repair_failed"
         );
     }
 }

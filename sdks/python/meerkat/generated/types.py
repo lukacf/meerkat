@@ -1067,6 +1067,7 @@ class MobSupervisorSpecInput:
     """Request payload for MobSupervisorSpecInput."""
     escalation_threshold: int
     role: str
+    escalation_turn_timeout_ms: Optional[int] = None
 
 
 @dataclass
@@ -1266,6 +1267,15 @@ class ProjectedAttentionAuthority:
 
 
 @dataclass
+class ReadyWorkFilter:
+    """Request payload for ReadyWorkFilter."""
+    labels: Optional[list[str]] = None
+    limit: Optional[int] = None
+    namespace: Optional[str] = None
+    realm_id: Optional[str] = None
+
+
+@dataclass
 class WorkAttentionBinding:
     """Wire payload for WorkAttentionBinding."""
     binding_id: str
@@ -1278,6 +1288,63 @@ class WorkAttentionBinding:
     work_ref: WorkItemRef
     machine_state: Optional[dict[str, Any]] = None
     projection_policy: Optional[AttentionProjectionPolicy] = None
+
+
+@dataclass
+class WorkGraphEventFilter:
+    """Request payload for WorkGraphEventFilter."""
+    after_seq: Optional[int] = None
+    all_namespaces: Optional[bool] = None
+    limit: Optional[int] = None
+    namespace: Optional[str] = None
+    realm_id: Optional[str] = None
+
+
+@dataclass
+class WorkGraphEventsResponse:
+    """Wire payload for WorkGraphEventsResponse."""
+    events: list[WorkGraphEvent]
+
+
+@dataclass
+class WorkGraphIdParams:
+    """Parameters identifying a single WorkGraph item by id within an optional
+realm/namespace scope (`workgraph/get`)."""
+    id: str
+    namespace: Optional[str] = None
+    realm_id: Optional[str] = None
+
+
+@dataclass
+class WorkGraphItemsResponse:
+    """Wire payload for WorkGraphItemsResponse."""
+    items: list[WorkItem]
+
+
+@dataclass
+class WorkGraphSnapshot:
+    """Wire payload for WorkGraphSnapshot."""
+    all_namespaces: bool
+    captured_at: str
+    edges: list[WorkEdge]
+    items: list[WorkItem]
+    ready_item_ids: list[str]
+    realm_id: str
+    attention: Optional[list[WorkAttentionBinding]] = None
+    event_high_water_mark: Optional[int] = None
+    namespace: Optional[str] = None
+
+
+@dataclass
+class WorkGraphSnapshotFilter:
+    """Request payload for WorkGraphSnapshotFilter."""
+    all_namespaces: Optional[bool] = None
+    include_terminal: Optional[bool] = None
+    labels: Optional[list[str]] = None
+    limit: Optional[int] = None
+    namespace: Optional[str] = None
+    realm_id: Optional[str] = None
+    statuses: Optional[list[WorkStatus]] = None
 
 
 @dataclass
@@ -1307,11 +1374,34 @@ class WorkItem:
 
 
 @dataclass
+class WorkItemFilter:
+    """Request payload for WorkItemFilter."""
+    all_namespaces: Optional[bool] = None
+    include_terminal: Optional[bool] = None
+    labels: Optional[list[str]] = None
+    limit: Optional[int] = None
+    namespace: Optional[str] = None
+    realm_id: Optional[str] = None
+    statuses: Optional[list[WorkStatus]] = None
+
+
+@dataclass
 class WorkItemRef:
     """Wire payload for WorkItemRef."""
     item_id: str
     namespace: str
     realm_id: str
+
+
+@dataclass
+class WorkEdge:
+    """Wire payload for WorkEdge."""
+    created_at: str
+    from_id: str
+    kind: WorkEdgeKind
+    namespace: str
+    realm_id: str
+    to_id: str
 
 
 @dataclass
@@ -1323,6 +1413,18 @@ class WorkEvidenceRef:
     confirming_owner_key: Optional[WorkOwnerKey] = None
     label: Optional[str] = None
     summary: Optional[str] = None
+
+
+@dataclass
+class WorkGraphEvent:
+    """Wire payload for WorkGraphEvent."""
+    at: str
+    kind: WorkGraphEventKind
+    namespace: str
+    realm_id: str
+    item_id: Optional[str] = None
+    payload: Optional[Any] = None
+    seq: Optional[int] = None
 
 
 @dataclass
@@ -2536,7 +2638,7 @@ class ModelsCatalogResponse:
 
 This is **not** a pure compiled-in snapshot. Surfaces build it from the
 config-backed `ModelRegistry`, which combines the compiled-in
-`meerkat-models` catalog with any config-declared self-hosted aliases
+`meerkat_core::model_profile` catalog with any config-declared self-hosted aliases
 (entries that carry a [`CatalogModelEntry::server_id`]). Two responses for
 the same binary can therefore differ when the active config declares
 different self-hosted models.
@@ -3175,8 +3277,17 @@ class WorkCompletionPolicyReviewerQuorum(TypedDict, total=False):
 
 WorkCompletionPolicy = WorkCompletionPolicySelfAttest | WorkCompletionPolicyHostConfirmed | WorkCompletionPolicyPrincipalConfirmed | WorkCompletionPolicySupervisor | WorkCompletionPolicyReviewerQuorum
 
+# WorkGraph RPC helper wire type for WorkEdgeKind.
+WorkEdgeKind = Literal['blocks', 'parent', 'related', 'supersedes', 'derived_from']
+
+# WorkGraph RPC helper wire type for WorkGraphEventKind.
+WorkGraphEventKind = Literal['created', 'updated', 'claimed', 'released', 'blocked', 'closed', 'linked', 'evidence_added', 'attention_created', 'attention_updated']
+
 # WorkGraph RPC helper wire type for WorkOwnerKind.
 WorkOwnerKind = Literal['principal', 'agent', 'session', 'mob', 'label']
+
+# WorkGraph RPC helper wire type for WorkStatus.
+WorkStatus = Literal['open', 'in_progress', 'blocked', 'completed', 'cancelled', 'failed']
 
 WorkGraphStatus = Literal["open", "in_progress", "blocked", "completed", "cancelled", "failed"]
 
@@ -3685,7 +3796,12 @@ class ContentBlockStructured(TypedDict, total=False):
     data: Required[Any]
     type: Required[Literal['structured']]
 
-ContentBlock = ContentBlockText | ContentBlockImage | ContentBlockVideo | ContentBlockStructured
+class ContentBlockSkillContext(TypedDict, total=False):
+    skill_key: Required[Any]
+    text: Required[str]
+    type: Required[Literal['skill_context']]
+
+ContentBlock = ContentBlockText | ContentBlockImage | ContentBlockVideo | ContentBlockStructured | ContentBlockSkillContext
 
 # Input content that can be either a plain text string or multimodal content blocks.
 #

@@ -9,35 +9,15 @@ use indexmap::IndexSet;
 use std::collections::BTreeMap;
 use std::fmt;
 
-macro_rules! define_metadata_string {
-    ($(#[$attr:meta])* $name:ident) => {
-        $(#[$attr])*
-        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-        pub struct $name(String);
-
+macro_rules! define_metadata_string_common {
+    ($name:ident) => {
         impl $name {
-            pub fn new(value: impl Into<String>) -> Self {
-                Self(value.into())
-            }
-
             pub fn as_str(&self) -> &str {
                 &self.0
             }
 
             pub fn is_empty(&self) -> bool {
                 self.0.is_empty()
-            }
-        }
-
-        impl From<String> for $name {
-            fn from(value: String) -> Self {
-                Self(value)
-            }
-        }
-
-        impl From<&str> for $name {
-            fn from(value: &str) -> Self {
-                Self(value.to_owned())
             }
         }
 
@@ -63,9 +43,72 @@ macro_rules! define_metadata_string {
     };
 }
 
+macro_rules! define_metadata_string {
+    // Validated kinds: EVERY ingress (`new`, `From<String>`, `From<&str>`)
+    // routes through the fail-closed `new_validated` constructor defined for
+    // the type below. These values are compile-time-authored catalog data, so
+    // a malformed value is an authoring bug surfaced at catalog construction
+    // — never an unvalidated string reaching codegen emission. There is no
+    // `Default`: an empty value is invalid by construction.
+    ($(#[$attr:meta])* validated $name:ident) => {
+        $(#[$attr])*
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(String);
+
+        impl $name {
+            /// Validating constructor for compile-time-authored catalog
+            /// values; a malformed value is a catalog authoring bug.
+            #[allow(clippy::expect_used)]
+            pub fn new(value: impl Into<String>) -> Self {
+                Self::new_validated(value)
+                    .expect("compile-time-authored Rust emission metadata must be valid")
+            }
+        }
+
+        impl From<String> for $name {
+            fn from(value: String) -> Self {
+                Self::new(value)
+            }
+        }
+
+        impl From<&str> for $name {
+            fn from(value: &str) -> Self {
+                Self::new(value.to_owned())
+            }
+        }
+
+        define_metadata_string_common!($name);
+    };
+    ($(#[$attr:meta])* $name:ident) => {
+        $(#[$attr])*
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Self {
+                Self(value.into())
+            }
+        }
+
+        impl From<String> for $name {
+            fn from(value: String) -> Self {
+                Self(value)
+            }
+        }
+
+        impl From<&str> for $name {
+            fn from(value: &str) -> Self {
+                Self(value.to_owned())
+            }
+        }
+
+        define_metadata_string_common!($name);
+    };
+}
+
 define_metadata_string!(
     /// Repository-relative Rust module path consumed by composition codegen.
-    RustModulePath
+    validated RustModulePath
 );
 
 impl AsRef<std::path::Path> for RustModulePath {
@@ -86,11 +129,11 @@ define_metadata_string!(
 );
 define_metadata_string!(
     /// Rust item identifier emitted into generated driver/helper modules.
-    RustItemIdent
+    validated RustItemIdent
 );
 define_metadata_string!(
     /// Rust method identifier emitted by HandleBridge helpers.
-    RustMethodName
+    validated RustMethodName
 );
 define_metadata_string!(
     /// Complete Rust `use ...;` import line inserted into generated code.
@@ -3290,6 +3333,41 @@ mod rust_metadata_validation_tests {
         assert!(
             RustModulePath::new_validated("").is_err(),
             "empty must be rejected"
+        );
+    }
+
+    // Ingress gate: the convenience `From` constructors used by the catalog
+    // route through `new_validated` and fail closed on malformed values, so
+    // the validating ctors are live at every construction site rather than
+    // dead test-only code.
+    #[test]
+    #[should_panic(expected = "compile-time-authored Rust emission metadata must be valid")]
+    fn rust_module_path_from_rejects_traversal_at_ingress() {
+        let _ = RustModulePath::from("../escape.rs");
+    }
+
+    #[test]
+    #[should_panic(expected = "compile-time-authored Rust emission metadata must be valid")]
+    fn rust_item_ident_from_rejects_non_identifier_at_ingress() {
+        let _ = RustItemIdent::from("has-dash");
+    }
+
+    #[test]
+    #[should_panic(expected = "compile-time-authored Rust emission metadata must be valid")]
+    fn rust_method_name_from_rejects_non_identifier_at_ingress() {
+        let _ = RustMethodName::from("foo::bar");
+    }
+
+    #[test]
+    fn metadata_from_impls_accept_valid_values_at_ingress() {
+        assert_eq!(
+            RustModulePath::from("meerkat-runtime/src/generated/x.rs").as_str(),
+            "meerkat-runtime/src/generated/x.rs"
+        );
+        assert_eq!(RustItemIdent::from("ValidIdent").as_str(), "ValidIdent");
+        assert_eq!(
+            RustMethodName::from("handle_request").as_str(),
+            "handle_request"
         );
     }
 }

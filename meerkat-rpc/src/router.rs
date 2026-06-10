@@ -2156,22 +2156,25 @@ impl MethodRouter {
 
         match self.resolve_session_owner(&session_id).await {
             Some(SessionOwner::Runtime) => {
-                if let Some(mut history) = self
+                match self
                     .runtime
                     .read_session_history_rich(&session_id, query)
                     .await
                 {
-                    history.session_ref = self
-                        .runtime
-                        .realm_id()
-                        .map(|realm| meerkat_contracts::format_session_ref(&realm, &session_id));
-                    RpcResponse::success(id, history)
-                } else {
-                    RpcResponse::error(
+                    Ok(Some(mut history)) => {
+                        history.session_ref = self.runtime.realm_id().map(|realm| {
+                            meerkat_contracts::format_session_ref(&realm, &session_id)
+                        });
+                        RpcResponse::success(id, history)
+                    }
+                    Ok(None) => RpcResponse::error(
                         id,
                         error::SESSION_NOT_FOUND,
                         format!("Session not found: {session_id}"),
-                    )
+                    ),
+                    // A store/control-plane fault is surfaced as itself —
+                    // never collapsed into a not-found.
+                    Err(err) => RpcResponse::error(id, err.code, err.message),
                 }
             }
             #[cfg(feature = "mob")]
@@ -7443,7 +7446,8 @@ mod tests {
             .unwrap();
         assert!(
             read_resp.error.is_none(),
-            "archived session should remain readable"
+            "archived session should remain readable: {:?}",
+            read_resp.error
         );
         let read = result_value(&read_resp);
         assert_eq!(read["session_id"], session_id);

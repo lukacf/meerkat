@@ -933,7 +933,22 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 }
                             }
                         }
-                        None => break,
+                        None => {
+                            // Closed effect receiver is NOT an applied stop —
+                            // route through the canonical stop/terminalize
+                            // path so the DSL executor-exit, durable
+                            // runtime-state commit, and waiter terminalization
+                            // all fire (same shape as the ready-effect drain
+                            // ChannelClosed arm).
+                            let _ = stop_runtime_loop_executor_from_dsl_effect(
+                                &driver,
+                                completions.as_ref(),
+                                &mut *executor,
+                                "runtime effect channel closed".to_string(),
+                            )
+                            .await;
+                            break;
+                        }
                     }
                 }
                 maybe_wake = wake_rx.recv() => {
@@ -981,7 +996,20 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 FeedWakeOutcome::Noop => {}
                             }
                         }
-                        None => break,
+                        None => {
+                            // Closed wake channel is NOT an applied stop —
+                            // terminalize through the canonical
+                            // StopRuntimeExecutor path rather than silently
+                            // exiting the loop.
+                            let _ = stop_runtime_loop_executor_from_dsl_effect(
+                                &driver,
+                                completions.as_ref(),
+                                &mut *executor,
+                                "runtime wake channel closed".to_string(),
+                            )
+                            .await;
+                            break;
+                        }
                     }
                 }
                 () = idle_wake => {
@@ -1953,6 +1981,90 @@ mod tests {
         assert_eq!(stop_calls.load(Ordering::SeqCst), 1);
         assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
         drop((wake_tx, effect_tx));
+    }
+
+    /// Row #58 residual gate: dropping the effect sender while the loop is
+    /// blocked in its main `select!` (NOT inside the ready-effect drain) must
+    /// also route through the canonical StopRuntimeExecutor terminalize path —
+    /// never exit the loop bare.
+    #[tokio::test]
+    async fn runtime_loop_direct_effect_channel_closure_routes_through_stop_path() {
+        let driver = make_shared_ephemeral_driver("direct-effect-channel-closed");
+        let stop_calls = Arc::new(AtomicUsize::new(0));
+        let apply_calls = Arc::new(AtomicUsize::new(0));
+        let executor = crate::control_plane::test_support::StopFailingExecutor::new(
+            Arc::clone(&stop_calls),
+            Arc::clone(&apply_calls),
+        );
+        let (wake_tx, wake_rx) = tokio::sync::mpsc::channel(1);
+        let (effect_tx, effect_rx) = tokio::sync::mpsc::channel(1);
+        let handle = spawn_runtime_loop_with_completions(
+            driver,
+            Box::new(executor),
+            wake_rx,
+            effect_rx,
+            None,
+            None,
+            None,
+            None,
+            std::sync::Weak::<crate::meerkat_machine::MeerkatMachine>::new(),
+            SessionId::new(),
+        );
+
+        drop(effect_tx);
+
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("runtime loop must exit after effect channel closure")
+            .expect("runtime loop task should not panic");
+        assert_eq!(
+            stop_calls.load(Ordering::SeqCst),
+            1,
+            "effect channel closure must route through StopRuntimeExecutor, not exit bare"
+        );
+        assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
+        drop(wake_tx);
+    }
+
+    /// Row #58 residual gate (sibling): dropping the wake sender must also
+    /// terminalize through the canonical StopRuntimeExecutor path.
+    #[tokio::test]
+    async fn runtime_loop_wake_channel_closure_routes_through_stop_path() {
+        let driver = make_shared_ephemeral_driver("wake-channel-closed");
+        let stop_calls = Arc::new(AtomicUsize::new(0));
+        let apply_calls = Arc::new(AtomicUsize::new(0));
+        let executor = crate::control_plane::test_support::StopFailingExecutor::new(
+            Arc::clone(&stop_calls),
+            Arc::clone(&apply_calls),
+        );
+        let (wake_tx, wake_rx) = tokio::sync::mpsc::channel(1);
+        let (effect_tx, effect_rx) = tokio::sync::mpsc::channel(1);
+        let handle = spawn_runtime_loop_with_completions(
+            driver,
+            Box::new(executor),
+            wake_rx,
+            effect_rx,
+            None,
+            None,
+            None,
+            None,
+            std::sync::Weak::<crate::meerkat_machine::MeerkatMachine>::new(),
+            SessionId::new(),
+        );
+
+        drop(wake_tx);
+
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("runtime loop must exit after wake channel closure")
+            .expect("runtime loop task should not panic");
+        assert_eq!(
+            stop_calls.load(Ordering::SeqCst),
+            1,
+            "wake channel closure must route through StopRuntimeExecutor, not exit bare"
+        );
+        assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
+        drop(effect_tx);
     }
 
     fn make_prompt(text: &str) -> Input {

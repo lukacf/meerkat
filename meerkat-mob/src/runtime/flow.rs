@@ -1,7 +1,7 @@
 use super::conditions::evaluate_condition;
 use super::events::MobEventEmitter;
 use super::handle::MobHandle;
-use super::path::resolve_context_path_opt;
+use super::path::{PathResolveError, resolve_context_path};
 use super::supervisor::Supervisor;
 use super::terminalization::{
     FlowFailureCause, FlowTerminalizationAuthority, TerminalizationOutcome, TerminalizationTarget,
@@ -1049,6 +1049,9 @@ impl FlowEngine {
         config: &FlowRunConfig,
         error: MobError,
     ) -> Result<(), MobError> {
+        // Classify the typed error ONCE; the display string below is a
+        // projection of the same typed cause for ledger/escalation rendering.
+        let cause = FlowFailureCause::from_step_error(&error);
         let reason = error.to_string();
         let escalation_steps = self.fail_unfinished_steps(run_id, &reason).await?;
         if !escalation_steps.is_empty() {
@@ -1061,11 +1064,7 @@ impl FlowEngine {
             supervisor.force_reset().await?;
         }
         let _ = self
-            .terminalize_failed(
-                run_id.clone(),
-                config.flow_id.clone(),
-                FlowFailureCause::StepError { detail: reason },
-            )
+            .terminalize_failed(run_id.clone(), config.flow_id.clone(), cause)
             .await?;
         Ok(())
     }
@@ -1793,7 +1792,6 @@ impl FlowEngine {
         authority: MobMachineFlowAuthorityToken,
         machine_effects: Vec<mob_dsl::MobMachineEffect>,
     ) -> Result<TerminalizationOutcome, MobError> {
-        let next_status = target.status();
         let authority_input = input.authority_input(&run_id);
         self.verify_terminal_run_steps(&run_id).await?;
         for attempt in 0..5u32 {
@@ -1817,22 +1815,23 @@ impl FlowEngine {
                 &machine_effects,
             )?
             .next_state;
-            let transitioned = self
-                .run_store
-                .cas_run_snapshot_with_authority(
+            // Terminal status and terminal event commit through ONE store
+            // seam (a single SQLite transaction on durable storage) so they
+            // cannot split.
+            let committed = self
+                .terminalization
+                .commit_terminalization_with_snapshot(
                     &run_id,
+                    flow_id.clone(),
+                    target.clone(),
                     run.status.clone(),
                     &run.flow_state,
-                    next_status.clone(),
                     &next_state,
                     vec![authority_input.clone()],
                 )
                 .await?;
-            if transitioned {
-                return self
-                    .terminalization
-                    .record_persisted_terminalization(run_id, flow_id, target)
-                    .await;
+            if let Some(outcome) = committed {
+                return Ok(outcome);
             }
             if attempt < 4 {
                 tracing::debug!(attempt, "terminalize CAS contention, retrying");
@@ -2446,8 +2445,17 @@ fn render_template(template: &str, context: &FlowContext) -> Result<String, Stri
         match segment {
             TemplateSegment::Text(text) => rendered.push_str(&text),
             TemplateSegment::Placeholder(expression) => {
-                let replacement =
-                    resolve_template_value(&expression, context).map_or(Value::Null, Clone::clone);
+                // Mirror the condition-evaluator split: an absent context ROOT
+                // (a step/loop-iteration output not yet produced) is a definite
+                // "not present" and renders as null, while a STRUCTURAL fault
+                // (typo'd key inside a present root, unparsable reference,
+                // scalar walk) fails closed instead of silently rendering null
+                // into a prompt.
+                let replacement = match resolve_context_path(context, &expression) {
+                    Ok(value) => value.clone(),
+                    Err(PathResolveError::MissingRoot { .. }) => Value::Null,
+                    Err(error) => return Err(error.to_string()),
+                };
                 match replacement {
                     Value::String(text) => rendered.push_str(&text),
                     other => rendered.push_str(&other.to_string()),
@@ -2480,14 +2488,6 @@ fn render_content_input_template(
             Ok(ContentInput::Blocks(rendered))
         }
     }
-}
-
-fn resolve_template_value<'a>(expression: &str, context: &'a FlowContext) -> Option<&'a Value> {
-    // Template rendering legitimately treats an unresolved reference as an
-    // absent placeholder (rendered as null), so the lossy `_opt` view is the
-    // correct seam here — distinct from condition evaluation, which fails
-    // closed on the same unresolved reference.
-    resolve_context_path_opt(context, expression)
 }
 
 // ─── FlowTurnExecutorAdapter ────────────────────────────────────────────────
@@ -2784,6 +2784,42 @@ mod template_tests {
         let rendered = render_template("hello {{ params.user }}", &sample_context())
             .expect("valid template should render");
         assert_eq!(rendered, "hello luka");
+    }
+
+    #[test]
+    fn test_render_template_structural_fault_fails_closed() {
+        // Regression: a typo'd key inside a PRESENT step output used to render
+        // silently as `null` into the prompt. It must now fail closed so the
+        // step surfaces a render fault instead of laundering folklore text
+        // into the member prompt.
+        let error = render_template("value: {{ steps.a.missing_key }}", &sample_context())
+            .expect_err("a missing key inside a present root must fail template rendering");
+        assert!(
+            error.contains("missing_key"),
+            "fault must name the offending segment: {error}"
+        );
+
+        // An unparsable reference likewise fails closed.
+        assert!(
+            render_template("{{ bogus.root.path }}", &sample_context()).is_err(),
+            "an unparsable context reference must fail template rendering"
+        );
+
+        // Walking into a scalar likewise fails closed.
+        assert!(
+            render_template("{{ steps.a.x.deeper }}", &sample_context()).is_err(),
+            "indexing into a scalar must fail template rendering"
+        );
+    }
+
+    #[test]
+    fn test_render_template_absent_root_renders_null() {
+        // An absent context ROOT (a step output not yet produced) is a
+        // definite "not present" — mirrored from the condition evaluator — and
+        // renders as null rather than faulting the step.
+        let rendered = render_template("prior: {{ steps.never_ran.output }}", &sample_context())
+            .expect("an absent step root must render as null, not fault");
+        assert_eq!(rendered, "prior: null");
     }
 
     #[test]

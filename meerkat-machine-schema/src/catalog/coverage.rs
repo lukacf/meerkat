@@ -783,6 +783,16 @@ fn semantic_scenario_ids(name: &str, scenarios: &[ScenarioCoverage]) -> Vec<Stri
     )
 }
 
+/// Associate a semantic element with the anchors/scenarios whose description
+/// contains EVERY semantic token of the element's name.
+///
+/// Full containment is deliberately strict: the old max-partial-score rule
+/// let an element lexically "win" the wrong anchor through coincidental
+/// overlap of a minority of tokens (or ties between unrelated anchors). Under
+/// full containment an anchor only claims an element when its note actually
+/// enumerates all of the element's name tokens; an element nothing fully
+/// describes is reported UNCLAIMED (empty ids) rather than mis-attributed —
+/// absence of coverage is honest, a wrong anchor is laundered truth.
 fn semantic_ids<T>(
     name: &str,
     items: &[T],
@@ -794,26 +804,16 @@ fn semantic_ids<T>(
     }
 
     let tokens = semantic_tokens(name);
-    let scored = items
-        .iter()
-        .map(|item| {
-            let haystack = format!("{} {}", id(item), description(item)).to_ascii_lowercase();
-            let score = tokens
-                .iter()
-                .filter(|token| haystack.contains(token.as_str()))
-                .count();
-            (item, score)
-        })
-        .collect::<Vec<_>>();
-    let max_score = scored.iter().map(|(_, score)| *score).max().unwrap_or(0);
-    if max_score == 0 {
+    if tokens.is_empty() {
         return Vec::new();
     }
-
-    scored
-        .into_iter()
-        .filter(|(_, score)| *score == max_score)
-        .map(|(item, _)| id(item).to_owned())
+    items
+        .iter()
+        .filter(|item| {
+            let haystack = format!("{} {}", id(item), description(item)).to_ascii_lowercase();
+            tokens.iter().all(|token| haystack.contains(token.as_str()))
+        })
+        .map(|item| id(item).to_owned())
         .collect::<Vec<_>>()
 }
 
@@ -875,5 +875,58 @@ fn scenario(id: &str, summary: &str) -> ScenarioCoverage {
     ScenarioCoverage {
         id: id.into(),
         summary: summary.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn semantic_ids_require_full_token_containment_never_coincidental_overlap() {
+        // Row #15 gate: under the old max-partial-score rule, an element whose
+        // tokens only PARTIALLY overlap an unrelated anchor's note could
+        // lexically "win" that anchor (wrong attribution). Full containment
+        // claims an element only when every token is described.
+        let anchors = vec![
+            machine_anchor(
+                "right_anchor",
+                "MeerkatMachine",
+                "meerkat-runtime/src/meerkat_machine/mod.rs",
+                "register session and prepare bindings ownership",
+            ),
+            machine_anchor(
+                "wrong_anchor",
+                "MeerkatMachine",
+                "meerkat/src/meerkat_machine.rs",
+                "register snapshot facade",
+            ),
+        ];
+
+        // Both anchors mention "register"; only the first also mentions
+        // "session". Max-partial-score would have tied or mis-attributed;
+        // full containment selects exactly the fully-describing anchor.
+        assert_eq!(
+            semantic_anchor_ids("RegisterSession", &anchors),
+            vec!["right_anchor".to_owned()],
+        );
+
+        // An element nothing fully describes is honestly UNCLAIMED, not
+        // attributed to whichever anchor coincidentally shares a token.
+        assert!(
+            semantic_anchor_ids("RegisterRealtimeEndpoint", &anchors).is_empty(),
+            "partially-overlapping anchors must not be claimed"
+        );
+    }
+
+    #[test]
+    fn canonical_manifests_construct_with_full_containment_matching() {
+        // The canonical manifests must still build (anchor notes enumerate
+        // the semantic vocabulary); unclaimed entries are permitted, wrong
+        // claims are not.
+        let manifests = canonical_machine_coverage_manifests();
+        assert!(!manifests.is_empty());
+        let compositions = canonical_composition_coverage_manifests();
+        assert!(!compositions.is_empty());
     }
 }

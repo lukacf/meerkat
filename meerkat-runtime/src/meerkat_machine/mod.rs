@@ -2342,29 +2342,26 @@ impl MeerkatMachine {
     /// session lookup + DSL-lock-scoped apply. A typed transition error
     /// from the kernel is surfaced as a `String` so the dispatcher can
     /// map it onto `DispatchRefusal::ConsumerRefused`.
-    pub async fn apply_routed_meerkat_input(
+    pub(crate) async fn apply_routed_meerkat_input(
         &self,
         session_id: &SessionId,
         input: dsl::MeerkatMachineInput,
-    ) -> Result<(), String> {
-        Self::reject_raw_fieldless_runtime_internal_dsl_input(&input)?;
+    ) -> Result<(), dsl_authority::DslTransitionRefusal> {
         let _gate_guard = self
             .lock_current_session_mutation_gate(session_id)
             .await
             .ok_or_else(|| {
-                format!(
-                    "session `{session_id}` is not registered with this MeerkatMachine; \
-                     cannot deliver routed input"
+                dsl_authority::DslTransitionRefusal::other(
+                    "routed_session_not_registered",
+                    format!(
+                        "session `{session_id}` is not registered with this MeerkatMachine; \
+                         cannot deliver routed input"
+                    ),
                 )
             })?;
-        self.apply_session_dsl_input_with_dispatch_failure(
-            session_id,
-            input,
-            "RoutedMeerkatInput",
-            CommittedEffectDispatchFailure::PreserveCommittedDslState,
-        )
-        .await
-        .map(|_| ())
+        self.apply_routed_session_dsl_input(session_id, input, "RoutedMeerkatInput")
+            .await
+            .map(|_| ())
     }
 
     #[cfg(test)]

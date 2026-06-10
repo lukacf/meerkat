@@ -237,64 +237,38 @@ pub enum TokenLifecycleClearError {
     AuthMachineRelease(DslTransitionError),
     #[error("TokenStore clear failed: {0}")]
     TokenStoreClear(TokenStoreError),
-    #[error("TokenStore load failed: {load_error}; TokenStore clear failed: {clear_error}")]
-    TokenStoreLoadAndClear {
-        load_error: TokenStoreError,
-        clear_error: TokenStoreError,
-    },
-    #[error(
-        "TokenStore clear failed: {clear_error}; AuthMachine lifecycle restore failed: {restore_error}"
-    )]
-    TokenStoreClearAndLifecycleRestore {
-        clear_error: TokenStoreError,
-        restore_error: DslTransitionError,
-    },
 }
 
-/// Clear persisted token material and release the AuthMachine lifecycle as one
-/// fail-closed boundary.
+/// Clear persisted token material and release the AuthMachine lifecycle.
 ///
-/// When the previous token snapshot can be loaded, the AuthMachine release
-/// happens first. If the token clear then fails, the previous lifecycle snapshot
-/// is restored so public status does not commit a split "token exists but
-/// lifecycle is gone" state. When token material is unreadable, there is no
-/// durable token snapshot to restore, so release is delayed until clear succeeds.
+/// The durable token record carries the machine-stamped lifecycle marker (see
+/// [`mark_tokens_lifecycle_published_for_transition`]), so the single
+/// `store.clear` IS the atomic boundary: one durable mutation destroys the
+/// credential and its lifecycle publication together. The in-process lease
+/// release that follows is a projection update of that durable truth, not a
+/// second commit — there is no compensation window to manage:
+///
+/// - If the clear fails, nothing changed (durable record and lease both stand)
+///   and the typed [`TokenLifecycleClearError::TokenStoreClear`] fault
+///   propagates.
+/// - If the clear succeeds and the release transition is rejected, the typed
+///   [`TokenLifecycleClearError::AuthMachineRelease`] fault propagates and the
+///   stale in-process lease self-heals on the next status rehydrate:
+///   [`rehydrate_marked_tokens_for_status`] derives lease state from durable
+///   truth and releases a credential-bearing lease whose durable record is
+///   gone.
 pub async fn clear_tokens_and_publish_lifecycle_released(
     store: &dyn TokenStore,
     handle: &GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
 ) -> Result<(), TokenLifecycleClearError> {
     let key = TokenKey::from_auth_binding(auth_binding);
-    let lease_key = LeaseKey::from_auth_binding(auth_binding);
-    let previous_lifecycle = handle.capture_auth_lifecycle_restore_snapshot(&lease_key);
-    let previous = match store.load(&key).await {
-        Ok(previous) => previous,
-        Err(load_error) => {
-            if let Err(clear_error) = store.clear(&key).await {
-                return Err(TokenLifecycleClearError::TokenStoreLoadAndClear {
-                    load_error,
-                    clear_error,
-                });
-            }
-            publish_token_lifecycle_released(handle, auth_binding)
-                .map_err(TokenLifecycleClearError::AuthMachineRelease)?;
-            return Ok(());
-        }
-    };
+    store
+        .clear(&key)
+        .await
+        .map_err(TokenLifecycleClearError::TokenStoreClear)?;
     publish_token_lifecycle_released(handle, auth_binding)
         .map_err(TokenLifecycleClearError::AuthMachineRelease)?;
-    if let Err(clear_error) = store.clear(&key).await {
-        let _ = previous;
-        if let Err(restore_error) = restore_token_lifecycle_snapshot(handle, &previous_lifecycle) {
-            return Err(
-                TokenLifecycleClearError::TokenStoreClearAndLifecycleRestore {
-                    clear_error,
-                    restore_error,
-                },
-            );
-        }
-        return Err(TokenLifecycleClearError::TokenStoreClear(clear_error));
-    }
     Ok(())
 }
 
@@ -384,6 +358,23 @@ pub async fn rehydrate_marked_tokens_for_status(
 ) -> Result<Option<PersistedTokens>, AuthStatusRehydrateError> {
     let key = TokenKey::from_auth_binding(auth_binding);
     let Some(tokens) = token_store.load(&key).await? else {
+        // Durable truth holds no credential for this binding. The in-process
+        // lease is a projection of durable truth: a credential-bearing lease
+        // that outlived its durable record (e.g. a clear whose release
+        // transition was rejected) is released here so public status cannot
+        // keep projecting a credential the store no longer holds.
+        let lease_key = LeaseKey::from_auth_binding(auth_binding);
+        let captured = auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
+        let snapshot = captured.snapshot();
+        let lease_is_live = snapshot.credential_present
+            && snapshot
+                .phase
+                .is_some_and(|phase| phase != AuthLeasePhase::Released);
+        if lease_is_live {
+            auth_lease
+                .release_lease(&lease_key)
+                .map_err(AuthStatusRehydrateError::LifecycleRestore)?;
+        }
         return Ok(None);
     };
     if tokens.auth_mode != expected_mode {

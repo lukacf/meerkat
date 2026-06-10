@@ -6056,7 +6056,12 @@ impl MobActor {
                     meerkat_runtime::meerkat_machine::dsl::MobId::from(self.definition.id.as_ref());
                 let spawned = adapter
                     .maybe_spawn_mob_comms_drain(bridge_session_id, comms_runtime, mob_id)
-                    .await;
+                    .await
+                    .map_err(|err| {
+                        MobError::Internal(format!(
+                            "mob comms drain spawn failed for session {bridge_session_id}: {err}"
+                        ))
+                    })?;
                 if spawned {
                     tracing::debug!(
                         agent_identity = %agent_identity,
@@ -6086,7 +6091,13 @@ impl MobActor {
                 .filter_map(|session_id| SessionId::parse(&session_id.0).ok())
                 .collect::<Vec<_>>();
             for session_id in session_ids {
-                adapter.abort_comms_drain(&session_id).await;
+                if let Err(error) = adapter.abort_comms_drain(&session_id).await {
+                    tracing::warn!(
+                        %session_id,
+                        %error,
+                        "failed to abort comms drain during mob runtime binding teardown"
+                    );
+                }
                 adapter.unregister_session(&session_id).await;
             }
         }
@@ -6268,7 +6279,11 @@ impl MobActor {
         if let (Some(adapter), Some(session_id)) =
             (&self.runtime_adapter, member_ref.bridge_session_id())
         {
-            adapter.abort_comms_drain(session_id).await;
+            adapter.abort_comms_drain(session_id).await.map_err(|err| {
+                MobError::Internal(format!(
+                    "failed to abort comms drain for stopped member session {session_id}: {err}"
+                ))
+            })?;
         }
         // Ensure stop semantics are strong: do not report completion while the
         // session still appears active, otherwise immediate resume can race into
@@ -9479,9 +9494,14 @@ impl MobActor {
                     let mob_id = meerkat_runtime::meerkat_machine::dsl::MobId::from(
                         self.definition.id.as_ref(),
                     );
-                    let _ = adapter
+                    adapter
                         .maybe_spawn_mob_comms_drain(bridge_session_id, comms_runtime, mob_id)
-                        .await;
+                        .await
+                        .map_err(|err| {
+                            MobError::Internal(format!(
+                                "mob comms drain spawn failed for session {bridge_session_id}: {err}"
+                            ))
+                        })?;
                 }
             }
 
@@ -12485,9 +12505,27 @@ impl MobActor {
     async fn detach_runtime_session_ingress(&self, session_id: &SessionId) -> Result<(), MobError> {
         #[cfg(feature = "runtime-adapter")]
         if let Some(adapter) = &self.runtime_adapter {
-            adapter
+            match adapter
                 .update_peer_ingress_context(session_id, false, None)
-                .await;
+                .await
+            {
+                Ok(_) => {}
+                // The session's runtime may already be absent or terminal
+                // (e.g. a stale routed retire after the bridge session was
+                // destroyed). Those machine verdicts prove no ingress remains
+                // attached, which is exactly the detach post-condition; the
+                // owner check below still verifies it.
+                Err(
+                    meerkat_runtime::RuntimeDriverError::NotFound { .. }
+                    | meerkat_runtime::RuntimeDriverError::Destroyed
+                    | meerkat_runtime::RuntimeDriverError::NotReady { .. },
+                ) => {}
+                Err(err) => {
+                    return Err(MobError::Internal(format!(
+                        "failed to detach peer ingress for session {session_id}: {err}"
+                    )));
+                }
+            }
             let owner = adapter.peer_ingress_owner(session_id).await;
             if !matches!(owner, meerkat_runtime::PeerIngressOwner::Unattached) {
                 return Err(MobError::Internal(format!(
@@ -17296,9 +17334,7 @@ impl MobActor {
                                 .terminalize_failed(
                                     flow_run_id.clone(),
                                     flow_id_for_task,
-                                    FlowFailureCause::StepError {
-                                        detail: other.to_string(),
-                                    },
+                                    FlowFailureCause::from_step_error(&other),
                                 )
                                 .await
                             {

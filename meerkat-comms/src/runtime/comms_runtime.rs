@@ -147,11 +147,7 @@ struct ResolvedPeer {
 #[cfg(not(target_arch = "wasm32"))]
 const PAIRING_VERSION: u32 = 1;
 #[cfg(not(target_arch = "wasm32"))]
-const PAIRING_HELLO_KIND: &str = "meerkat_pairing_hello";
-#[cfg(not(target_arch = "wasm32"))]
 const PAIRING_CHALLENGE_KIND: &str = "meerkat_pairing_challenge";
-#[cfg(not(target_arch = "wasm32"))]
-const PAIRING_PROOF_KIND: &str = "meerkat_pairing_proof";
 #[cfg(not(target_arch = "wasm32"))]
 const PAIRING_COMPLETE_KIND: &str = "meerkat_pairing_complete";
 #[cfg(not(target_arch = "wasm32"))]
@@ -203,7 +199,6 @@ struct PairingAddress(String);
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, serde::Deserialize)]
 struct PairingPeerIdentity {
-    #[allow(dead_code)]
     kind: PairingIdentityKind,
     public_key: PairingPublicKey,
 }
@@ -214,6 +209,24 @@ struct PairingPeer {
     name: String,
     address: PairingAddress,
     identity: PairingPeerIdentity,
+}
+
+/// Typed pairing-client wire messages, parsed once at ingress.
+///
+/// Deserialization fails closed on an unknown `kind`, a missing `version`, a
+/// missing `password_proof`, or a malformed `caller` — replacing the previous
+/// field-by-field raw-JSON `pairing_field` reads.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "kind")]
+enum PairingClientMessage {
+    #[serde(rename = "meerkat_pairing_hello")]
+    Hello { version: u32 },
+    #[serde(rename = "meerkat_pairing_proof")]
+    Proof {
+        caller: PairingPeer,
+        password_proof: String,
+    },
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -3283,10 +3296,10 @@ async fn handle_tcp_connection_or_pairing(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn read_pairing_line(
+async fn read_pairing_message(
     reader: &mut BufReader<TcpStream>,
     buf: &mut String,
-) -> Result<serde_json::Value, std::io::Error> {
+) -> Result<PairingClientMessage, std::io::Error> {
     buf.clear();
     let bytes = tokio::time::timeout(std::time::Duration::from_secs(10), reader.read_line(buf))
         .await
@@ -3302,22 +3315,9 @@ async fn read_pairing_line(
     serde_json::from_str(buf).map_err(|err| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("invalid pairing JSON: {err}"),
+            format!("invalid pairing message: {err}"),
         )
     })
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn pairing_field<'a>(value: &'a serde_json::Value, field: &str) -> Result<&'a str, std::io::Error> {
-    value
-        .get(field)
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("pairing request missing string field '{field}'"),
-            )
-        })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -3351,19 +3351,15 @@ async fn handle_pairing_connection(
 ) -> Result<(), std::io::Error> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
-    let hello = read_pairing_line(&mut reader, &mut line).await?;
-    if pairing_field(&hello, "kind")? != PAIRING_HELLO_KIND {
+    let PairingClientMessage::Hello { version } =
+        read_pairing_message(&mut reader, &mut line).await?
+    else {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "expected meerkat pairing hello",
         ));
-    }
-    if hello
-        .get("version")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or_default()
-        != u64::from(PAIRING_VERSION)
-    {
+    };
+    if version != PAIRING_VERSION {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "unsupported meerkat pairing version",
@@ -3389,37 +3385,28 @@ async fn handle_pairing_connection(
     )
     .await?;
 
-    let proof = read_pairing_line(&mut reader, &mut line).await?;
-    if pairing_field(&proof, "kind")? != PAIRING_PROOF_KIND {
+    // Typed pairing-proof deserialization fails closed: a malformed public
+    // key, an identity kind other than `ed25519_public_key`, or a missing
+    // `password_proof` is rejected here, before any trust row is derived. No
+    // raw-JSON field reads and no late, second public-key parse downstream.
+    let PairingClientMessage::Proof {
+        caller,
+        password_proof,
+    } = read_pairing_message(&mut reader, &mut line).await?
+    else {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "expected meerkat pairing proof",
         ));
-    }
-    let caller_value = proof.get("caller").cloned().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "pairing proof missing caller",
-        )
-    })?;
-    // Typed pairing-caller deserialization fails closed: a malformed public
-    // key or an identity kind other than `ed25519_public_key` is rejected here,
-    // before any trust row is derived. No String `identity.kind` equality check
-    // and no late, second public-key parse downstream.
-    let caller: PairingPeer = serde_json::from_value(caller_value).map_err(|err| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("invalid pairing caller: {err}"),
-        )
-    })?;
-    let supplied = pairing_field(&proof, "password_proof")?;
+    };
+    let PairingIdentityKind::Ed25519PublicKey = caller.identity.kind;
     let expected = comms_pairing_password_proof(
         pairing_password,
         &challenge,
         &caller.identity.public_key.raw,
         &caller.address.0,
     );
-    if !constant_time_str_eq(supplied, &expected) {
+    if !constant_time_str_eq(&password_proof, &expected) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "invalid pairing password proof",
@@ -3644,6 +3631,80 @@ mod tests {
         );
         assert_eq!(caller.address.0, "tcp://127.0.0.1:4200");
         assert_eq!(caller.identity.kind, PairingIdentityKind::Ed25519PublicKey);
+    }
+
+    /// Pairing ingress gate: the full client wire message parses once into the
+    /// typed [`PairingClientMessage`] envelope and fails closed — no raw-JSON
+    /// field-by-field reads remain on the trust-enrollment path.
+    #[test]
+    fn pairing_client_messages_parse_typed_and_fail_closed() {
+        // Unknown kind → rejected at typed deserialization.
+        assert!(
+            serde_json::from_value::<PairingClientMessage>(serde_json::json!({
+                "kind": "meerkat_pairing_evil",
+                "version": 1,
+            }))
+            .is_err(),
+            "an unknown pairing message kind must be rejected"
+        );
+
+        // Hello missing version → rejected (no default-zero laundering).
+        assert!(
+            serde_json::from_value::<PairingClientMessage>(serde_json::json!({
+                "kind": "meerkat_pairing_hello",
+            }))
+            .is_err(),
+            "a pairing hello without a version must be rejected"
+        );
+
+        // Proof missing password_proof → rejected before any trust derivation.
+        let pubkey = Keypair::generate().public_key();
+        assert!(
+            serde_json::from_value::<PairingClientMessage>(serde_json::json!({
+                "kind": "meerkat_pairing_proof",
+                "caller": {
+                    "name": "peer",
+                    "address": "tcp://127.0.0.1:4200",
+                    "identity": {
+                        "kind": "ed25519_public_key",
+                        "public_key": pubkey.to_pubkey_string(),
+                    }
+                }
+            }))
+            .is_err(),
+            "a pairing proof without a password proof must be rejected"
+        );
+
+        // Well-formed messages parse into the typed variants.
+        let hello: PairingClientMessage = serde_json::from_value(serde_json::json!({
+            "kind": "meerkat_pairing_hello",
+            "version": 1,
+        }))
+        .expect("well-formed hello parses");
+        assert!(matches!(hello, PairingClientMessage::Hello { version: 1 }));
+        let proof: PairingClientMessage = serde_json::from_value(serde_json::json!({
+            "kind": "meerkat_pairing_proof",
+            "password_proof": "proof",
+            "caller": {
+                "name": "peer",
+                "address": "tcp://127.0.0.1:4200",
+                "identity": {
+                    "kind": "ed25519_public_key",
+                    "public_key": pubkey.to_pubkey_string(),
+                }
+            }
+        }))
+        .expect("well-formed proof parses");
+        match proof {
+            PairingClientMessage::Proof {
+                caller,
+                password_proof,
+            } => {
+                assert_eq!(password_proof, "proof");
+                assert_eq!(caller.identity.public_key.key, pubkey);
+            }
+            PairingClientMessage::Hello { .. } => panic!("expected proof variant"),
+        }
     }
 
     /// Test helper: build a [`TrustedPeerDescriptor`] from raw pubkey +
@@ -4840,7 +4901,7 @@ mod tests {
             .get_mut()
             .write_all(
                 serde_json::json!({
-                    "kind": PAIRING_HELLO_KIND,
+                    "kind": "meerkat_pairing_hello",
                     "version": PAIRING_VERSION,
                 })
                 .to_string()
@@ -4866,7 +4927,7 @@ mod tests {
             .get_mut()
             .write_all(
                 serde_json::json!({
-                    "kind": PAIRING_PROOF_KIND,
+                    "kind": "meerkat_pairing_proof",
                     "version": PAIRING_VERSION,
                     "password_proof": proof,
                     "caller": {
@@ -4934,7 +4995,7 @@ mod tests {
             .get_mut()
             .write_all(
                 serde_json::json!({
-                    "kind": PAIRING_HELLO_KIND,
+                    "kind": "meerkat_pairing_hello",
                     "version": PAIRING_VERSION,
                 })
                 .to_string()

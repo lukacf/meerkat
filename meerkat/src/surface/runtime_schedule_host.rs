@@ -242,7 +242,8 @@ impl RuntimeBackedScheduleSessionHost {
                 })?
                 .keep_alive;
             configure_peer_ingress(&self.runtime_adapter, &self.service, session_id, keep_alive)
-                .await;
+                .await
+                .map_err(schedule_internal)?;
         }
         #[cfg(not(feature = "comms"))]
         let _ = session_id;
@@ -353,7 +354,8 @@ impl SurfaceScheduleSessionHost for RuntimeBackedScheduleSessionHost {
             &result.session_id,
             keep_alive,
         )
-        .await;
+        .await
+        .map_err(schedule_internal)?;
         #[cfg(not(feature = "comms"))]
         let _ = keep_alive;
         Ok(result.session_id)

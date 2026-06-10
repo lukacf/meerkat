@@ -255,7 +255,13 @@ impl McpRuntimeIngressContext {
 
     async fn clear_runtime_session_state(&self, session_id: &SessionId) {
         #[cfg(feature = "comms")]
-        self.runtime_adapter.abort_comms_drain(session_id).await;
+        if let Err(error) = self.runtime_adapter.abort_comms_drain(session_id).await {
+            tracing::warn!(
+                %session_id,
+                %error,
+                "failed to abort comms drain during runtime session state cleanup"
+            );
+        }
         self.runtime_adapter.unregister_session(session_id).await;
         if let Some(state) = self.runtime_sessions.write().await.remove(session_id) {
             state.clear_queued_turns().await;
@@ -775,7 +781,8 @@ impl McpRuntimeIngressContext {
                     &result.session_id,
                     keep_alive,
                 )
-                .await;
+                .await
+                .map_err(runtime_driver_error_to_session_error)?;
                 Ok(result)
             }
             Err(error) => {

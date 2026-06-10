@@ -357,20 +357,6 @@ impl MobMachineCommandVariant {
     }
 }
 
-#[allow(clippy::match_single_binding)]
-const fn session_ingress_detached_for_mob_destroy_catalog_input() -> MobMachineCatalogInput {
-    match () {
-        () => MobMachineCatalogInput::SessionIngressDetachedForMobDestroy,
-    }
-}
-
-#[allow(clippy::match_single_binding)]
-const fn session_ingress_detach_failed_for_mob_destroy_catalog_input() -> MobMachineCatalogInput {
-    match () {
-        () => MobMachineCatalogInput::SessionIngressDetachFailedForMobDestroy,
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MobMachineShellMechanicReason {
     TestInspection,
@@ -600,11 +586,11 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         reason: MobMachineRuntimeInternalReason::SessionIngressDetachRequest,
     },
     MobMachineRuntimeInternalClassificationRecord {
-        input: session_ingress_detached_for_mob_destroy_catalog_input(),
+        input: MobMachineCatalogInput::SessionIngressDetachedForMobDestroy,
         reason: MobMachineRuntimeInternalReason::SessionIngressDetachFeedback,
     },
     MobMachineRuntimeInternalClassificationRecord {
-        input: session_ingress_detach_failed_for_mob_destroy_catalog_input(),
+        input: MobMachineCatalogInput::SessionIngressDetachFailedForMobDestroy,
         reason: MobMachineRuntimeInternalReason::SessionIngressDetachFeedback,
     },
     MobMachineRuntimeInternalClassificationRecord {

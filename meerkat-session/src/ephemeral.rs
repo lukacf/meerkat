@@ -1514,11 +1514,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .collect();
         let (snapshot_state, staged_state) = state
             .stage_active_turn_appends_with_snapshot(staged_appends)
-            .map_err(|err| {
-                SessionError::Agent(AgentError::InternalError(
-                    err.into_control_error(id).to_string(),
-                ))
-            })?;
+            .map_err(|err| crate::control_error_into_session_error(err.into_control_error(id)))?;
         let staged_token = Self::active_turn_boundary_staging_token(turn_state_handle.as_ref())
             .ok_or_else(|| SessionError::NotRunning { id: id.clone() })?;
         if staged_token != initial_token {
@@ -2456,7 +2452,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             hydrate_deferred_turn_state(
                 blob_store.as_ref(),
                 &mut deferred_turn_state,
-                MissingBlobBehavior::HistoricalPlaceholder,
+                // Session creation hydrates blobs that were just externalized;
+                // a missing blob here is a hard fault, not evicted history.
+                MissingBlobBehavior::Error,
             )
             .await
             .map_err(|err| {
@@ -6296,8 +6294,8 @@ mod inline_video_admission_tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "noop"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         fn model(&self) -> &str {

@@ -514,7 +514,15 @@ impl PersistentRuntimeDriver {
     ) -> Result<crate::traits::RetireReport, RuntimeDriverError> {
         let checkpoint = self.inner.rollback_snapshot();
         let report = self.inner.finalize_retire();
-        let target_state = self.runtime_state_for_persistence()?;
+        // Restore the checkpoint on classification failure: an early `?` here
+        // would leave the finalized retire state live without rollback.
+        let target_state = match self.runtime_state_for_persistence() {
+            Ok(target_state) => target_state,
+            Err(err) => {
+                self.inner.restore_rollback_snapshot(checkpoint);
+                return Err(err);
+            }
+        };
         self.commit_lifecycle_with_rollback(checkpoint, target_state, "retire")
             .await?;
         self.inner.sync_control_projection_from_dsl_authority();
@@ -532,7 +540,15 @@ impl PersistentRuntimeDriver {
                 return Err(err);
             }
         };
-        let target_state = self.runtime_state_for_persistence()?;
+        // Restore the checkpoint on classification failure: an early `?` here
+        // would leave the reset-cleaned state live without rollback.
+        let target_state = match self.runtime_state_for_persistence() {
+            Ok(target_state) => target_state,
+            Err(err) => {
+                self.inner.restore_rollback_snapshot(checkpoint);
+                return Err(err);
+            }
+        };
         self.commit_lifecycle_with_rollback(checkpoint, target_state, "reset")
             .await?;
         self.inner.sync_control_projection_from_dsl_authority();
@@ -562,12 +578,19 @@ impl PersistentRuntimeDriver {
         &mut self,
         checkpoint: EphemeralDriverRollbackSnapshot,
     ) -> Result<(), RuntimeDriverError> {
-        self.commit_lifecycle_with_rollback(
-            checkpoint,
-            self.runtime_state_for_persistence()?,
-            "destroy",
-        )
-        .await
+        // Resolve the durable target BEFORE handing the checkpoint to the
+        // commit helper: an early `?` here would otherwise leave the staged
+        // destroy state live without restoring the checkpoint (driver-side
+        // shadow truth with no rollback).
+        let target_state = match self.runtime_state_for_persistence() {
+            Ok(target_state) => target_state,
+            Err(err) => {
+                self.inner.restore_rollback_snapshot(checkpoint);
+                return Err(err);
+            }
+        };
+        self.commit_lifecycle_with_rollback(checkpoint, target_state, "destroy")
+            .await
     }
 
     pub(crate) fn rollback_prepared_destroy_lifecycle(
@@ -589,12 +612,18 @@ impl PersistentRuntimeDriver {
             self.inner.restore_rollback_snapshot(checkpoint);
             return Err(err);
         }
-        self.commit_lifecycle_with_rollback(
-            checkpoint,
-            self.runtime_state_for_persistence()?,
-            "stop",
-        )
-        .await?;
+        // Resolve the durable target BEFORE handing the checkpoint to the
+        // commit helper, so a classification failure restores the staged
+        // executor-exit state instead of leaving it live without rollback.
+        let target_state = match self.runtime_state_for_persistence() {
+            Ok(target_state) => target_state,
+            Err(err) => {
+                self.inner.restore_rollback_snapshot(checkpoint);
+                return Err(err);
+            }
+        };
+        self.commit_lifecycle_with_rollback(checkpoint, target_state, "stop")
+            .await?;
         self.inner.sync_control_projection_from_dsl_authority();
         Ok(())
     }

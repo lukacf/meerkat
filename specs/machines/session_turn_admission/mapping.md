@@ -112,32 +112,32 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `session_turn_admission_authority`
   - scenarios: `turn_admission_runtime_keep_alive`
 - `ResolveRuntimeKeepAliveDisable`
-  - anchors: `session_turn_admission_authority`
-  - scenarios: `turn_admission_runtime_keep_alive`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeKeepAlivePreserve`
   - anchors: `session_turn_admission_authority`
   - scenarios: `turn_admission_runtime_keep_alive`
 - `ResolveLiveInterruptRequiredSteer`
-  - anchors: `session_turn_admission_authority`
-  - scenarios: `turn_admission_interrupt_and_shutdown`, `turn_admission_runtime_keep_alive`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveInterruptRequiredQueue`
-  - anchors: `session_turn_admission_authority`
-  - scenarios: `turn_admission_interrupt_and_shutdown`, `turn_admission_runtime_keep_alive`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLastStartTurnPublicTerminalNoPendingIdle`
   - anchors: `session_turn_admission_authority`
-  - scenarios: `turn_admission_start_turn_disposition`
+  - scenarios: (unclaimed)
 - `ResolveLastStartTurnPublicTerminalNoPendingAdmitted`
   - anchors: `session_turn_admission_authority`
-  - scenarios: `turn_admission_start_turn_disposition`
+  - scenarios: (unclaimed)
 - `ResolveLastStartTurnPublicTerminalNoPendingRunning`
   - anchors: `session_turn_admission_authority`
-  - scenarios: `turn_admission_start_turn_disposition`
+  - scenarios: (unclaimed)
 - `ResolveLastStartTurnPublicTerminalNoPendingCompleting`
   - anchors: `session_turn_admission_authority`
-  - scenarios: `turn_admission_start_turn_disposition`
+  - scenarios: (unclaimed)
 - `ResolveLastStartTurnPublicTerminalNoPendingShuttingDown`
   - anchors: `session_turn_admission_authority`
-  - scenarios: `turn_admission_start_turn_disposition`
+  - scenarios: (unclaimed)
 
 ### Effects
 - `TurnAdmissionProjected`
@@ -162,13 +162,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `session_turn_admission_authority`
   - scenarios: `turn_admission_runtime_keep_alive`
 - `LiveInterruptRequired`
-  - anchors: `session_turn_admission_authority`
-  - scenarios: `turn_admission_interrupt_and_shutdown`, `turn_admission_runtime_keep_alive`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `shutdown_phase_is_not_active`
   - anchors: `session_turn_admission_authority`
-  - scenarios: `turn_admission_interrupt_and_shutdown`
+  - scenarios: (unclaimed)
 
 
 <!-- GENERATED_COVERAGE_END -->

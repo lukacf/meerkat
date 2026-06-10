@@ -111,8 +111,8 @@ impl AgentLlmClient for ScenarioClient {
         }
     }
 
-    fn provider(&self) -> &'static str {
-        "mock"
+    fn provider(&self) -> crate::provider::Provider {
+        crate::provider::Provider::Other
     }
 
     fn model(&self) -> &'static str {
@@ -290,19 +290,12 @@ impl HookEngine for TestHookEngine {
                 priority: 1,
                 registration_index: 0,
                 decision: decision.clone(),
-                patches: Vec::new(),
-                published_patches: vec![],
                 failure_reason: None,
                 duration_ms: Some(0),
             }]
         };
 
-        Ok(HookExecutionReport {
-            outcomes,
-            decision,
-            patches: Vec::new(),
-            published_patches: vec![],
-        })
+        Ok(HookExecutionReport { outcomes, decision })
     }
 }
 
@@ -693,6 +686,59 @@ async fn run_started_deny_emits_no_run_started_event() {
             .iter()
             .any(|message| matches!(message, Message::User(_))),
         "run-start denial must not commit the user message to the transcript"
+    );
+}
+
+/// Row #130 (pending-continuation path): a run-start hook denial during
+/// `run_pending` must NOT advertise a `RunStarted` event either. The hook owns
+/// the start veto on every run entry point, so it runs before `RunStarted` is
+/// published — mirroring the `run_inner` ordering contract.
+#[tokio::test]
+async fn run_pending_started_deny_emits_no_run_started_event() {
+    let seen_args = Arc::new(Mutex::new(Vec::new()));
+    let seen_tokens = Arc::new(Mutex::new(Vec::new()));
+    let hooks = TestHookEngine {
+        run_started_deny: true,
+        ..test_hooks()
+    };
+    let mut agent = build_agent(ClientMode::TextOnly, hooks, seen_args, seen_tokens).await;
+    // Establish an authority-admitted pending boundary: a trailing user
+    // message with no assistant reply.
+    agent
+        .session_mut()
+        .push(Message::User(meerkat_core::types::UserMessage::text(
+            "pending prompt".to_string(),
+        )));
+
+    let (tx, mut rx) = mpsc::channel::<AgentEvent>(32);
+    let err = agent
+        .run_pending_with_events(tx)
+        .await
+        .expect_err("run-start denial should terminalize the pending run");
+    assert!(matches!(
+        err,
+        AgentError::HookDenied {
+            point: HookPoint::RunStarted,
+            ..
+        }
+    ));
+
+    let mut saw_run_started = false;
+    let mut saw_run_failed = false;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            AgentEvent::RunStarted { .. } => saw_run_started = true,
+            AgentEvent::RunFailed { .. } => saw_run_failed = true,
+            _ => {}
+        }
+    }
+    assert!(
+        !saw_run_started,
+        "pending-run start denial must not advertise a RunStarted (false-start window)"
+    );
+    assert!(
+        saw_run_failed,
+        "pending-run start denial should emit RunFailed"
     );
 }
 

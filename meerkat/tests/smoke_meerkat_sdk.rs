@@ -162,8 +162,8 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
         Ok(LlmStreamResult::new(blocks, stop_reason, usage))
     }
 
-    fn provider(&self) -> &'static str {
-        self.client.provider().as_str()
+    fn provider(&self) -> meerkat_core::Provider {
+        self.client.provider()
     }
 
     fn model(&self) -> &str {
@@ -765,12 +765,7 @@ mod scenario_06_hooks {
                 "observer",
                 Arc::new(move |_invocation| {
                     observer_called_clone.store(true, Ordering::SeqCst);
-                    Box::pin(async {
-                        Ok(RuntimeHookResponse {
-                            decision: None,
-                            patches: Vec::new(),
-                        })
-                    })
+                    Box::pin(async { Ok(RuntimeHookResponse { decision: None }) })
                 }),
             )
             .await
@@ -785,7 +780,6 @@ mod scenario_06_hooks {
                     Box::pin(async {
                         Ok(RuntimeHookResponse {
                             decision: Some(HookDecision::Allow),
-                            patches: Vec::new(),
                         })
                     })
                 }),
@@ -803,12 +797,7 @@ mod scenario_06_hooks {
                         invocation.llm_response.is_some(),
                         "post-LLM observer should receive an LLM response projection"
                     );
-                    Box::pin(async move {
-                        Ok(RuntimeHookResponse {
-                            decision: None,
-                            patches: Vec::new(),
-                        })
-                    })
+                    Box::pin(async move { Ok(RuntimeHookResponse { decision: None }) })
                 }),
             )
             .await
@@ -1849,7 +1838,8 @@ mod scenario_22_runtime_host_comms {
         // Spawn comms drain for A — THE path under test
         runtime_adapter
             .update_peer_ingress_context(&sid_a, true, Some(comms_a))
-            .await;
+            .await
+            .expect("comms drain spawn must succeed");
         eprintln!("[scenario 22] Comms drain spawned for A");
 
         // --- Inject message into A's inbox programmatically ---

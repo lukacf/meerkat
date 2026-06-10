@@ -3213,10 +3213,14 @@ impl EphemeralRuntimeDriver {
                 },
                 "MarkAppliedPendingConsumption",
             )?;
+            // The boundary sequence is machine-derived: RecordBoundarySeq
+            // reads the canonical per-run counter inside the generated
+            // machine. The receipt's `sequence` is a read-only projection of
+            // that same counter, never a producer.
             self.dsl_apply(
                 mm_dsl::MeerkatMachineInput::RecordBoundarySeq {
                     input_id: key,
-                    seq: receipt.sequence,
+                    run_id: mm_dsl::RunId::from_domain(run_id),
                 },
                 "RecordBoundarySeq",
             )?;

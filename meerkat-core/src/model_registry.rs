@@ -128,21 +128,19 @@ impl ModelRegistry {
         let mut profiles = BTreeMap::new();
         let mut defaults = BTreeMap::new();
 
-        for provider_name in crate::model_profile::catalog::provider_names() {
-            let provider = Provider::parse_strict(provider_name).ok_or_else(|| {
-                ConfigError::InternalError(format!("unknown built-in provider '{provider_name}'"))
-            })?;
-            let default_model = crate::model_profile::catalog::default_model(provider_name)
-                .ok_or_else(|| {
+        for &provider in crate::model_profile::catalog::catalog_providers() {
+            let default_model =
+                crate::model_profile::catalog::default_model(provider).ok_or_else(|| {
                     ConfigError::InternalError(format!(
-                        "missing built-in default for '{provider_name}'"
+                        "missing built-in default for '{}'",
+                        provider.as_str()
                     ))
                 })?;
             defaults.insert(provider, default_model.to_string());
 
             for entry in crate::model_profile::catalog::catalog()
                 .iter()
-                .filter(|entry| entry.provider == *provider_name)
+                .filter(|entry| entry.provider == provider.as_str())
             {
                 let profile =
                     crate::model_profile::profile_for(provider, entry.id).ok_or_else(|| {

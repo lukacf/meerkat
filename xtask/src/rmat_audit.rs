@@ -360,20 +360,6 @@ fn collect_dead_authority_wiring_findings(
         findings.extend(visitor.findings);
     }
 
-    for symbol in &policy.required_live_symbols {
-        let ref_count = source.matches(symbol.symbol).count();
-        if ref_count == 0 {
-            let symbol_name = symbol.symbol;
-            findings.push(error_finding(
-                "NoDeadAuthorityWiring",
-                relative,
-                symbol.symbol,
-                format!("required live symbol `{symbol_name}` has zero production references in this file set"),
-                false,
-            ));
-        }
-    }
-
     findings
 }
 
@@ -1351,79 +1337,71 @@ fn collect_protocol_feedback_constraint_findings(
         Err(_) => return findings,
     };
 
-    for rule in &policy.protocol_feedback_constraints {
-        let variant_pattern = &rule.feedback_input_variant;
-        for file in &files {
-            let relative = file
-                .strip_prefix(root)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
+    for file in &files {
+        let relative = file
+            .strip_prefix(root)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
 
-            // Generated files are allowed to reference the feedback variant.
-            if relative.contains("/src/generated/") {
-                continue;
-            }
-            // Authority files are allowed — they are the machine truth.
-            if relative.contains("authority") {
-                continue;
-            }
-            // Schema/catalog files are allowed — they declare the variant.
-            if relative.contains("meerkat-machine-schema/") {
-                continue;
-            }
-            // xtask files are allowed — they generate/audit.
-            if relative.starts_with("xtask/") {
-                continue;
-            }
-            // These files are the typed authority/owner adapter implementations
-            // for their respective feedback surfaces. They may destructure or
-            // construct the local authority input while generated helpers remain
-            // the public handoff entrypoint for non-owner shell code.
-            if is_feedback_authority_implementation_path(&relative) {
-                continue;
-            }
-            // Unit tests exercise authority inputs directly; the production
-            // bypass rule is scoped to non-test files.
-            if is_test_source_path(&relative) {
-                continue;
-            }
+        // Generated files are allowed to reference the feedback variant.
+        if relative.contains("/src/generated/") {
+            continue;
+        }
+        // Authority files are allowed — they are the machine truth.
+        if relative.contains("authority") {
+            continue;
+        }
+        // Schema/catalog files are allowed — they declare the variant.
+        if relative.contains("meerkat-machine-schema/") {
+            continue;
+        }
+        // xtask files are allowed — they generate/audit.
+        if relative.starts_with("xtask/") {
+            continue;
+        }
+        // These files are the typed authority/owner adapter implementations
+        // for their respective feedback surfaces. They may destructure or
+        // construct the local authority input while generated helpers remain
+        // the public handoff entrypoint for non-owner shell code.
+        if is_feedback_authority_implementation_path(&relative) {
+            continue;
+        }
+        // Unit tests exercise authority inputs directly; the production
+        // bypass rule is scoped to non-test files.
+        if is_test_source_path(&relative) {
+            continue;
+        }
 
-            let source = match fs::read_to_string(file) {
-                Ok(s) => s,
-                Err(_) => continue,
+        let source = match fs::read_to_string(file) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        // Every repo .rs file is parsed (and fails the run) earlier in
+        // `collect_findings`; an unparseable file here cannot silently pass.
+        let Ok(mut parsed) = syn::parse_file(&source) else {
+            continue;
+        };
+        // Inline `#[cfg(test)]` items are test code: the production bypass
+        // rule is scoped to non-test code, mirroring `is_test_source_path`.
+        strip_cfg_test_items(&mut parsed.items);
+
+        for rule in &policy.protocol_feedback_constraints {
+            let variant_pattern = &rule.feedback_input_variant;
+            // AST detection of feedback-variant *construction* (struct
+            // expression, call, or value path ending in `::<Variant>`).
+            // Replaces the prior line/text scan: match arms (patterns) are
+            // structurally not expressions, comments and string literals are
+            // not AST nodes, and word boundaries are ident equality — so a
+            // rename that keeps the relationship still fails and a substring
+            // in a longer identifier no longer false-positives. Companion
+            // `*InputVariant` metadata enums are excluded by the qualifying
+            // path segment, as before.
+            let mut visitor = FeedbackVariantConstructionVisitor {
+                variant: variant_pattern,
+                found: false,
             };
-
-            // Look for construction of the feedback variant (e.g., `Input::VariantName`)
-            // in non-generated, non-authority code. Check line-by-line to skip
-            // comments, and require the variant to appear at a word boundary to
-            // avoid false positives from substring matches in longer identifiers.
-            let construction_pattern = format!("::{variant_pattern}");
-            let has_non_comment_match = source.lines().any(|line| {
-                let trimmed = line.trim();
-                if trimmed.starts_with("//")
-                    || trimmed.starts_with("/*")
-                    || trimmed.starts_with('*')
-                {
-                    return false;
-                }
-                if let Some(pos) = trimmed.find(&construction_pattern) {
-                    let prefix = trimmed[..pos].trim_end();
-                    // Companion input-variant enums are metadata facts, not feedback submissions.
-                    if prefix.ends_with("InputVariant") {
-                        return false;
-                    }
-                    if trimmed.contains("=>") {
-                        return false;
-                    }
-                    // Verify the variant name ends at a word boundary (not a substring
-                    // of a longer identifier like `::VariantNameExtra`).
-                    let end = pos + construction_pattern.len();
-                    end >= trimmed.len() || !trimmed.as_bytes()[end].is_ascii_alphanumeric()
-                } else {
-                    false
-                }
-            });
-            if has_non_comment_match {
+            visitor.visit_file(&parsed);
+            if visitor.found {
                 findings.push(error_finding(
                     "ProtocolFeedbackThroughGeneratedHelpers",
                     &relative,
@@ -1439,6 +1417,106 @@ fn collect_protocol_feedback_constraint_findings(
         }
     }
     findings
+}
+
+/// Structurally drop every `#[cfg(test)]` item (top-level, nested in `mod`,
+/// or impl member) so production-only audits never see test fixtures.
+fn strip_cfg_test_items(items: &mut Vec<syn::Item>) {
+    fn attr_is_cfg_test(attr: &syn::Attribute) -> bool {
+        if !attr.path().is_ident("cfg") {
+            return false;
+        }
+        let mut is_test = false;
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("test") {
+                is_test = true;
+            }
+            Ok(())
+        });
+        is_test
+    }
+    fn item_is_cfg_test(item: &syn::Item) -> bool {
+        let attrs: &[syn::Attribute] = match item {
+            syn::Item::Const(item) => &item.attrs,
+            syn::Item::Enum(item) => &item.attrs,
+            syn::Item::Fn(item) => &item.attrs,
+            syn::Item::Impl(item) => &item.attrs,
+            syn::Item::Mod(item) => &item.attrs,
+            syn::Item::Static(item) => &item.attrs,
+            syn::Item::Struct(item) => &item.attrs,
+            syn::Item::Trait(item) => &item.attrs,
+            syn::Item::Type(item) => &item.attrs,
+            syn::Item::Use(item) => &item.attrs,
+            syn::Item::Macro(item) => &item.attrs,
+            _ => return false,
+        };
+        attrs.iter().any(attr_is_cfg_test)
+    }
+    items.retain(|item| !item_is_cfg_test(item));
+    for item in items.iter_mut() {
+        match item {
+            syn::Item::Mod(module) => {
+                if let Some((_, inner)) = module.content.as_mut() {
+                    strip_cfg_test_items(inner);
+                }
+            }
+            syn::Item::Impl(item_impl) => {
+                item_impl.items.retain(|impl_item| {
+                    let attrs: &[syn::Attribute] = match impl_item {
+                        syn::ImplItem::Const(item) => &item.attrs,
+                        syn::ImplItem::Fn(item) => &item.attrs,
+                        syn::ImplItem::Type(item) => &item.attrs,
+                        _ => return true,
+                    };
+                    !attrs.iter().any(attr_is_cfg_test)
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// AST visitor for value-position construction of a protocol feedback input
+/// variant: `…::<Variant> { .. }`, `…::<Variant>(..)`, or a bare
+/// `…::<Variant>` value path. Pattern positions (match arms, destructuring)
+/// are not expressions and are therefore not flagged.
+struct FeedbackVariantConstructionVisitor<'n> {
+    variant: &'n str,
+    found: bool,
+}
+
+impl FeedbackVariantConstructionVisitor<'_> {
+    fn path_constructs_variant(&self, path: &syn::Path) -> bool {
+        let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let Some(last) = segments.last() else {
+            return false;
+        };
+        if last != self.variant || segments.len() < 2 {
+            return false;
+        }
+        // Companion mirror enums are metadata facts, not feedback
+        // submissions: `*InputVariant` (hand-declared companions) and
+        // `*CatalogInput` (generated parameterless variant-name mirrors used
+        // for classification records).
+        let qualifier = &segments[segments.len() - 2];
+        !qualifier.ends_with("InputVariant") && !qualifier.ends_with("CatalogInput")
+    }
+}
+
+impl<'a> Visit<'a> for FeedbackVariantConstructionVisitor<'_> {
+    fn visit_expr_struct(&mut self, node: &'a syn::ExprStruct) {
+        if self.path_constructs_variant(&node.path) {
+            self.found = true;
+        }
+        syn::visit::visit_expr_struct(self, node);
+    }
+
+    fn visit_expr_path(&mut self, node: &'a syn::ExprPath) {
+        if self.path_constructs_variant(&node.path) {
+            self.found = true;
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
 }
 
 fn is_feedback_authority_implementation_path(relative: &str) -> bool {
@@ -1818,6 +1896,81 @@ mod tests {
     #![allow(clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    fn feedback_variant_constructed(source: &str, variant: &str) -> bool {
+        let mut parsed = syn::parse_file(source).expect("test source parses");
+        strip_cfg_test_items(&mut parsed.items);
+        let mut visitor = FeedbackVariantConstructionVisitor {
+            variant,
+            found: false,
+        };
+        visitor.visit_file(&parsed);
+        visitor.found
+    }
+
+    #[test]
+    fn feedback_variant_detection_flags_value_position_construction() {
+        // Struct construction, call construction, and bare value path all flag.
+        assert!(feedback_variant_constructed(
+            "fn f() { submit(Input::OpsBarrierSatisfied { op_id }); }",
+            "OpsBarrierSatisfied",
+        ));
+        assert!(feedback_variant_constructed(
+            "fn f() { submit(Input::OpsBarrierSatisfied(op_id)); }",
+            "OpsBarrierSatisfied",
+        ));
+        assert!(feedback_variant_constructed(
+            "fn f() -> Input { Input::OpsBarrierSatisfied }",
+            "OpsBarrierSatisfied",
+        ));
+    }
+
+    #[test]
+    fn feedback_variant_detection_skips_patterns_comments_and_companions() {
+        // Match-arm patterns are not constructions.
+        assert!(!feedback_variant_constructed(
+            "fn f(i: Input) { match i { Input::OpsBarrierSatisfied { .. } => {} _ => {} } }",
+            "OpsBarrierSatisfied",
+        ));
+        // Comments and string literals are not AST constructions.
+        assert!(!feedback_variant_constructed(
+            "fn f() { // Input::OpsBarrierSatisfied\n let s = \"Input::OpsBarrierSatisfied\"; }",
+            "OpsBarrierSatisfied",
+        ));
+        // Companion metadata mirrors are excluded by qualifying segment.
+        assert!(!feedback_variant_constructed(
+            "fn f() { record(MeerkatInputVariant::OpsBarrierSatisfied); }",
+            "OpsBarrierSatisfied",
+        ));
+        assert!(!feedback_variant_constructed(
+            "fn f() { record(MobMachineCatalogInput::SessionIngressDetachedForMobDestroy); }",
+            "SessionIngressDetachedForMobDestroy",
+        ));
+        // A longer identifier that merely contains the variant is not a match.
+        assert!(!feedback_variant_constructed(
+            "fn f() { submit(Input::OpsBarrierSatisfiedExtra); }",
+            "OpsBarrierSatisfied",
+        ));
+    }
+
+    #[test]
+    fn feedback_variant_detection_evasion_via_match_wrapper_still_flags() {
+        // The retired line scanner skipped any line containing `=>`, so a
+        // `match () { () => Input::Variant }` wrapper dodged it. The AST
+        // detector sees the arm BODY as an expression and still flags it.
+        assert!(feedback_variant_constructed(
+            "const fn f() -> Input { match () { () => Input::OpsBarrierSatisfied } }",
+            "OpsBarrierSatisfied",
+        ));
+    }
+
+    #[test]
+    fn feedback_variant_detection_skips_cfg_test_items() {
+        assert!(!feedback_variant_constructed(
+            "#[cfg(test)] mod tests { fn f() { submit(Input::OpsBarrierSatisfied { op_id }); } }",
+            "OpsBarrierSatisfied",
+        ));
+    }
 
     #[test]
     fn baseline_roundtrip() -> Result<()> {

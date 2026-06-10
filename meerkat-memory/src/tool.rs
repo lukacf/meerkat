@@ -44,7 +44,7 @@ struct MemorySearchInput {
 /// `required` keys are always present (tool schema contract).
 fn input_schema() -> Value {
     let schema = schemars::schema_for!(MemorySearchInput);
-    let mut value = serde_json::to_value(&schema).unwrap_or(Value::Null);
+    let mut value = schema.to_value();
     if let Value::Object(ref mut obj) = value
         && obj.get("type").and_then(Value::as_str) == Some("object")
     {
@@ -162,9 +162,14 @@ impl AgentToolDispatcher for MemorySearchDispatcher {
         // `{"results": items}` but that wrapper isn't consumed by any
         // production caller, and MCP-style tool outputs conventionally emit
         // the list directly when the result is a list.
-        let block = ContentBlock::structured(&items).map_err(|e| ToolError::ExecutionFailed {
-            message: format!("failed to encode memory_search results: {e}"),
-        })?;
+        // Result-encoding failure keeps the same structured failure-class shape
+        // as store errors: a stable `code` travels with the message instead of
+        // collapsing the cause into an opaque string-only failure.
+        let block =
+            ContentBlock::structured(&items).map_err(|e| ToolError::ExecutionFailedWithData {
+                message: format!("failed to encode memory_search results: {e}"),
+                data: json!({ "code": "memory_result_encoding" }),
+            })?;
         Ok(meerkat_core::ops::ToolDispatchOutcome::from(
             ToolResult::with_blocks(call.id.to_string(), vec![block], false),
         ))

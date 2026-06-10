@@ -887,7 +887,7 @@ async fn async_stop_does_not_publish_stopped_while_lifecycle_commit_is_in_flight
 }
 
 #[tokio::test]
-async fn cold_reregister_preserves_canonical_destroyed_runtime_state() {
+async fn cold_reregister_rejects_destroyed_runtime_and_preserves_durable_state() {
     let store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
     let sid = SessionId::new();
 
@@ -909,21 +909,23 @@ async fn cold_reregister_preserves_canonical_destroyed_runtime_state() {
         Arc::clone(&store) as Arc<dyn RuntimeStore>,
         memory_blob_store(),
     ));
-    restarted
+    // Destroyed is terminal machine truth: cold re-registration is rejected
+    // by the machine verdict instead of laundering the terminal state into a
+    // successful registration.
+    let err = restarted
         .register_session(sid.clone())
         .await
-        .expect("register session");
-    assert_eq!(
-        restarted.runtime_state(&sid).await.unwrap(),
-        RuntimeState::Destroyed,
-        "cold re-registration must preserve canonical durable destroyed runtime truth",
+        .expect_err("cold re-registration of a destroyed runtime must be rejected");
+    assert!(
+        err.to_string().contains("Runtime destroyed"),
+        "rejection must surface the destroyed terminal verdict, got {err:?}",
     );
     assert_eq!(
         load_runtime_state(store.as_ref(), &runtime_id)
             .await
             .unwrap(),
         Some(RuntimeState::Destroyed),
-        "cold re-registration must not rewrite canonical durable destroyed runtime truth",
+        "rejected cold re-registration must not rewrite canonical durable destroyed runtime truth",
     );
 }
 
@@ -1730,7 +1732,8 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
     assert!(
         adapter
             .update_peer_ingress_context(&sid, true, Some(requester_for_drain))
-            .await,
+            .await
+            .expect("update peer ingress context"),
         "host-mode requester should spawn comms drain"
     );
 
@@ -3549,14 +3552,18 @@ async fn unregister_session_aborts_spawned_drain_and_clears_suppression() {
     let comms: Arc<dyn CommsRuntime> = Arc::new(IdleDrainRuntime::new());
     let spawned = adapter
         .update_peer_ingress_context(&sid, true, Some(comms))
-        .await;
+        .await
+        .expect("update peer ingress context");
     assert!(spawned, "registered host-mode session should spawn a drain");
 
     // Give the drain task time to start before unregistering.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     adapter.unregister_session(&sid).await;
-    adapter.wait_comms_drain(&sid).await;
+    // The session was just unregistered; the wait verdict may be a typed
+    // NotFound rejection from the machine rather than success — both prove
+    // the drain is no longer running, which is what this test pins below.
+    let _ = adapter.wait_comms_drain(&sid).await;
     // Ephemeral unregister fully removes the session: there is no durable store
     // to retain a Destroyed marker (unlike the persistent cold-reregister and
     // recovery-contract paths, which DO preserve canonical Destroyed truth via
@@ -3625,7 +3632,8 @@ async fn idle_non_host_sessions_do_not_spawn_background_comms_drains() {
     let comms: Arc<dyn CommsRuntime> = Arc::new(IdleDrainRuntime::new());
     let spawned = adapter
         .update_peer_ingress_context(&sid, false, Some(comms))
-        .await;
+        .await
+        .expect("update peer ingress context");
 
     assert!(
         !spawned,
@@ -3733,7 +3741,8 @@ async fn attached_sessions_do_not_spawn_comms_drains_without_keep_alive() {
     let comms: Arc<dyn CommsRuntime> = Arc::new(IdleDrainRuntime::new());
     let spawned = adapter
         .update_peer_ingress_context(&sid, false, Some(comms))
-        .await;
+        .await
+        .expect("update peer ingress context");
 
     assert!(
         !spawned,

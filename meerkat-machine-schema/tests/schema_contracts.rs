@@ -536,12 +536,9 @@ fn meerkat_deferred_tool_witness_named_type_is_structural_authority() {
         binding.rust,
         RustTypeAtom::TypePathFieldPresenceSet {
             path: "crate::catalog::dsl::meerkat_machine::ToolVisibilityWitness".to_string(),
-            fields: vec![
-                FieldId::parse("stable_owner_key").expect("field"),
-                FieldId::parse("last_seen_provenance").expect("field"),
-            ],
+            fields: vec![FieldId::parse("last_seen_provenance").expect("field")],
         },
-        "deferred-tool authority must be bound to the typed witness projection and field-presence domain, not String"
+        "deferred-tool authority must be bound to the typed provenance witness projection, not String and not a shadow owner key"
     );
 
     let provenance_type = NamedTypeId::parse("ToolProvenance").expect("named type");

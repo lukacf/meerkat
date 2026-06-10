@@ -947,9 +947,52 @@ function runCheck(argv) {
     }
     return 1;
   }
+
+  // FRESHNESS: the checked-in HTML must byte-equal a fresh render. The
+  // generator output is deterministic (no wall-clock stamp), so a diff here
+  // means the posters predate the current TLA/contract/catalog artifacts.
+  const stale = [];
+  const posters = MACHINE_SPECS.map((spec) => buildPoster(spec));
+  for (const poster of posters) {
+    const outPath = path.join(outputDir, `${poster.id}.html`);
+    const fresh = cleanGeneratedText(renderPosterHtml(poster));
+    let onDisk = null;
+    try {
+      onDisk = fs.readFileSync(outPath, "utf8");
+    } catch {
+      // missing file: report as stale below.
+    }
+    if (onDisk !== fresh) {
+      stale.push(path.relative(repoRoot, outPath));
+    }
+  }
+  const indexPath = path.join(outputDir, "index.html");
+  const freshIndex = cleanGeneratedText(renderIndexHtml(posters));
+  let onDiskIndex = null;
+  try {
+    onDiskIndex = fs.readFileSync(indexPath, "utf8");
+  } catch {
+    // missing file: report as stale below.
+  }
+  if (onDiskIndex !== freshIndex) {
+    stale.push(path.relative(repoRoot, indexPath));
+  }
+  if (stale.length > 0) {
+    console.error(
+      "machine-poster --check: FRESHNESS drift detected; the checked-in posters do not " +
+        "match a fresh render of the current artifacts. Regenerate with " +
+        "`node scripts/machine-posters/generate-machine-posters.mjs`:",
+    );
+    for (const file of stale) {
+      console.error(`  stale: ${file}`);
+    }
+    return 1;
+  }
+
   console.log(
     `machine-poster --check: poster content (phase boxes, group anchors, triggers) ` +
-      `matches the canonical machine alphabet for all ${MACHINE_SPECS.length} postered machines.`,
+      `matches the canonical machine alphabet for all ${MACHINE_SPECS.length} postered machines, ` +
+      `and the checked-in HTML byte-matches a fresh render.`,
   );
   return coverageStatus;
 }
@@ -1006,7 +1049,6 @@ function buildPoster(spec) {
 
   return {
     ...spec,
-    generatedAt: new Date().toISOString(),
     contract,
     tla,
     triggerRecords,
@@ -1497,7 +1539,6 @@ function renderSvgHeader(poster, canvasWidth) {
     ["TLA", path.relative(repoRoot, poster.tlaPath)],
     ["contract", path.relative(repoRoot, poster.contractPath)],
     ["catalog", path.relative(repoRoot, poster.catalogPath)],
-    ["generated", poster.generatedAt.replace("T", " ").replace("Z", " UTC")],
   ];
   return `
     <text x="${titleX}" y="44" fill="${THEME.faint}" font-size="11" letter-spacing="3" font-family="Avenir Next, Helvetica Neue, Arial, sans-serif">CANONICAL MACHINE PLATE / GENERATED FROM TLA + CONTRACT ARTIFACTS</text>

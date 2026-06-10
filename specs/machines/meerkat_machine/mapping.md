@@ -30,20 +30,35 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
 - `RegisterSessionIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterSessionAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterSessionRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterSessionRetired`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
 - `RegisterSessionStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - scenarios: (unclaimed)
+- `RegisterSessionIdempotentIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RegisterSessionIdempotentAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RegisterSessionIdempotentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RegisterSessionIdempotentRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RegisterSessionIdempotentStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StageDeferredSession`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
@@ -52,1192 +67,1192 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `session_registration_and_binding`
 - `BeginDeferredSessionPromotion`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - scenarios: (unclaimed)
 - `UpdateDeferredSessionLlmIdentity`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeDeferredSessionSystemContextAppendStaged`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeDeferredSessionSystemContextAppendPromoting`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeDeferredSessionMachineArchivedResume`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbandonDeferredSessionPromotion`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `FinishDeferredSessionPromotion`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BeginDeferredSessionArchive`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - scenarios: (unclaimed)
 - `RestoreDeferredSessionArchive`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
 - `FinishDeferredSessionArchive`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DropDeferredSessionStaged`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - scenarios: (unclaimed)
 - `DropDeferredSessionPromoting`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DropDeferredSessionClosing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveMobOperatorCreateAuthority`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveMobOperatorCreateAuthorityAbsent`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreMobOperatorAuthority`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SetMobOperatorProfileMutation`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - scenarios: (unclaimed)
 - `SetMobOperatorCreateAuthority`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `GrantMobOperatorManageMob`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SetMobOperatorSpawnProfilesInMob`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `UnregisterSessionIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `UnregisterSessionAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `UnregisterSessionRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `UnregisterSessionRetired`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
 - `UnregisterSessionStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - scenarios: (unclaimed)
 - `ResolveRuntimeOpsLifecycleDurabilityIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeOpsLifecycleDurabilityAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeOpsLifecycleDurabilityRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeOpsLifecycleDurabilityRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeOpsLifecycleDurabilityStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `HydrateSessionLlmStateIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `realtime_connection_projection`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `HydrateSessionLlmStateAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `HydrateSessionLlmStateRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ReconfigureSessionLlmIdentityAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ReconfigureSessionLlmIdentityRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ReconfigureSessionLlmIdentityIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClearSessionLlmStateIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `realtime_connection_projection`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClearSessionLlmStateAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClearSessionLlmStateRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SetModelRoutingBaselineIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SetModelRoutingBaselineAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SetModelRoutingBaselineRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SetModelRoutingBaselineRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - scenarios: (unclaimed)
 - `SetModelRoutingBaselineStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - scenarios: (unclaimed)
 - `RequestFiniteSwitchTurnApprovalUnavailableIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestFiniteSwitchTurnApprovalUnavailableAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestFiniteSwitchTurnApprovalUnavailableRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestFiniteSwitchTurnApprovalDeniedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestFiniteSwitchTurnApprovalDeniedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestFiniteSwitchTurnApprovalDeniedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestFiniteSwitchTurnScopedConflictIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestFiniteSwitchTurnScopedConflictAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestFiniteSwitchTurnScopedConflictRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestFiniteSwitchTurnAcceptedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestFiniteSwitchTurnAcceptedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestFiniteSwitchTurnAcceptedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestUntilChangedSwitchTurnAcceptedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestUntilChangedSwitchTurnAcceptedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestUntilChangedSwitchTurnAcceptedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestUntilChangedSwitchTurnApprovalUnavailableIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestUntilChangedSwitchTurnApprovalUnavailableAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestUntilChangedSwitchTurnApprovalUnavailableRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestUntilChangedSwitchTurnApprovalDeniedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestUntilChangedSwitchTurnApprovalDeniedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestUntilChangedSwitchTurnApprovalDeniedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CompleteUntilChangedSwitchTurnReconfigureIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CompleteUntilChangedSwitchTurnReconfigureAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CompleteUntilChangedSwitchTurnReconfigureRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdmitPendingFiniteSwitchTurnIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdmitPendingFiniteSwitchTurnAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdmitPendingFiniteSwitchTurnRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DecrementFiniteSwitchTurnIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DecrementFiniteSwitchTurnAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DecrementFiniteSwitchTurnRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreConsumedFiniteSwitchTurnIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreConsumedFiniteSwitchTurnAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreConsumedFiniteSwitchTurnRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BeginImageOperationScopedConflictIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BeginImageOperationScopedConflictAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BeginImageOperationScopedConflictRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BeginImageOperationApprovalUnavailableIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BeginImageOperationApprovalUnavailableAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BeginImageOperationApprovalUnavailableRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BeginImageOperationApprovalDeniedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BeginImageOperationApprovalDeniedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BeginImageOperationApprovalDeniedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BeginImageOperationAcceptedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BeginImageOperationAcceptedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BeginImageOperationAcceptedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DenyImageOperationPlanIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DenyImageOperationPlanAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DenyImageOperationPlanRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ActivateImageOperationOverrideIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ActivateImageOperationOverrideAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ActivateImageOperationOverrideRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalGeneratedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalGeneratedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalGeneratedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalEmptyIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalEmptyAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalEmptyRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalMechanicalFailureIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalMechanicalFailureAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalMechanicalFailureRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalTimeoutIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalTimeoutAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalTimeoutRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalCancelledIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalCancelledAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalCancelledRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalSafetyFilteredIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalSafetyFilteredAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalSafetyFilteredRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalRefusedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalRefusedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalRefusedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalProviderFailedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalProviderFailedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyImageOperationTerminalProviderFailedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CompleteImageOperationIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CompleteImageOperationAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CompleteImageOperationRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CompleteImageOperationWithoutScopedOverrideIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CompleteImageOperationWithoutScopedOverrideAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CompleteImageOperationWithoutScopedOverrideRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreImageOperationOverrideIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreImageOperationOverrideAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RestoreImageOperationOverrideRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StagePersistentFilterIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StagePersistentFilterAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `realtime_connection_projection`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StagePersistentFilterRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StagePersistentFilterRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - scenarios: (unclaimed)
 - `StagePersistentFilterStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `model_routing_and_image_operation`
+  - scenarios: (unclaimed)
 - `RequestDeferredToolsIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestDeferredToolsAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestDeferredToolsRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestDeferredToolsRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - scenarios: (unclaimed)
 - `RequestDeferredToolsStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - scenarios: (unclaimed)
 - `PrepareBindingsIdempotentInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PrepareBindingsIdempotentIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PrepareBindingsIdempotentAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PrepareBindingsIdempotentRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PrepareBindingsIdempotentRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PrepareBindingsIdempotentStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PrepareBindingsInitializing`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
 - `PrepareBindingsIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PrepareBindingsAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PrepareBindingsRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PrepareBindingsRetired`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
 - `PrepareBindingsStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - scenarios: (unclaimed)
 - `SetPeerIngressContextIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SetPeerIngressContextAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SetPeerIngressContextRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SetPeerIngressContextRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - scenarios: (unclaimed)
 - `SetPeerIngressContextStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveClosedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveClosedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveClosedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveClosedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveClosedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveFullIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveFullAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveFullRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveFullRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveFullStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceivePlainEventIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceivePlainEventAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceivePlainEventRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceivePlainEventRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceivePlainEventStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveTrustedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveTrustedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveTrustedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveTrustedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveTrustedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveAuthExemptUntrustedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveAuthExemptUntrustedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveAuthExemptUntrustedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveAuthExemptUntrustedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveAuthExemptUntrustedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveAuthOpenUntrustedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveAuthOpenUntrustedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveAuthOpenUntrustedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveAuthOpenUntrustedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveAuthOpenUntrustedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveUntrustedQueuedDropIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveUntrustedQueuedDropAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveUntrustedQueuedDropRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveUntrustedQueuedDropRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveUntrustedQueuedDropStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveUntrustedEmptyDropIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveUntrustedEmptyDropAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveUntrustedEmptyDropRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveUntrustedEmptyDropRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveUntrustedEmptyDropStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressDequeuePlainEventIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressDequeuePlainEventAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressDequeuePlainEventRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressDequeuePlainEventRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressDequeuePlainEventStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressDequeueAuthExemptExternalIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressDequeueAuthExemptExternalAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressDequeueAuthExemptExternalRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressDequeueAuthExemptExternalRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressDequeueAuthExemptExternalStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressDequeueRequiredRemainingIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressDequeueRequiredRemainingAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressDequeueRequiredRemainingRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressDequeueRequiredRemainingRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressDequeueRequiredRemainingStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressDequeueRequiredEmptyIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressDequeueRequiredEmptyAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressDequeueRequiredEmptyRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressDequeueRequiredEmptyRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressDequeueRequiredEmptyStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NotifyDrainExitedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NotifyDrainExitedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NotifyDrainExitedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NotifyDrainExitedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NotifyDrainExitedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InterruptCurrentRunAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InterruptCurrentRun`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultAcceptedInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultAcceptedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultAcceptedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultAcceptedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultAcceptedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultAcceptedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultNoopInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultNoopIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultNoopAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultNoopRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultNoopRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultNoopStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultStagedNoopInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultStagedNoopIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultStagedNoopAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultStagedNoopRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultStagedNoopRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultStagedNoopStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultDestroyedPresentInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultDestroyedPresentIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultDestroyedPresentAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultDestroyedPresentRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultDestroyedPresentRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultDestroyedPresentStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultDestroyedMissingInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultDestroyedMissingIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultDestroyedMissingAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultDestroyedMissingRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultDestroyedMissingRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultDestroyedMissingStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultPromotingConflictInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultPromotingConflictIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultPromotingConflictAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultPromotingConflictRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultPromotingConflictRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultPromotingConflictStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultNotInterruptibleConflictInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultNotInterruptibleConflictIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultNotInterruptibleConflictAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultNotInterruptibleConflictRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultNotInterruptibleConflictRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultNotInterruptibleConflictStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CancelAfterBoundaryAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CancelAfterBoundary`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BoundaryAppliedPublish`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - scenarios: (unclaimed)
 - `PublishCommittedVisibleSetIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PublishCommittedVisibleSetAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `realtime_connection_projection`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PublishCommittedVisibleSetRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PublishCommittedVisibleSetRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PublishCommittedVisibleSetStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RetireRequestedFromIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RetireRequestedFromIdleUnbound`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RetireAlreadyRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RetireAlreadyRetiredUnbound`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `Reset`
   - anchors: `meerkat_machine`
   - scenarios: `retire-reset-destroy`, `product_turn_streaming`
 - `StopRuntimeExecutorInitializing`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - scenarios: (unclaimed)
 - `StopRuntimeExecutorIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StopRuntimeExecutorRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - scenarios: (unclaimed)
 - `StopRuntimeExecutorAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StopRuntimeExecutorRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RuntimeExecutorExitedFromAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RuntimeExecutorExitedFromRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RuntimeExecutorExitedFromIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RuntimeExecutorExitedFromRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RuntimeExecutorExitedFromStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultCompletedInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultCompletedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultCompletedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultCompletedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultCompletedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultCompletedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultWithoutResultInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultWithoutResultIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultWithoutResultAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultWithoutResultRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultWithoutResultRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultWithoutResultStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultCallbackPendingInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultCallbackPendingIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultCallbackPendingAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultCallbackPendingRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultCallbackPendingRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultCallbackPendingStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultCancelledInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultCancelledIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultCancelledAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultCancelledRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultCancelledRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultCancelledStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultRuntimeApplyFailedInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultRuntimeApplyFailedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultRuntimeApplyFailedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultRuntimeApplyFailedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultRuntimeApplyFailedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultRuntimeApplyFailedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultMachineFailedInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultMachineFailedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultMachineFailedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultMachineFailedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultMachineFailedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultMachineFailedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultFinalizationFailureWithResultInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultFinalizationFailureWithResultIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultFinalizationFailureWithResultAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultFinalizationFailureWithResultRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultFinalizationFailureWithResultRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultFinalizationFailureWithResultStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultRuntimeTerminatedInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultRuntimeTerminatedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultRuntimeTerminatedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultRuntimeTerminatedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultRuntimeTerminatedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultRuntimeTerminatedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultRuntimeTerminatedDestroyedDestroyed`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupArchivedInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupArchivedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupArchivedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupArchivedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupArchivedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupArchivedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupRuntimeTerminatedInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupRuntimeTerminatedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupRuntimeTerminatedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupRuntimeTerminatedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupRuntimeTerminatedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupRuntimeTerminatedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupFinalizationFailedInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupFinalizationFailedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupFinalizationFailedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupFinalizationFailedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupFinalizationFailedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupFinalizationFailedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupRuntimeApplyFailedInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupRuntimeApplyFailedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupRuntimeApplyFailedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupRuntimeApplyFailedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupRuntimeApplyFailedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupRuntimeApplyFailedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupAbandonedWithoutLiveSessionInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupAbandonedWithoutLiveSessionIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupAbandonedWithoutLiveSessionAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupAbandonedWithoutLiveSessionRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupAbandonedWithoutLiveSessionRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupAbandonedWithoutLiveSessionStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupCancelledWithoutLiveSessionInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupCancelledWithoutLiveSessionIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupCancelledWithoutLiveSessionAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupCancelledWithoutLiveSessionRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupCancelledWithoutLiveSessionRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupCancelledWithoutLiveSessionStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupRetainInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupRetainIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupRetainAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupRetainRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupRetainRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionCleanupRetainStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionWaitFailureChannelClosedInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionWaitFailureChannelClosedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionWaitFailureChannelClosedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionWaitFailureChannelClosedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionWaitFailureChannelClosedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionWaitFailureChannelClosedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionWaitFailureAuthorityUnavailableInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionWaitFailureAuthorityUnavailableIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionWaitFailureAuthorityUnavailableAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionWaitFailureAuthorityUnavailableRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionWaitFailureAuthorityUnavailableRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionWaitFailureAuthorityUnavailableStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DestroyInitializing`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
@@ -1248,953 +1263,953 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
 - `RecoverIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverRetired`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
 - `RecoverStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `RecoverRuntimeAuthorityInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverRuntimeAuthorityIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverRuntimeAuthorityAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverRuntimeAuthorityRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverRuntimeAuthorityRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverRuntimeAuthorityStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverRuntimeAuthorityDestroyed`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `EnsureSessionWithExecutorIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `EnsureSessionWithExecutorAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `EnsureSessionWithExecutorRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `EnsureSessionWithExecutorRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `EnsureSessionWithExecutorStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SetSilentIntentsIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `product_turn_streaming`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SetSilentIntentsAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `realtime_connection_projection`, `product_turn_streaming`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SetSilentIntentsRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `turn_interrupt_and_shutdown`, `product_turn_streaming`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SetSilentIntentsRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`, `product_turn_streaming`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - scenarios: (unclaimed)
 - `SetSilentIntentsStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `product_turn_streaming`, `model_routing_and_image_operation`
+  - scenarios: (unclaimed)
 - `AbortIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbortAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbortRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbortRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - scenarios: (unclaimed)
 - `AbortStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - scenarios: (unclaimed)
 - `WaitIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `WaitAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `WaitRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `WaitRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - scenarios: (unclaimed)
 - `WaitStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `AbortAllIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbortAllAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbortAllRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbortAllRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `AbortAllStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `EnsureDrainRunningAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `EnsureDrainRunningRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `IngestIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `IngestAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `IngestRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PublishEventIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PublishEventAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PublishEventRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PublishEventRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - scenarios: (unclaimed)
 - `PublishEventStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - scenarios: (unclaimed)
 - `AcceptWithCompletionIdleQueued`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AcceptWithCompletionIdleImmediate`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AcceptWithCompletionAttachedImmediate`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AcceptWithCompletionAttachedQueued`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AcceptWithCompletionRunningQueuedPassive`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AcceptWithCompletionRunningQueuedWakeIfIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AcceptWithCompletionRunningInterruptYielding`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AcceptWithCompletionRunningImmediate`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AcceptWithoutWakeIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AcceptWithoutWakeAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AcceptWithoutWakeRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionValidationDurabilityMissingRejectedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionValidationDurabilityMissingRejectedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionValidationDurabilityMissingRejectedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionValidationExternalDerivedRejectedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionValidationExternalDerivedRejectedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionValidationExternalDerivedRejectedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionValidationDerivedKindRejectedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionValidationDerivedKindRejectedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionValidationDerivedKindRejectedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionValidationPeerHandlingRejectedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionValidationPeerHandlingRejectedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionValidationPeerHandlingRejectedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionValidationPeerTerminalRejectedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionValidationPeerTerminalRejectedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionValidationPeerTerminalRejectedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionValidationAcceptedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionValidationAcceptedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionValidationAcceptedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAcceptedQueueInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAcceptedQueueIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAcceptedQueueAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAcceptedQueueRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAcceptedQueueRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAcceptedQueueStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputStagedInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputStagedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputStagedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputStagedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputStagedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputStagedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAppliedCommittedInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAppliedCommittedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAppliedCommittedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAppliedCommittedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAppliedCommittedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAppliedCommittedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAppliedMissingReceiptInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAppliedMissingReceiptIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAppliedMissingReceiptAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAppliedMissingReceiptRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAppliedMissingReceiptRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAppliedMissingReceiptStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAppliedUnobservedReceiptInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAppliedUnobservedReceiptIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAppliedUnobservedReceiptAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAppliedUnobservedReceiptRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAppliedUnobservedReceiptRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAppliedUnobservedReceiptStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputQueuedInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputQueuedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputQueuedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputQueuedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputQueuedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputQueuedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRecoveredInputDurabilityDiscardEphemeralInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRecoveredInputDurabilityDiscardEphemeralIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRecoveredInputDurabilityDiscardEphemeralAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRecoveredInputDurabilityDiscardEphemeralRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRecoveredInputDurabilityDiscardEphemeralRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRecoveredInputDurabilityDiscardEphemeralStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveInputPublicLifecycleAcceptedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveInputPublicLifecycleQueuedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveInputPublicLifecycleStagedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveInputPublicLifecycleAppliedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveInputPublicLifecycleAppliedPendingConsumptionIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveInputPublicLifecycleConsumedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveInputPublicLifecycleSupersededIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveInputPublicLifecycleCoalescedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveInputPublicLifecycleAbandonedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveInputPublicTerminalOutcomeNonTerminalIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveInputPublicTerminalOutcomeConsumedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveInputPublicTerminalOutcomeSupersededIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveInputPublicTerminalOutcomeCoalescedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveInputPublicTerminalOutcomeCancelledIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveInputPublicTerminalOutcomeAbandonedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyInputTerminalityNonTerminalIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyInputTerminalityConsumedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyInputTerminalitySupersededIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyInputTerminalityCoalescedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyInputTerminalityAbandonedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeStoredInputStateSeedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`, `model_routing_and_image_operation`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRuntimeLifecycleInitializingIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRuntimeLifecycleIdleIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRuntimeLifecycleAttachedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRuntimeLifecycleRunningIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRuntimeLifecycleRetiredIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRuntimeLifecycleStoppedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRuntimeLifecycleDestroyedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRuntimeDurabilityInitializingIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRuntimeDurabilityIdleIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRuntimeDurabilityAttachedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRuntimeDurabilityRunningIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRuntimeDurabilityRetiredIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRuntimeDurabilityStoppedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRuntimeDurabilityDestroyedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRuntimeLoopQueueInitializingIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRuntimeLoopQueueIdleIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRuntimeLoopQueueAttachedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRuntimeLoopQueueRunningWithoutBindingIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRuntimeLoopQueueRunningWithBindingIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRuntimeLoopQueueRetiredIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRuntimeLoopQueueStoppedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRuntimeLoopQueueDestroyedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveVisibleRuntimePhasePublishControlVisibleRewriteIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveVisibleRuntimePhasePublishControlNoRewriteIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveVisibleRuntimePhaseKeepDslVisibleRewriteIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveVisibleRuntimePhaseKeepDslNoRewriteIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionIdempotencyNoKeyIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionIdempotencyNoKeyAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionIdempotencyNoKeyRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionIdempotencyNewKeyIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionIdempotencyNewKeyAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionIdempotencyNewKeyRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionIdempotencyDuplicateIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionIdempotencyDuplicateAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionIdempotencyDuplicateRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterAcceptedIdempotencyIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterAcceptedIdempotencyAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterAcceptedIdempotencyRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterAcceptedIdempotencyRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterAcceptedIdempotencyStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanRequestedTerminalQueueIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanRequestedTerminalQueueAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanRequestedTerminalQueueRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanRequestedTerminalSteerIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanRequestedTerminalSteerAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanRequestedTerminalSteerRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanRequestedQueueIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanRequestedQueueAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanRequestedQueueRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanRequestedSteerIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanRequestedSteerAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanRequestedSteerRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanDefaultQueueKindIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanDefaultQueueKindAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanDefaultQueueKindRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanDefaultPeerMessageOrRequestIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanDefaultPeerMessageOrRequestAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanDefaultPeerMessageOrRequestRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanPeerResponseProgressIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanPeerResponseProgressAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanPeerResponseProgressRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanDefaultPeerResponseTerminalIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanDefaultPeerResponseTerminalAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanDefaultPeerResponseTerminalRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanDefaultContinuationIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanDefaultContinuationAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanDefaultContinuationRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanWorkgraphAttentionContinuationIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanWorkgraphAttentionContinuationAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanWorkgraphAttentionContinuationRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanOperationIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanOperationAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveAdmissionPlanOperationRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeMessageAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeMessageRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestPeerAddedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestPeerAddedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestPeerAddedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestPeerRetiredAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestPeerRetiredIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestPeerRetiredRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestPeerRetiredStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestPeerRetiredRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestPeerUnwiredAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestPeerUnwiredIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestPeerUnwiredRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestPeerUnwiredStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestPeerUnwiredRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestSupervisorSilentAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestSupervisorSilentIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestSupervisorSilentRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestSilentAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestSilentRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestSupervisorAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestSupervisorIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestSupervisorRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestActionableAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestActionableRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeLifecycleAddedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeLifecycleAddedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeLifecycleAddedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeLifecycleRetiredIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeLifecycleRetiredRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeLifecycleRetiredStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeLifecycleRetiredAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeLifecycleRetiredRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeLifecycleUnwiredIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeLifecycleUnwiredRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeLifecycleUnwiredStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeLifecycleUnwiredAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeLifecycleUnwiredRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeResponseAcceptedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeResponseAcceptedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeResponseCompletedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeResponseCompletedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeResponseFailedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeResponseFailedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeAckAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeAckRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPlainEventAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPlainEventRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPeerResponseReplyAcceptedInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPeerResponseReplyAcceptedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPeerResponseReplyAcceptedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPeerResponseReplyAcceptedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPeerResponseReplyAcceptedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPeerResponseReplyAcceptedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPeerResponseReplyCompletedInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPeerResponseReplyCompletedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPeerResponseReplyCompletedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPeerResponseReplyCompletedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPeerResponseReplyCompletedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPeerResponseReplyCompletedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPeerResponseReplyFailedInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPeerResponseReplyFailedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPeerResponseReplyFailedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPeerResponseReplyFailedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPeerResponseReplyFailedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyPeerResponseReplyFailedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PrepareIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PrepareAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DrainQueuedRunRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StartConversationRunIdleWithBinding`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StartConversationRunInitializing`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - scenarios: (unclaimed)
 - `StartConversationRunAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StartConversationRunRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StartImmediateAppendInitializing`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `product_turn_streaming`
+  - scenarios: (unclaimed)
 - `StartImmediateAppendAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StartImmediateAppendRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StartImmediateContextInitializing`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`
+  - scenarios: (unclaimed)
 - `StartImmediateContextAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StartImmediateContextRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PrimitiveAppliedConversation`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `PrimitiveAppliedImmediateCompleted`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - scenarios: (unclaimed)
 - `PrimitiveAppliedImmediateCancelled`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LlmReturnedToolCallsPositive`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LlmReturnedToolCallsZero`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LlmReturnedTerminal`
-  - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterPendingOps`
   - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`, `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `ToolCallsResolvedToCalling`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ToolCallsResolvedToBoundary`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `OpsBarrierSatisfied`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BoundaryContinueToCalling`
-  - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BoundaryContinueToCancelled`
-  - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BoundaryCompleteCompleted`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
 - `BoundaryCompleteCancelled`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `EnterExtraction`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `ExtractionStart`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+  - scenarios: (unclaimed)
 - `ExtractionValidationPassed`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `ExtractionValidationFailedRetry`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - scenarios: (unclaimed)
 - `ExtractionValidationFailedExhausted`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - scenarios: (unclaimed)
 - `ExtractionFailedTerminal`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - scenarios: (unclaimed)
 - `RecoverableFailure`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
@@ -2203,2704 +2218,2704 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `input_admission_and_queueing`
 - `RetryRequested`
   - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - scenarios: (unclaimed)
 - `CancelNow`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestCancelAfterBoundary`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CancellationObserved`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AcknowledgeTerminal`
-  - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `TurnLimitReached`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `product_turn_streaming`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BudgetExhausted`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `TimeBudgetExceeded`
-  - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ForceCancelNoRun`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RunCompleted`
   - anchors: `meerkat_machine`
   - scenarios: `recycle_and_compaction`
 - `ServiceTurnCommittedRunningToIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ServiceTurnCommittedRunningToAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ServiceTurnCommittedRunningToRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RunFailed`
   - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `recycle_and_compaction`
+  - scenarios: (unclaimed)
 - `RunCancelled`
-  - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceRegisterIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceRegisterAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceRegisterRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceStageAddIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceStageAddAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceStageAddRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceStageRemoveIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceStageRemoveAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceStageRemoveRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceSetRemovalTimeoutIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `ops_completion_and_waiters`, `product_turn_streaming`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceSetRemovalTimeoutAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceSetRemovalTimeoutRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`, `product_turn_streaming`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceStageReloadIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `ops_completion_and_waiters`, `realtime_connection_projection`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceStageReloadAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceStageReloadRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceApplyBoundaryAddIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceApplyBoundaryAddAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceApplyBoundaryAddRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceApplyBoundaryReloadIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceApplyBoundaryReloadAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceApplyBoundaryReloadRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceApplyBoundaryRemoveDrainingIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceApplyBoundaryRemoveDrainingAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceApplyBoundaryRemoveDrainingRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceApplyBoundaryRemoveNoopIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceApplyBoundaryRemoveNoopAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceApplyBoundaryRemoveNoopRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceMarkPendingSucceededAddIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceMarkPendingSucceededAddAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceMarkPendingSucceededAddRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceMarkPendingSucceededReloadIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceMarkPendingSucceededReloadAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceMarkPendingSucceededReloadRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceMarkPendingFailedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceMarkPendingFailedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceMarkPendingFailedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceCallStartedActiveAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceCallStartedActiveRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceCallStartedRejectRemovingAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceCallStartedRejectRemovingRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceCallStartedRejectUnavailableAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceCallStartedRejectUnavailableRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceCallFinishedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceCallFinishedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceFinalizeRemovalCleanIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceFinalizeRemovalCleanAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceFinalizeRemovalCleanRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceFinalizeRemovalForcedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceFinalizeRemovalForcedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceFinalizeRemovalForcedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceSnapshotAlignedIdle`
-  - anchors: `meerkat_public_surface`
-  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceSnapshotAlignedAttached`
-  - anchors: `meerkat_public_surface`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceSnapshotAlignedRunning`
-  - anchors: `meerkat_public_surface`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceShutdownIdle`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceShutdownAttached`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceShutdownRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`
-  - scenarios: `turn_interrupt_and_shutdown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CommitRunningToIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CommitRunningToAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CommitRunningToRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `FailRunningToIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `FailRunningToAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `FailRunningToRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CancelRunningToIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CancelRunningToAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CancelRunningToRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RollbackRunRunningToIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RollbackRunRunningToAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RollbackRunRunningToRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecycleFromIdleOrRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecycleFromAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverAdmittedInputIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverAdmittedInputAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverAdmittedInputRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverAdmittedInputRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverAdmittedInputStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverInputLifecycleIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverInputLifecycleAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverInputLifecycleRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverInputLifecycleRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `RecoverInputLifecycleStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `QueueAcceptedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `QueueAcceptedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `QueueAcceptedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `QueueAcceptedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - scenarios: (unclaimed)
 - `QueueAcceptedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - scenarios: (unclaimed)
 - `SteerAcceptedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SteerAcceptedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SteerAcceptedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SteerAcceptedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - scenarios: (unclaimed)
 - `SteerAcceptedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - scenarios: (unclaimed)
 - `ChangeLaneIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ChangeLaneAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ChangeLaneRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ChangeLaneRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ChangeLaneStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PrioritizeInputIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PrioritizeInputAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PrioritizeInputRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PrioritizeInputRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PrioritizeInputStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DeferInputBehindBacklogIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DeferInputBehindBacklogAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DeferInputBehindBacklogRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `input_admission_and_queueing`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DeferInputBehindBacklogRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DeferInputBehindBacklogStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StageForRunIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StageForRunAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StageForRunRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StageForRunRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - scenarios: (unclaimed)
 - `StageForRunStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - scenarios: (unclaimed)
 - `IncrementAttemptCountIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `IncrementAttemptCountAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `IncrementAttemptCountRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `IncrementAttemptCountRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - scenarios: (unclaimed)
 - `IncrementAttemptCountStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - scenarios: (unclaimed)
 - `RollbackStagedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RollbackStagedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RollbackStagedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RollbackStagedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `recycle_and_compaction`
+  - scenarios: (unclaimed)
 - `RollbackStagedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`
+  - scenarios: (unclaimed)
 - `ResolveStagedRollbackQueuedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveStagedRollbackQueuedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveStagedRollbackQueuedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveStagedRollbackQueuedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveStagedRollbackQueuedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveStagedRollbackMaxAttemptsExhaustedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveStagedRollbackMaxAttemptsExhaustedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveStagedRollbackMaxAttemptsExhaustedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveStagedRollbackMaxAttemptsExhaustedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveStagedRollbackMaxAttemptsExhaustedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `MarkAppliedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `MarkAppliedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `MarkAppliedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `MarkAppliedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `MarkAppliedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `MarkAppliedPendingConsumptionIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `MarkAppliedPendingConsumptionAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `MarkAppliedPendingConsumptionRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `MarkAppliedPendingConsumptionRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `MarkAppliedPendingConsumptionStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveBoundaryContextReceiptRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ConsumeOnAcceptIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ConsumeOnAcceptAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ConsumeOnAcceptRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ConsumeOnAcceptRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ConsumeOnAcceptStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordBoundarySeqIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordBoundarySeqAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordBoundarySeqRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordBoundarySeqRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordBoundarySeqStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ConsumeInputIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ConsumeInputAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ConsumeInputRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ConsumeInputRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - scenarios: (unclaimed)
 - `ConsumeInputStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - scenarios: (unclaimed)
 - `SupersedeInputIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupersedeInputAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupersedeInputRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupersedeInputRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`, `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupersedeInputStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `input_admission_and_queueing`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CoalesceInputIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CoalesceInputAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CoalesceInputRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CoalesceInputRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CoalesceInputStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbandonInputIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbandonInputAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbandonInputRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbandonInputRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbandonInputStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterOpAlreadyRegisteredRejectedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterOpAlreadyRegisteredRejectedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterOpAlreadyRegisteredRejectedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterOpAlreadyRegisteredRejectedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterOpAlreadyRegisteredRejectedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterOpMaxConcurrentRejectedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterOpMaxConcurrentRejectedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterOpMaxConcurrentRejectedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterOpMaxConcurrentRejectedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterOpMaxConcurrentRejectedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterOpAcceptedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterOpAcceptedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterOpAcceptedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterOpAcceptedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterOpAcceptedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOpLifecycleTransitionNotFoundRejectedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOpLifecycleTransitionNotFoundRejectedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOpLifecycleTransitionNotFoundRejectedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOpLifecycleTransitionNotFoundRejectedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOpLifecycleTransitionNotFoundRejectedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOpLifecycleTransitionPeerNotExpectedRejectedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOpLifecycleTransitionPeerNotExpectedRejectedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOpLifecycleTransitionPeerNotExpectedRejectedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOpLifecycleTransitionPeerNotExpectedRejectedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOpLifecycleTransitionPeerNotExpectedRejectedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOpLifecycleTransitionAlreadyPeerReadyRejectedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOpLifecycleTransitionAlreadyPeerReadyRejectedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOpLifecycleTransitionAlreadyPeerReadyRejectedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOpLifecycleTransitionAlreadyPeerReadyRejectedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOpLifecycleTransitionAlreadyPeerReadyRejectedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOpLifecycleTransitionInvalidRejectedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOpLifecycleTransitionInvalidRejectedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOpLifecycleTransitionInvalidRejectedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOpLifecycleTransitionInvalidRejectedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveOpLifecycleTransitionInvalidRejectedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StartOpIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StartOpAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StartOpRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StartOpRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StartOpStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CompleteOpIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`, `recycle_and_compaction`, `model_routing_and_image_operation`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CompleteOpAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`, `recycle_and_compaction`, `model_routing_and_image_operation`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CompleteOpRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`, `recycle_and_compaction`, `model_routing_and_image_operation`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CompleteOpRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`, `recycle_and_compaction`, `model_routing_and_image_operation`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CompleteOpStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`, `recycle_and_compaction`, `model_routing_and_image_operation`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `FailOpIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `FailOpAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `FailOpRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `FailOpRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `FailOpStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CancelOpIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CancelOpAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CancelOpRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CancelOpRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CancelOpStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbortOpIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbortOpAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbortOpRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbortOpRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbortOpStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerReadyOpIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerReadyOpAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerReadyOpRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerReadyOpRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerReadyOpStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ProgressReportedOpIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ProgressReportedOpAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ProgressReportedOpRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ProgressReportedOpRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ProgressReportedOpStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RetireRequestedOpIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RetireRequestedOpAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RetireRequestedOpRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RetireRequestedOpRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RetireRequestedOpStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RetireCompletedOpIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RetireCompletedOpAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RetireCompletedOpRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RetireCompletedOpRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RetireCompletedOpStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `TerminateOpIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `TerminateOpAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `TerminateOpRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `TerminateOpRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `TerminateOpStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverOpRecordIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverOpRecordAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverOpRecordRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverOpRecordRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverOpRecordStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyOperationTerminalityTerminalIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyOperationTerminalityNonTerminalIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyOperationPublicResultMissingAuthorityIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyOperationPublicResultRunningIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyOperationPublicResultCompletedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyOperationPublicResultFailedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyOperationPublicResultCancelledIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyOperationTransitionIdempotentSuccessIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyOperationTransitionNotIdempotentIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyOperationCompletionFeedSuppressIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyOperationCompletionFeedEmitIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyOperationCompletionWakeWakeIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyOperationCompletionWakeIgnoreIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyOperationDurabilityDiscardIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyOperationDurabilityRetainIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRecoveredOperationRecordCapacitySlotDiscardIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRecoveredOperationRecordRetainIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRecoveredOperationRecordDiscardIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverCompletionFeedEntryIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverCompletionFeedEntryAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverCompletionFeedEntryRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverCompletionFeedEntryRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverCompletionFeedEntryStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverOpsCompletionCursorIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverOpsCompletionCursorAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverOpsCompletionCursorRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverOpsCompletionCursorRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `RecoverOpsCompletionCursorStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `RecoverCompletionConsumerCursorsIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverCompletionConsumerCursorsAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverCompletionConsumerCursorsRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverCompletionConsumerCursorsRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `RecoverCompletionConsumerCursorsStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `AdvanceAgentCompletionCursorIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdvanceAgentCompletionCursorAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdvanceAgentCompletionCursorRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdvanceAgentCompletionCursorRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdvanceAgentCompletionCursorStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdvanceRuntimeObservedCompletionCursorIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdvanceRuntimeObservedCompletionCursorAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdvanceRuntimeObservedCompletionCursorRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdvanceRuntimeObservedCompletionCursorRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdvanceRuntimeObservedCompletionCursorStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdvanceRuntimeInjectedCompletionCursorIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdvanceRuntimeInjectedCompletionCursorAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdvanceRuntimeInjectedCompletionCursorRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdvanceRuntimeInjectedCompletionCursorRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdvanceRuntimeInjectedCompletionCursorStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `EvictCompletedOpIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `EvictCompletedOpAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `EvictCompletedOpRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `EvictCompletedOpRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `EvictCompletedOpStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CollectCompletedOpIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CollectCompletedOpAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CollectCompletedOpRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CollectCompletedOpRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CollectCompletedOpStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdmitSurfaceRequestAcceptedInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdmitSurfaceRequestDuplicateInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifySurfaceRequestTerminalMissingInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifySurfaceRequestTerminalPublishInitializing`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `ClassifySurfaceRequestTerminalFailedInitializing`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `ClassifySurfaceRequestTerminalObservationInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CancelSurfaceRequestMissingInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CancelSurfaceRequestPendingInitializing`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `CancelSurfaceRequestAlreadyCancelledInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CancelSurfaceRequestAlreadyPublishedInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CancelSurfaceRequestAlreadyCompletedInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PublishSurfaceRequestMissingInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PublishSurfaceRequestPendingInitializing`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `PublishSurfaceRequestAlreadyTerminalInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PublishOrCancelSurfaceRequestMissingInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PublishOrCancelSurfaceRequestPendingInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PublishOrCancelSurfaceRequestCancelledInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PublishOrCancelSurfaceRequestAlreadyTerminalInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `FinishSurfaceRequestUnpublishedMissingInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `FinishSurfaceRequestUnpublishedPendingInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `FinishSurfaceRequestUnpublishedCancelledInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `FinishSurfaceRequestUnpublishedTerminalInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveOpenAdmissionAcceptedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveOpenAdmissionAcceptedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveOpenAdmissionAcceptedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveOpenAdmissionAcceptedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveOpenAdmissionAcceptedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveOpenAdmissionSessionAlreadyBoundIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveOpenAdmissionSessionAlreadyBoundAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveOpenAdmissionSessionAlreadyBoundRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveOpenAdmissionSessionAlreadyBoundRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveOpenAdmissionSessionAlreadyBoundStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveOpenAdmissionChannelAlreadyBoundIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveOpenAdmissionChannelAlreadyBoundAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveOpenAdmissionChannelAlreadyBoundRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveOpenAdmissionChannelAlreadyBoundRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveOpenAdmissionChannelAlreadyBoundStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbandonLiveOpenAdmissionIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbandonLiveOpenAdmissionAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbandonLiveOpenAdmissionRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbandonLiveOpenAdmissionRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbandonLiveOpenAdmissionStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`, `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveRefreshQueuedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveRefreshQueuedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveRefreshQueuedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveRefreshQueuedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveRefreshQueuedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `ops_completion_and_waiters`, `product_turn_streaming`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveCloseClosedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveCloseClosedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveCloseClosedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveCloseClosedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `realtime_connection_projection`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveCloseClosedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveCommandAcceptedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveCommandAcceptedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveCommandAcceptedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveCommandAcceptedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+  - scenarios: (unclaimed)
 - `RecordLiveCommandAcceptedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - scenarios: (unclaimed)
 - `RecordLiveCommandRejectedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveCommandRejectedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveCommandRejectedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveCommandRejectedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - scenarios: (unclaimed)
 - `RecordLiveCommandRejectedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `RecordLiveChannelRequestRejectedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveChannelRequestRejectedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveChannelRequestRejectedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveChannelRequestRejectedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveChannelRequestRejectedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveWebrtcTokenIssuedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveWebrtcTokenIssuedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `ops_completion_and_waiters`, `realtime_connection_projection`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveWebrtcTokenIssuedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveWebrtcTokenIssuedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveWebrtcTokenIssuedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionAcceptedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionAcceptedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionAcceptedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionAcceptedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionAcceptedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionChannelNotBoundIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionChannelNotBoundAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionChannelNotBoundRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionChannelNotBoundRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionChannelNotBoundStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionTokenNotFoundIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionTokenNotFoundAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionTokenNotFoundRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionTokenNotFoundRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionTokenNotFoundStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionTokenAlreadyConsumedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionTokenAlreadyConsumedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionTokenAlreadyConsumedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionTokenAlreadyConsumedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionTokenAlreadyConsumedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionTokenChannelMismatchIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionTokenChannelMismatchAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionTokenChannelMismatchRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionTokenChannelMismatchRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionTokenChannelMismatchStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionTokenExpiredIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionTokenExpiredAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionTokenExpiredRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionTokenExpiredRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebrtcAnswerAdmissionTokenExpiredStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveWebrtcAnswerAcceptedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveWebrtcAnswerAcceptedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveWebrtcAnswerAcceptedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveWebrtcAnswerAcceptedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveWebrtcAnswerAcceptedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveWebsocketTokenIssuedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveWebsocketTokenIssuedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `ops_completion_and_waiters`, `realtime_connection_projection`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveWebsocketTokenIssuedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveWebsocketTokenIssuedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveWebsocketTokenIssuedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionAcceptedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionAcceptedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionAcceptedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionAcceptedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionAcceptedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionChannelNotBoundIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionChannelNotBoundAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionChannelNotBoundRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionChannelNotBoundRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionChannelNotBoundStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionTokenNotFoundIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionTokenNotFoundAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionTokenNotFoundRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionTokenNotFoundRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionTokenNotFoundStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionTokenAlreadyConsumedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionTokenAlreadyConsumedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionTokenAlreadyConsumedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionTokenAlreadyConsumedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionTokenAlreadyConsumedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionTokenChannelMismatchIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionTokenChannelMismatchAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionTokenChannelMismatchRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionTokenChannelMismatchRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionTokenChannelMismatchStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionTokenExpiredIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionTokenExpiredAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionTokenExpiredRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionTokenExpiredRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveWebsocketTokenAdmissionTokenExpiredStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordSessionEventStreamOpenedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordSessionEventStreamOpenedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordSessionEventStreamOpenedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordSessionEventStreamOpenedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `realtime_connection_projection`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordSessionEventStreamOpenedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordSessionEventStreamTerminatedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordSessionEventStreamTerminatedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordSessionEventStreamTerminatedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordSessionEventStreamTerminatedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordSessionEventStreamTerminatedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSessionEventStreamCloseActiveIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSessionEventStreamCloseActiveAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSessionEventStreamCloseActiveRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSessionEventStreamCloseActiveRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSessionEventStreamCloseActiveStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSessionEventStreamCloseAlreadyClosedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSessionEventStreamCloseAlreadyClosedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSessionEventStreamCloseAlreadyClosedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSessionEventStreamCloseAlreadyClosedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSessionEventStreamCloseAlreadyClosedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordMobEventStreamOpenedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordMobEventStreamOpenedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordMobEventStreamOpenedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordMobEventStreamOpenedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordMobEventStreamOpenedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordMobEventStreamTerminatedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `product_turn_streaming`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordMobEventStreamTerminatedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordMobEventStreamTerminatedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordMobEventStreamTerminatedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `product_turn_streaming`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordMobEventStreamTerminatedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveMobEventStreamCloseActiveIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveMobEventStreamCloseActiveAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveMobEventStreamCloseActiveRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveMobEventStreamCloseActiveRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveMobEventStreamCloseActiveStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveMobEventStreamCloseAlreadyClosedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveMobEventStreamCloseAlreadyClosedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveMobEventStreamCloseAlreadyClosedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveMobEventStreamCloseAlreadyClosedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveMobEventStreamCloseAlreadyClosedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveChannelStatusIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveChannelStatusAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `ops_completion_and_waiters`, `realtime_connection_projection`, `recycle_and_compaction`, `model_routing_and_image_operation`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveChannelStatusRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveChannelStatusRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveChannelStatusStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`, `model_routing_and_image_operation`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionDuplicateRejectedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionDuplicateRejectedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionDuplicateRejectedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionDuplicateRejectedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionDuplicateRejectedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionActiveRejectedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionActiveRejectedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionActiveRejectedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionActiveRejectedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionActiveRejectedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionNotFoundRejectedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionNotFoundRejectedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionNotFoundRejectedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionNotFoundRejectedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionNotFoundRejectedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionAcceptedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionAcceptedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionAcceptedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionAcceptedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `ResolveWaitAllAdmissionAcceptedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `RequestWaitAllIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestWaitAllAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestWaitAllRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestWaitAllRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `RequestWaitAllStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `SatisfyWaitAllIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SatisfyWaitAllAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SatisfyWaitAllRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SatisfyWaitAllRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SatisfyWaitAllStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CancelWaitAllIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CancelWaitAllAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CancelWaitAllRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CancelWaitAllRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `CancelWaitAllStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `SpawnDrainIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SpawnDrainAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SpawnDrainRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SpawnDrainRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - scenarios: (unclaimed)
 - `SpawnDrainStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - scenarios: (unclaimed)
 - `StopDrainIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StopDrainAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StopDrainRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `turn_interrupt_and_shutdown`, `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StopDrainRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - scenarios: (unclaimed)
 - `StopDrainStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`
+  - scenarios: (unclaimed)
 - `StageVisibilityFilterIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StageVisibilityFilterAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StageVisibilityFilterRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StageVisibilityFilterRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`
+  - scenarios: (unclaimed)
 - `StageVisibilityFilterStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`
+  - scenarios: (unclaimed)
 - `ReplaceFilterToolAuthorityCatalogIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `realtime_connection_projection`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ReplaceFilterToolAuthorityCatalogAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ReplaceFilterToolAuthorityCatalogRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ReplaceFilterToolAuthorityCatalogRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `realtime_connection_projection`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ReplaceFilterToolAuthorityCatalogStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CommitVisibilityFilterIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CommitVisibilityFilterAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CommitVisibilityFilterRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CommitVisibilityFilterRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`
+  - scenarios: (unclaimed)
 - `CommitVisibilityFilterStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`
+  - scenarios: (unclaimed)
 - `StageDeferredNamesIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StageDeferredNamesAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StageDeferredNamesRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StageDeferredNamesRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StageDeferredNamesStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ReplaceDeferredToolAuthorityCatalogIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `realtime_connection_projection`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ReplaceDeferredToolAuthorityCatalogAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ReplaceDeferredToolAuthorityCatalogRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ReplaceDeferredToolAuthorityCatalogRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ReplaceDeferredToolAuthorityCatalogStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CommitDeferredNamesIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `product_turn_streaming`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CommitDeferredNamesAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `realtime_connection_projection`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CommitDeferredNamesRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CommitDeferredNamesRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CommitDeferredNamesStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SetTurnToolOverlayIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `product_turn_streaming`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SetTurnToolOverlayAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `product_turn_streaming`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SetTurnToolOverlayRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `product_turn_streaming`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SetTurnToolOverlayRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `product_turn_streaming`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SetTurnToolOverlayStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `product_turn_streaming`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClearTurnToolOverlayIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `product_turn_streaming`, `recycle_and_compaction`, `model_routing_and_image_operation`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClearTurnToolOverlayAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `realtime_connection_projection`, `product_turn_streaming`, `model_routing_and_image_operation`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClearTurnToolOverlayRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClearTurnToolOverlayRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `product_turn_streaming`, `recycle_and_compaction`, `model_routing_and_image_operation`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClearTurnToolOverlayStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `product_turn_streaming`, `model_routing_and_image_operation`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SyncVisibilityRevisionsIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SyncVisibilityRevisionsAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SyncVisibilityRevisionsRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SyncVisibilityRevisionsRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - scenarios: (unclaimed)
 - `SyncVisibilityRevisionsStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `live_topology_and_supervision`
+  - scenarios: (unclaimed)
 - `McpServerConnectPendingIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `McpServerConnectPendingAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `McpServerConnectPendingRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `McpServerConnectPendingRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `McpServerConnectPendingStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `McpServerConnectedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `McpServerConnectedAttached`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `realtime_connection_projection`
 - `McpServerConnectedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `McpServerConnectedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `McpServerConnectedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `McpServerFailedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `McpServerFailedAttached`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `realtime_connection_projection`
 - `McpServerFailedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `McpServerFailedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - scenarios: (unclaimed)
 - `McpServerFailedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - scenarios: (unclaimed)
 - `McpServerDisconnectedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `McpServerDisconnectedAttached`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `realtime_connection_projection`
 - `McpServerDisconnectedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `McpServerDisconnectedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `McpServerDisconnectedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `McpServerReloadIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `McpServerReloadAttached`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `realtime_connection_projection`
 - `McpServerReloadRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `McpServerReloadRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `McpServerReloadStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerRequestSentIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerRequestSentAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerRequestSentRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerRequestSentRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerRequestSentStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseProgressArrivedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseProgressArrivedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseProgressArrivedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseProgressArrivedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseProgressArrivedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseTerminalArrivedCompletedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseTerminalArrivedCompletedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseTerminalArrivedCompletedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseTerminalArrivedCompletedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseTerminalArrivedCompletedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseTerminalArrivedFailedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseTerminalArrivedFailedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseTerminalArrivedFailedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseTerminalArrivedFailedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseTerminalArrivedFailedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseRejectedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseRejectedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseRejectedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseRejectedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `PeerResponseRejectedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `PeerRequestTimedOutIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerRequestTimedOutAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerRequestTimedOutRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerRequestTimedOutRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerRequestTimedOutStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerRequestSendFailedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerRequestSendFailedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerRequestSendFailedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerRequestSendFailedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerRequestSendFailedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerRequestReceivedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerRequestReceivedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerRequestReceivedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerRequestReceivedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerRequestReceivedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseRepliedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseRepliedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseRepliedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseRepliedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseRepliedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdvanceSessionContextIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdvanceSessionContextAttached`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `realtime_connection_projection`
 - `AdvanceSessionContextRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdvanceSessionContextRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - scenarios: (unclaimed)
 - `AdvanceSessionContextStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - scenarios: (unclaimed)
 - `InteractionStreamReservedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InteractionStreamReservedAttached`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `realtime_connection_projection`
 - `InteractionStreamReservedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InteractionStreamReservedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InteractionStreamReservedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InteractionStreamAttachedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InteractionStreamAttachedAttached`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `realtime_connection_projection`
 - `InteractionStreamAttachedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InteractionStreamAttachedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InteractionStreamAttachedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InteractionStreamCompletedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InteractionStreamCompletedAttached`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `realtime_connection_projection`
 - `InteractionStreamCompletedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InteractionStreamCompletedRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - scenarios: (unclaimed)
 - `InteractionStreamCompletedStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - scenarios: (unclaimed)
 - `InteractionStreamExpiredIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InteractionStreamExpiredAttached`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `realtime_connection_projection`
 - `InteractionStreamExpiredRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InteractionStreamExpiredRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InteractionStreamExpiredStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InteractionStreamClosedEarlyIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InteractionStreamClosedEarlyAttached`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `realtime_connection_projection`
 - `InteractionStreamClosedEarlyRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InteractionStreamClosedEarlyRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InteractionStreamClosedEarlyStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AttachSessionIngressIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AttachSessionIngressAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AttachSessionIngressRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AttachSessionIngressRetired`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `session_registration_and_binding`
 - `AttachSessionIngressStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AttachMobIngressIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AttachMobIngressAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AttachMobIngressRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AttachMobIngressRetired`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `session_registration_and_binding`
 - `AttachMobIngressStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DetachIngressIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DetachIngressAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DetachIngressRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DetachIngressRetired`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `session_registration_and_binding`
 - `DetachIngressStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindAdmissionBootstrapIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindAdmissionBootstrapAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindAdmissionBootstrapRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindAdmissionIdempotentAckIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindAdmissionIdempotentAckAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindAdmissionIdempotentAckRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindAdmissionSenderMismatchIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindAdmissionSenderMismatchAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindAdmissionSenderMismatchRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindAdmissionAlreadyBoundIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindAdmissionAlreadyBoundAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindAdmissionAlreadyBoundRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindMaterialAdmissionAddressMismatchIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindMaterialAdmissionAddressMismatchAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindMaterialAdmissionAddressMismatchRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindMaterialAdmissionSenderMismatchIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindMaterialAdmissionSenderMismatchAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindMaterialAdmissionSenderMismatchRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindMaterialAdmissionInvalidPeerSpecIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindMaterialAdmissionInvalidPeerSpecAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindMaterialAdmissionInvalidPeerSpecRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindMaterialAdmissionInvalidBootstrapTokenIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindMaterialAdmissionInvalidBootstrapTokenAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindMaterialAdmissionInvalidBootstrapTokenRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindMaterialAdmissionAcceptIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindMaterialAdmissionAcceptAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBindMaterialAdmissionAcceptRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveTranscriptEditAdmissionIdleBusy`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveTranscriptEditAdmissionIdleAdmissible`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveTranscriptEditAdmissionAttachedBusy`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveTranscriptEditAdmissionAttachedAdmissible`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveTranscriptEditAdmissionRunningBusy`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveTranscriptEditAdmissionRunningAdmissible`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorAuthorizeAdmissionNotBoundIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorAuthorizeAdmissionNotBoundAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorAuthorizeAdmissionNotBoundRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorAuthorizeAdmissionStaleSupervisorIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorAuthorizeAdmissionStaleSupervisorAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorAuthorizeAdmissionStaleSupervisorRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorAuthorizeAdmissionSenderMismatchIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorAuthorizeAdmissionSenderMismatchAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorAuthorizeAdmissionSenderMismatchRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorAuthorizeAdmissionIdempotentAckIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorAuthorizeAdmissionIdempotentAckAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorAuthorizeAdmissionIdempotentAckRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorAuthorizeAdmissionProceedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorAuthorizeAdmissionProceedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorAuthorizeAdmissionProceedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BindSupervisorIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BindSupervisorAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BindSupervisorRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BindSupervisorRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `live_topology_and_supervision`
+  - scenarios: (unclaimed)
 - `BindSupervisorStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - scenarios: (unclaimed)
 - `AuthorizeSupervisorIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeSupervisorAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeSupervisorRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeSupervisorRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeSupervisorStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestSupervisorTrustPublishIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestSupervisorTrustPublishAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestSupervisorTrustPublishRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestSupervisorTrustPublishRetired`
   - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - scenarios: (unclaimed)
 - `RequestSupervisorTrustPublishStopped`
   - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - scenarios: (unclaimed)
 - `RevokeSupervisorIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RevokeSupervisorAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RevokeSupervisorRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RevokeSupervisorRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RevokeSupervisorStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorTrustEdgePublishedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorTrustEdgePublishedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorTrustEdgePublishedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorTrustEdgePublishedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorTrustEdgePublishedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorTrustEdgePublishFailedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorTrustEdgePublishFailedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorTrustEdgePublishFailedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorTrustEdgePublishFailedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorTrustEdgePublishFailedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorTrustEdgeRevokedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorTrustEdgeRevokedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorTrustEdgeRevokedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorTrustEdgeRevokedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorTrustEdgeRevokedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorTrustEdgeRevokeFailedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorTrustEdgeRevokeFailedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorTrustEdgeRevokeFailedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorTrustEdgeRevokeFailedRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorTrustEdgeRevokeFailedStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PublishLocalEndpointIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PublishLocalEndpointAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PublishLocalEndpointRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClearLocalEndpointIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClearLocalEndpointAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClearLocalEndpointRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AddDirectPeerEndpointIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AddDirectPeerEndpointAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AddDirectPeerEndpointRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RepairAddDirectPeerEndpointIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RepairAddDirectPeerEndpointAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RepairAddDirectPeerEndpointRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RemoveDirectPeerEndpointIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RemoveDirectPeerEndpointAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RemoveDirectPeerEndpointRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RepairRemoveDirectPeerEndpointIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RepairRemoveDirectPeerEndpointAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RepairRemoveDirectPeerEndpointRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBridgeCommandAdmissionAcceptedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBridgeCommandAdmissionAcceptedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBridgeCommandAdmissionAcceptedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBridgeCommandAdmissionNotBoundIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBridgeCommandAdmissionNotBoundAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBridgeCommandAdmissionNotBoundRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBridgeCommandAdmissionStaleSupervisorIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBridgeCommandAdmissionStaleSupervisorAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBridgeCommandAdmissionStaleSupervisorRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBridgeCommandAdmissionSenderMismatchIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBridgeCommandAdmissionSenderMismatchAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorBridgeCommandAdmissionSenderMismatchRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeSupervisorMobPeerOverlayIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeSupervisorMobPeerOverlayAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeSupervisorMobPeerOverlayRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RepairSupervisorMobPeerOverlayIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RepairSupervisorMobPeerOverlayAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RepairSupervisorMobPeerOverlayRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ApplyMobPeerOverlayIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ApplyMobPeerOverlayAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ApplyMobPeerOverlayRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RepairMobPeerOverlayIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RepairMobPeerOverlayAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RepairMobPeerOverlayRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyTurnTerminalCauseClassMissingIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyTurnTerminalCauseClassUnknownIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyTurnTerminalCauseClassBudgetExhaustedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyTurnTerminalCauseClassTimeBudgetExceededIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyTurnTerminalCauseClassRetryExhaustedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyTurnTerminalCauseClassStructuredOutputValidationFailedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyTurnTerminalCauseClassOtherFailureIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyTurnTerminalityTerminalIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyTurnTerminalityTerminalAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyTurnTerminalityTerminalRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyTurnTerminalityNonTerminalIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyTurnTerminalityNonTerminalAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyTurnTerminalityNonTerminalRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyLlmFailureRecoveryRecoverIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyLlmFailureRecoveryRecoverAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyLlmFailureRecoveryRecoverRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyLlmFailureRecoveryExhaustedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyLlmFailureRecoveryExhaustedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyLlmFailureRecoveryExhaustedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyLlmFailureRecoveryFatalIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyLlmFailureRecoveryFatalAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyLlmFailureRecoveryFatalRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyAssistantOutputEmptyTerminalIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyAssistantOutputEmptyTerminalAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyAssistantOutputEmptyTerminalRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyAssistantOutputProceedIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyAssistantOutputProceedAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyAssistantOutputProceedRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyCallTimeoutRetryableIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyCallTimeoutRetryableAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyCallTimeoutRetryableRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyCallTimeoutTerminalIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyCallTimeoutTerminalAttached`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyCallTimeoutTerminalRunning`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveTurnSurfaceResultNoneMissingTerminalIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveTurnSurfaceResultCompletedSuccessIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveTurnSurfaceResultCompletedFailureIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveTurnSurfaceResultFailedHardFailureIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveTurnSurfaceResultCancelledCancelledIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveTurnSurfaceResultCancelledFailureIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveTurnSurfaceResultBudgetExhaustedSuccessIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveTurnSurfaceResultBudgetExhaustedFailureIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveTurnSurfaceResultTimeBudgetExceededHardFailureIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveTurnSurfaceResultStructuredOutputValidationFailedHardFailureIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `RuntimeBound`
@@ -4913,499 +4928,499 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
 - `TurnRunStarted`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `TurnBoundaryApplied`
   - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`
+  - scenarios: (unclaimed)
 - `LiveBoundaryContextReceiptResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `TurnRunCompleted`
   - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `recycle_and_compaction`
+  - scenarios: (unclaimed)
 - `TurnRunFailed`
   - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`
+  - scenarios: (unclaimed)
 - `TurnRunCancelled`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `TurnCheckCompaction`
-  - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestCancellationAtBoundary`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `WakeInterrupt`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CommittedVisibleSetPublished`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RuntimeNotice`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
 - `RuntimeEffectFact`
-  - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RuntimeCompletionResultResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RuntimeCompletionCleanupResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RuntimeCompletionWaitFailureResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RuntimeOpsLifecycleDurabilityResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `UserInterruptPublicResultResolved`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ModelRoutingStatusChanged`
   - anchors: `meerkat_machine`
   - scenarios: `model_routing_and_image_operation`
 - `SwitchTurnDenied`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `model_routing_and_image_operation`
 - `SwitchTurnPersistentReconfigureRequested`
   - anchors: `meerkat_machine`
   - scenarios: `model_routing_and_image_operation`
 - `SwitchTurnFiniteOverrideActivated`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `model_routing_and_image_operation`
 - `SwitchTurnFiniteOverrideRestored`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `model_routing_and_image_operation`
 - `ImageOperationPhaseChanged`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `model_routing_and_image_operation`
 - `ImageOperationTerminalClassified`
-  - anchors: `meerkat_machine`
-  - scenarios: `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ImageOperationDenied`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `model_routing_and_image_operation`
 - `ModelRoutingApprovalTerminalized`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `model_routing_and_image_operation`
 - `ResolveAdmission`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `SubmitAdmittedIngressEffect`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `input_admission_and_queueing`
 - `SubmitRunPrimitive`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `ResolveCompletionAsTerminated`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ApplyControlPlaneCommand`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InitiateRecycle`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `recycle_and_compaction`
 - `IngressAccepted`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `AdmissionResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdmissionValidationResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdmissionIdempotencyResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoveredInputLifecycleNormalized`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoveredInputDurabilityClassified`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InputPublicLifecycleResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InputPublicTerminalOutcomeResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InputBehavioralTerminalityResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `TurnTerminalCauseClassResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `TurnTerminalityClassified`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AssistantOutputClassified`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CallTimeoutClassified`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LlmFailureRecoveryClassified`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `TurnSurfaceResultResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StoredInputStateSeedAuthorized`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `product_turn_streaming`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RuntimeLifecycleStateClassified`
-  - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RuntimeLifecycleDurabilityClassified`
-  - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RuntimeLoopQueueAdmissionClassified`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `VisibleRuntimePhaseResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PostAdmissionSignal`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `input_admission_and_queueing`
 - `ReadyForRun`
   - anchors: `meerkat_machine`
-  - scenarios: `recycle_and_compaction`
+  - scenarios: (unclaimed)
 - `InputLifecycleNotice`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - scenarios: (unclaimed)
 - `CompletionResolved`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `ops_completion_and_waiters`
 - `IngressNotice`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
 - `SilentIntentApplied`
   - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `realtime_connection_projection`
+  - scenarios: (unclaimed)
 - `CheckCompaction`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `recycle_and_compaction`
 - `RecordTerminalOutcome`
-  - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordRunAssociation`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordBoundarySequence`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SubmitOpEvent`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NotifyOpWatcher`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ExposeOperationPeer`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RetainTerminalRecord`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `ops_completion_and_waiters`
 - `DiscardRecoveredOperationRecord`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `ops_completion_and_waiters`
 - `OperationTerminal`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
 - `OperationNonTerminal`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `OperationPublicResultClassified`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `OperationCompletionFeedClassified`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `OperationCompletionWakeClassified`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `OperationDurabilityClassified`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `OperationTransitionIdempotentSuccess`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `OperationTransitionNotIdempotent`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `EvictCompletedRecord`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
 - `CompletionFeedEntryRecovered`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CompletionProduced`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `ops_completion_and_waiters`
 - `AgentCompletionCursorAdvanced`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RuntimeObservedCompletionCursorAdvanced`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RuntimeInjectedCompletionCursorAdvanced`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `OpRegistrationAdmissionResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `OpLifecycleTransitionRejected`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `WaitAllAdmissionResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `WaitAllSatisfied`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `ops_completion_and_waiters`
 - `CollectCompletedResult`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `ops_completion_and_waiters`
 - `SurfaceRequestAdmissionAccepted`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - scenarios: (unclaimed)
 - `SurfaceRequestAdmissionDuplicate`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceRequestNotFound`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceRequestTerminalPublish`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - scenarios: (unclaimed)
 - `SurfaceRequestTerminalRespondWithoutPublish`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceRequestCancelled`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceRequestAlreadyCancelled`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceRequestAlreadyPublished`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceRequestAlreadyCompleted`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceRequestPublished`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceRequestAlreadyTerminal`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceRequestCancelledBeforePublish`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceRequestCompleted`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
 - `SurfaceRequestSupersededByCancel`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveRefreshResultResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveCloseResultResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveCommandResultResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveCommandRejectionResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveChannelRequestRejectionResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveWebrtcTokenIssued`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveWebrtcAnswerAdmissionResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveWebrtcAnswerResultResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveWebsocketTokenIssued`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveWebsocketTokenAdmissionResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveOpenAdmissionResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveOpenAdmissionAbandoned`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`, `input_admission_and_queueing`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SessionEventStreamOpenResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SessionEventStreamTerminalResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SessionEventStreamCloseResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `MobEventStreamOpenResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `MobEventStreamTerminalResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `MobEventStreamCloseResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveChannelStatusResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `ops_completion_and_waiters`, `model_routing_and_image_operation`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RealtimeTranscriptAppended`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`, `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `EnqueueClassifiedEntry`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `input_admission_and_queueing`
 - `PeerIngressClassified`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `input_admission_and_queueing`
 - `PeerResponseReplyClassified`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerIngressReceiveResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerIngressDequeueResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SpawnDrainTask`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ScheduleSurfaceCompletion`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RefreshVisibleSurfaceSet`
-  - anchors: `meerkat_machine`
-  - scenarios: `product_turn_streaming`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `EmitExternalToolDelta`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CloseSurfaceConnection`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RejectSurfaceCall`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
 - `PublishSupervisorTrustEdge`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `live_topology_and_supervision`
 - `RevokeSupervisorTrustEdge`
-  - anchors: `meerkat_machine`
+  - anchors: (unclaimed)
   - scenarios: `live_topology_and_supervision`
 - `McpServerStateChanged`
   - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - scenarios: (unclaimed)
 - `McpServerReloadRequested`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerInteractionStateChanged`
   - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `model_routing_and_image_operation`
+  - scenarios: (unclaimed)
 - `PeerInteractionCleanup`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InboundPeerInteractionStateChanged`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `model_routing_and_image_operation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SessionContextAdvanced`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `InteractionStreamStateChanged`
   - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - scenarios: (unclaimed)
 - `InteractionStreamCleanup`
-  - anchors: `meerkat_machine`
-  - scenarios: `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LocalEndpointChanged`
   - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - scenarios: (unclaimed)
 - `SupervisorBindAdmissionResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorBindMaterialAdmissionResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `TranscriptEditAdmissionResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorAuthorizeAdmissionResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorBridgeCommandAdmissionResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SessionLlmReconfigurePlanResolved`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerProjectionChanged`
   - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `realtime_connection_projection`, `product_turn_streaming`, `model_routing_and_image_operation`
+  - scenarios: (unclaimed)
 - `CommsTrustReconcileRequested`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `fence_requires_bound_runtime`
-  - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `runtime_generation_requires_bound_runtime`
-  - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `runtime_epoch_requires_bound_runtime`
-  - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`, `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `runtime_binding_identity_is_typed`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `running_has_current_run`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `deferred_stop_requires_active_runtime_phase`
-  - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `current_run_only_while_running_or_retired`
-  - anchors: `meerkat_machine`
-  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `current_run_has_pre_run_phase`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `staged_surface_ops_are_known_and_sequenced`
-  - anchors: `meerkat_machine`
-  - scenarios: `ops_completion_and_waiters`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `staged_reload_surfaces_are_active`
-  - anchors: `meerkat_machine`
-  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `peer_ingress_owner_consistency`
-  - anchors: `meerkat_machine`
-  - scenarios: `input_admission_and_queueing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `supervisor_binding_consistency`
-  - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`, `realtime_connection_projection`, `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `supervisor_revoke_pending_consistency`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `supervisor_publish_pending_consistency`
-  - anchors: `meerkat_machine`
-  - scenarios: `live_topology_and_supervision`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 
 <!-- GENERATED_COVERAGE_END -->

@@ -470,6 +470,10 @@ pub struct MobTopologySpecInput {
 pub struct MobSupervisorSpecInput {
     pub role: String,
     pub escalation_threshold: u32,
+    /// Declared escalation turn timeout in milliseconds. Absent means the
+    /// runtime default applies (mirrors the domain `SupervisorSpec` owner).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation_turn_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

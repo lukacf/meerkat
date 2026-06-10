@@ -48,9 +48,8 @@ impl GoogleAuthMethod {
 
     /// The persisted credential mode this auth method stores in the
     /// `TokenStore`, or `None` for ADC/authorizer-backed methods that hold no
-    /// persisted secret. Typed owner of the auth-method -> persisted-mode
-    /// mapping (replaces the string-keyed `persisted_auth_mode_for_auth_method`
-    /// decision table).
+    /// persisted secret. Typed owner of the
+    /// auth-method -> persisted-mode mapping.
     pub fn persisted_auth_mode(self) -> Option<crate::auth::token_store::PersistedAuthMode> {
         use crate::auth::token_store::PersistedAuthMode;
         match self {
@@ -72,6 +71,36 @@ mod tests {
         for v in GoogleAuthMethod::ALL {
             let v = *v;
             assert_eq!(GoogleAuthMethod::parse(v.as_str()), Some(v));
+        }
+    }
+
+    #[test]
+    fn persisted_auth_mode_mapping_is_typed_owner_truth() {
+        use crate::auth::token_store::PersistedAuthMode;
+        let cases = [
+            (GoogleAuthMethod::ApiKey, Some(PersistedAuthMode::ApiKey)),
+            (
+                GoogleAuthMethod::ApiKeyExpress,
+                Some(PersistedAuthMode::ApiKey),
+            ),
+            (
+                GoogleAuthMethod::BearerApiKey,
+                Some(PersistedAuthMode::StaticBearer),
+            ),
+            (
+                GoogleAuthMethod::GoogleOauth,
+                Some(PersistedAuthMode::GoogleOauth),
+            ),
+            (GoogleAuthMethod::ExternalAuthorizer, None),
+            (GoogleAuthMethod::Adc, None),
+            (GoogleAuthMethod::ComputeAdc, None),
+        ];
+        for (method, expected) in cases {
+            assert_eq!(
+                method.persisted_auth_mode(),
+                expected,
+                "persisted mode for {method:?}"
+            );
         }
     }
 }

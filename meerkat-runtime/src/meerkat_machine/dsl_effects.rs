@@ -185,4 +185,52 @@ impl MeerkatMachine {
         }
         Ok((previous_snapshot, effects))
     }
+
+    /// Typed-refusal variant of [`Self::apply_session_dsl_input_with_dispatch_failure`]
+    /// for the formal-composition routed-input seam: every rejection leg keeps
+    /// its stable typed discriminant (per-variant for generated-machine
+    /// rejections) instead of collapsing into a bare string the consumer
+    /// surface would re-wrap under one generic code.
+    pub(super) async fn apply_routed_session_dsl_input(
+        &self,
+        session_id: &SessionId,
+        input: dsl::MeerkatMachineInput,
+        context: &str,
+    ) -> Result<
+        (dsl::MeerkatMachineAuthoritySnapshot, DslTransitionEffects),
+        dsl_authority::DslTransitionRefusal,
+    > {
+        if let Err(reason) = Self::reject_raw_fieldless_runtime_internal_dsl_input(&input) {
+            return Err(dsl_authority::DslTransitionRefusal::other(
+                "routed_raw_internal_input_rejected",
+                reason,
+            ));
+        }
+        let authority = self
+            .session_dsl_authority(session_id)
+            .await
+            .map_err(|reason| {
+                dsl_authority::DslTransitionRefusal::other("session_authority_unavailable", reason)
+            })?;
+        let (previous_snapshot, effects) = {
+            let mut authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let previous_snapshot = authority.snapshot();
+            let effects = dsl::MeerkatMachineMutator::apply(&mut *authority, input)
+                .map(|transition| DslTransitionEffects::new(transition.into_effects()))
+                .map_err(|err| dsl_authority::refusal(err, context))?;
+            (previous_snapshot, effects)
+        };
+        if let Err(error) = self.dispatch_routed_signals_from_effects(&effects).await {
+            // CommittedEffectDispatchFailure::PreserveCommittedDslState
+            // semantics: the committed DSL state is preserved; only the
+            // dispatch fault is surfaced (typed).
+            return Err(dsl_authority::DslTransitionRefusal::other(
+                "committed_effect_dispatch_failed",
+                format!("DSL authority ({context}): committed effect dispatch failed: {error}"),
+            ));
+        }
+        Ok((previous_snapshot, effects))
+    }
 }

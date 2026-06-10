@@ -519,7 +519,17 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
             if restore_result.is_ok() {
                 runtime_adapter.unregister_session(&session_id).await;
                 #[cfg(feature = "comms")]
-                runtime_adapter.abort_comms_drain(&session_id).await;
+                if let Err(error) = runtime_adapter.abort_comms_drain(&session_id).await {
+                    // Secondary fault on the restore path: the primary
+                    // restore outcome owns the result channel, so this drain
+                    // fault is surfaced as a typed warning instead of
+                    // overwriting the primary outcome.
+                    tracing::warn!(
+                        %session_id,
+                        %error,
+                        "failed to abort comms drain after materialized-failure restore"
+                    );
+                }
             }
             promotion_cleanup.disarm();
             let _ = result_tx.send(match restore_result {
@@ -824,7 +834,17 @@ pub fn spawn_pending_create_and_start_turn_with_admission_guard(
             if restore_result.is_ok() {
                 runtime_adapter.unregister_session(&session_id).await;
                 #[cfg(feature = "comms")]
-                runtime_adapter.abort_comms_drain(&session_id).await;
+                if let Err(error) = runtime_adapter.abort_comms_drain(&session_id).await {
+                    // Secondary fault on the restore path: the primary
+                    // restore outcome owns the result channel, so this drain
+                    // fault is surfaced as a typed warning instead of
+                    // overwriting the primary outcome.
+                    tracing::warn!(
+                        %session_id,
+                        %error,
+                        "failed to abort comms drain after materialized-failure restore"
+                    );
+                }
             }
             promotion_cleanup.disarm();
             let _ = result_tx.send(match restore_result {

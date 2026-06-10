@@ -882,13 +882,13 @@ pub struct ModelDefaults {
 impl Default for ModelDefaults {
     fn default() -> Self {
         Self {
-            anthropic: crate::model_profile::catalog::default_model("anthropic")
+            anthropic: crate::model_profile::catalog::default_model(crate::Provider::Anthropic)
                 .unwrap_or_default()
                 .to_string(),
-            openai: crate::model_profile::catalog::default_model("openai")
+            openai: crate::model_profile::catalog::default_model(crate::Provider::OpenAI)
                 .unwrap_or_default()
                 .to_string(),
-            gemini: crate::model_profile::catalog::default_model("gemini")
+            gemini: crate::model_profile::catalog::default_model(crate::Provider::Gemini)
                 .unwrap_or_default()
                 .to_string(),
         }
@@ -2090,7 +2090,8 @@ mod tests {
         let config = Config::template().expect("template parses");
         assert_eq!(
             config.agent.model.as_str(),
-            crate::model_profile::catalog::default_model("openai").expect("openai catalog default")
+            crate::model_profile::catalog::default_model(crate::Provider::OpenAI)
+                .expect("openai catalog default")
         );
     }
 

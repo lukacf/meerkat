@@ -97,13 +97,20 @@ impl JsonlStore {
         self.dir.join("session_index.sqlite3")
     }
 
-    async fn read_all_metadata_sidecars(&self) -> Result<Vec<SessionMeta>, StoreError> {
+    /// Derive `SessionMeta` for every durable session file.
+    ///
+    /// The per-session `.jsonl` file is the single durable truth; the metadata
+    /// used to rebuild the index projection is derived from it directly, so a
+    /// reconcile can never resurrect state that diverges from what `load`
+    /// returns. A corrupt session file surfaces as a typed serialization
+    /// fault rather than being silently dropped from the listing.
+    async fn read_all_session_metas(&self) -> Result<Vec<SessionMeta>, StoreError> {
         let mut entries = fs::read_dir(&self.dir).await?;
         let mut sessions = Vec::new();
 
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("meta") {
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                 continue;
             }
 
@@ -112,8 +119,8 @@ impl JsonlStore {
                 Err(err) => return Err(StoreError::Io(err)),
             };
 
-            match serde_json::from_str::<SessionMeta>(&contents) {
-                Ok(meta) => sessions.push(meta),
+            match serde_json::from_str::<Session>(&contents) {
+                Ok(session) => sessions.push(SessionMeta::from(&session)),
                 Err(err) => return Err(StoreError::Serialization(err)),
             }
         }
@@ -176,10 +183,12 @@ impl JsonlStore {
             Err(err) => return Err(StoreError::Join(err)),
         };
 
-        // Always reconcile: rebuild from sidecars if index is missing entries
-        // This handles the case where a crash happens after writing session/meta but before index insert
-        let metas = self.read_all_metadata_sidecars().await?;
-        let sidecar_count = metas.len();
+        // Always reconcile: rebuild the index projection from the canonical
+        // per-session `.jsonl` files. This handles a crash after the session
+        // rename but before the index insert — the durable truth is intact and
+        // the projection is rematerialized from it.
+        let metas = self.read_all_session_metas().await?;
+        let session_count = metas.len();
 
         let index_count = {
             let index = Arc::clone(&index);
@@ -191,16 +200,16 @@ impl JsonlStore {
             Err(err) => return Err(StoreError::Join(err)),
         };
 
-        // Always reconcile on startup when sidecars exist.
+        // Always reconcile on startup when session files exist.
         // This handles:
-        // 1. Missing index entries (sidecar_count > index_count)
-        // 2. Stale updated_at entries when session was updated but index write failed
+        // 1. Missing index entries (session_count > index_count)
+        // 2. Stale updated_at entries when a session was updated but the index write failed
         // 3. Any other partial-write scenarios where counts match but metadata differs
-        if sidecar_count > 0 {
-            if sidecar_count != index_count {
+        if session_count > 0 {
+            if session_count != index_count {
                 tracing::info!(
-                    "Reconciling session index: {} sidecars vs {} indexed entries",
-                    sidecar_count,
+                    "Reconciling session index: {} session files vs {} indexed entries",
+                    session_count,
                     index_count
                 );
             }
@@ -234,10 +243,6 @@ impl JsonlStore {
 
     fn session_path(&self, id: &SessionId) -> PathBuf {
         self.dir.join(format!("{}.jsonl", id.0))
-    }
-
-    fn metadata_path(&self, id: &SessionId) -> PathBuf {
-        self.dir.join(format!("{}.meta", id.0))
     }
 
     fn session_lock_path(&self, id: &SessionId) -> PathBuf {
@@ -300,7 +305,6 @@ impl JsonlStore {
         self.init().await?;
 
         let path = self.session_path(session.id());
-        let meta_path = self.metadata_path(session.id());
 
         // Serialize session as JSON (pretty or compact based on setting)
         let json = if self.pretty_print {
@@ -310,11 +314,10 @@ impl JsonlStore {
         }
         .map_err(StoreError::Serialization)?;
 
-        // Create metadata for the sidecar file
-        let meta = SessionMeta::from(session);
-        let meta_json = serde_json::to_string(&meta).map_err(StoreError::Serialization)?;
-
-        // Write session atomically (write to temp, then rename)
+        // Write the session file atomically (write to temp, then rename). This
+        // single rename is the durable commit point: the `.jsonl` file is the
+        // only durable truth, and both `load` and the index projection derive
+        // from it — there is no second durable artifact that could lag it.
         let temp_path = path.with_extension("jsonl.tmp");
         let mut file = fs::File::create(&temp_path).await?;
         file.write_all(json.as_bytes()).await?;
@@ -324,16 +327,10 @@ impl JsonlStore {
 
         fs::rename(&temp_path, &path).await?;
 
-        // Write metadata sidecar atomically
-        let meta_temp_path = meta_path.with_extension("meta.tmp");
-        let mut meta_file = fs::File::create(&meta_temp_path).await?;
-        meta_file.write_all(meta_json.as_bytes()).await?;
-        meta_file.flush().await?;
-        meta_file.sync_all().await?;
-        drop(meta_file);
-
-        fs::rename(&meta_temp_path, &meta_path).await?;
-
+        // Update the index projection. A crash between the rename above and
+        // this insert self-heals: `open_index` reconciles the projection from
+        // the session files.
+        let meta = SessionMeta::from(session);
         let index = self.index().await?;
         let result = spawn_blocking(move || index.insert_meta(meta)).await;
         match result {
@@ -366,15 +363,15 @@ impl JsonlStore {
 
     /// List sessions via the SQLite session index.
     ///
-    /// The index is a **derived projection**, not canonical state. The source
-    /// of truth is the per-session `.meta` sidecar written atomically (temp +
-    /// rename + `sync_all`) in [`save_impl`](Self::save_impl) *before* the index
-    /// insert. `open_index` (and therefore the first `index()` call backing this
-    /// method) always reconciles the index by rebuilding it from the `.meta`
-    /// sidecars, so a crash that lands the sidecars but not the index insert
-    /// self-heals on next open: the canonical truth is intact and the projection
-    /// is rematerialized from it. A stale or missing index can never make this
-    /// listing diverge from the sidecars beyond the next reconcile.
+    /// The index is a **derived projection**, not canonical state. The single
+    /// durable truth is the per-session `.jsonl` file written atomically
+    /// (temp + rename + `sync_all`) in [`save_impl`](Self::save_impl).
+    /// `open_index` (and therefore the first `index()` call backing this
+    /// method) always reconciles the index by re-deriving `SessionMeta` from
+    /// the session files, so a crash that lands the session rename but not the
+    /// index insert self-heals on next open: the canonical truth is intact and
+    /// the projection is rematerialized from it. There is no second durable
+    /// metadata artifact that this listing could diverge toward.
     async fn list_impl(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, StoreError> {
         let index = self.index().await?;
         let result = spawn_blocking(move || index.list_meta(filter)).await;
@@ -387,16 +384,9 @@ impl JsonlStore {
 
     async fn delete_impl(&self, id: &SessionId) -> Result<(), StoreError> {
         let path = self.session_path(id);
-        let meta_path = self.metadata_path(id);
 
         // Use async remove_file and handle NotFound instead of sync path.exists()
         if let Err(e) = fs::remove_file(&path).await
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            return Err(e.into());
-        }
-
-        if let Err(e) = fs::remove_file(&meta_path).await
             && e.kind() != std::io::ErrorKind::NotFound
         {
             return Err(e.into());
@@ -572,51 +562,31 @@ mod tests {
         Ok(())
     }
 
+    /// The `.jsonl` session file is the SINGLE durable artifact: no metadata
+    /// sidecar exists for `list`/reconcile to diverge toward.
     #[tokio::test]
-    async fn test_jsonl_store_uses_metadata_sidecar() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_jsonl_store_writes_no_metadata_sidecar() -> Result<(), Box<dyn std::error::Error>>
+    {
         let temp_dir = tempfile::tempdir()?;
         let store = JsonlStore::new(temp_dir.path().to_path_buf());
 
-        // Create a session with some content
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("Hello".to_string())));
 
         let id = session.id().clone();
         store.save(&session).await?;
 
-        // Verify metadata sidecar file was created
         let meta_path = temp_dir.path().join(format!("{}.meta", id.0));
         assert!(
-            meta_path.exists(),
-            "Metadata sidecar file should exist at {meta_path:?}"
+            !meta_path.exists(),
+            "no derived metadata sidecar may be persisted alongside the session file"
         );
 
-        // Verify the metadata file contains valid SessionMeta
-        let meta_contents = fs::read_to_string(&meta_path).await?;
-        let meta: SessionMeta = serde_json::from_str(&meta_contents)?;
-        assert_eq!(meta.id, id);
-        assert_eq!(meta.message_count, 1);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_jsonl_store_list_reads_only_metadata() -> Result<(), Box<dyn std::error::Error>> {
-        let temp_dir = tempfile::tempdir()?;
-        let store = JsonlStore::new(temp_dir.path().to_path_buf());
-
-        // Create a session
-        let mut session = Session::new();
-        session.push(Message::User(UserMessage::text("Hello".to_string())));
-        store.save(&session).await?;
-
-        // Delete the main session file but keep the metadata
-        let session_path = temp_dir.path().join(format!("{}.jsonl", session.id().0));
-        fs::remove_file(&session_path).await?;
-
-        // list() should still work because it reads from metadata sidecar
+        // Listing is served from the index projection derived from the file.
         let sessions = store.list(SessionFilter::default()).await?;
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].id, *session.id());
+        assert_eq!(sessions[0].id, id);
+        assert_eq!(sessions[0].message_count, 1);
         Ok(())
     }
 
@@ -645,27 +615,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_jsonl_store_list_uses_index_when_metadata_missing()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let temp_dir = tempfile::tempdir()?;
-        let store = JsonlStore::new(temp_dir.path().to_path_buf());
-
-        let mut session = Session::new();
-        session.push(Message::User(UserMessage::text("Hello".to_string())));
-        let id = session.id().clone();
-        store.save(&session).await?;
-
-        // If listing relies on scanning `.meta` sidecars, this would now return 0.
-        let meta_path = temp_dir.path().join(format!("{}.meta", id.0));
-        fs::remove_file(&meta_path).await?;
-
-        let sessions = store.list(SessionFilter::default()).await?;
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].id, id);
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn test_jsonl_store_rebuilds_index_when_missing() -> Result<(), Box<dyn std::error::Error>>
     {
         let temp_dir = tempfile::tempdir()?;
@@ -680,7 +629,8 @@ mod tests {
             id
         };
 
-        // Remove the index file to force an index rebuild from `.meta` sidecars.
+        // Remove the index file to force an index rebuild from the canonical
+        // `.jsonl` session files.
         let index_path = store_path.join("session_index.sqlite3");
         fs::remove_file(&index_path).await?;
 
@@ -691,11 +641,12 @@ mod tests {
         Ok(())
     }
 
-    /// A corrupt `.meta` sidecar must surface as a typed `SessionStoreError`
-    /// rather than being silently dropped (laundered) from the reconciliation
-    /// set, which would otherwise yield an incomplete `list()` with no fault.
+    /// A corrupt durable session file must surface as a typed
+    /// `SessionStoreError` rather than being silently dropped (laundered) from
+    /// the reconciliation set, which would otherwise yield an incomplete
+    /// `list()` with no fault.
     #[tokio::test]
-    async fn test_jsonl_store_list_surfaces_corrupt_metadata_sidecar()
+    async fn test_jsonl_store_list_surfaces_corrupt_session_file()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = tempfile::tempdir()?;
         let store_path = temp_dir.path().to_path_buf();
@@ -709,68 +660,63 @@ mod tests {
             id
         };
 
-        // Corrupt the metadata sidecar so reconciliation can no longer parse it.
-        let meta_path = store_path.join(format!("{}.meta", id.0));
-        fs::write(&meta_path, b"{ this is not valid SessionMeta json").await?;
+        // Corrupt the session file so reconciliation can no longer parse it.
+        let session_path = store_path.join(format!("{}.jsonl", id.0));
+        fs::write(&session_path, b"{ this is not a valid Session json").await?;
 
-        // A fresh store forces index reconciliation, which scans sidecars.
-        // The corrupt sidecar must propagate as a typed serialization error
-        // instead of an incomplete `Ok(short Vec)`.
+        // A fresh store forces index reconciliation, which derives metadata
+        // from the session files. The corrupt file must propagate as a typed
+        // serialization error instead of an incomplete `Ok(short Vec)`.
         let store = JsonlStore::new(store_path);
         let result = store.list(SessionFilter::default()).await;
         assert!(
             matches!(result, Err(SessionStoreError::Serialization(_))),
-            "corrupt .meta must surface as SessionStoreError::Serialization, got {result:?}"
+            "corrupt session file must surface as SessionStoreError::Serialization, got {result:?}"
         );
         Ok(())
     }
 
-    /// Row #104 gate: the SQLite index is a reconciled projection of the `.meta`
-    /// sidecars, which are the canonical source of truth. `save_impl` writes the
-    /// session file and the `.meta` sidecar atomically (temp + rename + sync)
-    /// *before* inserting into the index, so a crash in the index-insert window
-    /// leaves the canonical sidecar durable. A fresh `open_index` must reconcile
-    /// the projection back from the sidecars, yielding a complete listing with
-    /// no divergence. This asserts both the durable sidecar invariant and the
-    /// reconcile-on-open behavior the doc-comment on `list_impl` declares.
+    /// Row #104 gate: the per-session `.jsonl` file is the SINGLE durable
+    /// truth, and the SQLite index is a projection reconciled from it. A crash
+    /// (or out-of-band write) that lands the session file but not the index
+    /// insert cannot split durable truth: a fresh `open_index` re-derives the
+    /// listing from the session files, so `list` and `load` agree again.
     #[tokio::test]
-    async fn test_jsonl_store_meta_sidecar_is_source_of_truth_for_index()
+    async fn test_jsonl_session_file_is_single_source_of_truth_for_index()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = tempfile::tempdir()?;
         let store_path = temp_dir.path().to_path_buf();
 
-        let id = {
+        let (id, updated_json) = {
             let store = JsonlStore::new(store_path.clone());
             let mut session = Session::new();
             session.push(Message::User(UserMessage::text("Hello".to_string())));
             let id = session.id().clone();
             store.save(&session).await?;
-            id
+
+            // Prepare a NEWER durable session state and write it directly to
+            // the session file, bypassing the index insert — exactly the state
+            // a crash between the session rename and the index insert leaves.
+            session.push(Message::User(UserMessage::text("again".to_string())));
+            (id, serde_json::to_string_pretty(&session)?)
         };
 
-        // The canonical `.meta` sidecar must exist independently of the index:
-        // `save_impl` writes it (atomically) before the index insert, so it is
-        // durable even if the subsequent index write never lands.
-        let meta_path = store_path.join(format!("{}.meta", id.0));
-        assert!(
-            fs::try_exists(&meta_path).await?,
-            "canonical .meta sidecar must be written before index insert"
-        );
+        let session_path = store_path.join(format!("{}.jsonl", id.0));
+        fs::write(&session_path, updated_json).await?;
 
-        // Simulate the crash window: the durable sidecar exists, but the index
-        // projection is gone. A fresh store must reconcile the full listing
-        // back from the sidecars rather than diverging from canonical truth.
-        let index_path = store_path.join("session_index.sqlite3");
-        fs::remove_file(&index_path).await?;
-
+        // A fresh store must reconcile the listing from the session file: the
+        // listing reflects the newer durable truth (2 messages), proving the
+        // index cannot serve a stale parallel artifact.
         let store = JsonlStore::new(store_path);
         let sessions = store.list(SessionFilter::default()).await?;
-        assert_eq!(
-            sessions.len(),
-            1,
-            "list() must reconcile from .meta sidecars, not the dropped index"
-        );
+        assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, id);
+        assert_eq!(
+            sessions[0].message_count, 2,
+            "list() must re-derive metadata from the session file, not a stale projection"
+        );
+        let loaded = store.load(&id).await?.expect("session loads");
+        assert_eq!(loaded.messages().len(), 2);
         Ok(())
     }
 

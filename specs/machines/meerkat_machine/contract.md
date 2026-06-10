@@ -429,7 +429,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SupersedeInput`(input_id: String, superseded_by: String)
 - `CoalesceInput`(input_id: String, aggregate_id: String)
 - `AbandonInput`(input_id: String, reason: InputAbandonReason, attempt_count: u64)
-- `RecordBoundarySeq`(input_id: String, seq: u64)
+- `RecordBoundarySeq`(input_id: String, run_id: RunId)
 - `RegisterOp`(operation_id: String, kind: OperationKind, source: Option<OperationSource>, max_concurrent: Option<u64>)
 - `StartOp`(operation_id: String)
 - `CompleteOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: String)
@@ -772,26 +772,71 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `RegisterSessionIdle`
 - From: `Idle`
 - On: `RegisterSession`(session_id)
+- Guards:
+  - `new_session_binding`
 - To: `Idle`
 
 ### `RegisterSessionAttached`
 - From: `Attached`
 - On: `RegisterSession`(session_id)
+- Guards:
+  - `new_session_binding`
 - To: `Attached`
 
 ### `RegisterSessionRunning`
 - From: `Running`
 - On: `RegisterSession`(session_id)
+- Guards:
+  - `new_session_binding`
 - To: `Running`
 
 ### `RegisterSessionRetired`
 - From: `Retired`
 - On: `RegisterSession`(session_id)
+- Guards:
+  - `new_session_binding`
 - To: `Retired`
 
 ### `RegisterSessionStopped`
 - From: `Stopped`
 - On: `RegisterSession`(session_id)
+- Guards:
+  - `new_session_binding`
+- To: `Stopped`
+
+### `RegisterSessionIdempotentIdle`
+- From: `Idle`
+- On: `RegisterSession`(session_id)
+- Guards:
+  - `same_session_binding`
+- To: `Idle`
+
+### `RegisterSessionIdempotentAttached`
+- From: `Attached`
+- On: `RegisterSession`(session_id)
+- Guards:
+  - `same_session_binding`
+- To: `Attached`
+
+### `RegisterSessionIdempotentRunning`
+- From: `Running`
+- On: `RegisterSession`(session_id)
+- Guards:
+  - `same_session_binding`
+- To: `Running`
+
+### `RegisterSessionIdempotentRetired`
+- From: `Retired`
+- On: `RegisterSession`(session_id)
+- Guards:
+  - `same_session_binding`
+- To: `Retired`
+
+### `RegisterSessionIdempotentStopped`
+- From: `Stopped`
+- On: `RegisterSession`(session_id)
+- Guards:
+  - `same_session_binding`
 - To: `Stopped`
 
 ### `StageDeferredSession`
@@ -9019,7 +9064,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecordBoundarySeqIdle`
 - From: `Idle`
-- On: `RecordBoundarySeq`(input_id, seq)
+- On: `RecordBoundarySeq`(input_id, run_id)
 - Guards:
   - `input_tracked`
 - Emits: `RecordBoundarySequence`
@@ -9027,7 +9072,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecordBoundarySeqAttached`
 - From: `Attached`
-- On: `RecordBoundarySeq`(input_id, seq)
+- On: `RecordBoundarySeq`(input_id, run_id)
 - Guards:
   - `input_tracked`
 - Emits: `RecordBoundarySequence`
@@ -9035,7 +9080,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecordBoundarySeqRunning`
 - From: `Running`
-- On: `RecordBoundarySeq`(input_id, seq)
+- On: `RecordBoundarySeq`(input_id, run_id)
 - Guards:
   - `input_tracked`
 - Emits: `RecordBoundarySequence`
@@ -9043,7 +9088,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecordBoundarySeqRetired`
 - From: `Retired`
-- On: `RecordBoundarySeq`(input_id, seq)
+- On: `RecordBoundarySeq`(input_id, run_id)
 - Guards:
   - `input_tracked`
 - Emits: `RecordBoundarySequence`
@@ -9051,7 +9096,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecordBoundarySeqStopped`
 - From: `Stopped`
-- On: `RecordBoundarySeq`(input_id, seq)
+- On: `RecordBoundarySeq`(input_id, run_id)
 - Guards:
   - `input_tracked`
 - Emits: `RecordBoundarySequence`
@@ -9618,6 +9663,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Idle`
 
@@ -9627,6 +9674,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Attached`
 
@@ -9636,6 +9685,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Running`
 
@@ -9645,6 +9696,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Retired`
 
@@ -9654,6 +9707,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Stopped`
 
@@ -9663,6 +9718,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Idle`
 
@@ -9672,6 +9729,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Attached`
 
@@ -9681,6 +9740,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Running`
 
@@ -9690,6 +9751,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Retired`
 
@@ -9699,6 +9762,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Stopped`
 
@@ -9708,6 +9773,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Idle`
 
@@ -9717,6 +9784,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Attached`
 
@@ -9726,6 +9795,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Running`
 
@@ -9735,6 +9806,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Retired`
 
@@ -9744,6 +9817,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Stopped`
 
@@ -9753,6 +9828,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Idle`
 
@@ -9762,6 +9839,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Attached`
 
@@ -9771,6 +9850,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Running`
 
@@ -9780,6 +9861,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Retired`
 
@@ -9789,6 +9872,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Stopped`
 
@@ -9943,6 +10028,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_empty_for_retired`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Idle`
 
@@ -9952,6 +10039,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_empty_for_retired`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Attached`
 
@@ -9961,6 +10050,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_empty_for_retired`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Running`
 
@@ -9970,6 +10061,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_empty_for_retired`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Retired`
 
@@ -9979,6 +10072,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_empty_for_retired`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Stopped`
 
@@ -9988,6 +10083,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Idle`
 
@@ -9997,6 +10094,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Attached`
 
@@ -10006,6 +10105,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Running`
 
@@ -10015,6 +10116,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Retired`
 
@@ -10024,6 +10127,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `op_registered`
   - `from_status_valid`
+  - `outcome_matches_terminal`
+  - `payload_present_for_kind`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`
 - To: `Stopped`
 

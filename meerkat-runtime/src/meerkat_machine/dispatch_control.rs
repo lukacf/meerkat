@@ -622,12 +622,17 @@ impl MeerkatMachine {
                 }
                 drop(drv);
 
+                // The durable destroy is already committed above, so a
+                // completion-classification failure must NOT early-return and
+                // skip the session DSL commit + waiter terminalization — that
+                // would leave staged driver-side state behind a committed
+                // terminal. Finish the commit/terminalize legs, then surface
+                // the typed fault.
                 let result_class =
                     crate::meerkat_machine::driver::machine_resolve_runtime_terminated_completion_result(
                         &driver,
                     )
-                    .await
-                    .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?;
+                    .await;
                 let apply_result = self
                     .commit_session_dsl_transition_preserving_committed_state(
                         &session_id,
@@ -641,9 +646,26 @@ impl MeerkatMachine {
                     .sync_control_projection_from_dsl_authority();
 
                 let mut comp = completions.lock().await;
-                comp.resolve_all_runtime_terminated("runtime destroyed", result_class);
+                let result_class_err = match result_class {
+                    Ok(result_class) => {
+                        comp.resolve_all_runtime_terminated("runtime destroyed", result_class);
+                        None
+                    }
+                    Err(err) => {
+                        comp.fail_all_waiters(
+                            crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
+                                "runtime destroyed without completion authority: {err}"
+                            )),
+                        );
+                        Some(RuntimeControlPlaneError::Internal(err.to_string()))
+                    }
+                };
+                drop(comp);
                 if let Err(reason) = apply_result {
                     return Err(RuntimeControlPlaneError::Internal(reason));
+                }
+                if let Some(err) = result_class_err {
+                    return Err(err);
                 }
                 Ok(MeerkatMachineCommandResult::DestroyReport(report))
             }

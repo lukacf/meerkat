@@ -1651,26 +1651,54 @@ pub async fn get_auth_status(
     let phase = meerkat_core::AuthStatusPhase::from_lease_snapshot(now, &snapshot);
     let mut stored = None;
     if source_uses_store {
-        if phase.is_no_live_lease()
-            && let Some(expected_mode) = expected_mode
-            && let Ok(Some(rehydrated)) = meerkat_core::rehydrate_marked_tokens_for_status(
-                state.token_store.as_ref(),
-                &state.auth_lease,
-                &auth_binding,
-                expected_mode,
-                now,
-            )
-            .await
-        {
-            stored = Some(rehydrated);
-            snapshot = state.auth_lease.snapshot(&lease_key);
-        } else if !phase.is_no_live_lease() {
-            stored = state
+        if phase.is_no_live_lease() {
+            if let Some(expected_mode) = expected_mode {
+                // A store fault during rehydration is a real error, not
+                // absent credentials: collapsing it would report a store
+                // failure as "no credentials"/Unknown status.
+                match meerkat_core::rehydrate_marked_tokens_for_status(
+                    state.token_store.as_ref(),
+                    &state.auth_lease,
+                    &auth_binding,
+                    expected_mode,
+                    now,
+                )
+                .await
+                {
+                    Ok(Some(rehydrated)) => {
+                        stored = Some(rehydrated);
+                        snapshot = state.auth_lease.snapshot(&lease_key);
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({
+                                "error": format!("TokenStore rehydration failed: {err}")
+                            })),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+        } else {
+            // A store-load fault is a real error, not absent credentials.
+            stored = match state
                 .token_store
                 .load(&TokenKey::from_auth_binding(&auth_binding))
                 .await
-                .ok()
-                .flatten();
+            {
+                Ok(stored) => stored,
+                Err(err) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "error": format!("TokenStore load failed: {err}")
+                        })),
+                    )
+                        .into_response();
+                }
+            };
         }
     }
     if stored
@@ -3892,7 +3920,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rest_auth_status_reports_lease_phase_when_token_load_fails() {
+    async fn rest_auth_status_fails_closed_when_token_load_fails() {
         let temp = tempfile::tempdir().unwrap();
         let mut state = AppState::load_from(temp.path().to_path_buf())
             .await
@@ -3922,23 +3950,27 @@ mod tests {
             .acquire_lease(&lease_key, now + 3600)
             .unwrap();
 
-        let detail = auth_status_detail(
-            get_auth_status(
-                State(state),
-                Path(BindingId::parse("default_openai").unwrap()),
-                Query(RealmQuery {
-                    realm_id: RealmId::parse("dev").unwrap(),
-                    profile_id: None,
-                }),
-            )
-            .await,
+        let response = get_auth_status(
+            State(state),
+            Path(BindingId::parse("default_openai").unwrap()),
+            Query(RealmQuery {
+                realm_id: RealmId::parse("dev").unwrap(),
+                profile_id: None,
+            }),
         )
-        .await;
+        .await
+        .into_response();
 
-        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Valid);
-        assert!(detail.expires_at.is_some());
-        assert_eq!(detail.account_id, None);
-        assert!(!detail.has_refresh_token);
+        // A token-store load fault is auth truth the surface cannot vouch
+        // for: it must propagate as a typed failure, never be laundered into
+        // a lease-phase success.
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            body.contains("TokenStore load failed"),
+            "error body must carry the token-store fault, got: {body}"
+        );
     }
 
     #[tokio::test]

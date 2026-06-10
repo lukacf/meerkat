@@ -66,9 +66,7 @@ pub mod external_auth;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
-use std::io::Read;
 use std::sync::Arc;
-use uuid::Uuid;
 use wasm_bindgen::prelude::*;
 
 use meerkat::{AgentBuildConfig, SessionServiceControlExt};
@@ -364,7 +362,7 @@ fn populate_realm_from_api_keys(
     // sort index is its position in that list; providers absent from the list
     // (and unrecognized strings) sort last. The `google` alias normalizes to
     // the Gemini identity before lookup.
-    let priority = meerkat_models::catalog::provider_priority();
+    let priority = meerkat_core::model_profile::catalog::provider_priority();
     let provider_rank = |key: &str| -> usize {
         match canonical_provider_key(key) {
             Some(provider) => priority
@@ -912,63 +910,10 @@ fn compile_system_prompt(
 // Archive Extraction
 // ═══════════════════════════════════════════════════════════
 
+/// Extract a mobpack tar.gz using the typed extraction owner in
+/// `meerkat-mob-pack` (single owner of archive path-safety semantics).
 fn extract_targz_safe(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, String> {
-    let cursor = std::io::Cursor::new(bytes);
-    let decoder = flate2::read::GzDecoder::new(cursor);
-    let mut archive = tar::Archive::new(decoder);
-    let mut files = BTreeMap::new();
-    let entries = archive
-        .entries()
-        .map_err(|e| format!("failed to read archive entries: {e}"))?;
-    for entry in entries {
-        let mut entry = entry.map_err(|e| format!("failed reading archive entry: {e}"))?;
-        let kind = entry.header().entry_type();
-        if !(kind.is_file() || kind.is_dir()) {
-            return Err("archive contains unsupported entry type".to_string());
-        }
-        let path = entry
-            .path()
-            .map_err(|e| format!("invalid archive path: {e}"))?;
-        if !kind.is_file() {
-            continue;
-        }
-        let normalized = normalize_for_archive(path.to_string_lossy().as_ref())?;
-        let mut contents = Vec::new();
-        entry
-            .read_to_end(&mut contents)
-            .map_err(|e| format!("failed reading archive file '{normalized}': {e}"))?;
-        files.insert(normalized, contents);
-    }
-    Ok(files)
-}
-
-fn normalize_for_archive(path: &str) -> Result<String, String> {
-    let replaced = path.replace('\\', "/");
-    if replaced.starts_with('/') || looks_like_windows_absolute(&replaced) {
-        return Err("archive contains absolute path entry".to_string());
-    }
-    let mut parts = Vec::new();
-    for segment in replaced.split('/') {
-        if segment.is_empty() || segment == "." {
-            continue;
-        }
-        if segment == ".." {
-            return Err("archive contains parent directory traversal entry".to_string());
-        }
-        parts.push(segment);
-    }
-    if parts.is_empty() {
-        return Err("archive contains empty path entry".to_string());
-    }
-    Ok(parts.join("/"))
-}
-
-fn looks_like_windows_absolute(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && (bytes[2] == b'/' || bytes[2] == b'\\')
+    meerkat_mob_pack::targz::extract_targz_safe(bytes).map_err(|error| error.to_string())
 }
 
 // Plan §6.14 deleted the legacy flat-path `create_llm_client` helper.
@@ -1560,9 +1505,18 @@ fn create_runtime_backed_session(
 ///
 /// Allocates a real session through the initialized runtime-backed session
 /// service, then returns a browser-local session handle for convenience.
+///
+/// The pack's skills/definition become session prompt truth here, so this
+/// ingress runs the same canonical [`meerkat_mob_pack::trust`] verification
+/// as `init_runtime` (Strict, fail-closed) — never the local parse-only path.
 #[wasm_bindgen]
 pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, JsValue> {
-    let parsed = parse_mobpack(mobpack_bytes).map_err(|e| err_str("invalid_mobpack", e))?;
+    let parsed = extract_verify_and_parse_mobpack(
+        mobpack_bytes,
+        meerkat_mob_pack::trust::TrustPolicy::Strict,
+        &meerkat_mob_pack::trust::TrustedSigners::default(),
+    )
+    .map_err(js_from_value)?;
     let config: SessionConfig =
         serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
     let system_prompt = compile_system_prompt(
@@ -1784,6 +1738,11 @@ pub fn get_session_state(handle: u32) -> Result<String, JsValue> {
 }
 
 /// Inspect a mobpack without creating a session.
+///
+/// Read-only metadata projection: nothing from the pack is consumed as
+/// runtime/prompt authority here, so (matching `rkat mob inspect`) unsigned
+/// packs are inspectable and trust verification is deliberately not applied.
+/// Every consuming ingress (`init_runtime`, `create_session`) verifies trust.
 #[wasm_bindgen]
 pub fn inspect_mobpack(mobpack_bytes: &[u8]) -> Result<String, JsValue> {
     let parsed = parse_mobpack(mobpack_bytes).map_err(|e| err_str("invalid_mobpack", e))?;
@@ -2474,11 +2433,17 @@ pub async fn mob_spawn_helper(mob_id: &str, request_json: &str) -> Result<JsValu
         serde_json::from_str(request_json).map_err(|e| err_str("invalid_request", e))?;
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
-    let identity = AgentIdentity::from(
-        request
-            .agent_identity
-            .unwrap_or_else(|| format!("helper-{}", Uuid::new_v4())),
-    );
+    // #115: the surface must not mint mob-member identity. A missing
+    // `agent_identity` fails closed rather than fabricating a synthetic
+    // `helper-{uuid}` on the runtime identity path — identity allocation is
+    // the mob substrate's responsibility.
+    let Some(agent_identity) = request.agent_identity else {
+        return Err(err_str(
+            "invalid_request",
+            "mob_spawn_helper requires agent_identity; the surface does not allocate member identity",
+        ));
+    };
+    let identity = AgentIdentity::from(agent_identity);
     let mut options = meerkat_mob::HelperOptions::default();
     if let Some(role_name) = request.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role_name));
@@ -2505,11 +2470,15 @@ pub async fn mob_fork_helper(mob_id: &str, request_json: &str) -> Result<JsValue
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let source_member_id = AgentIdentity::from(request.source_member_id.as_str());
-    let identity = AgentIdentity::from(
-        request
-            .agent_identity
-            .unwrap_or_else(|| format!("fork-{}", Uuid::new_v4())),
-    );
+    // #115: the surface must not mint mob-member identity (no synthetic
+    // `fork-{uuid}` fallback).
+    let Some(agent_identity) = request.agent_identity else {
+        return Err(err_str(
+            "invalid_request",
+            "mob_fork_helper requires agent_identity; the surface does not allocate member identity",
+        ));
+    };
+    let identity = AgentIdentity::from(agent_identity);
     let fork_context = request
         .fork_context
         .unwrap_or(meerkat_mob::ForkContext::FullHistory);
@@ -3786,12 +3755,16 @@ capabilities = [{capability_values}]
     fn bootstrap_default_model_for_only_openai_is_openai_catalog_default() {
         let keys = HashMap::from([("openai".to_string(), "sk-oai".to_string())]);
         let (config, model) = build_bootstrap_config(None, &keys, None);
-        let expected = meerkat_models::catalog::default_model("openai")
-            .expect("openai catalog default")
-            .to_string();
+        let expected =
+            meerkat_core::model_profile::catalog::default_model(meerkat_core::Provider::OpenAI)
+                .expect("openai catalog default")
+                .to_string();
         assert_eq!(model, expected);
         // Must NOT hardcode the anthropic global default when anthropic is absent.
-        assert_ne!(model, meerkat_models::catalog::global_default_model());
+        assert_ne!(
+            model,
+            meerkat_core::model_profile::catalog::global_default_model()
+        );
         assert_eq!(
             model,
             meerkat::resolve_create_session_default_model(&config)
@@ -3810,7 +3783,8 @@ capabilities = [{capability_values}]
         let (config, model) = build_bootstrap_config(None, &keys, None);
         assert_eq!(
             model,
-            meerkat_models::catalog::default_model("openai").expect("openai catalog default")
+            meerkat_core::model_profile::catalog::default_model(meerkat_core::Provider::OpenAI)
+                .expect("openai catalog default")
         );
         assert_eq!(
             model,
@@ -3823,7 +3797,10 @@ capabilities = [{capability_values}]
     fn bootstrap_default_model_unrecognized_key_falls_back_to_global_default() {
         let keys = HashMap::from([("notaprovider".to_string(), "x".to_string())]);
         let (config, model) = build_bootstrap_config(None, &keys, None);
-        assert_eq!(model, meerkat_models::catalog::global_default_model());
+        assert_eq!(
+            model,
+            meerkat_core::model_profile::catalog::global_default_model()
+        );
         assert_eq!(
             model,
             meerkat::resolve_create_session_default_model(&config)
@@ -3863,7 +3840,7 @@ capabilities = [{capability_values}]
 
         // The highest-priority configured provider (anthropic) seeds the
         // per-realm default_binding.
-        let top = meerkat_models::catalog::provider_priority()
+        let top = meerkat_core::model_profile::catalog::provider_priority()
             .first()
             .expect("at least one provider in priority");
         let expected_binding = format!("default_{}", top.as_str());
@@ -3937,7 +3914,7 @@ capabilities = [{capability_values}]
             .and_then(|id| id.strip_prefix("default_"))
             .expect("default binding uses default_<provider> form");
         assert!(
-            meerkat_models::catalog::provider_priority()
+            meerkat_core::model_profile::catalog::provider_priority()
                 .iter()
                 .any(|p| p.as_str() == default_provider),
             "default binding provider '{default_provider}' must be catalog-owned"

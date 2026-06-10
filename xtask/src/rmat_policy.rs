@@ -10,7 +10,6 @@ pub struct AuditPolicy {
     pub protected_fields: Vec<ProtectedFieldRule>,
     pub forbidden_shell_reads: Vec<ForbiddenShellReadRule>,
     pub routed_effect_realizations: Vec<RoutedEffectRealizationRule>,
-    pub required_live_symbols: Vec<RequiredLiveSymbolRule>,
     pub handoff_protocol_coverage: Vec<HandoffProtocolCoverageRule>,
     pub protocol_realization_sites: Vec<ProtocolRealizationSiteRule>,
     pub protocol_feedback_constraints: Vec<ProtocolFeedbackConstraintRule>,
@@ -72,7 +71,6 @@ impl AuditPolicy {
             ],
             forbidden_shell_reads: default_forbidden_shell_reads(),
             routed_effect_realizations: default_routed_effect_realizations()?,
-            required_live_symbols: vec![],
             handoff_protocol_coverage: default_handoff_protocol_coverage(),
             protocol_realization_sites: default_protocol_realization_sites(),
             protocol_feedback_constraints: default_protocol_feedback_constraints(),
@@ -160,11 +158,6 @@ impl RoutedEffectRealizationRule {
             allowed_paths: allowed_paths.to_vec(),
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct RequiredLiveSymbolRule {
-    pub symbol: &'static str,
 }
 
 fn default_routed_effect_realizations() -> Result<Vec<RoutedEffectRealizationRule>> {

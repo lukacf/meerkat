@@ -399,14 +399,11 @@ where
             CallTimeoutOverride::Value(d) => Some(*d),
             CallTimeoutOverride::Disabled => None,
             CallTimeoutOverride::Inherit => {
-                // Consult the injected resolver with the current model/provider.
-                // Cross the provider string boundary once here, at the LLM-client
-                // seam; an unparseable provider yields no typed default and falls
-                // through to the retry policy.
+                // Consult the injected resolver with the typed client provider
+                // identity — no string boundary to re-parse.
                 self.model_defaults_resolver
                     .as_ref()
-                    .zip(crate::Provider::parse_strict(self.client.provider()))
-                    .and_then(|(r, provider)| r.call_timeout_for(provider, self.client.model()))
+                    .and_then(|r| r.call_timeout_for(self.client.provider(), self.client.model()))
                     // Fall through to RetryPolicy.call_timeout for direct builder users.
                     .or(self.retry_policy.call_timeout)
             }
@@ -438,26 +435,20 @@ where
 
         let hydrated_messages = if let Some(blob_store) = self.blob_store.as_ref() {
             let mut hydrated = messages.to_vec();
-            let missing_blob_behavior = self.missing_blob_behavior;
+            // The model boundary is always fail-closed: a durable blob missing
+            // at live LLM-execution hydration is a typed terminal fault, never
+            // silently rewritten into placeholder prompt text. Placeholder
+            // hydration exists only for read-side transcript rendering.
             hydrate_messages_for_execution(
                 blob_store.as_ref(),
                 &mut hydrated,
-                missing_blob_behavior,
+                MissingBlobBehavior::Error,
             )
             .await
             .map_err(|err| match err {
-                // A blob the policy refuses to placeholder is a typed
-                // configuration/policy refusal, not a generic internal fault:
-                // the surface explicitly selected `Error`, so the missing live
-                // blob terminalizes the turn as a `ConfigError` (Config class)
-                // rather than being laundered into `InternalError`.
-                crate::blob::BlobStoreError::NotFound(blob_id)
-                    if missing_blob_behavior == MissingBlobBehavior::Error =>
-                {
-                    AgentError::ConfigError(format!(
-                        "required image blob is unavailable before llm execution: {blob_id}"
-                    ))
-                }
+                crate::blob::BlobStoreError::NotFound(blob_id) => AgentError::ConfigError(format!(
+                    "required image blob is unavailable before llm execution: {blob_id}"
+                )),
                 other => AgentError::InternalError(format!(
                     "failed to hydrate image refs before llm execution: {other}"
                 )),
@@ -530,7 +521,7 @@ where
                             let timeout_ms = effective_timeout.as_millis() as u64;
                             match self.classify_call_timeout(source, timeout_ms)? {
                                 CallTimeoutVerdict::RetryableCallTimeout => Err(AgentError::Llm {
-                                    provider: self.client.provider(),
+                                    provider: self.client.provider().as_str(),
                                     reason: crate::error::LlmFailureReason::CallTimeout {
                                         duration_ms: timeout_ms,
                                     },
@@ -569,7 +560,7 @@ where
                         if allow_empty_success {
                             return Ok(result);
                         }
-                        let error = AgentError::llm_empty_response(self.client.provider());
+                        let error = AgentError::llm_empty_response(self.client.provider().as_str());
                         // P0 Dogma Invariant 1: MeerkatMachine — not the shell —
                         // owns the recoverable-vs-fatal/exhaustion verdict. Only
                         // a machine `Recover` verdict drives the retry path;
@@ -606,11 +597,7 @@ where
                                 &self.event_tap,
                                 event_tx.as_ref(),
                                 AgentEvent::Retrying {
-                                    attempt: retry_schedule.plan.attempt,
-                                    max_attempts: retry_schedule.plan.max_retries,
-                                    error: error.to_string(),
-                                    delay_ms: retry_schedule.plan.selected_delay_ms,
-                                    retry: Some(retry_schedule.clone()),
+                                    retry: retry_schedule.clone(),
                                 },
                             )
                             .await;
@@ -670,11 +657,7 @@ where
                             &self.event_tap,
                             event_tx.as_ref(),
                             AgentEvent::Retrying {
-                                attempt: retry_schedule.plan.attempt,
-                                max_attempts: retry_schedule.plan.max_retries,
-                                error: e.to_string(),
-                                delay_ms: retry_schedule.plan.selected_delay_ms,
-                                retry: Some(retry_schedule.clone()),
+                                retry: retry_schedule.clone(),
                             },
                         )
                         .await;
@@ -709,10 +692,8 @@ where
                     session_id: self.session.id().clone(),
                     turn_number: Some(turn_count),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: None,
                     llm_response: None,
                     tool_call: None,
@@ -1872,10 +1853,8 @@ where
                         session_id: self.session.id().clone(),
                         turn_number: Some(turn_count),
                         prompt_input: None,
-                        prompt: None,
                         error_report: None,
                         error_class: None,
-                        error: None,
                         llm_request: Some(HookLlmRequest {
                             max_tokens: effective_max_tokens,
                             temperature: effective_temperature,
@@ -1942,7 +1921,7 @@ where
                         // Strip the provider-native web-search/grounding body via the typed
                         // ProviderTag owner — extraction is deterministic and tool-free.
                         let mut typed = ProviderParamsOverride::from_legacy_provider_value(
-                            self.client.provider(),
+                            self.client.provider().as_str(),
                             &params,
                         );
                         typed.clear_web_search();
@@ -1960,7 +1939,7 @@ where
                         .as_ref()
                         .map(|params| {
                             ProviderParamsOverride::from_legacy_provider_value(
-                                self.client.provider(),
+                                self.client.provider().as_str(),
                                 params,
                             )
                         })
@@ -2065,7 +2044,7 @@ where
                     let has_visible_or_actionable =
                         turn_has_visible_or_actionable || run_has_visible_or_actionable_output;
                     if self.classify_assistant_output_terminal(has_visible_or_actionable)? {
-                        let error = AgentError::llm_empty_response(self.client.provider());
+                        let error = AgentError::llm_empty_response(self.client.provider().as_str());
                         if in_extraction {
                             return self
                                 .complete_extraction_failed(
@@ -2091,10 +2070,8 @@ where
                         session_id: self.session.id().clone(),
                         turn_number: Some(turn_count),
                         prompt_input: None,
-                        prompt: None,
                         error_report: None,
                         error_class: None,
-                        error: None,
                         llm_request: None,
                         llm_response: Some(HookLlmResponse {
                             assistant_text: assistant_text.clone(),
@@ -2244,10 +2221,8 @@ where
                                         session_id: self.session.id().clone(),
                                         turn_number: Some(turn_count),
                                         prompt_input: None,
-                                        prompt: None,
                                         error_report: None,
                                         error_class: None,
-                                        error: None,
                                         llm_request: None,
                                         llm_response: None,
                                         tool_call: Some(HookToolCall {
@@ -2431,10 +2406,8 @@ where
                                         session_id: self.session.id().clone(),
                                         turn_number: Some(turn_count),
                                         prompt_input: None,
-                                        prompt: None,
                                         error_report: None,
                                         error_class: None,
-                                        error: None,
                                         llm_request: None,
                                         llm_response: None,
                                         tool_call: None,
@@ -3082,12 +3055,6 @@ where
     /// whole-`None` (`health_snapshot().ok()?`) or an empty list
     /// (`quarantined_diagnostics().unwrap_or_default()`).
     ///
-    /// Dogma row #239 (in-lane portion): the source seam no longer swallows the
-    /// typed fault. Surfacing the fault *as a typed signal inside the wire-
-    /// crossing run result* additionally requires a typed failure variant on
-    /// `meerkat_core::skills::SkillRuntimeDiagnostics` (it is embedded directly
-    /// in `meerkat_contracts::wire::WireRunResult`), which is an out-of-lane
-    /// wire-schema change requiring `make regen-schemas`.
     async fn collect_skill_diagnostics(
         &self,
     ) -> Result<Option<crate::skills::SkillRuntimeDiagnostics>, crate::skills::SkillError> {
@@ -3099,31 +3066,33 @@ where
         Ok(Some(crate::skills::SkillRuntimeDiagnostics {
             source_health,
             quarantined,
+            collection_fault: None,
         }))
     }
 
-    /// Resolve skill diagnostics for the terminal `RunResult` while making any
-    /// typed collection fault explicit at the agent boundary.
+    /// Resolve skill diagnostics for the terminal `RunResult`, recording any
+    /// typed collection fault inside the result instead of dropping it.
     ///
-    /// Until the wire-crossing `SkillRuntimeDiagnostics` gains a typed failure
-    /// variant (out-of-lane, see [`Self::collect_skill_diagnostics`]), a
-    /// collection fault cannot be recorded *inside* the run result; it is
-    /// surfaced here as an explicit, typed `tracing` warning instead of being
-    /// silently dropped at the `health_snapshot`/`quarantined_diagnostics`
-    /// seams. This preserves run-success semantics while ending the silent
-    /// fail-open.
+    /// A collection fault produces diagnostics carrying the typed
+    /// `collection_fault` (dogma row #239): surfaces receive an explicit
+    /// failure fact instead of absent or healthy-looking diagnostics.
     async fn resolve_skill_diagnostics_for_result(
         &self,
     ) -> Option<crate::skills::SkillRuntimeDiagnostics> {
         match self.collect_skill_diagnostics().await {
             Ok(diagnostics) => diagnostics,
             Err(error) => {
+                let reason = crate::event::SkillResolutionFailureReason::from_skill_error(&error);
                 tracing::warn!(
                     %error,
-                    "skill diagnostics collection failed; reporting absent diagnostics \
-                     (typed run-result signal pending out-of-lane wire change)"
+                    "skill diagnostics collection failed; recording typed collection fault \
+                     in the run result"
                 );
-                None
+                Some(crate::skills::SkillRuntimeDiagnostics {
+                    source_health: Default::default(),
+                    quarantined: Vec::new(),
+                    collection_fault: Some(reason),
+                })
             }
         }
     }
@@ -3254,8 +3223,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -3576,8 +3545,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "openai"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::OpenAI
         }
 
         fn model(&self) -> &'static str {
@@ -3630,8 +3599,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -3745,8 +3714,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -3910,8 +3879,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -4220,8 +4189,8 @@ mod tests {
             Ok(response)
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -4383,12 +4352,18 @@ mod tests {
                     crate::ToolCatalogEntry::session_deferred(
                         deferred,
                         true,
-                        "callback:test".to_string(),
+                        crate::ToolProvenance {
+                            kind: crate::ToolSourceKind::Callback,
+                            source_id: "test".into(),
+                        },
                     ),
                     crate::ToolCatalogEntry::session_deferred(
                         deferred_two,
                         true,
-                        "callback:test".to_string(),
+                        crate::ToolProvenance {
+                            kind: crate::ToolSourceKind::Callback,
+                            source_id: "test".into(),
+                        },
                     ),
                     crate::ToolCatalogEntry::control_inline(control, true),
                 ]
@@ -4430,7 +4405,6 @@ mod tests {
                         authorities: vec![crate::DeferredToolLoadAuthority::new(
                             "deferred_tool",
                             crate::ToolVisibilityWitness {
-                                stable_owner_key: Some("callback:test".to_string()),
                                 last_seen_provenance: Some(crate::ToolProvenance {
                                     kind: crate::ToolSourceKind::Callback,
                                     source_id: "test".into(),
@@ -4480,12 +4454,18 @@ mod tests {
                     crate::ToolCatalogEntry::session_deferred(
                         secret,
                         true,
-                        "callback:direct-builder".to_string(),
+                        crate::ToolProvenance {
+                            kind: crate::ToolSourceKind::Callback,
+                            source_id: "direct-builder".into(),
+                        },
                     ),
                     crate::ToolCatalogEntry::session_deferred(
                         deferred_two,
                         true,
-                        "callback:direct-builder".to_string(),
+                        crate::ToolProvenance {
+                            kind: crate::ToolSourceKind::Callback,
+                            source_id: "direct-builder".into(),
+                        },
                     ),
                 ]
                 .into(),
@@ -4578,8 +4558,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -4630,8 +4610,8 @@ mod tests {
             Ok(response)
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -4703,8 +4683,8 @@ mod tests {
             Ok(response)
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -4776,8 +4756,8 @@ mod tests {
             Ok(response)
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -5042,7 +5022,15 @@ mod tests {
             "the next boundary after a failed compaction should not immediately retry compaction"
         );
 
-        let cadence = crate::agent::compact::load_compaction_cadence(agent.session());
+        let cadence: crate::compact::SessionCompactionCadence = serde_json::from_value(
+            agent
+                .session()
+                .metadata()
+                .get(crate::compact::SESSION_COMPACTION_CADENCE_KEY)
+                .expect("cadence metadata must be persisted by the run loop")
+                .clone(),
+        )
+        .unwrap();
         assert_eq!(cadence.session_boundary_index, 3);
         assert_eq!(cadence.last_compaction_boundary_index, None);
         assert_eq!(cadence.last_compaction_attempt_boundary_index, Some(1));
@@ -5249,14 +5237,10 @@ mod tests {
                         priority: 0,
                         registration_index: 0,
                         decision: None,
-                        patches: Vec::new(),
-                        published_patches: Vec::new(),
                         failure_reason: None,
                         duration_ms: None,
                     }],
                     decision: None,
-                    patches: Vec::new(),
-                    published_patches: Vec::new(),
                 })
             }
         }
@@ -6057,6 +6041,24 @@ mod tests {
                 .any(|msg| msg.contains("<skill>injected canonical skill</skill>")),
             "expected runtime prompt to include rendered skill injection, saw: {seen_messages:?}"
         );
+
+        // The durable transcript must preserve the typed activation provenance
+        // — a SkillContext block carrying the canonical key — never an
+        // anonymous text fold of the rendered body into operator text.
+        let has_typed_skill_block = agent.session().messages().iter().any(|message| {
+            matches!(message, Message::User(user) if user.content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::SkillContext { skill_key, .. }
+                        if skill_key.to_string()
+                            == "dc256086-0d2f-4f61-a307-320d4148107f/email-extractor"
+                )
+            }))
+        });
+        assert!(
+            has_typed_skill_block,
+            "durable transcript must carry the typed SkillContext block with provenance"
+        );
     }
 
     #[tokio::test]
@@ -6104,12 +6106,10 @@ mod tests {
         assert_eq!(blob_store.gets(), vec![blob_id]);
     }
 
-    /// Row 205: when the composition seam selects
-    /// `MissingBlobBehavior::Error`, a durable image blob missing from the
-    /// store at the live LLM-execution hydration seam must terminalize the
-    /// turn with a typed `ConfigError` rather than silently degrading to a
-    /// placeholder. (The default policy remains the graceful placeholder, as
-    /// exercised by `llm_execution_hydrates_blob_refs_before_provider_call`.)
+    /// Row 205: a durable image blob missing from the store at the live
+    /// LLM-execution hydration seam terminalizes the turn with a typed
+    /// `ConfigError` — the model boundary is unconditionally fail-closed and
+    /// never degrades to placeholder prompt text.
     #[tokio::test]
     async fn llm_execution_errors_on_missing_blob_when_policy_is_error() {
         let missing_blob_id = BlobId::new("sha256:absent-image");
@@ -6129,7 +6129,6 @@ mod tests {
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .resume_session(session)
             .with_blob_store(blob_store.clone())
-            .with_missing_blob_behavior(crate::image_content::MissingBlobBehavior::Error)
             .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
         agent.config.max_turns = Some(1);
@@ -6137,7 +6136,7 @@ mod tests {
         let err = agent
             .run("current turn".to_string().into())
             .await
-            .expect_err("missing required blob under Error policy must fail the run");
+            .expect_err("missing required blob at the model boundary must fail the run");
 
         assert!(
             matches!(err, AgentError::ConfigError(ref message) if message.contains("absent-image")),
@@ -6457,8 +6456,8 @@ mod tests {
                 ))
             }
 
-            fn provider(&self) -> &'static str {
-                "mock"
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
             }
 
             fn model(&self) -> &'static str {
@@ -6573,8 +6572,8 @@ mod tests {
                 ))
             }
 
-            fn provider(&self) -> &'static str {
-                "mock"
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
             }
 
             fn model(&self) -> &'static str {
@@ -6734,8 +6733,6 @@ mod tests {
                         priority: 0,
                         registration_index: 0,
                         decision: None,
-                        patches: Vec::new(),
-                        published_patches: Vec::new(),
                         failure_reason: None,
                         duration_ms: None,
                     }],
@@ -6821,8 +6818,8 @@ mod tests {
             Ok(response)
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -6863,8 +6860,8 @@ mod tests {
             Ok(response)
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -6902,8 +6899,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -7686,8 +7683,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -7726,8 +7723,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -8308,8 +8305,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -8485,8 +8482,8 @@ mod tests {
             }
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -8660,8 +8657,8 @@ mod tests {
             }
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -8739,8 +8736,8 @@ mod tests {
             })
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -8775,8 +8772,8 @@ mod tests {
             }
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -8809,8 +8806,8 @@ mod tests {
             Err(crate::schema::SchemaError::InvalidRoot)
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {

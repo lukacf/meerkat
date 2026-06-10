@@ -329,8 +329,9 @@ async fn http_repository_is_wired_and_preserves_filesystem_precedence() {
                 source_uuid: source_uuid("fe52aa61-1111-4a22-9999-bbbbbbbbbbbb"),
                 transport: SkillRepoTransport::Http {
                     url: format!("{}/skills", server.uri()),
-                    auth_header: None,
-                    auth_token: Some("secret".to_string()),
+                    auth: Some(meerkat_core::skills_config::HttpSkillRepoAuth::Bearer {
+                        token: "secret".to_string(),
+                    }),
                     refresh_seconds: 300,
                     timeout_seconds: 15,
                 },
@@ -368,8 +369,7 @@ async fn git_repository_reports_unavailable_on_wasm() {
                 git_ref: "main".to_string(),
                 ref_type: Default::default(),
                 skills_root: None,
-                auth_token: None,
-                ssh_key: None,
+                auth: None,
                 refresh_seconds: 300,
                 depth: Some(1),
             },

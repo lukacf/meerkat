@@ -60,7 +60,7 @@ use meerkat_mob_pack::pack::{inspect_archive_bytes, pack_directory_with_excludes
 #[cfg(feature = "mob")]
 use meerkat_mob_pack::targz::extract_targz_safe;
 #[cfg(feature = "mob")]
-use meerkat_mob_pack::trust::{TrustPolicy, load_trusted_signers, verify_extracted_pack_trust};
+use meerkat_mob_pack::trust::{TrustPolicy, load_trusted_signers};
 use meerkat_runtime::input::{InputDurability, InputHeader, InputVisibility};
 use meerkat_runtime::{CorrelationId, IdempotencyKey, Input, InputOrigin, PromptInput};
 use meerkat_tools::find_project_root;
@@ -2397,9 +2397,10 @@ enum MobCommands {
         mob_id: String,
         /// Task prompt for the helper
         prompt: String,
-        /// Agent identity for the helper (auto-generated if omitted)
+        /// Agent identity for the helper. Required: the surface does not
+        /// allocate member identity (#115).
         #[arg(long)]
-        agent_identity: Option<String>,
+        agent_identity: String,
         /// Profile to use
         #[arg(long)]
         profile: Option<String>,
@@ -2415,9 +2416,10 @@ enum MobCommands {
         source_member: String,
         /// Task prompt for the forked helper
         prompt: String,
-        /// Agent identity for the helper (auto-generated if omitted)
+        /// Agent identity for the helper. Required: the surface does not
+        /// allocate member identity (#115).
         #[arg(long)]
-        agent_identity: Option<String>,
+        agent_identity: String,
         /// Profile to use
         #[arg(long)]
         profile: Option<String>,
@@ -4585,7 +4587,7 @@ impl LoginProvider {
     }
 
     fn sample_model(self) -> &'static str {
-        meerkat_core::model_profile::catalog::default_model(self.config_provider())
+        meerkat_core::model_profile::catalog::default_model(self.provider())
             .expect("login provider must have a catalog default model")
     }
 
@@ -5746,20 +5748,31 @@ async fn project_cli_auth_status(
     let mut stored = None;
     if source_uses_store && let Some(store) = token_store {
         let phase = AuthStatusPhase::from_lease_snapshot(now, &snapshot);
-        if phase.is_no_live_lease()
-            && let Some(expected_mode) = expected_mode
-            && let Ok(Some(rehydrated)) = meerkat_core::rehydrate_marked_tokens_for_status(
-                store,
-                auth_lease,
-                auth_binding,
-                expected_mode,
-                now,
-            )
-            .await
-        {
-            stored = Some(rehydrated);
-            snapshot = auth_lease.snapshot(&lease_key);
-        } else if !phase.is_no_live_lease() {
+        if phase.is_no_live_lease() {
+            if let Some(expected_mode) = expected_mode {
+                // A rehydration fault is a real error, not absent
+                // credentials. Propagate it rather than collapsing to None,
+                // which would report a store fault as "no credentials".
+                match meerkat_core::rehydrate_marked_tokens_for_status(
+                    store,
+                    auth_lease,
+                    auth_binding,
+                    expected_mode,
+                    now,
+                )
+                .await
+                {
+                    Ok(Some(rehydrated)) => {
+                        stored = Some(rehydrated);
+                        snapshot = auth_lease.snapshot(&lease_key);
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        return Err(anyhow::anyhow!("TokenStore rehydration failed: {err}"));
+                    }
+                }
+            }
+        } else {
             // A store-load fault is a real error, not absent credentials.
             // Propagate the typed TokenStoreError rather than collapsing it
             // to None, which would report a store fault as "no credentials".
@@ -8884,7 +8897,10 @@ async fn run_agent(
                 }
                 runtime_adapter
                     .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
-                    .await;
+                    .await
+                    .map_err(|err| {
+                        anyhow::anyhow!("failed to update peer ingress context: {err}")
+                    })?;
             }
 
             match handle {
@@ -8926,8 +8942,8 @@ async fn run_agent(
             async {
                 // Abort the comms drain so the CLI can exit cleanly.
                 #[cfg(feature = "comms")]
-                {
-                    runtime_adapter.abort_comms_drain(&session_id).await;
+                if let Err(error) = runtime_adapter.abort_comms_drain(&session_id).await {
+                    eprintln!("Warning: failed to abort comms drain during shutdown: {error}");
                 }
 
                 // Abort stdin reader if it was running.
@@ -9545,7 +9561,10 @@ async fn resume_session_with_llm_override(
                 }
                 resume_adapter
                     .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
-                    .await;
+                    .await
+                    .map_err(|err| {
+                        anyhow::anyhow!("failed to update peer ingress context: {err}")
+                    })?;
             }
 
             match handle {
@@ -9583,8 +9602,8 @@ async fn resume_session_with_llm_override(
                 // The resume turn is complete — abort the comms drain so the CLI can
                 // return. Same rationale as run_agent: one-shot commands must not block.
                 #[cfg(feature = "comms")]
-                {
-                    resume_adapter.abort_comms_drain(&session_id).await;
+                if let Err(error) = resume_adapter.abort_comms_drain(&session_id).await {
+                    eprintln!("Warning: failed to abort comms drain during shutdown: {error}");
                 }
 
                 #[cfg(feature = "comms")]
@@ -9965,11 +9984,14 @@ impl CliScheduleSessionHost {
             )
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
-        self.update_peer_ingress_context(session_id).await;
+        self.update_peer_ingress_context(session_id).await?;
         Ok(())
     }
 
-    async fn update_peer_ingress_context(&self, session_id: &SessionId) {
+    async fn update_peer_ingress_context(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), meerkat::ScheduleDomainError> {
         let keep_alive = self
             .service
             .load_authoritative_session(session_id)
@@ -9985,7 +10007,9 @@ impl CliScheduleSessionHost {
         let comms_rt = self.service.comms_runtime(session_id).await;
         self.runtime_adapter
             .update_peer_ingress_context(session_id, keep_alive, comms_rt)
-            .await;
+            .await
+            .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
+        Ok(())
     }
 
     fn accepted_scheduled_input_from_runtime_handle(
@@ -10141,7 +10165,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             )
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
-        self.update_peer_ingress_context(&result.session_id).await;
+        self.update_peer_ingress_context(&result.session_id).await?;
         Ok(result.session_id)
     }
 
@@ -11993,15 +12017,9 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             profile,
             json,
         } => {
-            let mid = meerkat_mob::AgentIdentity::from(agent_identity.unwrap_or_else(|| {
-                format!(
-                    "helper-{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis())
-                        .unwrap_or(0)
-                )
-            }));
+            // #115: the surface must not mint mob-member identity; clap
+            // requires --agent-identity, so the value is always caller-owned.
+            let mid = meerkat_mob::AgentIdentity::from(agent_identity);
             let mut options = meerkat_mob::HelperOptions::default();
             if let Some(p) = profile {
                 options.role_name = Some(meerkat_mob::ProfileName::from(p));
@@ -12032,15 +12050,9 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             last_messages,
             json,
         } => {
-            let mid = meerkat_mob::AgentIdentity::from(agent_identity.unwrap_or_else(|| {
-                format!(
-                    "fork-{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis())
-                        .unwrap_or(0)
-                )
-            }));
+            // #115: the surface must not mint mob-member identity; clap
+            // requires --agent-identity, so the value is always caller-owned.
+            let mid = meerkat_mob::AgentIdentity::from(agent_identity);
             let source_id = meerkat_mob::AgentIdentity::from(source_member);
             let ctx = match fork_context.as_str() {
                 "last-messages" => {
@@ -12271,8 +12283,6 @@ async fn load_verified_mobpack(
         .await
         .map_err(|err| anyhow::anyhow!("failed reading pack '{}': {err}", pack.display()))?;
     let files = extract_targz_safe(&bytes).map_err(|err| anyhow::anyhow!("{action}: {err}"))?;
-    let archive = MobpackArchive::from_extracted_files(&files)
-        .map_err(|err| anyhow::anyhow!("{action}: {err}"))?;
     let config_trust = read_config_trust_policy(scope)?;
     let trust_policy = resolve_trust_policy(
         cli_trust_policy,
@@ -12284,8 +12294,15 @@ async fn load_verified_mobpack(
         &project_trust_store_path(scope),
     )
     .map_err(|err| anyhow::anyhow!("{action}: {err}"))?;
-    let trust_verification = verify_extracted_pack_trust(&files, trust_policy, &trusted_signers)
-        .map_err(|err| anyhow::anyhow!("{action}: {err}"))?;
+    // Archive truth is bound to trust truth: parsing and trust verification
+    // happen in one fail-closed step through the verified-archive owner.
+    let verified = meerkat_mob_pack::archive::VerifiedMobpackArchive::open(
+        &files,
+        trust_policy,
+        &trusted_signers,
+    )
+    .map_err(|err| anyhow::anyhow!("{action}: {err}"))?;
+    let (archive, trust_verification) = verified.into_parts();
     Ok(VerifiedMobpack {
         bytes,
         archive,
@@ -13407,14 +13424,14 @@ mod tests {
                 .binding
                 .get("anthropic_oauth")
                 .and_then(|binding| binding.default_model.as_deref()),
-            meerkat_core::model_profile::catalog::default_model("anthropic")
+            meerkat_core::model_profile::catalog::default_model(meerkat_core::Provider::Anthropic)
         );
         assert_eq!(
             realm
                 .binding
                 .get("openai_oauth")
                 .and_then(|binding| binding.default_model.as_deref()),
-            meerkat_core::model_profile::catalog::default_model("openai")
+            meerkat_core::model_profile::catalog::default_model(meerkat_core::Provider::OpenAI)
         );
     }
 
@@ -13459,14 +13476,14 @@ mod tests {
                 .binding
                 .get("anthropic_oauth")
                 .and_then(|binding| binding.default_model.as_deref()),
-            meerkat_core::model_profile::catalog::default_model("anthropic")
+            meerkat_core::model_profile::catalog::default_model(meerkat_core::Provider::Anthropic)
         );
         assert_eq!(
             realm
                 .binding
                 .get("openai_oauth")
                 .and_then(|binding| binding.default_model.as_deref()),
-            meerkat_core::model_profile::catalog::default_model("openai")
+            meerkat_core::model_profile::catalog::default_model(meerkat_core::Provider::OpenAI)
         );
     }
 
@@ -13498,7 +13515,9 @@ mod tests {
                     .binding
                     .get("anthropic_oauth")
                     .and_then(|binding| binding.default_model.as_deref()),
-                meerkat_core::model_profile::catalog::default_model("anthropic")
+                meerkat_core::model_profile::catalog::default_model(
+                    meerkat_core::Provider::Anthropic
+                )
             );
         }
     }
@@ -20245,6 +20264,7 @@ supports_reasoning = true
                     handshake_failed: false,
                 },
                 quarantined: vec![],
+                collection_fault: None,
             }),
         };
         let json = serde_json::json!({

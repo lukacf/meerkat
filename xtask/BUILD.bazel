@@ -445,7 +445,6 @@ rust_test(
         "//meerkat-mob-mcp:package_runfiles",
         "//meerkat-mob-pack:package_runfiles",
         "//meerkat-mob:package_runfiles",
-        "//meerkat-models:package_runfiles",
         "//meerkat-openai:package_runfiles",
         "//meerkat-providers:package_runfiles",
         "//meerkat-rest:package_runfiles",

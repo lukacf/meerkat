@@ -163,38 +163,45 @@ fn infer_session_boundary_index(messages: &[Message]) -> u64 {
         .count() as u64
 }
 
-/// Load persisted compaction cadence from session metadata, falling back to
-/// transcript-derived history for pre-migration sessions.
+/// Error establishing the session compaction cadence at agent-build ingress.
+#[derive(Debug, thiserror::Error)]
+pub enum CompactionCadenceError {
+    /// The persisted cadence metadata is present but does not deserialize.
+    /// Silently re-inferring here would launder a corrupt persisted cadence
+    /// into a fresh transcript-derived count, masking the corruption.
+    #[error("persisted session compaction cadence metadata is corrupt: {0}")]
+    CorruptMetadata(serde_json::Error),
+    /// The one-time migration cadence could not be persisted, which would
+    /// leave the transcript-derived count alive as a parallel owner.
+    #[error("failed to persist migrated session compaction cadence metadata: {0}")]
+    PersistFailed(serde_json::Error),
+}
+
+/// Establish the session compaction cadence at agent-build ingress.
 ///
-/// Two cases are distinguished explicitly:
-/// - **Absent** (metadata key missing): a pre-migration session that never
-///   recorded cadence. Infer from transcript history. This is the normal path.
-/// - **Present-but-corrupt** (key present but does not deserialize): a fault.
-///   A silent `.ok()` drop would launder a corrupt persisted cadence into the
-///   "absent" path and silently re-infer a *fresh* count, masking the
-///   corruption. Instead the parse failure is surfaced via `tracing::warn!`,
-///   then recovered (gracefully, but explicitly) by inferring.
-pub fn load_compaction_cadence(session: &Session) -> SessionCompactionCadence {
-    let inferred = || SessionCompactionCadence {
-        session_boundary_index: infer_session_boundary_index(session.messages()),
-        last_compaction_boundary_index: None,
-        last_compaction_attempt_boundary_index: None,
-    };
+/// Session metadata under [`SESSION_COMPACTION_CADENCE_KEY`] is the single
+/// typed owner of cadence truth:
+/// - **Present**: parsed fail-closed. Corrupt metadata is a typed build
+///   fault, never a trigger for silent re-inference.
+/// - **Absent** (pre-migration session): the cadence is inferred from
+///   transcript history exactly once and immediately persisted, so the
+///   transcript-derived count never survives as a shadow owner past ingress.
+pub fn load_compaction_cadence(
+    session: &mut Session,
+) -> Result<SessionCompactionCadence, CompactionCadenceError> {
     match session.metadata().get(SESSION_COMPACTION_CADENCE_KEY) {
-        None => inferred(),
-        Some(value) => match serde_json::from_value::<SessionCompactionCadence>(value.clone()) {
-            Ok(cadence) => cadence,
-            Err(error) => {
-                tracing::warn!(
-                    target: "meerkat_core::compact",
-                    session_id = %session.id(),
-                    %error,
-                    "persisted session compaction cadence is corrupt; \
-                     recovering by inferring boundary index from transcript"
-                );
-                inferred()
-            }
-        },
+        Some(value) => serde_json::from_value::<SessionCompactionCadence>(value.clone())
+            .map_err(CompactionCadenceError::CorruptMetadata),
+        None => {
+            let cadence = SessionCompactionCadence {
+                session_boundary_index: infer_session_boundary_index(session.messages()),
+                last_compaction_boundary_index: None,
+                last_compaction_attempt_boundary_index: None,
+            };
+            persist_compaction_cadence(session, &cadence)
+                .map_err(CompactionCadenceError::PersistFailed)?;
+            Ok(cadence)
+        }
     }
 }
 
@@ -368,9 +375,20 @@ mod tests {
         )));
         session.record_usage(Usage::default());
 
-        let cadence = load_compaction_cadence(&session);
+        let cadence = load_compaction_cadence(&mut session).unwrap();
         assert_eq!(cadence.session_boundary_index, 2);
         assert_eq!(cadence.last_compaction_boundary_index, None);
+        // The one-time migration must persist immediately so the
+        // transcript-derived count never survives as a shadow owner.
+        let persisted: SessionCompactionCadence = serde_json::from_value(
+            session
+                .metadata()
+                .get(SESSION_COMPACTION_CADENCE_KEY)
+                .expect("migrated cadence must be persisted at ingress")
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(persisted, cadence);
     }
 
     #[test]
@@ -383,7 +401,30 @@ mod tests {
         };
         persist_compaction_cadence(&mut session, &cadence).unwrap();
 
-        assert_eq!(load_compaction_cadence(&session), cadence);
+        assert_eq!(load_compaction_cadence(&mut session).unwrap(), cadence);
+    }
+
+    #[test]
+    fn corrupt_persisted_compaction_cadence_fails_closed() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("first")));
+        session.push(Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: "ok".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        )));
+        session.set_metadata(
+            SESSION_COMPACTION_CADENCE_KEY,
+            serde_json::json!({"session_boundary_index": "not-a-number"}),
+        );
+
+        // Corrupt persisted cadence is a typed fault, never silently
+        // re-inferred from the transcript.
+        let err = load_compaction_cadence(&mut session)
+            .expect_err("corrupt cadence metadata must fail closed");
+        assert!(matches!(err, CompactionCadenceError::CorruptMetadata(_)));
     }
 
     #[test]

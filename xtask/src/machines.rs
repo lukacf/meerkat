@@ -1764,8 +1764,9 @@ pub fn collect_mob_runtime_catalog_command_gate_mismatches(root: &Path) -> Resul
 
     let contents = fs::read_to_string(&actor_path)
         .with_context(|| format!("read Mob runtime actor {}", actor_path.display()))?;
-    let lines = contents.lines().collect::<Vec<_>>();
     let rel = relative_slash_path(root, &actor_path)?;
+    let parsed = parse_production_file(&contents)
+        .map_err(|error| anyhow!("parse Mob runtime actor {}: {error}", actor_path.display()))?;
     let critical_inputs = [
         MobCatalogCommandGateSpec {
             input: "RunFlow",
@@ -1787,11 +1788,7 @@ pub fn collect_mob_runtime_catalog_command_gate_mismatches(root: &Path) -> Resul
     let mut mismatches = Vec::new();
 
     for spec in critical_inputs {
-        let scope = spec.scope.resolve(&lines);
-        let gated = scope.is_some_and(|(start, end)| {
-            mob_catalog_input_has_fail_closed_gate(&lines[start..=end], spec.input)
-        });
-        if !gated {
+        if !mob_catalog_command_gate_is_fail_closed(&parsed, spec) {
             mismatches.push(format!(
                 "MobCommand::{} is catalog-classified but does not fail-close on MobMachineInput::{} in {}",
                 spec.input, spec.input, rel
@@ -1814,91 +1811,309 @@ enum MobCatalogCommandGateScope {
     CommandArm(&'static str),
 }
 
-impl MobCatalogCommandGateScope {
-    fn resolve(self, lines: &[&str]) -> Option<(usize, usize)> {
-        match self {
-            Self::Function(name) => function_scope_bounds(lines, name),
-            Self::CommandArm(variant) => command_arm_scope_bounds(lines, variant),
+/// MobMachine admission seams whose successful, propagated result proves the
+/// shell consulted machine authority before mutating shell state.
+const MOB_CATALOG_GATE_METHODS: [&str; 5] = [
+    "probe_mob_machine_input",
+    "apply_dsl_input",
+    "prepare_dsl_input",
+    "apply_command_admission",
+    "prepare_command_admission",
+];
+
+/// AST-level fail-closed audit for one catalog-classified Mob command.
+///
+/// The prior implementation located the scope by compacted-text needle +
+/// brace counting and classified fail-closed handling by joining a ±N line
+/// window into a token string (`compact.contains("apply_dsl_input(")` &&
+/// `compact.contains('?')`). That recognized banned/required *relationships*
+/// only as substrings: a `?` anywhere in the window (e.g. inside an
+/// unrelated call or a string literal) satisfied the gate, and a rename or
+/// reformat could silently change what the window saw.
+///
+/// This version resolves the scope structurally (named fn item / `match` arm
+/// whose pattern is `MobCommand::<variant>`) and classifies the gate on AST
+/// shape: a gate-seam call (one of [`MOB_CATALOG_GATE_METHODS`]) that
+/// *carries the input variant* must have its `Result` propagated — wrapped
+/// in `?` (`syn::Expr::Try`) or mapped through `.map_err(..)` — or be the
+/// probe seam, which is fail-closed by construction. A discarded result
+/// (`let _ = self.apply_dsl_input(..)`) has neither ancestor and fails.
+fn mob_catalog_command_gate_is_fail_closed(
+    file: &syn::File,
+    spec: MobCatalogCommandGateSpec,
+) -> bool {
+    match spec.scope {
+        MobCatalogCommandGateScope::Function(name) => {
+            let Some(block) = find_named_fn_block(file, name) else {
+                return false;
+            };
+            let mut analyzer = MobCatalogGateAnalyzer::for_block(spec.input, block);
+            analyzer.visit_block(block);
+            analyzer.gated
+        }
+        MobCatalogCommandGateScope::CommandArm(variant) => {
+            let mut finder = MobCommandArmFinder {
+                variant,
+                input: spec.input,
+                gated: false,
+            };
+            finder.visit_file(file);
+            finder.gated
         }
     }
 }
 
-fn mob_catalog_input_has_fail_closed_gate(lines: &[&str], input: &str) -> bool {
-    let token = format!("MobMachineInput::{input}");
-    lines
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| line.contains(&token))
-        .any(|(line_index, _)| mob_catalog_input_occurrence_is_fail_closed(lines, line_index))
-}
-
-fn mob_catalog_input_occurrence_is_fail_closed(lines: &[&str], line_index: usize) -> bool {
-    let start = line_index.saturating_sub(4);
-    let end = (line_index + 18).min(lines.len());
-    let window = lines[start..end].join("\n");
-    let compact = window.split_whitespace().collect::<Vec<_>>().join(" ");
-
-    if compact.contains("let _ = self.apply_dsl_input") || compact.contains("may diverge") {
-        return false;
+/// Locate the body block of a named production `fn` (free or impl member).
+fn find_named_fn_block<'a>(file: &'a syn::File, name: &str) -> Option<&'a syn::Block> {
+    struct FnFinder<'a, 'n> {
+        name: &'n str,
+        block: Option<&'a syn::Block>,
     }
-
-    compact.contains("probe_mob_machine_input(")
-        || (compact.contains("apply_dsl_input(")
-            && (compact.contains('?')
-                || compact.contains("return Err")
-                || compact.contains("continue;")
-                || compact.contains(".map_err(")))
-        || (compact.contains("prepare_dsl_input(")
-            && (compact.contains('?')
-                || compact.contains("return Err")
-                || compact.contains("continue;")
-                || compact.contains(".map_err(")))
-        || (compact.contains("apply_command_admission(")
-            && (compact.contains('?')
-                || compact.contains("return Err")
-                || compact.contains("continue;")
-                || compact.contains(".map_err(")))
-        || (compact.contains("prepare_command_admission(")
-            && (compact.contains('?')
-                || compact.contains("return Err")
-                || compact.contains("continue;")
-                || compact.contains(".map_err(")))
+    impl<'a> Visit<'a> for FnFinder<'a, '_> {
+        fn visit_item_fn(&mut self, node: &'a syn::ItemFn) {
+            if node.sig.ident == self.name {
+                self.block = Some(&node.block);
+            }
+            syn::visit::visit_item_fn(self, node);
+        }
+        fn visit_impl_item_fn(&mut self, node: &'a syn::ImplItemFn) {
+            if node.sig.ident == self.name {
+                self.block = Some(&node.block);
+            }
+            syn::visit::visit_impl_item_fn(self, node);
+        }
+    }
+    let mut finder = FnFinder { name, block: None };
+    finder.visit_file(file);
+    finder.block
 }
 
-fn function_scope_bounds(lines: &[&str], function_name: &str) -> Option<(usize, usize)> {
-    let needle = format!("fn{function_name}(");
-    let start = lines.iter().position(|line| {
-        let compact = line.split_whitespace().collect::<String>();
-        compact.contains(&needle)
-    })?;
-    brace_scope_bounds(lines, start)
+/// Find every `match` arm whose pattern is `MobCommand::<variant>` and run
+/// the gate analyzer over the arm body. Any gated arm satisfies the audit.
+struct MobCommandArmFinder<'n> {
+    variant: &'n str,
+    input: &'n str,
+    gated: bool,
 }
 
-fn command_arm_scope_bounds(lines: &[&str], variant: &str) -> Option<(usize, usize)> {
-    let needle = format!("MobCommand::{variant}");
-    let start = lines.iter().position(|line| line.contains(&needle))?;
-    brace_scope_bounds(lines, start)
-}
-
-fn brace_scope_bounds(lines: &[&str], start: usize) -> Option<(usize, usize)> {
-    let mut depth = 0usize;
-    let mut opened = false;
-    for (index, line) in lines.iter().enumerate().skip(start) {
-        for ch in line.chars() {
-            match ch {
-                '{' => {
-                    depth += 1;
-                    opened = true;
-                }
-                '}' if depth > 0 => depth -= 1,
-                _ => {}
+impl<'a> Visit<'a> for MobCommandArmFinder<'_> {
+    fn visit_arm(&mut self, node: &'a syn::Arm) {
+        if pat_is_mob_command_variant(&node.pat, self.variant) {
+            let mut analyzer = MobCatalogGateAnalyzer::for_expr(self.input, &node.body);
+            analyzer.visit_expr(&node.body);
+            if analyzer.gated {
+                self.gated = true;
             }
         }
-        if opened && depth == 0 {
-            return Some((start, index));
+        syn::visit::visit_arm(self, node);
+    }
+}
+
+fn pat_is_mob_command_variant(pat: &syn::Pat, variant: &str) -> bool {
+    let path = match pat {
+        syn::Pat::Struct(pat) => &pat.path,
+        syn::Pat::TupleStruct(pat) => &pat.path,
+        syn::Pat::Path(pat) => &pat.path,
+        _ => return false,
+    };
+    path_ends_with(path, &["MobCommand", variant])
+}
+
+fn path_ends_with(path: &syn::Path, suffix: &[&str]) -> bool {
+    let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+    segments.len() >= suffix.len()
+        && segments[segments.len() - suffix.len()..]
+            .iter()
+            .zip(suffix)
+            .all(|(seg, want)| seg == want)
+}
+
+/// Scope analyzer: `gated` flips true when a gate-seam call carrying the
+/// input variant sits under a `?` or `.map_err(..)` ancestor (or is the
+/// probe seam). Built in two passes: first collect idents that a macro
+/// assertion in the same scope structurally binds to the input variant
+/// (e.g. `debug_assert!(matches!(run_flow, ..MobMachineInput::RunFlow {..}))`
+/// — macro interiors have no typed AST, so their parsed token stream is the
+/// structural truth available), then classify gate calls.
+struct MobCatalogGateAnalyzer<'n> {
+    input: &'n str,
+    asserted_idents: BTreeSet<String>,
+    gated: bool,
+}
+
+impl<'n> MobCatalogGateAnalyzer<'n> {
+    fn for_block(input: &'n str, block: &syn::Block) -> Self {
+        let mut collector = MacroAssertedIdentCollector {
+            input,
+            idents: BTreeSet::new(),
+        };
+        collector.visit_block(block);
+        Self {
+            input,
+            asserted_idents: collector.idents,
+            gated: false,
         }
     }
-    None
+
+    fn for_expr(input: &'n str, expr: &syn::Expr) -> Self {
+        let mut collector = MacroAssertedIdentCollector {
+            input,
+            idents: BTreeSet::new(),
+        };
+        collector.visit_expr(expr);
+        Self {
+            input,
+            asserted_idents: collector.idents,
+            gated: false,
+        }
+    }
+
+    /// `true` when `expr`'s subtree contains a gate-seam call whose
+    /// arguments carry the input variant.
+    fn subtree_has_input_carrying_gate_call(&self, expr: &syn::Expr) -> bool {
+        let mut finder = GateCallFinder {
+            input: self.input,
+            asserted_idents: &self.asserted_idents,
+            found: false,
+        };
+        finder.visit_expr(expr);
+        finder.found
+    }
+}
+
+impl<'a> Visit<'a> for MobCatalogGateAnalyzer<'_> {
+    fn visit_expr_try(&mut self, node: &'a syn::ExprTry) {
+        if self.subtree_has_input_carrying_gate_call(&node.expr) {
+            self.gated = true;
+        }
+        syn::visit::visit_expr_try(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'a syn::ExprMethodCall) {
+        let method = node.method.to_string();
+        if method == "map_err" && self.subtree_has_input_carrying_gate_call(&node.receiver) {
+            self.gated = true;
+        }
+        if method == "probe_mob_machine_input"
+            && node
+                .args
+                .iter()
+                .any(|arg| expr_carries_mob_machine_input(arg, self.input, &self.asserted_idents))
+        {
+            self.gated = true;
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+/// Collect idents bound to the input variant by a macro assertion in scope.
+struct MacroAssertedIdentCollector<'n> {
+    input: &'n str,
+    idents: BTreeSet<String>,
+}
+
+impl<'a> Visit<'a> for MacroAssertedIdentCollector<'_> {
+    fn visit_macro(&mut self, node: &'a syn::Macro) {
+        let compact: String = node
+            .tokens
+            .to_string()
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        if compact.contains(&format!("MobMachineInput::{}", self.input)) {
+            collect_token_idents(node.tokens.clone(), &mut self.idents);
+        }
+        syn::visit::visit_macro(self, node);
+    }
+}
+
+fn collect_token_idents(tokens: proc_macro2::TokenStream, idents: &mut BTreeSet<String>) {
+    for token in tokens {
+        match token {
+            proc_macro2::TokenTree::Ident(ident) => {
+                idents.insert(ident.to_string());
+            }
+            proc_macro2::TokenTree::Group(group) => collect_token_idents(group.stream(), idents),
+            _ => {}
+        }
+    }
+}
+
+/// Subtree search for a gate-seam call whose arguments carry the input.
+struct GateCallFinder<'n> {
+    input: &'n str,
+    asserted_idents: &'n BTreeSet<String>,
+    found: bool,
+}
+
+impl GateCallFinder<'_> {
+    fn args_carry_input<'e>(&self, mut args: impl Iterator<Item = &'e syn::Expr>) -> bool {
+        args.any(|arg| expr_carries_mob_machine_input(arg, self.input, self.asserted_idents))
+    }
+}
+
+impl<'a> Visit<'a> for GateCallFinder<'_> {
+    fn visit_expr_method_call(&mut self, node: &'a syn::ExprMethodCall) {
+        if MOB_CATALOG_GATE_METHODS.contains(&node.method.to_string().as_str())
+            && self.args_carry_input(node.args.iter())
+        {
+            self.found = true;
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'a syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref()
+            && let Some(last) = path.path.segments.last()
+            && MOB_CATALOG_GATE_METHODS.contains(&last.ident.to_string().as_str())
+            && self.args_carry_input(node.args.iter())
+        {
+            self.found = true;
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+}
+
+/// `true` when the expression subtree carries `MobMachineInput::<input>` —
+/// either as a direct enum-variant construction/path, or as an ident the
+/// scope structurally asserted to be that variant.
+fn expr_carries_mob_machine_input(
+    expr: &syn::Expr,
+    input: &str,
+    asserted_idents: &BTreeSet<String>,
+) -> bool {
+    struct InputCarrierFinder<'n> {
+        input: &'n str,
+        asserted_idents: &'n BTreeSet<String>,
+        found: bool,
+    }
+    impl<'a> Visit<'a> for InputCarrierFinder<'_> {
+        fn visit_expr_struct(&mut self, node: &'a syn::ExprStruct) {
+            if path_ends_with(&node.path, &["MobMachineInput", self.input]) {
+                self.found = true;
+            }
+            syn::visit::visit_expr_struct(self, node);
+        }
+        fn visit_expr_path(&mut self, node: &'a syn::ExprPath) {
+            if path_ends_with(&node.path, &["MobMachineInput", self.input]) {
+                self.found = true;
+            }
+            if node.path.segments.len() == 1
+                && let Some(segment) = node.path.segments.first()
+                && self.asserted_idents.contains(&segment.ident.to_string())
+            {
+                self.found = true;
+            }
+            syn::visit::visit_expr_path(self, node);
+        }
+    }
+    let mut finder = InputCarrierFinder {
+        input,
+        asserted_idents,
+        found: false,
+    };
+    finder.visit_expr(expr);
+    finder.found
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3170,18 +3385,11 @@ fn validate_semantic_entries(
                 entry.name
             );
         }
-        if entry.anchor_ids.is_empty() {
-            bail!(
-                "{owner} semantic coverage entry `{}` has no code-anchor mappings",
-                entry.name
-            );
-        }
-        if entry.scenario_ids.is_empty() {
-            bail!(
-                "{owner} semantic coverage entry `{}` has no scenario mappings",
-                entry.name
-            );
-        }
+        // Empty anchor/scenario id lists are permitted: under the
+        // full-containment matching rule an element nothing fully describes
+        // is honestly UNCLAIMED rather than mis-attributed to whichever
+        // anchor coincidentally shares a token. Wrong claims (unknown ids,
+        // tautological everything-maps-to-everything) remain rejected below.
         if anchor_ids.len() > 1
             && scenario_ids.len() > 1
             && entry.anchor_ids.len() == anchor_ids.len()

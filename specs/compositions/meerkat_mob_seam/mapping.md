@@ -47,26 +47,26 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 
 ### Routes
 - `binding_request_reaches_meerkat`
-  - anchors: `mob_meerkat_seam`
-  - scenarios: `binding_round_trip`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `work_request_reaches_meerkat`
-  - anchors: `mob_meerkat_seam`
-  - scenarios: `binding_round_trip`, `work_round_trip`, `peer-ingress-and-cancellation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `retire_request_reaches_meerkat`
-  - anchors: `mob_meerkat_seam`
-  - scenarios: `binding_round_trip`, `peer-ingress-and-cancellation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `destroy_request_reaches_meerkat`
-  - anchors: `mob_meerkat_seam`
-  - scenarios: `binding_round_trip`, `peer-ingress-and-cancellation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `runtime_bound_reaches_mob`
-  - anchors: `mob_meerkat_seam`, `meerkat_runtime_entry`
-  - scenarios: `binding_round_trip`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `runtime_retired_reaches_mob`
-  - anchors: `mob_meerkat_seam`, `meerkat_runtime_entry`
-  - scenarios: `binding_round_trip`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `runtime_destroyed_reaches_mob`
-  - anchors: `mob_meerkat_seam`, `meerkat_runtime_entry`
-  - scenarios: `binding_round_trip`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Scheduler Rules
 - `(none)`

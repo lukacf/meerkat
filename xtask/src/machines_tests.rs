@@ -614,3 +614,174 @@ fn peer_terminal_shell_allows_enum_variant_carrier_and_typed_facts() {
         "enum carrier + typed-fact call must not flag: {clean:#?}"
     );
 }
+
+// ─── AST-level Mob catalog command gate (replaces window/token scanning) ─────
+
+#[cfg(feature = "machine-authority")]
+fn mob_gate_check(source: &str, spec: MobCatalogCommandGateSpec) -> bool {
+    let parsed = parse_production_file(source).expect("test source parses");
+    mob_catalog_command_gate_is_fail_closed(&parsed, spec)
+}
+
+#[cfg(feature = "machine-authority")]
+#[test]
+fn mob_catalog_gate_accepts_try_propagated_admission() {
+    let gated = mob_gate_check(
+        r#"
+        impl Actor {
+            async fn handle_cancel_flow(&mut self, run_id: RunId) -> Result<(), MobError> {
+                self.apply_command_admission(
+                    mob_dsl::MobMachineInput::CancelFlow {
+                        run_id: mob_dsl::RunId::from(run_id.to_string()),
+                    },
+                    MobState::Running,
+                    "cancel_flow",
+                )?;
+                Ok(())
+            }
+        }
+    "#,
+        MobCatalogCommandGateSpec {
+            input: "CancelFlow",
+            scope: MobCatalogCommandGateScope::Function("handle_cancel_flow"),
+        },
+    );
+    assert!(gated, "`?`-propagated admission must satisfy the gate");
+}
+
+#[cfg(feature = "machine-authority")]
+#[test]
+fn mob_catalog_gate_accepts_map_err_chained_admission_in_command_arm() {
+    let gated = mob_gate_check(
+        r#"
+        impl Actor {
+            async fn run(&mut self) {
+                match command {
+                    MobCommand::SetSpawnPolicy { policy, reply_tx } => {
+                        let enabled = policy.is_some();
+                        let result = self
+                            .apply_dsl_input(
+                                mob_dsl::MobMachineInput::SetSpawnPolicy { enabled },
+                                "set_spawn_policy",
+                            )
+                            .map_err(|error| MobError::Internal(error.to_string()));
+                        let _ = reply_tx.send(result);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    "#,
+        MobCatalogCommandGateSpec {
+            input: "SetSpawnPolicy",
+            scope: MobCatalogCommandGateScope::CommandArm("SetSpawnPolicy"),
+        },
+    );
+    assert!(
+        gated,
+        "map_err-propagated admission in the arm must satisfy the gate"
+    );
+}
+
+#[cfg(feature = "machine-authority")]
+#[test]
+fn mob_catalog_gate_accepts_macro_asserted_variable_input() {
+    // handle_run_flow shape: the input is built elsewhere, structurally
+    // asserted to be the variant via `debug_assert!(matches!(..))`, and the
+    // asserted local is what flows into the gate seam.
+    let gated = mob_gate_check(
+        r#"
+        impl Actor {
+            async fn handle_run_flow(&mut self) -> Result<RunId, MobError> {
+                let run_flow = MobRun::run_flow_input(&run_id, &config)?;
+                debug_assert!(matches!(run_flow, mob_dsl::MobMachineInput::RunFlow { .. }));
+                let prepared = self
+                    .prepare_dsl_input(run_flow.clone(), "run_flow")
+                    .map_err(|_| self.invalid_transition_to(MobState::Running))?;
+                self.commit_prepared_dsl_input(prepared)?;
+                Ok(run_id)
+            }
+        }
+    "#,
+        MobCatalogCommandGateSpec {
+            input: "RunFlow",
+            scope: MobCatalogCommandGateScope::Function("handle_run_flow"),
+        },
+    );
+    assert!(
+        gated,
+        "macro-asserted local flowing into the gate seam must satisfy the gate"
+    );
+}
+
+#[cfg(feature = "machine-authority")]
+#[test]
+fn mob_catalog_gate_rejects_discarded_admission_result() {
+    let gated = mob_gate_check(
+        r#"
+        impl Actor {
+            async fn handle_force_cancel(&mut self, id: MeerkatId) -> Result<(), MobError> {
+                let _ = self.apply_dsl_input(
+                    mob_dsl::MobMachineInput::ForceCancel { agent_identity: id },
+                    "force_cancel",
+                );
+                self.do_the_cancel(id).await?;
+                Ok(())
+            }
+        }
+    "#,
+        MobCatalogCommandGateSpec {
+            input: "ForceCancel",
+            scope: MobCatalogCommandGateScope::Function("handle_force_cancel"),
+        },
+    );
+    assert!(!gated, "a discarded admission result must fail the gate");
+}
+
+#[cfg(feature = "machine-authority")]
+#[test]
+fn mob_catalog_gate_rejects_unrelated_try_in_scope() {
+    // The retired window scanner accepted any `?` within ±N lines of the
+    // input token. The AST gate requires the `?` (or map_err) to sit on the
+    // admission call itself.
+    let gated = mob_gate_check(
+        r#"
+        impl Actor {
+            async fn handle_cancel_flow(&mut self, run_id: RunId) -> Result<(), MobError> {
+                let outcome = self.apply_dsl_input(
+                    mob_dsl::MobMachineInput::CancelFlow { run_id },
+                    "cancel_flow",
+                );
+                self.unrelated_io().await?;
+                tracing::debug!(?outcome, "admission outcome ignored");
+                Ok(())
+            }
+        }
+    "#,
+        MobCatalogCommandGateSpec {
+            input: "CancelFlow",
+            scope: MobCatalogCommandGateScope::Function("handle_cancel_flow"),
+        },
+    );
+    assert!(
+        !gated,
+        "a `?` on an unrelated call must not satisfy the gate"
+    );
+}
+
+#[cfg(feature = "machine-authority")]
+#[test]
+fn mob_catalog_gate_rejects_missing_scope() {
+    let gated = mob_gate_check(
+        r"
+        impl Actor {
+            async fn some_other_fn(&mut self) {}
+        }
+    ",
+        MobCatalogCommandGateSpec {
+            input: "RunFlow",
+            scope: MobCatalogCommandGateScope::Function("handle_run_flow"),
+        },
+    );
+    assert!(!gated, "a missing scope must fail closed");
+}

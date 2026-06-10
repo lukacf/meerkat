@@ -194,9 +194,11 @@ impl ActorFlowTurnExecutor {
                         }
                         return;
                     }
-                    AgentEvent::InteractionFailed { error, .. } => {
+                    AgentEvent::InteractionFailed { reason, .. } => {
                         if let Some(tx) = completion_tx.take() {
-                            let _ = tx.send(FlowTurnOutcome::Failed { reason: error });
+                            let _ = tx.send(FlowTurnOutcome::Failed {
+                                reason: reason.to_string(),
+                            });
                         }
                         return;
                     }

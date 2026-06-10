@@ -83,11 +83,11 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `session_document_authority`
   - scenarios: `session_system_context_append_resolve`
 - `ResolveSystemContextPersistAppendAdmissionAdmit`
-  - anchors: `session_document_authority`
-  - scenarios: `session_system_context_append_resolve`, `session_system_context_apply_discard`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSystemContextPersistAppendAdmissionReject`
-  - anchors: `session_document_authority`
-  - scenarios: `session_system_context_append_resolve`, `session_system_context_apply_discard`, `session_durable_config_authorize_restore`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSystemContextPendingApplyItemRuntimeSteer`
   - anchors: `session_document_authority`
   - scenarios: `session_system_context_apply_discard`
@@ -203,56 +203,56 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `session_document_authority`
   - scenarios: `session_durable_config_authorize_restore`
 - `ResolvePendingContinuationWithBoundary`
-  - anchors: `session_document_authority`
-  - scenarios: `session_first_turn_pending_consume`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePendingContinuationWithoutBoundary`
-  - anchors: `session_document_authority`
-  - scenarios: `session_first_turn_pending_consume`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeSessionResumeOverridesRejectProviderRequiresModel`
-  - anchors: `session_document_authority`
-  - scenarios: `session_durable_config_authorize_restore`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn`
-  - anchors: `session_document_authority`
-  - scenarios: `session_initial_inputs_stage`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeSessionResumeOverridesAcceptRecomputeProvider`
-  - anchors: `session_document_authority`
-  - scenarios: `session_initial_inputs_stage`, `session_system_context_snapshot_restore`, `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`, `session_durable_config_authorize_restore`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeSessionResumeOverridesAcceptUseOverride`
-  - anchors: `session_document_authority`
-  - scenarios: `session_initial_inputs_stage`, `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeSessionResumeOverridesAcceptRetainStored`
-  - anchors: `session_document_authority`
-  - scenarios: `session_initial_inputs_stage`, `session_system_context_snapshot_restore`, `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`, `session_durable_config_authorize_restore`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyLiveSessionAuthorityLive`
-  - anchors: `session_document_authority`
-  - scenarios: `session_first_turn_pending_consume`, `session_initial_inputs_stage`, `session_first_turn_restore_recover`, `session_system_context_append_resolve`, `session_system_context_apply_discard`, `session_system_context_snapshot_restore`, `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`, `session_durable_config_authorize_restore`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyLiveSessionAuthorityDurableArchived`
-  - anchors: `session_document_authority`
-  - scenarios: `session_first_turn_restore_recover`, `session_system_context_snapshot_restore`, `session_realtime_transcript_materialize_and_restore`, `session_durable_config_authorize_restore`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyLiveSessionAuthorityDurableUncommitted`
-  - anchors: `session_document_authority`
-  - scenarios: `session_first_turn_restore_recover`, `session_system_context_snapshot_restore`, `session_realtime_transcript_materialize_and_restore`, `session_durable_config_authorize_restore`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyLiveSessionAuthorityDurableSystemContext`
-  - anchors: `session_document_authority`
-  - scenarios: `session_system_context_snapshot_restore`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyLiveSessionAuthorityDurableRevision`
-  - anchors: `session_document_authority`
-  - scenarios: `session_first_turn_restore_recover`, `session_system_context_snapshot_restore`, `session_realtime_transcript_materialize_and_restore`, `session_durable_config_authorize_restore`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverSessionFromStoreAuthorized`
-  - anchors: `session_document_authority`
-  - scenarios: `session_first_turn_restore_recover`, `session_durable_config_authorize_restore`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverSessionFromStoreUnrecoverable`
-  - anchors: `session_document_authority`
-  - scenarios: `session_first_turn_restore_recover`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ApplyPendingToolResults`
   - anchors: `session_document_authority`
-  - scenarios: `session_initial_inputs_stage`, `session_system_context_apply_discard`
+  - scenarios: (unclaimed)
 - `TranscriptEditFork`
-  - anchors: `session_document_authority`
-  - scenarios: `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `TranscriptEditRewrite`
-  - anchors: `session_document_authority`
-  - scenarios: `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `SessionFirstTurnPhaseResolved`
@@ -286,8 +286,8 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `session_document_authority`
   - scenarios: `session_system_context_snapshot_restore`
 - `SystemContextPersistAppendAdmissionResolved`
-  - anchors: `session_document_authority`
-  - scenarios: `session_system_context_append_resolve`, `session_system_context_apply_discard`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RealtimeTranscriptEventResolved`
   - anchors: `session_document_authority`
   - scenarios: `session_realtime_transcript_event_resolve`
@@ -310,29 +310,29 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `session_document_authority`
   - scenarios: `session_durable_config_authorize_restore`
 - `PendingContinuationResolved`
-  - anchors: `session_document_authority`
-  - scenarios: `session_first_turn_pending_consume`, `session_system_context_apply_discard`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PendingContinuationPublicTerminalResolved`
-  - anchors: `session_document_authority`
-  - scenarios: `session_first_turn_pending_consume`, `session_system_context_apply_discard`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SessionResumeOverridesAuthorized`
-  - anchors: `session_document_authority`
-  - scenarios: `session_initial_inputs_stage`, `session_system_context_snapshot_restore`, `session_realtime_transcript_materialize_and_restore`, `session_durable_config_authorize_restore`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SessionResumeOverridesRejected`
-  - anchors: `session_document_authority`
-  - scenarios: `session_initial_inputs_stage`, `session_durable_config_authorize_restore`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveSessionAuthorityClassified`
-  - anchors: `session_document_authority`
-  - scenarios: `session_first_turn_pending_consume`, `session_initial_inputs_stage`, `session_first_turn_restore_recover`, `session_system_context_append_resolve`, `session_system_context_apply_discard`, `session_system_context_snapshot_restore`, `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`, `session_durable_config_authorize_restore`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SessionStoreRecoverySourceResolved`
-  - anchors: `session_document_authority`
-  - scenarios: `session_initial_inputs_stage`, `session_first_turn_restore_recover`, `session_system_context_apply_discard`, `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SessionToolResultsApplied`
-  - anchors: `session_document_authority`
-  - scenarios: `session_initial_inputs_stage`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `TranscriptRewriteCommitted`
-  - anchors: `session_document_authority`
-  - scenarios: `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `(none)`

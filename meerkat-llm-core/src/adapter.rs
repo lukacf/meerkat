@@ -386,8 +386,8 @@ impl AgentLlmClient for LlmClientAdapter {
         ))
     }
 
-    fn provider(&self) -> &'static str {
-        self.client.provider().as_str()
+    fn provider(&self) -> meerkat_core::Provider {
+        self.client.provider()
     }
 
     fn model(&self) -> &str {

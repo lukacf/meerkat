@@ -1013,16 +1013,16 @@ fn occurrence_from_planned_state(
     created_at_utc: DateTime<Utc>,
 ) -> Result<Occurrence, OccurrenceLifecycleError> {
     let snapshot_key = target_stable_key(&target_snapshot)?;
-    if dsl.target_binding_key != snapshot_key {
+    if dsl.target_binding_key.0 != snapshot_key {
         return Err(OccurrenceLifecycleError::TargetBindingKeyMismatch {
-            machine_key: dsl.target_binding_key.clone(),
+            machine_key: dsl.target_binding_key.0.clone(),
             snapshot_key,
         });
     }
     let trigger_key = trigger_stable_key(&schedule.trigger)?;
-    if dsl.trigger_key != trigger_key {
+    if dsl.trigger_key.0 != trigger_key {
         return Err(OccurrenceLifecycleError::TargetBindingKeyMismatch {
-            machine_key: dsl.trigger_key.clone(),
+            machine_key: dsl.trigger_key.0.clone(),
             snapshot_key: trigger_key,
         });
     }
@@ -1050,13 +1050,13 @@ fn occurrence_from_planned_state(
         misfire_policy: schedule.misfire_policy.clone(),
         overlap_policy: schedule.overlap_policy.clone(),
         missing_target_policy: schedule.missing_target_policy.clone(),
-        claimed_by: dsl.claimed_by.clone(),
+        claimed_by: dsl.claimed_by.clone().map(|owner| owner.0),
         lease_expires_at_utc: occurrence_optional_datetime_from_dsl(
             dsl.lease_expires_at_utc_ms,
             "lease_expires_at_utc",
         )?,
         claim_token: claim_token_from_dsl(&dsl.claim_token)?,
-        delivery_correlation_id: dsl.delivery_correlation_id.clone(),
+        delivery_correlation_id: dsl.delivery_correlation_id.clone().map(|id| id.0),
         last_receipt: None,
         failure_class: dsl.failure_class.map(from_dsl_failure_class),
         runtime_outcome: None,
@@ -1100,8 +1100,8 @@ fn convert_occurrence_input(
             schedule_id: occ_dsl::ScheduleId(schedule_id.0.to_string()),
             schedule_revision: schedule_revision.0,
             occurrence_ordinal: occurrence_ordinal.0,
-            trigger_key: trigger_stable_key(trigger_snapshot)?,
-            target_binding_key: target_stable_key(target_snapshot)?,
+            trigger_key: trigger_stable_key(trigger_snapshot)?.into(),
+            target_binding_key: target_stable_key(target_snapshot)?.into(),
             misfire_policy: to_occ_dsl_misfire_policy(misfire_policy),
             misfire_policy_key: misfire_policy_authority_key(misfire_policy)?,
             overlap_policy: to_occ_dsl_overlap_policy(overlap_policy),
@@ -1118,7 +1118,7 @@ fn convert_occurrence_input(
         },
         OccurrenceLifecycleInput::SyncTargetSnapshot { target_snapshot } => {
             occ_dsl::OccurrenceLifecycleInput::SyncTargetSnapshot {
-                target_binding_key: target_stable_key(target_snapshot)?,
+                target_binding_key: target_stable_key(target_snapshot)?.into(),
                 target_materialized_session_id: target_materialized_session_id(target_snapshot)
                     .map(|session_id| occ_dsl::SessionId(session_id.0.to_string())),
             }
@@ -1128,7 +1128,7 @@ fn convert_occurrence_input(
             runtime_outcome,
             ..
         } => occ_dsl::OccurrenceLifecycleInput::RecordReceipt {
-            correlation_id: receipt.correlation_id.clone(),
+            correlation_id: receipt.correlation_id.clone().map(Into::into),
             detail: receipt.detail.clone(),
             materialized_session_id: receipt
                 .materialized_session_id
@@ -1167,7 +1167,7 @@ fn convert_occurrence_input(
             lease_expires_at_utc,
             claim_token,
         } => occ_dsl::OccurrenceLifecycleInput::Claim {
-            owner_id: owner_id.clone(),
+            owner_id: owner_id.clone().into(),
             at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
             lease_expires_at_utc_ms: occurrence_datetime_to_millis(
                 *lease_expires_at_utc,
@@ -1179,7 +1179,7 @@ fn convert_occurrence_input(
             correlation_id,
             at_utc,
         } => occ_dsl::OccurrenceLifecycleInput::DispatchStarted {
-            correlation_id: correlation_id.clone(),
+            correlation_id: correlation_id.clone().map(Into::into),
             at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
         },
         OccurrenceLifecycleInput::AwaitCompletion { at_utc } => {
@@ -1279,8 +1279,8 @@ fn write_back_occurrence(
     occ.phase = occurrence_phase_from_dsl(dsl.lifecycle_phase);
 
     // Scalar fields
-    occ.claimed_by = dsl.claimed_by.clone();
-    occ.delivery_correlation_id = dsl.delivery_correlation_id.clone();
+    occ.claimed_by = dsl.claimed_by.clone().map(|owner| owner.0);
+    occ.delivery_correlation_id = dsl.delivery_correlation_id.clone().map(|id| id.0);
     occ.failure_detail = dsl.failure_detail.clone();
     occ.attempt_count = attempt_count_from_dsl(dsl.attempt_count)?;
 
@@ -1314,9 +1314,9 @@ fn write_back_occurrence(
             ..
         } => {
             let snapshot_key = target_stable_key(target_snapshot)?;
-            if dsl.target_binding_key != snapshot_key {
+            if dsl.target_binding_key.0 != snapshot_key {
                 return Err(OccurrenceLifecycleError::TargetBindingKeyMismatch {
-                    machine_key: dsl.target_binding_key.clone(),
+                    machine_key: dsl.target_binding_key.0.clone(),
                     snapshot_key,
                 });
             }
@@ -1330,9 +1330,9 @@ fn write_back_occurrence(
             }
             occ.target_snapshot = target_snapshot.clone();
             let trigger_key = trigger_stable_key(trigger_snapshot)?;
-            if dsl.trigger_key != trigger_key {
+            if dsl.trigger_key.0 != trigger_key {
                 return Err(OccurrenceLifecycleError::TargetBindingKeyMismatch {
-                    machine_key: dsl.trigger_key.clone(),
+                    machine_key: dsl.trigger_key.0.clone(),
                     snapshot_key: trigger_key,
                 });
             }
@@ -1349,9 +1349,9 @@ fn write_back_occurrence(
         }
         OccurrenceLifecycleInput::SyncTargetSnapshot { target_snapshot } => {
             let snapshot_key = target_stable_key(target_snapshot)?;
-            if dsl.target_binding_key != snapshot_key {
+            if dsl.target_binding_key.0 != snapshot_key {
                 return Err(OccurrenceLifecycleError::TargetBindingKeyMismatch {
-                    machine_key: dsl.target_binding_key.clone(),
+                    machine_key: dsl.target_binding_key.0.clone(),
                     snapshot_key,
                 });
             }
@@ -2387,7 +2387,7 @@ fn receipt_from_pending_authority(
         attempt,
         stage,
         recorded_at_utc_ms,
-        dsl.delivery_correlation_id.as_deref(),
+        dsl.delivery_correlation_id.as_ref().map(|id| id.0.as_str()),
         detail.as_deref(),
         failure_class,
         runtime_outcome_key.as_deref(),
@@ -2400,7 +2400,7 @@ fn receipt_from_pending_authority(
         attempt,
         stage,
         recorded_at_utc,
-        correlation_id: dsl.delivery_correlation_id.clone(),
+        correlation_id: dsl.delivery_correlation_id.clone().map(|id| id.0),
         detail,
         failure_class,
         runtime_outcome,
@@ -2449,7 +2449,9 @@ fn receipt_from_recorded_authority(
         attempt,
         stage,
         recorded_at_utc_ms,
-        dsl.last_receipt_correlation_id.as_deref(),
+        dsl.last_receipt_correlation_id
+            .as_ref()
+            .map(|id| id.0.as_str()),
         detail.as_deref(),
         failure_class,
         dsl.runtime_outcome_key.as_deref(),
@@ -2462,7 +2464,7 @@ fn receipt_from_recorded_authority(
         attempt,
         stage,
         recorded_at_utc,
-        correlation_id: dsl.last_receipt_correlation_id.clone(),
+        correlation_id: dsl.last_receipt_correlation_id.clone().map(|id| id.0),
         detail,
         failure_class,
         runtime_outcome,

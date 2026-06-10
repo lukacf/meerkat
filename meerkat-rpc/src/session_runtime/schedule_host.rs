@@ -317,7 +317,8 @@ impl SessionRuntime {
         if comms_rt.is_some() || peer_ingress_enabled {
             self.runtime_adapter
                 .update_peer_ingress_context(session_id, peer_ingress_enabled, comms_rt)
-                .await;
+                .await
+                .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
         }
 
         let turn_metadata = Some(
@@ -407,7 +408,8 @@ impl SessionRuntime {
         if comms_rt.is_some() || peer_ingress_enabled {
             self.runtime_adapter
                 .update_peer_ingress_context(session_id, peer_ingress_enabled, comms_rt)
-                .await;
+                .await
+                .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
         }
 
         let input = meerkat_runtime::Input::ExternalEvent(meerkat_runtime::ExternalEventInput {

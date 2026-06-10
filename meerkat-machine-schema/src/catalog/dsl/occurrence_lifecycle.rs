@@ -12,8 +12,8 @@ machine! {
             schedule_id: ScheduleId,
             schedule_revision: u64,
             occurrence_ordinal: u64,
-            trigger_key: String,
-            target_binding_key: String,
+            trigger_key: TriggerKey,
+            target_binding_key: TargetBindingId,
             misfire_policy: Enum<MisfirePolicy>,
             misfire_policy_key: String,
             overlap_policy: Enum<OverlapPolicy>,
@@ -22,11 +22,11 @@ machine! {
             missing_target_policy_key: String,
             due_at_utc_ms: u64,
             misfire_deadline_utc_ms: u64,
-            claimed_by: Option<String>,
+            claimed_by: Option<ClaimOwner>,
             lease_expires_at_utc_ms: Option<u64>,
             claimed_at_utc_ms: Option<u64>,
             claim_token: Option<ClaimToken>,
-            delivery_correlation_id: Option<String>,
+            delivery_correlation_id: Option<CorrelationId>,
             target_materialized_session_id: Option<SessionId>,
             receipt_recorded_at_utc_ms: Option<u64>,
             last_receipt_recorded_at_utc_ms: Option<u64>,
@@ -34,7 +34,7 @@ machine! {
             last_receipt_stage: Option<Enum<DeliveryReceiptStage>>,
             last_receipt_failure_class: Option<Enum<OccurrenceFailureClass>>,
             last_receipt_detail: Option<String>,
-            last_receipt_correlation_id: Option<String>,
+            last_receipt_correlation_id: Option<CorrelationId>,
             last_receipt_materialized_session_id: Option<SessionId>,
             runtime_outcome_key: Option<String>,
             receipt_stage: Option<Enum<DeliveryReceiptStage>>,
@@ -109,8 +109,8 @@ machine! {
                 schedule_id: ScheduleId,
                 schedule_revision: u64,
                 occurrence_ordinal: u64,
-                trigger_key: String,
-                target_binding_key: String,
+                trigger_key: TriggerKey,
+                target_binding_key: TargetBindingId,
                 misfire_policy: Enum<MisfirePolicy>,
                 misfire_policy_key: String,
                 overlap_policy: Enum<OverlapPolicy>,
@@ -121,9 +121,9 @@ machine! {
                 due_at_utc_ms: u64,
                 misfire_deadline_utc_ms: u64,
             },
-            SyncTargetSnapshot { target_binding_key: String, target_materialized_session_id: Option<SessionId> },
+            SyncTargetSnapshot { target_binding_key: TargetBindingId, target_materialized_session_id: Option<SessionId> },
             RecordReceipt {
-                correlation_id: Option<String>,
+                correlation_id: Option<CorrelationId>,
                 detail: Option<String>,
                 materialized_session_id: Option<SessionId>,
                 runtime_outcome_key: Option<String>
@@ -166,8 +166,8 @@ machine! {
                 schedule_phase: Enum<ClaimedDispatchSchedulePhase>,
                 current_schedule_revision: u64
             },
-            Claim { owner_id: String, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken },
-            DispatchStarted { correlation_id: Option<String>, at_utc_ms: u64 },
+            Claim { owner_id: ClaimOwner, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken },
+            DispatchStarted { correlation_id: Option<CorrelationId>, at_utc_ms: u64 },
             AwaitCompletion { at_utc_ms: u64 },
             Complete { at_utc_ms: u64 },
             ResolveRuntimeCompletion {
@@ -1728,6 +1728,43 @@ machine! {
 // Stub types for compilation — in the real port these would come from meerkat-schedule
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OccurrenceId(pub String);
+
+/// Typed trigger identity an occurrence was planned from. String-backed
+/// newtype so the machine cannot confuse it with policy keys or binding ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerKey(pub String);
+impl<T: Into<String>> From<T> for TriggerKey {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Typed target-binding identity that determines delivery target resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetBindingId(pub String);
+impl<T: Into<String>> From<T> for TargetBindingId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Typed claim-owner identity that determines lease ownership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimOwner(pub String);
+impl<T: Into<String>> From<T> for ClaimOwner {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Typed delivery correlation identity that ties receipts to dispatches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorrelationId(pub String);
+impl<T: Into<String>> From<T> for CorrelationId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
 impl<T: Into<String>> From<T> for OccurrenceId {
     fn from(s: T) -> Self {
         Self(s.into())

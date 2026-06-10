@@ -37,6 +37,9 @@ echo "==> Release hook: syncing SDK versions to $VERSION"
 # 1. Bump SDK package versions
 "$ROOT/scripts/bump-sdk-versions.sh" "$VERSION"
 
+# 1b. Stamp docs version projections (gated by verify-version-parity.sh)
+"$ROOT/scripts/stamp-docs-contract-version.sh" "$VERSION"
+
 # 2. Bump ContractVersion::CURRENT in version.rs to match package version
 VERSION_RS="$ROOT/meerkat-contracts/src/version.rs"
 V_CORE="${VERSION%%-*}"
@@ -101,6 +104,7 @@ echo "==> Verifying SDK wrapper freshness..."
 
 # 4. Stage SDK and artifact files for the release commit
 git add \
+    "$ROOT/docs/" \
     "$ROOT/MODULE.bazel.lock" \
     "$ROOT/meerkat-contracts/src/version.rs" \
     "$ROOT/sdks/python/pyproject.toml" \

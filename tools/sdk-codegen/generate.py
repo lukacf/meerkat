@@ -189,8 +189,16 @@ WORKGRAPH_RPC_CONTRACT_TYPES = [
     "GoalStatusRequest",
     "GoalStatusResult",
     "ProjectedAttentionAuthority",
+    "ReadyWorkFilter",
     "WorkAttentionBinding",
+    "WorkGraphEventFilter",
+    "WorkGraphEventsResponse",
+    "WorkGraphIdParams",
+    "WorkGraphItemsResponse",
+    "WorkGraphSnapshot",
+    "WorkGraphSnapshotFilter",
     "WorkItem",
+    "WorkItemFilter",
     "WorkItemRef",
 ]
 
@@ -201,11 +209,16 @@ WORKGRAPH_RPC_CONTRACT_ALIAS_TYPES = [
     "WorkAttentionStatus",
     "WorkAttentionTarget",
     "WorkCompletionPolicy",
+    "WorkEdgeKind",
+    "WorkGraphEventKind",
     "WorkOwnerKind",
+    "WorkStatus",
 ]
 
 WORKGRAPH_RPC_CONTRACT_HELPER_TYPES = [
+    "WorkEdge",
     "WorkEvidenceRef",
+    "WorkGraphEvent",
     "WorkOwnerKey",
 ]
 
@@ -781,6 +794,24 @@ def _workitem_enum(schemas: dict, field: str) -> list[str]:
     values = field_schema.get("enum") if isinstance(field_schema, dict) else None
     if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
         raise KeyError(f"WorkItem.{field} must be a closed string enum in wire-types.json")
+    return list(values)
+
+
+def _workgraph_event_kind_enum(schemas: dict) -> list[str]:
+    """Closed string-enum values for ``WorkGraphEventKind`` from the schema.
+
+    Drives the generated runtime event-kind inventory so SDK parsers stop
+    hand-listing the closed union.
+    """
+    wire_schema = schemas.get("wire-types", {})
+    events_response = wire_schema.get("WorkGraphEventsResponse", {})
+    defs = events_response.get("$defs", {}) if isinstance(events_response, dict) else {}
+    kind_schema = defs.get("WorkGraphEventKind", {}) if isinstance(defs, dict) else {}
+    values = kind_schema.get("enum") if isinstance(kind_schema, dict) else None
+    if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+        raise KeyError(
+            "WorkGraphEventKind must be a closed string enum in wire-types.json"
+        )
     return list(values)
 
 
@@ -1610,6 +1641,14 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     types_content += "export type WorkGraphStatus = typeof WORK_GRAPH_STATUSES[number];\n"
     types_content += f"\nexport const WORK_GRAPH_PRIORITIES = [{priority_items}] as const;\n"
     types_content += "export type WorkGraphPriority = typeof WORK_GRAPH_PRIORITIES[number];\n"
+    # WorkGraph read parity: emit the event-kind closed union as a runtime
+    # const array so the hand-authored event parser validates against the
+    # generated inventory instead of an inline hand list. The type itself is
+    # generated via the `WorkGraphEventKind` alias above.
+    event_kind_items = ", ".join(
+        json.dumps(v) for v in _workgraph_event_kind_enum(schemas)
+    )
+    types_content += f"\nexport const WORK_GRAPH_EVENT_KINDS = [{event_kind_items}] as const;\n"
     append_typescript_alias("McpLiveOperation", wire_schema)
     append_typescript_alias("McpLiveOpStatus", wire_schema)
     for name in MCP_CONFIG_ALIAS_TYPES:
@@ -3060,6 +3099,87 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def verify_contract_inventory_coverage(
+    schemas: dict, py_output: Path, ts_output: Path, baseline_path: Path
+) -> None:
+    """Close the schema -> SDK-roster direction of the generation ratchet.
+
+    The RPC method catalog (artifacts/schemas/rpc-methods.json) is the contract
+    authority for which params/result types exist on the public surface. The
+    SDK generation rosters in this file are hand-maintained, so a NEW
+    catalog-named type could otherwise ship in schema output without any
+    generated SDK exposure. This check derives the required type inventory
+    from the catalog and fails closed when a type outside the shrink-only
+    grandfather baseline is missing from generated SDK output.
+    """
+    methods = schemas.get("rpc-methods", {}).get("methods")
+    if not isinstance(methods, list):
+        print(
+            "Error: artifacts/schemas/rpc-methods.json missing or malformed; "
+            "cannot verify SDK contract-type inventory coverage.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    inventory: set[str] = set()
+    inventory_sources: dict[str, str] = {}
+    for method in methods:
+        for key in ("params_type", "result_type"):
+            value = method.get(key)
+            if not value:
+                continue
+            # Result unions are catalogued as "A | B"; each arm is a type.
+            for part in str(value).split("|"):
+                name = part.strip()
+                if name:
+                    inventory.add(name)
+                    inventory_sources.setdefault(name, str(method.get("name", "?")))
+
+    ts_text = (ts_output / "types.ts").read_text()
+    py_text = (py_output / "types.py").read_text()
+
+    def covered(name: str) -> bool:
+        escaped = re.escape(name)
+        ts_ok = re.search(rf"\bexport (interface|type|enum|class) {escaped}\b", ts_text)
+        py_ok = re.search(rf"^(class {escaped}\b|{escaped} =|{escaped}:)", py_text, re.M)
+        return bool(ts_ok and py_ok)
+
+    missing = {name for name in inventory if not covered(name)}
+
+    baseline_doc = json.loads(baseline_path.read_text())
+    baseline = set(baseline_doc.get("grandfathered", []))
+
+    new_gaps = sorted(missing - baseline)
+    healed = sorted(baseline - missing)
+    errors = []
+    if new_gaps:
+        errors.append(
+            "catalog-named contract types are not exposed by generated SDK output "
+            "(add them to the generation rosters in tools/sdk-codegen/generate.py):"
+        )
+        for name in new_gaps:
+            errors.append(f"  {name} (catalogued by `{inventory_sources.get(name, '?')}`)")
+    if healed:
+        errors.append(
+            "grandfathered contract types are now covered; remove them from "
+            f"{baseline_path.name} (the ratchet only shrinks):"
+        )
+        errors.extend(f"  {name}" for name in healed)
+    if errors:
+        print(
+            "Error: SDK contract-type inventory coverage check failed:",
+            file=sys.stderr,
+        )
+        for line in errors:
+            print(line, file=sys.stderr)
+        sys.exit(1)
+    print(
+        f"Contract-type inventory coverage OK "
+        f"({len(inventory) - len(missing)}/{len(inventory)} covered, "
+        f"{len(missing)} grandfathered)"
+    )
+
+
 def main():
     args = parse_args()
     root = (args.root or Path(__file__).resolve().parent.parent.parent).resolve()
@@ -3112,6 +3232,15 @@ def main():
     # Generate web auth/connection wire contracts from canonical artifacts.
     generate_web_auth_types(schemas, web_events_output)
     print(f"Generated web auth contracts in {web_events_output}")
+
+    # Ratchet: every catalog-named contract type must be exposed by the
+    # generated SDK output (modulo the shrink-only grandfather baseline).
+    verify_contract_inventory_coverage(
+        schemas,
+        py_output,
+        ts_output,
+        Path(__file__).resolve().parent / "contract-inventory-baseline.json",
+    )
 
 
 if __name__ == "__main__":

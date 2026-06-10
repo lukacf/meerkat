@@ -2303,7 +2303,10 @@ async fn dismiss_exit_updates_authority_before_join() {
         "drain task should clear its slot before wait_comms_drain joins"
     );
 
-    adapter.wait_comms_drain(&session_id).await;
+    adapter
+        .wait_comms_drain(&session_id)
+        .await
+        .expect("wait_comms_drain");
     assert_eq!(
         current_phase(&adapter, &session_id).await,
         Some(CommsDrainPhase::Stopped)
@@ -2331,7 +2334,10 @@ async fn idle_timeout_updates_authority_before_join() {
         "drain task should clear its slot before wait_comms_drain joins"
     );
 
-    adapter.wait_comms_drain(&session_id).await;
+    adapter
+        .wait_comms_drain(&session_id)
+        .await
+        .expect("wait_comms_drain");
     assert_eq!(
         current_phase(&adapter, &session_id).await,
         Some(CommsDrainPhase::Stopped)
@@ -5265,8 +5271,13 @@ async fn raw_fieldless_runtime_internal_routed_input_is_rejected_before_dsl_appl
         );
 
     assert!(
-        err.contains("must use typed runtime-internal staging authority"),
+        err.to_string()
+            .contains("must use typed runtime-internal staging authority"),
         "raw fieldless runtime-internal routed input must fail before DSL apply, got {err}"
+    );
+    assert_eq!(
+        err.error_code, "routed_raw_internal_input_rejected",
+        "routed raw-input rejection must keep its stable typed discriminant"
     );
 }
 
@@ -14412,12 +14423,15 @@ async fn meerkat_machine_spine_snapshot_tracks_stopped_comms_drain_state() {
     let session_id = SessionId::new();
     let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
 
-    let spawned = adapter
+    // An unregistered session is a typed machine rejection, not a silent
+    // no-spawn success.
+    let err = adapter
         .maybe_spawn_comms_drain(&session_id, true, Some(comms_runtime))
-        .await;
+        .await
+        .expect_err("unregistered session must surface a typed rejection");
     assert!(
-        !spawned,
-        "unregistered session should not spawn a comms drain"
+        matches!(err, RuntimeDriverError::NotReady { .. }),
+        "expected NotReady, got {err:?}"
     );
 
     adapter
@@ -14431,10 +14445,14 @@ async fn meerkat_machine_spine_snapshot_tracks_stopped_comms_drain_state() {
             true,
             Some(Arc::new(FakeDrainRuntime::idle()) as Arc<dyn CommsRuntime>),
         )
-        .await;
+        .await
+        .expect("maybe_spawn_comms_drain");
     assert!(spawned, "registered session should spawn a comms drain");
 
-    adapter.abort_comms_drain(&session_id).await;
+    adapter
+        .abort_comms_drain(&session_id)
+        .await
+        .expect("abort_comms_drain");
 
     let snapshot = adapter
         .meerkat_machine_spine_snapshot(&session_id)
@@ -14486,6 +14504,105 @@ async fn register_session_rejects_destroyed_session() {
         ),
         "expected Destroyed, got {err:?}"
     );
+}
+
+#[tokio::test]
+async fn prepare_bindings_rejects_destroyed_session_with_machine_verdict() {
+    // Row #3 gate (stage-first): no shell Destroyed preflight precedes the
+    // generated machine. RegisterSession is not declared from Destroyed, so
+    // the machine rejects it and the rejection is classified as the terminal
+    // `Destroyed` truth.
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let runtime_id = runtime_id_for_session(&session_id);
+    crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
+        .await
+        .expect("destroy should succeed");
+
+    let err = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect_err("prepare_bindings must reject a destroyed binding");
+    match err {
+        crate::meerkat_machine::RuntimeBindingsError::PrepareFailed(failed_session, message) => {
+            assert_eq!(failed_session, session_id);
+            assert!(
+                message.contains("Runtime destroyed"),
+                "expected the machine Destroyed verdict to be carried, got {message:?}"
+            );
+        }
+        other => panic!("expected PrepareFailed carrying Destroyed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn set_silent_intents_rejects_destroyed_session_with_machine_verdict() {
+    // Row #3 gate (stage-first): SetSilentIntents has no shell Destroyed
+    // preflight; the generated machine rejects it from Destroyed and the
+    // rejection is classified as the terminal `Destroyed` truth.
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let runtime_id = runtime_id_for_session(&session_id);
+    crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
+        .await
+        .expect("destroy should succeed");
+
+    let err = adapter
+        .set_session_silent_intents(&session_id, vec!["mob.status".to_string()])
+        .await
+        .expect_err("set_session_silent_intents must reject a destroyed binding");
+    assert!(
+        matches!(err, RuntimeDriverError::Destroyed),
+        "expected Destroyed, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn register_session_same_binding_is_machine_owned_idempotent_noop() {
+    // Row #3 gate (probe deletion): the shell stages RegisterSession
+    // unconditionally; re-registering the SAME binding is decided by the
+    // machine (`RegisterSessionIdempotent` no-op), not by a shell probe of
+    // the authority state.
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("first register session");
+    let state_after_first = adapter.existing_session_runtime_state(&session_id).await;
+
+    adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::RegisterSession {
+                session_id: session_id.clone(),
+            },
+        )
+        .await
+        .expect("same-binding re-registration must be a machine-owned no-op");
+    assert_eq!(
+        adapter.existing_session_runtime_state(&session_id).await,
+        state_after_first,
+        "idempotent re-registration must not change the machine-owned phase"
+    );
+
+    // prepare_bindings also stages RegisterSession unconditionally and must
+    // succeed through the same machine no-op verdict.
+    adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("prepare_bindings after registration must pass the machine idempotence verdict");
 }
 
 #[tokio::test]
@@ -14597,12 +14714,14 @@ async fn set_peer_ingress_context_rejects_unknown_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    let spawned = adapter
+    // The guard rejection is a typed fault, not a silent no-spawn success.
+    let err = adapter
         .update_peer_ingress_context(&session_id, true, None)
-        .await;
+        .await
+        .expect_err("unknown session must surface a typed rejection");
     assert!(
-        !spawned,
-        "update_peer_ingress_context should not spawn for unknown session"
+        matches!(err, RuntimeDriverError::NotReady { .. }),
+        "expected NotReady, got {err:?}"
     );
 }
 
@@ -14621,12 +14740,15 @@ async fn set_peer_ingress_context_rejects_destroyed_session() {
         .await
         .expect("destroy should succeed");
 
-    let spawned = adapter
+    // The machine rejection on a destroyed binding is the typed terminal
+    // truth, not a silent swallow.
+    let err = adapter
         .update_peer_ingress_context(&session_id, true, None)
-        .await;
+        .await
+        .expect_err("destroyed session must surface the typed terminal");
     assert!(
-        !spawned,
-        "update_peer_ingress_context should not spawn for destroyed session"
+        matches!(err, RuntimeDriverError::Destroyed),
+        "expected Destroyed, got {err:?}"
     );
 }
 
@@ -14635,10 +14757,15 @@ async fn notify_drain_exited_rejects_unknown_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    // Should not panic — the guard silently rejects.
-    adapter
+    // The guard rejection is a typed fault, not a silent swallow.
+    let err = adapter
         .notify_comms_drain_exited(&session_id, DrainExitReason::Dismissed)
-        .await;
+        .await
+        .expect_err("unknown session must surface a typed rejection");
+    assert!(
+        matches!(err, RuntimeDriverError::NotReady { .. }),
+        "expected NotReady, got {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -14656,28 +14783,50 @@ async fn notify_drain_exited_rejects_destroyed_session() {
         .await
         .expect("destroy should succeed");
 
-    // Should not panic — the guard silently rejects.
-    adapter
+    // The machine rejection on a destroyed binding is the typed terminal
+    // truth, not a silent swallow.
+    let err = adapter
         .notify_comms_drain_exited(&session_id, DrainExitReason::Dismissed)
-        .await;
+        .await
+        .expect_err("destroyed session must surface the typed terminal");
+    assert!(
+        matches!(err, RuntimeDriverError::Destroyed),
+        "expected Destroyed, got {err:?}"
+    );
 }
 
 #[tokio::test]
-async fn abort_comms_drain_tolerates_unknown_session() {
+async fn abort_comms_drain_surfaces_typed_rejection_for_unknown_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    // Guard rejects unknown session but caller swallows the error.
-    adapter.abort_comms_drain(&session_id).await;
+    // Row #41 sibling gate: the helper propagates the typed control fault
+    // instead of discarding the command result.
+    let err = adapter
+        .abort_comms_drain(&session_id)
+        .await
+        .expect_err("unknown session must surface a typed rejection");
+    assert!(
+        matches!(err, RuntimeDriverError::NotReady { .. }),
+        "expected NotReady, got {err:?}"
+    );
 }
 
 #[tokio::test]
-async fn wait_comms_drain_tolerates_unknown_session() {
+async fn wait_comms_drain_surfaces_typed_rejection_for_unknown_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    // Guard rejects unknown session but caller swallows the error.
-    adapter.wait_comms_drain(&session_id).await;
+    // Row #41 sibling gate: the helper propagates the typed control fault
+    // instead of discarding the command result.
+    let err = adapter
+        .wait_comms_drain(&session_id)
+        .await
+        .expect_err("unknown session must surface a typed rejection");
+    assert!(
+        matches!(err, RuntimeDriverError::NotReady { .. }),
+        "expected NotReady, got {err:?}"
+    );
 }
 
 // ---------------------------------------------------------------
@@ -16043,7 +16192,6 @@ async fn stage_persistent_filter_updates_machine_owned_visibility_state() {
     let witnesses = [(
         "secret".to_string(),
         meerkat_core::ToolVisibilityWitness {
-            stable_owner_key: Some("callback:test".to_string()),
             last_seen_provenance: catalog_tool.provenance.clone(),
         },
     )]
@@ -16181,7 +16329,6 @@ async fn stage_persistent_filter_rejects_filter_authority_mismatched_with_visibl
     let forged_witnesses = [(
         "secret".to_string(),
         meerkat_core::ToolVisibilityWitness {
-            stable_owner_key: Some("callback:forged".to_string()),
             last_seen_provenance: Some(callback_tool_provenance("forged")),
         },
     )]
@@ -16224,7 +16371,6 @@ async fn request_deferred_tools_updates_machine_owned_visibility_state() {
     let authorities = vec![deferred_load_authority(
         "deferred_tool",
         meerkat_core::ToolVisibilityWitness {
-            stable_owner_key: Some("callback:test".to_string()),
             last_seen_provenance: deferred_tool.provenance.clone(),
         },
     )];
@@ -16301,7 +16447,6 @@ async fn request_deferred_tools_records_typed_authority_in_dsl_state() {
         &["deferred_tool"],
     );
     let witness = meerkat_core::ToolVisibilityWitness {
-        stable_owner_key: Some("callback:test".to_string()),
         last_seen_provenance: deferred_tool.provenance.clone(),
     };
 
@@ -16352,7 +16497,6 @@ async fn request_deferred_tools_scopes_dsl_authority_to_requested_names() {
         &["first_tool", "second_tool"],
     );
     let first_witness = meerkat_core::ToolVisibilityWitness {
-        stable_owner_key: Some("callback:first".to_string()),
         last_seen_provenance: first_tool.provenance.clone(),
     };
     adapter
@@ -16368,7 +16512,6 @@ async fn request_deferred_tools_scopes_dsl_authority_to_requested_names() {
         .expect("empty legacy staging should clear staged routing names");
 
     let second_witness = meerkat_core::ToolVisibilityWitness {
-        stable_owner_key: Some("callback:second".to_string()),
         last_seen_provenance: second_tool.provenance.clone(),
     };
     adapter
@@ -16416,7 +16559,6 @@ async fn request_deferred_tools_requires_machine_visible_provenance_authority() 
             vec![deferred_load_authority(
                 "deferred_tool",
                 meerkat_core::ToolVisibilityWitness {
-                    stable_owner_key: Some("callback:test".to_string()),
                     last_seen_provenance: None,
                 },
             )],
@@ -16480,7 +16622,6 @@ async fn request_deferred_tools_rejects_public_authority_mismatched_with_visible
             vec![deferred_load_authority(
                 "unknown_deferred_tool",
                 meerkat_core::ToolVisibilityWitness {
-                    stable_owner_key: Some("callback:catalog".to_string()),
                     last_seen_provenance: Some(catalog_provenance.clone()),
                 },
             )],
@@ -16498,7 +16639,6 @@ async fn request_deferred_tools_rejects_public_authority_mismatched_with_visible
             vec![deferred_load_authority(
                 "deferred_tool",
                 meerkat_core::ToolVisibilityWitness {
-                    stable_owner_key: Some("callback:forged".to_string()),
                     last_seen_provenance: Some(meerkat_core::ToolProvenance {
                         kind: meerkat_core::ToolSourceKind::Callback,
                         source_id: "forged".into(),
@@ -17988,7 +18128,6 @@ fn request_deferred_tools_rejects_empty_dsl_authority_witness() {
 fn request_deferred_tools_accepts_provenance_only_dsl_authority_witness() {
     let mut authority = registered_dsl_authority_for_visibility_tests();
     let witness = mm_dsl::ToolVisibilityWitness::from(&meerkat_core::ToolVisibilityWitness {
-        stable_owner_key: None,
         last_seen_provenance: Some(meerkat_core::ToolProvenance {
             kind: meerkat_core::ToolSourceKind::Callback,
             source_id: "test".into(),
@@ -18037,7 +18176,6 @@ async fn machine_owned_visibility_owner_promotes_staged_state_at_boundary() {
     let witnesses = [(
         "secret".to_string(),
         meerkat_core::ToolVisibilityWitness {
-            stable_owner_key: Some("callback:test".to_string()),
             last_seen_provenance: catalog_tool.provenance.clone(),
         },
     )]
@@ -18088,7 +18226,6 @@ async fn machine_owned_visibility_owner_promotes_deferred_authority_at_boundary(
         &["deferred_tool"],
     );
     let witness = meerkat_core::ToolVisibilityWitness {
-        stable_owner_key: Some("callback:test".to_string()),
         last_seen_provenance: deferred_tool.provenance.clone(),
     };
 
@@ -18243,11 +18380,9 @@ async fn replace_visibility_state_installs_full_state_in_generated_authority() {
         &["deferred_tool"],
     );
     let filter_witness = meerkat_core::ToolVisibilityWitness {
-        stable_owner_key: Some("callback:filter".to_string()),
         last_seen_provenance: filter_tool.provenance.clone(),
     };
     let deferred_witness = meerkat_core::ToolVisibilityWitness {
-        stable_owner_key: Some("callback:deferred".to_string()),
         last_seen_provenance: deferred_tool.provenance.clone(),
     };
     let replacement = meerkat_core::SessionToolVisibilityState {
@@ -18447,7 +18582,6 @@ async fn replace_visibility_state_rejects_filter_authority_mismatched_with_visib
         filter_witnesses: [(
             "secret".to_string(),
             meerkat_core::ToolVisibilityWitness {
-                stable_owner_key: Some("callback:forged".to_string()),
                 last_seen_provenance: Some(callback_tool_provenance("forged")),
             },
         )]
@@ -18532,7 +18666,6 @@ async fn replace_visibility_state_rejects_deferred_authority_mismatched_with_vis
         requested_witnesses: [(
             "deferred_tool".to_string(),
             meerkat_core::ToolVisibilityWitness {
-                stable_owner_key: Some("callback:forged".to_string()),
                 last_seen_provenance: Some(callback_tool_provenance("forged")),
             },
         )]
@@ -18700,7 +18833,6 @@ async fn publish_committed_visible_set_rejects_deferred_authority_mismatched_wit
         requested_witnesses: [(
             "deferred_tool".to_string(),
             meerkat_core::ToolVisibilityWitness {
-                stable_owner_key: Some("callback:forged".to_string()),
                 last_seen_provenance: Some(callback_tool_provenance("forged")),
             },
         )]
@@ -21171,12 +21303,6 @@ fn runtime_modeled_tool_visibility_witness_inner_from_domain(
     witness: &meerkat_core::ToolVisibilityWitness,
 ) -> KernelValue {
     let mut fields = BTreeMap::new();
-    if let Some(stable_owner_key) = &witness.stable_owner_key {
-        fields.insert(
-            KernelValue::String("stable_owner_key".to_string()),
-            KernelValue::String(stable_owner_key.clone()),
-        );
-    }
     if let Some(last_seen_provenance) = &witness.last_seen_provenance {
         fields.insert(
             KernelValue::String("last_seen_provenance".to_string()),
@@ -21195,10 +21321,6 @@ fn runtime_modeled_tool_visibility_witness_inner_from_json(
             let Some(object) = value.as_object() else {
                 return KernelValue::Map(BTreeMap::new());
             };
-            let stable_owner_key = object
-                .get("stable_owner_key")
-                .and_then(|value| value.as_str())
-                .map(ToString::to_string);
             let last_seen_provenance = object
                 .get("last_seen_provenance")
                 .and_then(|value| value.as_object())
@@ -21217,7 +21339,6 @@ fn runtime_modeled_tool_visibility_witness_inner_from_json(
                 });
             runtime_modeled_tool_visibility_witness_inner_from_domain(
                 &meerkat_core::ToolVisibilityWitness {
-                    stable_owner_key,
                     last_seen_provenance,
                 },
             )
@@ -21730,7 +21851,6 @@ fn runtime_parity_witnesses() -> BTreeMap<String, meerkat_core::ToolVisibilityWi
     [(
         "probe_tool".to_string(),
         meerkat_core::ToolVisibilityWitness {
-            stable_owner_key: Some("callback:runtime-parity".to_string()),
             last_seen_provenance: Some(meerkat_core::ToolProvenance {
                 kind: meerkat_core::ToolSourceKind::Callback,
                 source_id: "runtime-parity".into(),
@@ -22638,7 +22758,8 @@ async fn prepare_runtime_parity_probe(
         let spawned = fixture
             .adapter
             .update_peer_ingress_context(&fixture.session_id, true, Some(comms_runtime))
-            .await;
+            .await
+            .expect("update_peer_ingress_context");
         setup_tags.push(format!("drain_primed:{spawned}"));
         if spawned {
             wait_for_phase(
@@ -23976,7 +24097,8 @@ async fn attach_session_ingress_transitions_owner() {
     let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
     adapter
         .update_peer_ingress_context(&session_id, true, Some(Arc::clone(&comms_runtime)))
-        .await;
+        .await
+        .expect("update_peer_ingress_context");
 
     let owner = adapter.peer_ingress_owner(&session_id).await;
     let expected_id = crate::meerkat_machine::dsl::CommsRuntimeId::from_runtime(&comms_runtime);
@@ -24004,7 +24126,8 @@ async fn attach_mob_ingress_transitions_owner() {
     let mob_id = crate::meerkat_machine::dsl::MobId::from("mob-w2g-test");
     adapter
         .maybe_spawn_mob_comms_drain(&session_id, Arc::clone(&comms_runtime), mob_id.clone())
-        .await;
+        .await
+        .expect("maybe_spawn_mob_comms_drain");
 
     let owner = adapter.peer_ingress_owner(&session_id).await;
     let expected_id = crate::meerkat_machine::dsl::CommsRuntimeId::from_runtime(&comms_runtime);
@@ -24039,7 +24162,8 @@ async fn mob_owned_drain_rejects_silent_session_downgrade() {
     assert!(
         adapter
             .maybe_spawn_mob_comms_drain(&session_id, Arc::clone(&mob_comms), mob_id.clone())
-            .await,
+            .await
+            .expect("maybe_spawn_mob_comms_drain"),
         "initial mob-owned drain should spawn"
     );
     let expected_id = crate::meerkat_machine::dsl::CommsRuntimeId::from_runtime(&mob_comms);
@@ -24102,7 +24226,8 @@ async fn attach_session_ingress_exact_reassertion_is_idempotent() {
     assert!(
         adapter
             .update_peer_ingress_context(&session_id, true, Some(Arc::clone(&comms_runtime)))
-            .await,
+            .await
+            .expect("update_peer_ingress_context"),
         "first session-owned attach should spawn"
     );
 
@@ -24149,7 +24274,8 @@ async fn attach_mob_ingress_exact_reassertion_is_idempotent() {
     assert!(
         adapter
             .maybe_spawn_mob_comms_drain(&session_id, Arc::clone(&comms_runtime), mob_id.clone())
-            .await,
+            .await
+            .expect("maybe_spawn_mob_comms_drain"),
         "first mob-owned attach should spawn"
     );
 
@@ -24198,7 +24324,8 @@ async fn attach_mob_ingress_rejects_conflicting_mob_rebind() {
     assert!(
         adapter
             .maybe_spawn_mob_comms_drain(&session_id, Arc::clone(&comms_runtime), mob_id.clone())
-            .await,
+            .await
+            .expect("maybe_spawn_mob_comms_drain"),
         "first mob-owned attach should spawn"
     );
 
@@ -24285,13 +24412,15 @@ async fn detach_ingress_clears_owner() {
     let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
     adapter
         .update_peer_ingress_context(&session_id, true, Some(Arc::clone(&comms_runtime)))
-        .await;
+        .await
+        .expect("update_peer_ingress_context");
 
     // Now request detach (keep_alive=false). The shell stages
     // `DetachIngress` into the DSL.
     adapter
         .update_peer_ingress_context(&session_id, false, None)
-        .await;
+        .await
+        .expect("update_peer_ingress_context detach");
 
     let owner = adapter.peer_ingress_owner(&session_id).await;
     assert!(
@@ -24316,7 +24445,8 @@ async fn attach_mob_ingress_promotes_from_session_owned() {
     let session_comms: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
     adapter
         .update_peer_ingress_context(&session_id, true, Some(Arc::clone(&session_comms)))
-        .await;
+        .await
+        .expect("update_peer_ingress_context");
 
     // Step 2: mob provisioning promotes to MobOwned with (possibly) a
     // different comms runtime.
@@ -24324,7 +24454,8 @@ async fn attach_mob_ingress_promotes_from_session_owned() {
     let mob_id = crate::meerkat_machine::dsl::MobId::from("mob-w2g-promotion");
     adapter
         .maybe_spawn_mob_comms_drain(&session_id, Arc::clone(&mob_comms), mob_id.clone())
-        .await;
+        .await
+        .expect("maybe_spawn_mob_comms_drain");
 
     let owner = adapter.peer_ingress_owner(&session_id).await;
     let expected_id = crate::meerkat_machine::dsl::CommsRuntimeId::from_runtime(&mob_comms);

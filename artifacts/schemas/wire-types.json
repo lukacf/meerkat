@@ -596,11 +596,6 @@
           {
             "description": "Hook invocation failed.",
             "properties": {
-              "error": {
-                "default": "",
-                "description": "Display projection of `reason`. Fused mirror retained for consumers\nstill reading a string error.",
-                "type": "string"
-              },
               "hook_id": {
                 "$ref": "#/$defs/HookId"
               },
@@ -609,7 +604,7 @@
               },
               "reason": {
                 "$ref": "#/$defs/HookFailureReason",
-                "description": "Typed failure cause."
+                "description": "Typed failure cause. The human-readable string is the `Display`\nprojection of this reason, never a separately-carried field."
               },
               "type": {
                 "const": "hook_failed",
@@ -1072,35 +1067,10 @@
             "type": "object"
           },
           {
-            "description": "Retrying after error",
+            "description": "Retrying after a recoverable LLM failure.\n\nThe typed schedule is the single owner of the retry facts (failure\nkind/provider/diagnostic and plan attempt/delay); display strings are\nderived from it, never carried beside it.",
             "properties": {
-              "attempt": {
-                "format": "uint32",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "delay_ms": {
-                "format": "uint64",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "error": {
-                "type": "string"
-              },
-              "max_attempts": {
-                "format": "uint32",
-                "minimum": 0,
-                "type": "integer"
-              },
               "retry": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/LlmRetrySchedule"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+                "$ref": "#/$defs/LlmRetrySchedule"
               },
               "type": {
                 "const": "retrying",
@@ -1109,10 +1079,7 @@
             },
             "required": [
               "type",
-              "attempt",
-              "max_attempts",
-              "error",
-              "delay_ms"
+              "retry"
             ],
             "type": "object"
           },
@@ -1234,17 +1201,12 @@
           {
             "description": "An interaction failed (terminal event for tap subscribers).",
             "properties": {
-              "error": {
-                "default": "",
-                "description": "Display projection of `reason`. Fused mirror retained for consumers\nstill reading a string error.",
-                "type": "string"
-              },
               "interaction_id": {
                 "$ref": "#/$defs/InteractionId"
               },
               "reason": {
                 "$ref": "#/$defs/InteractionFailureReason",
-                "description": "Typed failure cause."
+                "description": "Typed failure cause. The human-readable string is the `Display`\nprojection of this reason, never a separately-carried field."
               },
               "type": {
                 "const": "interaction_failed",
@@ -1262,7 +1224,7 @@
             "description": "Some streaming events were dropped due to channel backpressure.\nBest-effort marker — the terminal event is authoritative.",
             "properties": {
               "reason": {
-                "type": "string"
+                "$ref": "#/$defs/StreamTruncationReason"
               },
               "type": {
                 "const": "stream_truncated",
@@ -1666,6 +1628,29 @@
               "data"
             ],
             "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -1927,7 +1912,7 @@
         "type": "string"
       },
       "InteractionFailureReason": {
-        "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation that\nthe `InteractionFailed` event carries as a fused mirror, never as the\nauthoritative cause.\n\n[`Display`]: std::fmt::Display",
+        "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-carried field.\n\n[`Display`]: std::fmt::Display",
         "oneOf": [
           {
             "description": "The interaction was cancelled before completing.",
@@ -2618,6 +2603,44 @@
             "const": "cancelled",
             "description": "Request was cancelled",
             "type": "string"
+          }
+        ]
+      },
+      "StreamTruncationReason": {
+        "description": "Typed reason a best-effort event stream dropped frames.\n\nThe variant is the typed owner of the truncation cause; the human-readable\nstring is a [`Display`](std::fmt::Display) derivation, never a\nseparately-carried field. `StreamTruncated` is a UI hint — the terminal\nevent remains authoritative.",
+        "oneOf": [
+          {
+            "description": "The per-interaction tap channel was full; streaming frames dropped.",
+            "properties": {
+              "kind": {
+                "const": "channel_full",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A broadcast event stream lagged and skipped events.",
+            "properties": {
+              "dropped": {
+                "description": "Number of events skipped by the lagging receiver.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "stream_lagged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dropped"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -6693,6 +6716,29 @@
               "data"
             ],
             "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -6718,6 +6764,30 @@
           "queue",
           "steer"
         ],
+        "type": "string"
+      },
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
         "type": "string"
       }
     },
@@ -7454,6 +7524,29 @@
               "data"
             ],
             "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -7479,6 +7572,30 @@
           "queue",
           "steer"
         ],
+        "type": "string"
+      },
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
         "type": "string"
       }
     },
@@ -10235,6 +10352,29 @@
               "data"
             ],
             "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -10321,6 +10461,30 @@
           "completed",
           "failed"
         ],
+        "type": "string"
+      },
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
         "type": "string"
       }
     },
@@ -11306,6 +11470,29 @@
               "data"
             ],
             "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -11331,6 +11518,30 @@
           "queue",
           "steer"
         ],
+        "type": "string"
+      },
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
         "type": "string"
       }
     },
@@ -12879,11 +13090,6 @@
           {
             "description": "Hook invocation failed.",
             "properties": {
-              "error": {
-                "default": "",
-                "description": "Display projection of `reason`. Fused mirror retained for consumers\nstill reading a string error.",
-                "type": "string"
-              },
               "hook_id": {
                 "$ref": "#/$defs/HookId"
               },
@@ -12892,7 +13098,7 @@
               },
               "reason": {
                 "$ref": "#/$defs/HookFailureReason",
-                "description": "Typed failure cause."
+                "description": "Typed failure cause. The human-readable string is the `Display`\nprojection of this reason, never a separately-carried field."
               },
               "type": {
                 "const": "hook_failed",
@@ -13355,35 +13561,10 @@
             "type": "object"
           },
           {
-            "description": "Retrying after error",
+            "description": "Retrying after a recoverable LLM failure.\n\nThe typed schedule is the single owner of the retry facts (failure\nkind/provider/diagnostic and plan attempt/delay); display strings are\nderived from it, never carried beside it.",
             "properties": {
-              "attempt": {
-                "format": "uint32",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "delay_ms": {
-                "format": "uint64",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "error": {
-                "type": "string"
-              },
-              "max_attempts": {
-                "format": "uint32",
-                "minimum": 0,
-                "type": "integer"
-              },
               "retry": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/LlmRetrySchedule"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+                "$ref": "#/$defs/LlmRetrySchedule"
               },
               "type": {
                 "const": "retrying",
@@ -13392,10 +13573,7 @@
             },
             "required": [
               "type",
-              "attempt",
-              "max_attempts",
-              "error",
-              "delay_ms"
+              "retry"
             ],
             "type": "object"
           },
@@ -13517,17 +13695,12 @@
           {
             "description": "An interaction failed (terminal event for tap subscribers).",
             "properties": {
-              "error": {
-                "default": "",
-                "description": "Display projection of `reason`. Fused mirror retained for consumers\nstill reading a string error.",
-                "type": "string"
-              },
               "interaction_id": {
                 "$ref": "#/$defs/InteractionId"
               },
               "reason": {
                 "$ref": "#/$defs/InteractionFailureReason",
-                "description": "Typed failure cause."
+                "description": "Typed failure cause. The human-readable string is the `Display`\nprojection of this reason, never a separately-carried field."
               },
               "type": {
                 "const": "interaction_failed",
@@ -13545,7 +13718,7 @@
             "description": "Some streaming events were dropped due to channel backpressure.\nBest-effort marker — the terminal event is authoritative.",
             "properties": {
               "reason": {
-                "type": "string"
+                "$ref": "#/$defs/StreamTruncationReason"
               },
               "type": {
                 "const": "stream_truncated",
@@ -13949,6 +14122,29 @@
               "data"
             ],
             "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -14274,7 +14470,7 @@
         "type": "string"
       },
       "InteractionFailureReason": {
-        "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation that\nthe `InteractionFailed` event carries as a fused mirror, never as the\nauthoritative cause.\n\n[`Display`]: std::fmt::Display",
+        "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-carried field.\n\n[`Display`]: std::fmt::Display",
         "oneOf": [
           {
             "description": "The interaction was cancelled before completing.",
@@ -14974,6 +15170,44 @@
             "const": "cancelled",
             "description": "Request was cancelled",
             "type": "string"
+          }
+        ]
+      },
+      "StreamTruncationReason": {
+        "description": "Typed reason a best-effort event stream dropped frames.\n\nThe variant is the typed owner of the truncation cause; the human-readable\nstring is a [`Display`](std::fmt::Display) derivation, never a\nseparately-carried field. `StreamTruncated` is a UI hint — the terminal\nevent remains authoritative.",
+        "oneOf": [
+          {
+            "description": "The per-interaction tap channel was full; streaming frames dropped.",
+            "properties": {
+              "kind": {
+                "const": "channel_full",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A broadcast event stream lagged and skipped events.",
+            "properties": {
+              "dropped": {
+                "description": "Number of events skipped by the lagging receiver.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "stream_lagged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dropped"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -18720,6 +18954,10 @@
   },
   "HelpResponse": {
     "$defs": {
+      "CapabilityId": {
+        "description": "Slug-validated capability identifier for skill requirements.\n\nReplaces the legacy `Vec<String>` capability lists with a typed\nnamespace. Parsed at construction, so callers cannot smuggle invalid\nidentifiers into descriptors or requirements.",
+        "type": "string"
+      },
       "ExtractionError": {
         "description": "Structured-output extraction failure details for a run whose main agentic\nturn completed successfully.",
         "properties": {
@@ -18798,6 +19036,26 @@
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",
         "type": "string"
       },
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
       "SkillQuarantineDiagnostic": {
         "description": "Per-skill quarantine diagnostic.",
         "properties": {
@@ -18839,9 +19097,240 @@
         ],
         "type": "object"
       },
+      "SkillResolutionFailureReason": {
+        "oneOf": [
+          {
+            "properties": {
+              "key": {
+                "$ref": "#/$defs/SkillKey"
+              },
+              "reason_type": {
+                "const": "not_found",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "key"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "capability": {
+                "$ref": "#/$defs/CapabilityId"
+              },
+              "key": {
+                "$ref": "#/$defs/SkillKey"
+              },
+              "reason_type": {
+                "const": "capability_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "key",
+              "capability"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "load",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "parse",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "existing_fingerprint": {
+                "type": "string"
+              },
+              "new_fingerprint": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "source_uuid_collision",
+                "type": "string"
+              },
+              "source_uuid": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "source_uuid",
+              "existing_fingerprint",
+              "new_fingerprint"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "existing_source_uuid": {
+                "type": "string"
+              },
+              "fingerprint": {
+                "type": "string"
+              },
+              "mutated_source_uuid": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "source_uuid_mutation_without_lineage",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "fingerprint",
+              "existing_source_uuid",
+              "mutated_source_uuid"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "event_id": {
+                "type": "string"
+              },
+              "event_kind": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "missing_skill_remaps",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "event_id",
+              "event_kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "from_skill_name": {
+                "type": "string"
+              },
+              "from_source_uuid": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "remap_without_lineage",
+                "type": "string"
+              },
+              "to_skill_name": {
+                "type": "string"
+              },
+              "to_source_uuid": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "from_source_uuid",
+              "from_skill_name",
+              "to_source_uuid",
+              "to_skill_name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "alias": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "unknown_skill_alias",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "alias"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason_type": {
+                "const": "remap_cycle",
+                "type": "string"
+              },
+              "skill_name": {
+                "type": "string"
+              },
+              "source_uuid": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "source_uuid",
+              "skill_name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "message"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "SkillRuntimeDiagnostics": {
         "description": "Runtime-visible diagnostics for skill health and quarantined entries.",
         "properties": {
+          "collection_fault": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SkillResolutionFailureReason"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed fault recorded when run-terminal diagnostics collection failed.\n\nWhen set, `source_health` and `quarantined` are vacuous defaults — NOT\nobserved truth. Surfaces must read this fault instead of treating the\ndefault snapshot as a successful healthy observation (dogma row #239:\ncollection faults are typed run-result facts, never silently dropped)."
+          },
           "quarantined": {
             "items": {
               "$ref": "#/$defs/SkillQuarantineDiagnostic"
@@ -21208,6 +21697,15 @@
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
+          },
+          "escalation_turn_timeout_ms": {
+            "description": "Declared escalation turn timeout in milliseconds. Absent means the\nruntime default applies (mirrors the domain `SupervisorSpec` owner).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "role": {
             "type": "string"
@@ -26727,6 +27225,29 @@
               "data"
             ],
             "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -28003,6 +28524,29 @@
             "required": [
               "type",
               "data"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
             ],
             "type": "object"
           }
@@ -29295,6 +29839,29 @@
             "required": [
               "type",
               "data"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
             ],
             "type": "object"
           }
@@ -31745,6 +32312,29 @@
               "data"
             ],
             "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -31951,6 +32541,30 @@
           "provider",
           "meerkat_projection"
         ],
+        "type": "string"
+      },
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
         "type": "string"
       },
       "SystemNoticeBlock": {
@@ -41900,6 +42514,10 @@
   },
   "WireRunResult": {
     "$defs": {
+      "CapabilityId": {
+        "description": "Slug-validated capability identifier for skill requirements.\n\nReplaces the legacy `Vec<String>` capability lists with a typed\nnamespace. Parsed at construction, so callers cannot smuggle invalid\nidentifiers into descriptors or requirements.",
+        "type": "string"
+      },
       "ExtractionError": {
         "description": "Structured-output extraction failure details for a run whose main agentic\nturn completed successfully.",
         "properties": {
@@ -41978,6 +42596,26 @@
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",
         "type": "string"
       },
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
       "SkillQuarantineDiagnostic": {
         "description": "Per-skill quarantine diagnostic.",
         "properties": {
@@ -42019,9 +42657,240 @@
         ],
         "type": "object"
       },
+      "SkillResolutionFailureReason": {
+        "oneOf": [
+          {
+            "properties": {
+              "key": {
+                "$ref": "#/$defs/SkillKey"
+              },
+              "reason_type": {
+                "const": "not_found",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "key"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "capability": {
+                "$ref": "#/$defs/CapabilityId"
+              },
+              "key": {
+                "$ref": "#/$defs/SkillKey"
+              },
+              "reason_type": {
+                "const": "capability_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "key",
+              "capability"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "load",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "parse",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "existing_fingerprint": {
+                "type": "string"
+              },
+              "new_fingerprint": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "source_uuid_collision",
+                "type": "string"
+              },
+              "source_uuid": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "source_uuid",
+              "existing_fingerprint",
+              "new_fingerprint"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "existing_source_uuid": {
+                "type": "string"
+              },
+              "fingerprint": {
+                "type": "string"
+              },
+              "mutated_source_uuid": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "source_uuid_mutation_without_lineage",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "fingerprint",
+              "existing_source_uuid",
+              "mutated_source_uuid"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "event_id": {
+                "type": "string"
+              },
+              "event_kind": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "missing_skill_remaps",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "event_id",
+              "event_kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "from_skill_name": {
+                "type": "string"
+              },
+              "from_source_uuid": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "remap_without_lineage",
+                "type": "string"
+              },
+              "to_skill_name": {
+                "type": "string"
+              },
+              "to_source_uuid": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "from_source_uuid",
+              "from_skill_name",
+              "to_source_uuid",
+              "to_skill_name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "alias": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "unknown_skill_alias",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "alias"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason_type": {
+                "const": "remap_cycle",
+                "type": "string"
+              },
+              "skill_name": {
+                "type": "string"
+              },
+              "source_uuid": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "source_uuid",
+              "skill_name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "message"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "SkillRuntimeDiagnostics": {
         "description": "Runtime-visible diagnostics for skill health and quarantined entries.",
         "properties": {
+          "collection_fault": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SkillResolutionFailureReason"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed fault recorded when run-terminal diagnostics collection failed.\n\nWhen set, `source_health` and `quarantined` are vacuous defaults — NOT\nobserved truth. Surfaces must read this fault instead of treating the\ndefault snapshot as a successful healthy observation (dogma row #239:\ncollection faults are typed run-result facts, never silently dropped)."
+          },
           "quarantined": {
             "items": {
               "$ref": "#/$defs/SkillQuarantineDiagnostic"
@@ -42618,6 +43487,29 @@
               "data"
             ],
             "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -42824,6 +43716,30 @@
           "provider",
           "meerkat_projection"
         ],
+        "type": "string"
+      },
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
         "type": "string"
       },
       "SystemNoticeBlock": {
@@ -44451,6 +45367,29 @@
               "data"
             ],
             "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -44657,6 +45596,30 @@
           "provider",
           "meerkat_projection"
         ],
+        "type": "string"
+      },
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
         "type": "string"
       },
       "SystemNoticeBlock": {
@@ -46727,6 +47690,29 @@
               "data"
             ],
             "type": "object"
+          },
+          {
+            "description": "Rendered skill context injected by per-turn skill activation.\n\nThe typed `skill_key` preserves the activation provenance in the\ndurable transcript — activation is never folded into anonymous\noperator text. `text` is the rendered skill body; the model-facing\nrepresentation is the text projection of this block.",
+            "properties": {
+              "skill_key": {
+                "$ref": "#/$defs/SkillKey",
+                "description": "Canonical identity of the activated skill."
+              },
+              "text": {
+                "description": "Rendered skill body delivered to the model.",
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_context",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skill_key",
+              "text"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -46933,6 +47919,30 @@
           "provider",
           "meerkat_projection"
         ],
+        "type": "string"
+      },
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
         "type": "string"
       },
       "SystemNoticeBlock": {

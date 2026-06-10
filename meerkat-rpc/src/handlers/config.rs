@@ -238,6 +238,7 @@ pub async fn handle_set(
                         tracing::warn!(
                             swap_failed = ?report.swap_failed,
                             refresh_failed = ?report.refresh_failed,
+                            close_failed = ?report.close_failed,
                             "live config propagation to active channels reported failures"
                         );
                     }
@@ -272,6 +273,7 @@ pub async fn handle_set(
                         tracing::warn!(
                             swap_failed = ?report.swap_failed,
                             refresh_failed = ?report.refresh_failed,
+                            close_failed = ?report.close_failed,
                             "live config propagation to active channels reported failures"
                         );
                     }
@@ -385,6 +387,7 @@ pub async fn handle_patch(
                         tracing::warn!(
                             swap_failed = ?report.swap_failed,
                             refresh_failed = ?report.refresh_failed,
+                            close_failed = ?report.close_failed,
                             "live config propagation to active channels reported failures"
                         );
                     }
@@ -445,6 +448,7 @@ pub async fn handle_patch(
                         tracing::warn!(
                             swap_failed = ?report.swap_failed,
                             refresh_failed = ?report.refresh_failed,
+                            close_failed = ?report.close_failed,
                             "live config propagation to active channels reported failures"
                         );
                     }

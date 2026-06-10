@@ -351,7 +351,7 @@ function handleEvent(event: AgentEvent): string {
     case 'budget_warning':
       return `${event.budget_type}:${event.percent}`;
     case 'retrying':
-      return `${event.attempt}/${event.max_attempts}`;
+      return `${event.retry.plan.attempt}/${event.retry.plan.max_retries}`;
     case 'skills_resolved':
       return `${event.skills.length}`;
     case 'skill_resolution_failed':
@@ -363,7 +363,7 @@ function handleEvent(event: AgentEvent): string {
     case 'interaction_failed':
       return event.reason.kind;
     case 'stream_truncated':
-      return event.reason;
+      return event.reason.kind;
     case 'tool_config_changed':
       return event.payload.target;
     case 'background_job_completed':
@@ -439,15 +439,24 @@ const actions: MobLifecycleAction[] = ['stop', 'resume', 'complete', 'reset', 'd
 declare const mob: Mob;
 const memberSendResult: Promise<MemberDeliveryReceipt> = mob.member('worker-1').send('hello');
 const memberStatusResult: Promise<MobMemberSnapshot> = mob.memberStatus('worker-1');
-const helperResult: Promise<MobHelperResult> = mob.spawnHelper('Summarize the latest findings.');
+const helperResult: Promise<MobHelperResult> = mob.spawnHelper(
+  'Summarize the latest findings.',
+  { agentIdentity: 'helper-1' },
+);
 const helperWithConnectionResult: Promise<MobHelperResult> = mob.spawnHelper(
   'Summarize using the OpenAI binding.',
-  { authBinding: { realm: 'default', binding: 'openai', profile: 'work' } },
+  {
+    agentIdentity: 'helper-2',
+    authBinding: { realm: 'default', binding: 'openai', profile: 'work' },
+  },
 );
 const forkedHelperResult: Promise<MobHelperResult> = mob.forkHelper(
   'worker-1',
   'Review the draft and suggest one improvement.',
-  { authBinding: { realm: 'default', binding: 'anthropic' } },
+  {
+    agentIdentity: 'fork-1',
+    authBinding: { realm: 'default', binding: 'anthropic' },
+  },
 );
 const flowStatusResult: Promise<FlowStatus | null> = mob.flowStatus('run-1');
 const memberSubscription = mob.member('worker-1').subscribe();

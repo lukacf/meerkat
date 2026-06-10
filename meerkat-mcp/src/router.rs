@@ -31,7 +31,6 @@ use meerkat_core::handles::{
     ExternalToolSurfaceTransition as CoreSurfaceTransition, McpServerLifecycleHandle,
     SurfaceDiagnosticSnapshot, SurfaceSnapshot,
 };
-use meerkat_core::tool_catalog::stable_owner_key_for_tool;
 use meerkat_core::types::ToolDef;
 use meerkat_core::types::{ContentBlock, ToolCallView, ToolResult};
 use meerkat_core::{
@@ -1919,8 +1918,8 @@ impl McpRouter {
         let catalog_entries: Arc<[ToolCatalogEntry]> = canonical_tools
             .values()
             .map(|tool| {
-                if let Some(stable_owner_key) = stable_owner_key_for_tool(tool) {
-                    ToolCatalogEntry::session_deferred(Arc::clone(tool), true, stable_owner_key)
+                if let Some(provenance) = tool.provenance.clone() {
+                    ToolCatalogEntry::session_deferred(Arc::clone(tool), true, provenance)
                 } else {
                     ToolCatalogEntry::session_inline(Arc::clone(tool), true)
                 }

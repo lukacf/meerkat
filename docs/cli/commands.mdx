@@ -319,8 +319,8 @@ rkat mob deploy <PACK.mobpack> <PROMPT> [--trust-policy <permissive|strict>] [--
 rkat mob web build <PACK.mobpack> -o <OUT_DIR>
 rkat mob run-flow <MOB_ID> --flow <FLOW_ID> [--params <JSON>] [--stream|--no-stream]
 rkat mob flow-status <MOB_ID> <RUN_ID>
-rkat mob spawn-helper <MOB_ID> <PROMPT> [--profile <PROFILE>] [--agent-identity <ID>] [--json]
-rkat mob fork-helper <MOB_ID> <SOURCE_MEMBER_ID> <PROMPT> [--profile <PROFILE>] [--agent-identity <ID>] [--fork-context <full-history|last-messages>] [--last-messages <N>] [--json]
+rkat mob spawn-helper <MOB_ID> <PROMPT> --agent-identity <ID> [--profile <PROFILE>] [--json]
+rkat mob fork-helper <MOB_ID> <SOURCE_MEMBER_ID> <PROMPT> --agent-identity <ID> [--profile <PROFILE>] [--fork-context <full-history|last-messages>] [--last-messages <N>] [--json]
 rkat mob member-status <MOB_ID> <AGENT_IDENTITY> [--json]
 rkat mob force-cancel <MOB_ID> <AGENT_IDENTITY>
 rkat mob respawn <MOB_ID> <AGENT_IDENTITY> [--initial-message <MESSAGE>]
@@ -393,7 +393,7 @@ remains runtime-host owned rather than a REST-backed CLI command.
 rkat models
 ```
 
-Lists all available models grouped by provider, including display name, tier, context window, max output tokens, and profile capabilities (temperature, thinking, reasoning support). Data is compiled from the `meerkat-models` catalog.
+Lists all available models grouped by provider, including display name, tier, context window, max output tokens, and profile capabilities (temperature, thinking, reasoning support). Data is compiled from the `meerkat_core::model_profile` catalog.
 
 ## capabilities
 

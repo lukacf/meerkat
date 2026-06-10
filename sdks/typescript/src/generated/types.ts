@@ -760,6 +760,7 @@ export interface MobRoleWiringRuleInput {
 
 export interface MobSupervisorSpecInput {
   escalation_threshold: number;
+  escalation_turn_timeout_ms?: number;
   role: string;
 }
 
@@ -910,6 +911,13 @@ export interface ProjectedAttentionAuthority {
   can_update: boolean;
 }
 
+export interface ReadyWorkFilter {
+  labels?: string[];
+  limit?: number;
+  namespace?: string;
+  realm_id?: string;
+}
+
 export interface WorkAttentionBinding {
   binding_id: string;
   created_at: string;
@@ -921,6 +929,50 @@ export interface WorkAttentionBinding {
   target: WorkAttentionTarget;
   updated_at: string;
   work_ref: WorkItemRef;
+}
+
+export interface WorkGraphEventFilter {
+  after_seq?: number;
+  all_namespaces?: boolean;
+  limit?: number;
+  namespace?: string;
+  realm_id?: string;
+}
+
+export interface WorkGraphEventsResponse {
+  events: WorkGraphEvent[];
+}
+
+export interface WorkGraphIdParams {
+  id: string;
+  namespace?: string;
+  realm_id?: string;
+}
+
+export interface WorkGraphItemsResponse {
+  items: WorkItem[];
+}
+
+export interface WorkGraphSnapshot {
+  all_namespaces: boolean;
+  attention?: WorkAttentionBinding[];
+  captured_at: string;
+  edges: WorkEdge[];
+  event_high_water_mark?: number;
+  items: WorkItem[];
+  namespace?: string;
+  ready_item_ids: string[];
+  realm_id: string;
+}
+
+export interface WorkGraphSnapshotFilter {
+  all_namespaces?: boolean;
+  include_terminal?: boolean;
+  labels?: string[];
+  limit?: number;
+  namespace?: string;
+  realm_id?: string;
+  statuses?: WorkStatus[];
 }
 
 export interface WorkItem {
@@ -947,10 +999,29 @@ export interface WorkItem {
   updated_at: string;
 }
 
+export interface WorkItemFilter {
+  all_namespaces?: boolean;
+  include_terminal?: boolean;
+  labels?: string[];
+  limit?: number;
+  namespace?: string;
+  realm_id?: string;
+  statuses?: WorkStatus[];
+}
+
 export interface WorkItemRef {
   item_id: string;
   namespace: string;
   realm_id: string;
+}
+
+export interface WorkEdge {
+  created_at: string;
+  from_id: string;
+  kind: WorkEdgeKind;
+  namespace: string;
+  realm_id: string;
+  to_id: string;
 }
 
 export interface WorkEvidenceRef {
@@ -960,6 +1031,16 @@ export interface WorkEvidenceRef {
   kind: string;
   label?: string;
   summary?: string;
+}
+
+export interface WorkGraphEvent {
+  at: string;
+  item_id?: string;
+  kind: WorkGraphEventKind;
+  namespace: string;
+  payload?: unknown;
+  realm_id: string;
+  seq?: number;
 }
 
 export interface WorkOwnerKey {
@@ -1456,13 +1537,21 @@ export interface WorkCompletionPolicyReviewerQuorum {
 
 export type WorkCompletionPolicy = WorkCompletionPolicySelfAttest | WorkCompletionPolicyHostConfirmed | WorkCompletionPolicyPrincipalConfirmed | WorkCompletionPolicySupervisor | WorkCompletionPolicyReviewerQuorum;
 
+export type WorkEdgeKind = "blocks" | "parent" | "related" | "supersedes" | "derived_from";
+
+export type WorkGraphEventKind = "created" | "updated" | "claimed" | "released" | "blocked" | "closed" | "linked" | "evidence_added" | "attention_created" | "attention_updated";
+
 export type WorkOwnerKind = "principal" | "agent" | "session" | "mob" | "label";
+
+export type WorkStatus = "open" | "in_progress" | "blocked" | "completed" | "cancelled" | "failed";
 
 export const WORK_GRAPH_STATUSES = ["open", "in_progress", "blocked", "completed", "cancelled", "failed"] as const;
 export type WorkGraphStatus = typeof WORK_GRAPH_STATUSES[number];
 
 export const WORK_GRAPH_PRIORITIES = ["low", "medium", "high"] as const;
 export type WorkGraphPriority = typeof WORK_GRAPH_PRIORITIES[number];
+
+export const WORK_GRAPH_EVENT_KINDS = ["created", "updated", "claimed", "released", "blocked", "closed", "linked", "evidence_added", "attention_created", "attention_updated"] as const;
 
 export type McpLiveOperation = "add" | "remove" | "reload";
 
@@ -1774,7 +1863,13 @@ export interface ContentBlockStructured {
   type: "structured";
 }
 
-export type ContentBlock = ContentBlockText | ContentBlockImage | ContentBlockVideo | ContentBlockStructured;
+export interface ContentBlockSkillContext {
+  skill_key: unknown;
+  text: string;
+  type: "skill_context";
+}
+
+export type ContentBlock = ContentBlockText | ContentBlockImage | ContentBlockVideo | ContentBlockStructured | ContentBlockSkillContext;
 
 export type ContentInput = string | ContentBlock[];
 

@@ -1974,10 +1974,7 @@ impl LiveAdapterHost {
     ) -> Result<(), LiveAdapterHostError> {
         self.send_command(
             channel_id,
-            LiveAdapterCommand::SubmitToolError {
-                call_id: call_id.0,
-                error,
-            },
+            LiveAdapterCommand::SubmitToolError { call_id, error },
         )
         .await
     }
@@ -3017,7 +3014,7 @@ fn tool_result_from_dispatch(call_id: ToolCallId, result: ToolResult) -> LiveToo
     LiveToolResult {
         // `LiveToolResult.call_id` is the meerkat-core seam edge and remains
         // a bare `String`; project the typed id to the wire string here.
-        call_id: call_id.0,
+        call_id,
         content: result.content,
         is_error: result.is_error,
     }
@@ -4520,7 +4517,7 @@ mod tests {
         // Adapter saw the SubmitToolResult command.
         let submitted = adapter.submitted_results.lock().unwrap();
         assert_eq!(submitted.len(), 1);
-        assert_eq!(submitted[0].call_id, "call_42");
+        assert_eq!(submitted[0].call_id.0, "call_42");
     }
 
     #[tokio::test]
@@ -4939,7 +4936,7 @@ mod tests {
         }
         let results = adapter.submitted_results.lock().unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].call_id, "call_fast");
+        assert_eq!(results[0].call_id.0, "call_fast");
         assert!(adapter.submitted_errors.lock().unwrap().is_empty());
     }
 
@@ -5226,7 +5223,10 @@ mod tests {
                     self.submitted_results.lock().unwrap().push(result);
                 }
                 LiveAdapterCommand::SubmitToolError { call_id, error } => {
-                    self.submitted_errors.lock().unwrap().push((call_id, error));
+                    self.submitted_errors
+                        .lock()
+                        .unwrap()
+                        .push((call_id.0, error));
                 }
                 _ => {}
             }

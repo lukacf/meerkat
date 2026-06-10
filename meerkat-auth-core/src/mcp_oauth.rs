@@ -496,11 +496,17 @@ impl McpOAuthAuthority {
                 if persisted.refresh_token.is_none() {
                     persisted.refresh_token = Some(refresh_token);
                 }
+                // Mirror the login path: the post-refresh durable token write
+                // is owned by an AuthMachine lease-publish transition at the
+                // refreshed credential's own expiry, so refreshed tokens never
+                // lose the machine-stamped lifecycle marker. Fail closed — no
+                // refreshed token is persisted without a committed lease.
+                let published = self.publish_login_tokens_via_lease(target, key, &persisted)?;
                 self.token_store
-                    .save(key, &persisted)
+                    .save(key, &published)
                     .await
                     .map_err(|error| McpOAuthError::TokenStore(error.to_string()))?;
-                Ok(persisted)
+                Ok(published)
             }
             // Refresh is not permitted or the credential is otherwise unusable:
             // the user must reauthenticate. (`LeaseAbsent`/`AlreadyRefreshing`
@@ -1282,6 +1288,52 @@ mod tests {
         );
         // The pre-existing MCP metadata survives alongside the marker.
         assert_eq!(stored.metadata["client"]["client_id"], "client-123");
+    }
+
+    #[tokio::test]
+    async fn refreshed_token_write_is_lease_published() {
+        // The refresh-success persist mirrors the login path: refreshed
+        // tokens carry the AuthMachine lease lifecycle marker stamped at the
+        // refreshed credential's own expiry — never a bare store.save that
+        // drops the lifecycle-published marker.
+        let (base, state) = spawn_oauth_fixture().await;
+        let store = Arc::new(EphemeralTokenStore::new());
+        let browser = recording_browser(Arc::clone(&state));
+        let authority =
+            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
+        let target = McpAuthTarget::new("glean", format!("{base}/mcp"));
+
+        authority
+            .interactive_login(&target, None)
+            .await
+            .expect("initial login succeeds");
+        let key = target.token_key().unwrap();
+        let mut stored = store.load(&key).await.unwrap().unwrap();
+        stored.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        store.save(&key, &stored).await.unwrap();
+
+        let token = authority
+            .stored_bearer_token(&target)
+            .await
+            .expect("expired token refreshes")
+            .expect("refresh yields a bearer token");
+        assert_eq!(token, "access-token");
+
+        let refreshed = store.load(&key).await.unwrap().unwrap();
+        assert!(
+            meerkat_core::tokens_lifecycle_published(&refreshed),
+            "post-refresh token write must be wrapped in an AuthMachine lease transition"
+        );
+        // The marker is stamped against the refreshed credential's expiry.
+        let publication = meerkat_core::tokens_lifecycle_publication(&refreshed)
+            .expect("refreshed tokens carry a lifecycle publication");
+        assert_eq!(
+            publication.expires_at,
+            meerkat_core::persisted_token_expires_at_epoch_secs(&refreshed),
+            "lifecycle marker expiry must match the refreshed token expiry"
+        );
+        // MCP metadata survives the refresh publish.
+        assert_eq!(refreshed.metadata["client"]["client_id"], "client-123");
     }
 
     #[test]

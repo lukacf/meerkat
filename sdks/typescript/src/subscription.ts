@@ -7,6 +7,7 @@ export class EventSubscription<T> implements AsyncIterable<T> {
   private readonly parseEvent: (raw: Record<string, unknown>) => T;
   private readonly getTerminalOutcome: () => Record<string, unknown> | undefined;
   private closed = false;
+  private closeInFlight: Promise<void> | null = null;
 
   /** @internal */
   constructor(opts: {
@@ -37,9 +38,23 @@ export class EventSubscription<T> implements AsyncIterable<T> {
 
   async close(): Promise<void> {
     if (this.closed) return;
-    this.closed = true;
-    this.queue.put(null);
-    await this.closeRemote(this.streamId);
+    // Stream-close authority is server-owned: await the RPC close BEFORE
+    // surfacing closed terminal state locally. A rejected close propagates
+    // the typed error and leaves the subscription open (retryable); only an
+    // accepted close flips `isClosed` and ends the local queue.
+    if (!this.closeInFlight) {
+      this.closeInFlight = (async () => {
+        try {
+          await this.closeRemote(this.streamId);
+        } catch (error) {
+          this.closeInFlight = null;
+          throw error;
+        }
+        this.closed = true;
+        this.queue.put(null);
+      })();
+    }
+    await this.closeInFlight;
   }
 
   async *[Symbol.asyncIterator](): AsyncGenerator<T, void, undefined> {

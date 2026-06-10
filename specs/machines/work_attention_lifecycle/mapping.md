@@ -36,32 +36,32 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `work_attention_lifecycle`
   - scenarios: `work_attention_pause_resume_stop`
 - `ClassifyEligibilityActive`
-  - anchors: `work_attention_lifecycle`
-  - scenarios: `work_attention_pause_resume_stop`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyEligibilityPausedElapsed`
-  - anchors: `work_attention_lifecycle`
-  - scenarios: `work_attention_pause_resume_stop`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyEligibilityPausedPending`
-  - anchors: `work_attention_lifecycle`
-  - scenarios: `work_attention_pause_resume_stop`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyEligibilitySuperseded`
-  - anchors: `work_attention_lifecycle`
-  - scenarios: `work_attention_pause_resume_stop`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyEligibilityStopped`
-  - anchors: `work_attention_lifecycle`
-  - scenarios: `work_attention_pause_resume_stop`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyAuthorityActive`
-  - anchors: `work_attention_lifecycle`
-  - scenarios: `work_attention_pause_resume_stop`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyAuthorityPaused`
-  - anchors: `work_attention_lifecycle`
-  - scenarios: `work_attention_pause_resume_stop`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyAuthoritySuperseded`
-  - anchors: `work_attention_lifecycle`
-  - scenarios: `work_attention_pause_resume_stop`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyAuthorityStopped`
-  - anchors: `work_attention_lifecycle`
-  - scenarios: `work_attention_pause_resume_stop`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `AttentionPaused`
@@ -77,21 +77,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `work_attention_lifecycle`
   - scenarios: `work_attention_pause_resume_stop`
 - `AttentionEligibilityClassified`
-  - anchors: `work_attention_lifecycle`
-  - scenarios: `work_attention_pause_resume_stop`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AttentionAuthorityClassified`
-  - anchors: `work_attention_lifecycle`
-  - scenarios: `work_attention_pause_resume_stop`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `live_has_no_terminal_time`
-  - anchors: `work_attention_lifecycle`
+  - anchors: (unclaimed)
   - scenarios: `work_attention_pause_resume_stop`
 - `paused_has_pause_state`
   - anchors: `work_attention_lifecycle`
   - scenarios: `work_attention_pause_resume_stop`
 - `superseded_records_successor`
-  - anchors: `work_attention_lifecycle`
+  - anchors: (unclaimed)
   - scenarios: `work_attention_pause_resume_stop`
 
 

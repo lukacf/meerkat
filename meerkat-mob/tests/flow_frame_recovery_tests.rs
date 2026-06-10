@@ -276,16 +276,20 @@ fn test_recovery_adds_missing_pending_body_frame_loops() {
 }
 
 /// Recovery drops stale pending_body_frame_loops entries for loops whose
-/// active_body_frame_id is already set (body frame already started).
+/// machine-owned stage says the body frame is already active.
+///
+/// Pending-ness is the machine-owned `stage` (Running + AwaitingBodyFrame),
+/// never re-derived from `active_body_frame_id` absence.
 #[test]
 fn test_recovery_drops_stale_pending_body_frame_loops() {
     let mut run = minimal_run_with_schema_v2();
 
-    // A LoopSnapshot in Running phase with active_body_frame_id = Some(frame_id)
+    // A LoopSnapshot in Running phase whose stage is BodyFrameActive
     // → should NOT be in pending_body_frame_loops.
     let loop_snap = LoopSnapshot {
         kernel_state: loop_iteration::State {
             phase: loop_iteration::Phase::Running,
+            stage: loop_iteration::LoopIterationStage::BodyFrameActive,
             active_body_frame_id: Some(meerkat_mob::FrameId::from("body-frame-1")),
             ..loop_iteration::initial_state()
         },

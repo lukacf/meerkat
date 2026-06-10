@@ -52,3 +52,72 @@ describe("EventStream late drain", () => {
     assert.equal(queue.waiters.length, 0, "completed streams must not leak queue waiters");
   });
 });
+
+describe("RPC error payload parsing", () => {
+  it("uses only the typed error.data projection, never message-string JSON", async () => {
+    const { MeerkatClient } = await import("../dist/client.js");
+    const parse = MeerkatClient["parseRpcErrorPayload"];
+    assert.equal(typeof parse, "function");
+
+    // Typed error.data projection wins.
+    const typed = parse({
+      code: -32600,
+      message: "presentation text",
+      data: { code: "TYPED_CODE", message: "typed message", details: { k: "v" } },
+    });
+    assert.equal(typed.code, "TYPED_CODE");
+    assert.equal(typed.message, "typed message");
+    assert.deepEqual(typed.details, { k: "v" });
+
+    // A JSON-looking error.message must NOT be recovered into typed fields:
+    // error.message is presentation text only.
+    const embedded = JSON.stringify({
+      code: "FOLKLORE",
+      message: "from-message",
+      details: { x: 1 },
+    });
+    const folklore = parse({ code: -32600, message: embedded });
+    assert.equal(folklore.code, "-32600");
+    assert.equal(folklore.message, embedded);
+    assert.equal(folklore.details, undefined);
+  });
+});
+
+describe("EventSubscription close authority", () => {
+  it("awaits server stream-close authority before surfacing closed state", async () => {
+    const { EventSubscription } = await import("../dist/subscription.js");
+
+    // Rejected close: typed error propagates, subscription stays open.
+    let queue = new AsyncQueue();
+    const rejecting = new EventSubscription({
+      streamId: "stream-1",
+      queue,
+      closeRemote: async () => {
+        throw new Error("server said no");
+      },
+      parseEvent: (raw) => raw,
+      getTerminalOutcome: () => undefined,
+    });
+    await assert.rejects(() => rejecting.close(), /server said no/);
+    assert.equal(rejecting.isClosed, false, "rejected close must not surface closed state");
+    assert.equal(queue.buffer.length, 0, "rejected close must not end the local queue");
+
+    // Accepted close flips closed state and ends the queue; close is
+    // retryable after a rejection (single in-flight close at a time).
+    queue = new AsyncQueue();
+    const order = [];
+    const accepting = new EventSubscription({
+      streamId: "stream-2",
+      queue,
+      closeRemote: async () => {
+        order.push("remote");
+      },
+      parseEvent: (raw) => raw,
+      getTerminalOutcome: () => undefined,
+    });
+    await accepting.close();
+    order.push("local-closed:" + accepting.isClosed);
+    assert.deepEqual(order, ["remote", "local-closed:true"]);
+    assert.equal(await queue.get(), null, "accepted close ends the local queue");
+  });
+});

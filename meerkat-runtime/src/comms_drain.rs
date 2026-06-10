@@ -118,9 +118,23 @@ pub fn spawn_comms_drain(
                         error = %err,
                         "comms_drain: classified inbox drain failed; exiting via typed Failed terminal (not idle/dismiss)"
                     );
-                    adapter
+                    if let Err(notify_err) = adapter
                         .notify_comms_drain_exited(&session_id, DrainExitReason::Failed)
-                        .await;
+                        .await
+                    {
+                        // Detached-task boundary: the typed control fault has
+                        // nowhere left to propagate; surface it explicitly and
+                        // run the projection safety net so slot mechanics
+                        // cannot silently diverge from the drain authority.
+                        tracing::error!(
+                            session_id = %session_id,
+                            error = %notify_err,
+                            "comms_drain: NotifyDrainExited(Failed) rejected by machine authority"
+                        );
+                        adapter
+                            .project_comms_drain_failed_safety_net(&session_id)
+                            .await;
+                    }
                     return;
                 }
             };
@@ -138,9 +152,22 @@ pub fn spawn_comms_drain(
                     .is_err()
                 {
                     tracing::info!("comms_drain: idle timeout expired, stopping");
-                    adapter
+                    if let Err(notify_err) = adapter
                         .notify_comms_drain_exited(&session_id, DrainExitReason::IdleTimeout)
-                        .await;
+                        .await
+                    {
+                        // Detached-task boundary: surface the typed fault and
+                        // run the projection safety net so slot mechanics
+                        // cannot silently diverge from the drain authority.
+                        tracing::error!(
+                            session_id = %session_id,
+                            error = %notify_err,
+                            "comms_drain: NotifyDrainExited(IdleTimeout) rejected by machine authority"
+                        );
+                        adapter
+                            .project_comms_drain_failed_safety_net(&session_id)
+                            .await;
+                    }
                     return;
                 }
                 continue;
@@ -3289,14 +3316,12 @@ fn interaction_terminal_event(
         CompletionOutcome::Cancelled => AgentEvent::InteractionFailed {
             interaction_id,
             reason: InteractionFailureReason::Cancelled,
-            error: "cancelled".to_string(),
         },
         CompletionOutcome::Abandoned { reason, .. }
         | CompletionOutcome::AbandonedWithError { reason, .. }
         | CompletionOutcome::RuntimeTerminated { reason, .. } => AgentEvent::InteractionFailed {
             interaction_id,
-            reason: InteractionFailureReason::abandoned(reason.clone()),
-            error: reason,
+            reason: InteractionFailureReason::abandoned(reason),
         },
         CompletionOutcome::CompletedWithFinalizationFailure { error, .. } => {
             let detail = error
@@ -3304,8 +3329,7 @@ fn interaction_terminal_event(
                 .unwrap_or_else(|| "turn finalization failed".to_string());
             AgentEvent::InteractionFailed {
                 interaction_id,
-                reason: InteractionFailureReason::finalization_failed(detail.clone()),
-                error: detail,
+                reason: InteractionFailureReason::finalization_failed(detail),
             }
         }
     }

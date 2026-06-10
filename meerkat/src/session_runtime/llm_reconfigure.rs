@@ -55,7 +55,7 @@ pub fn runtime_driver_error_to_session_error(err: RuntimeDriverError) -> Session
 /// Resolve a model profile into the typed capability surface a session
 /// LLM identity carries through reconfigurations.
 pub fn profile_to_capability_surface(
-    profile: &meerkat_models::profile::ModelProfile,
+    profile: &meerkat_core::model_profile::ModelProfile,
 ) -> SessionLlmCapabilitySurface {
     SessionLlmCapabilitySurface {
         supports_temperature: profile.supports_temperature,

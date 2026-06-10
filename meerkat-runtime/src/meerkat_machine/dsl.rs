@@ -696,14 +696,12 @@ impl From<&meerkat_core::types::ToolProvenance> for ToolProvenance {
 /// projection of the two optional witness fields.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct ToolVisibilityWitness {
-    pub stable_owner_key: Option<String>,
     pub last_seen_provenance: Option<ToolProvenance>,
 }
 
 impl From<&meerkat_core::ToolVisibilityWitness> for ToolVisibilityWitness {
     fn from(w: &meerkat_core::ToolVisibilityWitness) -> Self {
         Self {
-            stable_owner_key: w.stable_owner_key.clone(),
             last_seen_provenance: w.last_seen_provenance.as_ref().map(ToolProvenance::from),
         }
     }
@@ -715,7 +713,7 @@ impl ToolVisibilityWitness {
     }
 
     fn len(&self) -> u64 {
-        u64::from(self.stable_owner_key.is_some()) + u64::from(self.last_seen_provenance.is_some())
+        u64::from(self.last_seen_provenance.is_some())
     }
 }
 

@@ -584,7 +584,8 @@ async fn update_peer_ingress_context(
         _context
             .runtime_adapter
             .update_peer_ingress_context(_session_id, keep_alive, comms_rt)
-            .await;
+            .await
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
     }
     #[cfg(not(feature = "comms"))]
     let _ = (_context, _session_id);

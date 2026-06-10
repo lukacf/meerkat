@@ -5,26 +5,26 @@
 //! feature pages (`effort`, `extended-thinking`, `adaptive-thinking`,
 //! `context-windows`, `compaction`, `structured-outputs`).
 
-use super::{BetaHeader, BetaValue, EffortLevel, ModelCapabilities, ThinkingSupport};
+use super::{BetaFeature, BetaHeader, BetaValue, EffortLevel, ModelCapabilities, ThinkingSupport};
 use crate::Provider;
 use crate::model_profile::catalog::ModelTier;
 
 // ── Beta headers ──────────────────────────────────────────────────────────
 
 const BETA_COMPACTION: BetaHeader = BetaHeader {
-    feature: "compaction",
+    feature: BetaFeature::Compaction,
     header_name: "anthropic-beta",
     header_value: "compact-2026-01-12",
 };
 
 const BETA_STRUCTURED_OUTPUT: BetaHeader = BetaHeader {
-    feature: "structured_output",
+    feature: BetaFeature::StructuredOutput,
     header_name: "anthropic-beta",
     header_value: "structured-outputs-2025-11-13",
 };
 
 const BETA_INTERLEAVED_THINKING: BetaHeader = BetaHeader {
-    feature: "interleaved_thinking",
+    feature: BetaFeature::InterleavedThinking,
     header_name: "anthropic-beta",
     header_value: "interleaved-thinking-2025-05-14",
 };

@@ -273,7 +273,7 @@ impl MeerkatMachine {
         session_id: &SessionId,
         keep_alive: bool,
         comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
-    ) -> bool {
+    ) -> Result<bool, RuntimeDriverError> {
         match self
             .execute_meerkat_machine_drain_command(MeerkatMachineCommand::SetPeerIngressContext {
                 session_id: session_id.clone(),
@@ -281,10 +281,12 @@ impl MeerkatMachine {
                 comms_runtime,
                 mob_id: None,
             })
-            .await
+            .await?
         {
-            Ok(MeerkatMachineCommandResult::Spawned(spawned)) => spawned,
-            _ => false,
+            MeerkatMachineCommandResult::Spawned(spawned) => Ok(spawned),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "update_peer_ingress_context: unexpected command result variant: {other:?}"
+            ))),
         }
     }
 
@@ -298,7 +300,7 @@ impl MeerkatMachine {
         session_id: &SessionId,
         keep_alive: bool,
         comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
-    ) -> bool {
+    ) -> Result<bool, RuntimeDriverError> {
         match self
             .execute_meerkat_machine_drain_command(MeerkatMachineCommand::SetPeerIngressContext {
                 session_id: session_id.clone(),
@@ -306,10 +308,12 @@ impl MeerkatMachine {
                 comms_runtime,
                 mob_id: None,
             })
-            .await
+            .await?
         {
-            Ok(MeerkatMachineCommandResult::Spawned(spawned)) => spawned,
-            _ => false,
+            MeerkatMachineCommandResult::Spawned(spawned) => Ok(spawned),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "maybe_spawn_comms_drain: unexpected command result variant: {other:?}"
+            ))),
         }
     }
 
@@ -326,7 +330,7 @@ impl MeerkatMachine {
         session_id: &SessionId,
         comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
         mob_id: crate::meerkat_machine::dsl::MobId,
-    ) -> bool {
+    ) -> Result<bool, RuntimeDriverError> {
         match self
             .execute_meerkat_machine_drain_command(MeerkatMachineCommand::SetPeerIngressContext {
                 session_id: session_id.clone(),
@@ -334,10 +338,12 @@ impl MeerkatMachine {
                 comms_runtime: Some(comms_runtime),
                 mob_id: Some(mob_id),
             })
-            .await
+            .await?
         {
-            Ok(MeerkatMachineCommandResult::Spawned(spawned)) => spawned,
-            _ => false,
+            MeerkatMachineCommandResult::Spawned(spawned) => Ok(spawned),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "maybe_spawn_mob_comms_drain: unexpected command result variant: {other:?}"
+            ))),
         }
     }
 
@@ -422,22 +428,24 @@ impl MeerkatMachine {
         session_id: &SessionId,
         keep_alive: bool,
         comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
-    ) -> bool {
+    ) -> Result<bool, RuntimeDriverError> {
         if !keep_alive {
-            // Explicit disable: stop any running drain for this session.
-            let _ = self
-                .execute_meerkat_machine_drain_local_command(MeerkatMachineCommand::Abort {
-                    session_id: session_id.clone(),
-                })
-                .await;
-            return false;
+            // Explicit disable: stop any running drain for this session. A
+            // failed abort is a typed control fault — the drain would keep
+            // running while the caller believes keep-alive was disabled — so
+            // it propagates instead of being silently discarded.
+            self.execute_meerkat_machine_drain_local_command(MeerkatMachineCommand::Abort {
+                session_id: session_id.clone(),
+            })
+            .await?;
+            return Ok(false);
         }
 
         let mode = CommsDrainMode::PersistentHost;
 
         let comms = match comms_runtime {
             Some(c) => c,
-            None => return false,
+            None => return Ok(false),
         };
 
         let runtime_id = crate::meerkat_machine::dsl::CommsRuntimeId::from_runtime(&comms);
@@ -446,14 +454,14 @@ impl MeerkatMachine {
                 %session_id,
                 "refusing to spawn comms drain without generated drain authority"
             );
-            return false;
+            return Ok(false);
         };
         if !authority_state.has_peer_runtime(&runtime_id) {
             tracing::warn!(
                 %session_id,
                 "refusing to spawn comms drain without matching generated peer-ingress authority"
             );
-            return false;
+            return Ok(false);
         }
 
         let dsl_mode = crate::meerkat_machine::dsl::DrainMode::from(mode);
@@ -469,7 +477,7 @@ impl MeerkatMachine {
                     %session_id,
                     "refusing to spawn comms drain for unregistered session"
                 );
-                return false;
+                return Ok(false);
             };
             !entry.drain_slot.handle_present() || !entry.drain_slot.task_runtime_matches(&comms)
         } else {
@@ -477,7 +485,7 @@ impl MeerkatMachine {
         };
 
         if !needs_spawn && !needs_task_refresh {
-            return false;
+            return Ok(false);
         }
 
         if needs_spawn {
@@ -498,7 +506,7 @@ impl MeerkatMachine {
                     error = %err,
                     "DSL rejected SpawnDrain; skipping drain spawn"
                 );
-                return false;
+                return Ok(false);
             }
         } else if needs_task_refresh {
             tracing::warn!(
@@ -522,10 +530,10 @@ impl MeerkatMachine {
             entry.drain_slot.install_task(comms.clone(), handle);
         } else {
             handle.abort();
-            return false;
+            return Ok(false);
         }
 
-        true
+        Ok(true)
     }
 
     /// Notify the authority that a drain task has exited with the given reason.
@@ -538,16 +546,17 @@ impl MeerkatMachine {
         self: &Arc<Self>,
         session_id: &SessionId,
         reason: DrainExitReason,
-    ) {
-        let _ = self
-            .execute_meerkat_machine_command(
-                Some(Arc::clone(self)),
-                MeerkatMachineCommand::NotifyDrainExited {
-                    session_id: session_id.clone(),
-                    reason,
-                },
-            )
-            .await;
+    ) -> Result<(), RuntimeDriverError> {
+        self.execute_meerkat_machine_command(
+            Some(Arc::clone(self)),
+            MeerkatMachineCommand::NotifyDrainExited {
+                session_id: session_id.clone(),
+                reason,
+            },
+        )
+        .await
+        .map_err(MeerkatMachine::driver_error_from_command_error)?;
+        Ok(())
     }
 
     pub(super) async fn notify_comms_drain_exited_inner(
@@ -575,7 +584,7 @@ impl MeerkatMachine {
         }
     }
 
-    pub(super) async fn project_comms_drain_failed_safety_net(&self, session_id: &SessionId) {
+    pub(crate) async fn project_comms_drain_failed_safety_net(&self, session_id: &SessionId) {
         let keep_runtime = match self.drain_authority_state(session_id).await {
             Some(state) => {
                 state.phase == crate::meerkat_machine::dsl::DrainPhase::ExitedRespawnable
@@ -589,22 +598,27 @@ impl MeerkatMachine {
     }
 
     /// Abort all active comms drain tasks.
-    pub async fn abort_comms_drains(&self) {
-        let _ = self
-            .execute_meerkat_machine_command(None, MeerkatMachineCommand::AbortAll)
-            .await;
+    pub async fn abort_comms_drains(&self) -> Result<(), RuntimeDriverError> {
+        self.execute_meerkat_machine_command(None, MeerkatMachineCommand::AbortAll)
+            .await
+            .map_err(MeerkatMachine::driver_error_from_command_error)?;
+        Ok(())
     }
 
     /// Abort the comms drain task for a specific session.
-    pub async fn abort_comms_drain(&self, session_id: &SessionId) {
-        let _ = self
-            .execute_meerkat_machine_command(
-                None,
-                MeerkatMachineCommand::Abort {
-                    session_id: session_id.clone(),
-                },
-            )
-            .await;
+    pub async fn abort_comms_drain(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        self.execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::Abort {
+                session_id: session_id.clone(),
+            },
+        )
+        .await
+        .map_err(MeerkatMachine::driver_error_from_command_error)?;
+        Ok(())
     }
 
     /// Wait for a session's comms drain task to finish.
@@ -613,15 +627,16 @@ impl MeerkatMachine {
     /// If the task already notified the authority (normal exit), this is a no-op
     /// for authority state. If the task panicked without notifying, this submits
     /// `TaskExited { Failed }` as a safety net.
-    pub async fn wait_comms_drain(&self, session_id: &SessionId) {
-        let _ = self
-            .execute_meerkat_machine_command(
-                None,
-                MeerkatMachineCommand::Wait {
-                    session_id: session_id.clone(),
-                },
-            )
-            .await;
+    pub async fn wait_comms_drain(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
+        self.execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::Wait {
+                session_id: session_id.clone(),
+            },
+        )
+        .await
+        .map_err(MeerkatMachine::driver_error_from_command_error)?;
+        Ok(())
     }
 
     /// Read the current supervisor binding from DSL state (Wave 3 D Row 21).

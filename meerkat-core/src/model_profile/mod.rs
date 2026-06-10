@@ -88,7 +88,8 @@ pub struct ModelBetaHeader {
 impl From<&BetaHeader> for ModelBetaHeader {
     fn from(value: &BetaHeader) -> Self {
         Self {
-            feature: value.feature.to_string(),
+            // Wire/display projection of the typed `BetaFeature` owner.
+            feature: value.feature.as_wire_str().to_string(),
             header_name: value.header_name.to_string(),
             header_value: value.header_value.to_string(),
         }
@@ -146,6 +147,52 @@ mod tests {
     fn provider_from_catalog(provider: &str) -> Provider {
         Provider::parse_strict(provider)
             .unwrap_or_else(|| panic!("catalog provider '{provider}' must parse"))
+    }
+
+    /// Fields that `ModelProfile` must expose, mirrored by `WireModelProfile`
+    /// in `meerkat-contracts::wire::models`. Adding a field here is a
+    /// wire-contract change that needs parallel updates in `meerkat-contracts`
+    /// and a schema regeneration. (Moved from the deleted `meerkat-models`
+    /// shim crate's guard tests.)
+    const EXPECTED_MODEL_PROFILE_FIELDS: &[&str] = &[
+        "provider",
+        "model_family",
+        "supports_temperature",
+        "supports_thinking",
+        "supports_reasoning",
+        "supports_web_search",
+        "inline_video",
+        "vision",
+        "image_input",
+        "image_tool_results",
+        "realtime",
+        "image_generation",
+        "params_schema",
+        "call_timeout_secs",
+        "beta_headers",
+    ];
+
+    #[test]
+    fn model_profile_wire_field_parity() {
+        let schema = schemars::schema_for!(ModelProfile);
+        let value = serde_json::to_value(&schema).expect("schema serializes to JSON");
+        let props = value
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .expect("ModelProfile schema has a properties map")
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected: std::collections::BTreeSet<String> = EXPECTED_MODEL_PROFILE_FIELDS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(
+            props, expected,
+            "ModelProfile field set drift — update meerkat-contracts::WireModelProfile \
+             in lockstep, regenerate artifact schemas (make regen-schemas), and update \
+             EXPECTED_MODEL_PROFILE_FIELDS if this change is intentional."
+        );
     }
 
     #[test]

@@ -12,6 +12,57 @@ use crate::runtime_state::RuntimeState;
 use meerkat_core::lifecycle::RunId;
 use meerkat_core::types::SessionId;
 
+/// Typed projection of a generated-machine transition rejection.
+///
+/// Carries a stable per-variant discriminant (the same `&'static str`
+/// convention as `meerkat_core::error::error_code()`) alongside the
+/// human-readable rejection detail, so consumer seams can move the typed
+/// refusal across boundaries without re-parsing a flattened reason string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DslTransitionRefusal {
+    pub(crate) error_code: &'static str,
+    pub(crate) message: String,
+}
+
+impl DslTransitionRefusal {
+    /// Build a non-transition refusal (e.g. unregistered session, raw
+    /// internal input, committed-effect dispatch failure) under an explicit
+    /// stable discriminant.
+    pub(crate) fn other(error_code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            error_code,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for DslTransitionRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} [{}]", self.message, self.error_code)
+    }
+}
+
+/// Map a generated-machine transition rejection to its typed refusal with a
+/// stable per-variant `error_code`.
+pub(crate) fn refusal(
+    err: mm_dsl::MeerkatMachineTransitionError,
+    context: &str,
+) -> DslTransitionRefusal {
+    let error_code = match &err {
+        mm_dsl::MeerkatMachineTransitionError::NoMatchingTransition { .. } => {
+            "dsl_no_matching_transition"
+        }
+        mm_dsl::MeerkatMachineTransitionError::GuardRejected { .. } => "dsl_guard_rejected",
+        mm_dsl::MeerkatMachineTransitionError::RecoveredStateInvariantRejected { .. } => {
+            "dsl_recovered_state_invariant_rejected"
+        }
+    };
+    DslTransitionRefusal {
+        error_code,
+        message: map_error(err, context),
+    }
+}
+
 /// Map DSL transition errors into plain strings with context.
 pub(crate) fn map_error(err: mm_dsl::MeerkatMachineTransitionError, context: &str) -> String {
     match err {

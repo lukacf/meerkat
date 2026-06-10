@@ -608,7 +608,10 @@ fn last_receipt_from_machine_projection(
         attempt,
         stage,
         recorded_at_utc_ms,
-        machine.last_receipt_correlation_id.as_deref(),
+        machine
+            .last_receipt_correlation_id
+            .as_ref()
+            .map(|id| id.0.as_str()),
         machine.last_receipt_detail.as_deref(),
         failure_class,
         machine.runtime_outcome_key.as_deref(),
@@ -620,7 +623,7 @@ fn last_receipt_from_machine_projection(
         attempt,
         stage,
         recorded_at_utc,
-        correlation_id: machine.last_receipt_correlation_id.clone(),
+        correlation_id: machine.last_receipt_correlation_id.clone().map(|id| id.0),
         detail: machine.last_receipt_detail.clone(),
         failure_class,
         runtime_outcome,
@@ -745,8 +748,8 @@ pub(crate) fn validate_occurrence_machine_projection(
             occurrence.occurrence_id
         ));
     }
-    if trigger_stable_key(&occurrence.trigger_snapshot)? != machine.trigger_key
-        || occurrence.target_snapshot.stable_key()? != machine.target_binding_key
+    if trigger_stable_key(&occurrence.trigger_snapshot)? != machine.trigger_key.0
+        || occurrence.target_snapshot.stable_key()? != machine.target_binding_key.0
         || optional_session_id_to_machine(target_materialized_session_id(
             &occurrence.target_snapshot,
         )) != machine.target_materialized_session_id.clone()
@@ -794,7 +797,7 @@ pub(crate) fn validate_occurrence_machine_projection(
             occurrence.occurrence_id
         ));
     }
-    if occurrence.claimed_by != machine.claimed_by
+    if occurrence.claimed_by.as_deref() != machine.claimed_by.as_ref().map(|owner| owner.0.as_str())
         || optional_datetime_to_machine_millis(
             occurrence.lease_expires_at_utc,
             "lease_expires_at_utc",
@@ -811,7 +814,11 @@ pub(crate) fn validate_occurrence_machine_projection(
             occurrence.occurrence_id
         ));
     }
-    if occurrence.delivery_correlation_id != machine.delivery_correlation_id
+    if occurrence.delivery_correlation_id.as_deref()
+        != machine
+            .delivery_correlation_id
+            .as_ref()
+            .map(|id| id.0.as_str())
         || occurrence.last_receipt
             != last_receipt_from_machine_projection(machine, occurrence.runtime_outcome.clone())?
     {
@@ -2187,8 +2194,8 @@ impl From<&occ_dsl::OccurrenceLifecycleMachineState> for OccurrenceMachineStateW
             schedule_id: state.schedule_id.0.clone(),
             schedule_revision: state.schedule_revision,
             occurrence_ordinal: state.occurrence_ordinal,
-            trigger_key: state.trigger_key.clone(),
-            target_binding_key: state.target_binding_key.clone(),
+            trigger_key: state.trigger_key.0.clone(),
+            target_binding_key: state.target_binding_key.0.clone(),
             misfire_policy: occurrence_misfire_policy_to_wire(state.misfire_policy).to_string(),
             misfire_policy_key: state.misfire_policy_key.clone(),
             overlap_policy: occurrence_overlap_policy_to_wire(state.overlap_policy).to_string(),
@@ -2200,11 +2207,11 @@ impl From<&occ_dsl::OccurrenceLifecycleMachineState> for OccurrenceMachineStateW
             missing_target_policy_key: state.missing_target_policy_key.clone(),
             due_at_utc_ms: state.due_at_utc_ms,
             misfire_deadline_utc_ms: state.misfire_deadline_utc_ms,
-            claimed_by: state.claimed_by.clone(),
+            claimed_by: state.claimed_by.clone().map(|owner| owner.0),
             lease_expires_at_utc_ms: state.lease_expires_at_utc_ms,
             claimed_at_utc_ms: state.claimed_at_utc_ms,
             claim_token: state.claim_token.as_ref().map(|token| token.0.clone()),
-            delivery_correlation_id: state.delivery_correlation_id.clone(),
+            delivery_correlation_id: state.delivery_correlation_id.clone().map(|id| id.0),
             target_materialized_session_id: state
                 .target_materialized_session_id
                 .as_ref()
@@ -2221,7 +2228,7 @@ impl From<&occ_dsl::OccurrenceLifecycleMachineState> for OccurrenceMachineStateW
                 .map(occurrence_failure_class_to_wire)
                 .map(str::to_string),
             last_receipt_detail: state.last_receipt_detail.clone(),
-            last_receipt_correlation_id: state.last_receipt_correlation_id.clone(),
+            last_receipt_correlation_id: state.last_receipt_correlation_id.clone().map(|id| id.0),
             last_receipt_materialized_session_id: state
                 .last_receipt_materialized_session_id
                 .as_ref()
@@ -2260,8 +2267,8 @@ impl TryFrom<OccurrenceMachineStateWire> for occ_dsl::OccurrenceLifecycleMachine
             schedule_id: occ_dsl::ScheduleId(wire.schedule_id),
             schedule_revision: wire.schedule_revision,
             occurrence_ordinal: wire.occurrence_ordinal,
-            trigger_key: wire.trigger_key,
-            target_binding_key: wire.target_binding_key,
+            trigger_key: wire.trigger_key.into(),
+            target_binding_key: wire.target_binding_key.into(),
             misfire_policy: occurrence_misfire_policy_from_wire(&wire.misfire_policy)?,
             misfire_policy_key: wire.misfire_policy_key,
             overlap_policy: occurrence_overlap_policy_from_wire(&wire.overlap_policy)?,
@@ -2272,11 +2279,11 @@ impl TryFrom<OccurrenceMachineStateWire> for occ_dsl::OccurrenceLifecycleMachine
             missing_target_policy_key: wire.missing_target_policy_key,
             due_at_utc_ms: wire.due_at_utc_ms,
             misfire_deadline_utc_ms: wire.misfire_deadline_utc_ms,
-            claimed_by: wire.claimed_by,
+            claimed_by: wire.claimed_by.map(Into::into),
             lease_expires_at_utc_ms: wire.lease_expires_at_utc_ms,
             claimed_at_utc_ms: wire.claimed_at_utc_ms,
             claim_token: wire.claim_token.map(occ_dsl::ClaimToken),
-            delivery_correlation_id: wire.delivery_correlation_id,
+            delivery_correlation_id: wire.delivery_correlation_id.map(Into::into),
             target_materialized_session_id: wire
                 .target_materialized_session_id
                 .map(occ_dsl::SessionId),
@@ -2294,7 +2301,7 @@ impl TryFrom<OccurrenceMachineStateWire> for occ_dsl::OccurrenceLifecycleMachine
                 .map(occurrence_failure_class_from_wire)
                 .transpose()?,
             last_receipt_detail: wire.last_receipt_detail,
-            last_receipt_correlation_id: wire.last_receipt_correlation_id,
+            last_receipt_correlation_id: wire.last_receipt_correlation_id.map(Into::into),
             last_receipt_materialized_session_id: wire
                 .last_receipt_materialized_session_id
                 .map(occ_dsl::SessionId),

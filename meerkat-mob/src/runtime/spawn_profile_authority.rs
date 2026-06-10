@@ -48,7 +48,12 @@ pub(super) fn authorize_spawn_profile_input(
     let tool_config_digest = digest_serializable(&profile.tools)?;
     let skills_digest = digest_serializable(&profile.skills)?;
     let provider_params_digest = optional_value_digest(profile.provider_params.as_ref())?;
-    let output_schema_digest = optional_value_digest(profile.output_schema.as_ref())?;
+    let output_schema_digest = optional_value_digest(
+        profile
+            .output_schema
+            .as_ref()
+            .map(meerkat_core::MeerkatSchema::as_value),
+    )?;
     let dsl_identity =
         mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(agent_identity.as_str()));
     let expected = AuthorizedSpawnProfileMaterial {

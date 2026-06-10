@@ -1481,30 +1481,27 @@ async fn converge_recovered_active_flow_run(
         .get_run(&run_id)
         .await?
         .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
-    let transitioned = if crate::run::mob_machine_run_status_is_terminal(
+    if !crate::run::mob_machine_run_status_is_terminal(
         &before_terminal.run_id,
         &before_terminal.status,
     )? {
-        false
-    } else {
-        commit_recovered_flow_run_command(
+        // Terminal status and terminal event commit through the store's
+        // combined seam (single SQLite transaction on durable storage) so
+        // recovery cannot split terminal truth either.
+        let _ = commit_recovered_flow_run_command(
             authority,
             run_store.clone(),
             &run_id,
             MobMachineFlowRunCommand::TerminalizeCanceled(flow_run::inputs::TerminalizeCanceled {}),
             Some(MobRunStatus::Canceled),
+            Some((
+                terminalization,
+                super::terminalization::TerminalizationTarget::Canceled,
+                before_terminal.flow_id.clone(),
+            )),
             "resume_recovered_flow_terminalize_canceled",
         )
-        .await?
-    };
-    if transitioned {
-        terminalization
-            .record_persisted_terminalization(
-                run_id.clone(),
-                before_terminal.flow_id,
-                super::terminalization::TerminalizationTarget::Canceled,
-            )
-            .await?;
+        .await?;
     }
 
     apply_recovered_flow_signal(
@@ -1540,6 +1537,7 @@ async fn start_recovered_flow_run_if_pending(
         run_id,
         MobMachineFlowRunCommand::StartRun(flow_run::inputs::StartRun {}),
         Some(MobRunStatus::Running),
+        None,
         "resume_recovered_flow_start",
     )
     .await?;
@@ -1581,6 +1579,7 @@ async fn cancel_recovered_unfinished_steps(
             run_id,
             MobMachineFlowRunCommand::CancelStep(flow_run::inputs::CancelStep { step_id }),
             None,
+            None,
             "resume_recovered_flow_cancel_step",
         )
         .await?;
@@ -1594,6 +1593,11 @@ async fn commit_recovered_flow_run_command(
     run_id: &crate::ids::RunId,
     command: crate::run::MobMachineFlowRunCommand,
     next_status: Option<crate::run::MobRunStatus>,
+    terminalization: Option<(
+        &super::terminalization::FlowTerminalizationAuthority,
+        super::terminalization::TerminalizationTarget,
+        crate::ids::FlowId,
+    )>,
     context: &'static str,
 ) -> Result<bool, MobError> {
     use crate::machines::mob_machine as mob_dsl;
@@ -1637,26 +1641,41 @@ async fn commit_recovered_flow_run_command(
             transition.effects(),
         )?;
 
-        let won = if let Some(next_status) = &next_status {
-            run_store
-                .cas_run_snapshot_with_authority(
+        let won = match (&next_status, &terminalization) {
+            (Some(_), Some((terminalization, target, flow_id))) => terminalization
+                .commit_terminalization_with_snapshot(
                     run_id,
+                    flow_id.clone(),
+                    target.clone(),
                     run.status.clone(),
                     &run.flow_state,
-                    next_status.clone(),
                     &outcome.next_state,
                     vec![authority_input.clone()],
                 )
                 .await?
-        } else {
-            run_store
-                .cas_flow_state_with_authority(
-                    run_id,
-                    &run.flow_state,
-                    &outcome.next_state,
-                    vec![authority_input.clone()],
-                )
-                .await?
+                .is_some(),
+            (Some(next_status), None) => {
+                run_store
+                    .cas_run_snapshot_with_authority(
+                        run_id,
+                        run.status.clone(),
+                        &run.flow_state,
+                        next_status.clone(),
+                        &outcome.next_state,
+                        vec![authority_input.clone()],
+                    )
+                    .await?
+            }
+            (None, _) => {
+                run_store
+                    .cas_flow_state_with_authority(
+                        run_id,
+                        &run.flow_state,
+                        &outcome.next_state,
+                        vec![authority_input.clone()],
+                    )
+                    .await?
+            }
         };
         if won {
             *authority = prepared;

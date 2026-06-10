@@ -106,8 +106,8 @@ impl AgentLlmClient for MockAgentLlmClient {
         ))
     }
 
-    fn provider(&self) -> &'static str {
-        "mock"
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Other
     }
 
     fn model(&self) -> &str {
@@ -136,7 +136,7 @@ impl AgentLlmClient for CountingAgentLlmClient {
             .await
     }
 
-    fn provider(&self) -> &'static str {
+    fn provider(&self) -> meerkat_core::Provider {
         self.inner.provider()
     }
 
@@ -806,7 +806,7 @@ async fn build_agent_resolves_self_hosted_alias_from_registry() {
             remote_model: "gemma4:31b".to_string(),
             display_name: "Gemma 4 31B".into(),
             family: "gemma-4".to_string(),
-            tier: meerkat_models::ModelTier::Supported,
+            tier: meerkat_core::model_profile::catalog::ModelTier::Supported,
             context_window: Some(256_000),
             max_output_tokens: Some(8_192),
             vision: true,
@@ -858,7 +858,7 @@ async fn build_llm_client_for_identity_rejects_self_hosted_server_mismatch() {
             remote_model: "gemma4:e2b".to_string(),
             display_name: "Gemma 4 E2B".into(),
             family: "gemma-4".to_string(),
-            tier: meerkat_models::ModelTier::Supported,
+            tier: meerkat_core::model_profile::catalog::ModelTier::Supported,
             context_window: Some(128_000),
             max_output_tokens: Some(8_192),
             vision: true,
@@ -3249,4 +3249,39 @@ fn session_metadata_projects_auth_binding_into_llm_identity() {
     };
     metadata.apply_llm_identity(&new_identity);
     assert_eq!(metadata.auth_binding, Some(swapped_ref));
+}
+
+/// Memory enabled at the factory level (config truth) must fail closed when
+/// the memory store cannot open — even with an `Inherit` per-build override.
+/// Building an agent without the promised `memory_search` tool would silently
+/// misreport the session's capability truth.
+#[cfg(feature = "memory-store-session")]
+#[tokio::test]
+async fn factory_enabled_memory_open_failure_fails_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let store_path = temp.path().join("sessions");
+    std::fs::create_dir_all(&store_path).unwrap();
+    // Occupy the memory dir path with a plain file so HnswMemoryStore::open fails.
+    std::fs::write(store_path.join("memory"), b"not a directory").unwrap();
+
+    let factory = AgentFactory::new(store_path.clone()).memory(true);
+    let config = Config::default();
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        // Inherit resolves against the factory-level enable: still effective.
+        override_memory: ToolCategoryOverride::Inherit,
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let err = factory
+        .build_agent(build_config, &config)
+        .await
+        .err()
+        .expect("enabled memory with an unopenable store must fail the build");
+    match err {
+        BuildAgentError::CapabilityUnavailable { capability, .. } => {
+            assert_eq!(capability, "memory");
+        }
+        other => panic!("expected CapabilityUnavailable for memory, got: {other:?}"),
+    }
 }

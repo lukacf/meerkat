@@ -1158,23 +1158,19 @@ where
         self.run_completed_event_emitted = false;
 
         // Apply canonical per-turn skill references staged by the surface.
-        // Skill refs are text-only so they operate on the text projection.
-        let user_input = if user_input.has_non_text_content() {
-            // For multimodal input, prepend skill text to the text blocks only.
-            let skill_text = self.apply_skill_ref(String::new(), event_tx.as_ref()).await;
-            if skill_text.is_empty() {
-                user_input
-            } else {
-                // Prepend skill text as a leading text block.
-                let mut blocks = vec![crate::types::ContentBlock::Text { text: skill_text }];
-                blocks.extend(user_input.into_blocks());
-                ContentInput::Blocks(blocks)
-            }
+        // Resolved activations travel as typed `SkillContext` blocks prepended
+        // to the turn input, preserving activation provenance in the durable
+        // transcript instead of folding skill bodies into operator text.
+        let skill_blocks = self.resolve_pending_skill_context(event_tx.as_ref()).await;
+        let user_input = if skill_blocks.is_empty() {
+            user_input
         } else {
-            let text = self
-                .apply_skill_ref(user_input.text_content(), event_tx.as_ref())
-                .await;
-            ContentInput::Text(text)
+            let mut blocks = skill_blocks;
+            match user_input {
+                ContentInput::Text(text) if text.is_empty() => {}
+                other => blocks.extend(other.into_blocks()),
+            }
+            ContentInput::Blocks(blocks)
         };
 
         // Hooks/events receive the typed content input; legacy hook fields
@@ -1309,14 +1305,19 @@ where
         self.run_completed_hooks_applied = false;
         self.run_completed_event_emitted = false;
 
-        self.emit_run_started_event(prompt.clone(), event_tx.as_ref())
-            .await;
-
+        // Run-start hooks own the start veto on the pending-continuation path
+        // too: they must run — and be able to deny — BEFORE we publish
+        // `RunStarted`, mirroring `run_inner`. Otherwise observers see a
+        // `RunStarted` for a run that immediately fails at run-start (a
+        // false-start window).
         if let Err(err) = self.run_started_hooks(&prompt, event_tx.as_ref()).await {
             self.handle_run_failure(&err, event_tx.as_ref()).await;
             self.clear_runtime_execution_kind();
             return Err(err);
         }
+
+        self.emit_run_started_event(prompt.clone(), event_tx.as_ref())
+            .await;
 
         self.tool_dispatch_context = crate::ToolDispatchContext::from_current_turn_input(&prompt)
             .with_turn_metadata(self.turn_tool_dispatch_metadata.clone());
@@ -1372,36 +1373,37 @@ where
     }
 
     /// Consume canonical pending `skill_references` staged by the surface and
-    /// prepend resolved skill bodies to the next user input.
+    /// resolve them into typed [`ContentBlock::SkillContext`] blocks for the
+    /// next user input.
     ///
     /// Per-turn skill activation is a typed operational effect, not operator
     /// text: a successful resolution emits the typed
     /// [`AgentEvent::SkillsResolved`] (carrying the canonical [`SkillKey`]s and
-    /// injection byte count) before the rendered bodies are projected onto the
-    /// turn input, and a failed resolution emits the typed
-    /// [`AgentEvent::SkillResolutionFailed`] (carrying the typed `SkillKey` and
-    /// typed [`SkillResolutionFailureReason`]) rather than being swallowed by a
-    /// log line. The rendered prefix projection onto user text remains a
-    /// transport detail of how the activation reaches the model.
+    /// injection byte count) AND yields typed skill-context blocks that the
+    /// durable transcript preserves with their activation provenance — the
+    /// rendered body is never folded into anonymous operator text. A failed
+    /// resolution emits the typed [`AgentEvent::SkillResolutionFailed`]
+    /// (carrying the typed `SkillKey` and typed
+    /// [`SkillResolutionFailureReason`]) rather than being swallowed by a log
+    /// line.
     ///
     /// Compatibility slash refs are handled at transport/resolver boundaries;
     /// core runtime no longer parses slash refs directly.
     ///
     /// [`SkillKey`]: crate::skills::SkillKey
     /// [`SkillResolutionFailureReason`]: crate::event::SkillResolutionFailureReason
-    async fn apply_skill_ref(
+    async fn resolve_pending_skill_context(
         &mut self,
-        user_input: String,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
-    ) -> String {
+    ) -> Vec<crate::types::ContentBlock> {
         let engine = match &self.skill_engine {
             Some(e) => e.clone(),
-            None => return user_input,
+            None => return Vec::new(),
         };
 
-        let mut prefix_parts: Vec<String> = Vec::new();
+        let mut skill_blocks: Vec<crate::types::ContentBlock> = Vec::new();
 
-        // 1. Consume pending_skill_references (from wire format / API)
+        // Consume pending_skill_references (from wire format / API)
         if let Some(refs) = self.pending_skill_references.take()
             && !refs.is_empty()
         {
@@ -1410,8 +1412,8 @@ where
                 Ok(resolved) => {
                     // Typed activation effect: resolved skills are observable as
                     // a structured event carrying the canonical keys, distinct
-                    // from any operator-typed text. The rendered bodies are then
-                    // projected onto the turn input below as transport.
+                    // from any operator-typed text. The rendered bodies travel
+                    // as typed skill-context blocks, not folded prompt text.
                     let mut injection_bytes = 0usize;
                     let mut activated_keys: Vec<crate::skills::SkillKey> =
                         Vec::with_capacity(resolved.len());
@@ -1422,7 +1424,10 @@ where
                         );
                         injection_bytes = injection_bytes.saturating_add(skill.byte_size);
                         activated_keys.push(skill.key.clone());
-                        prefix_parts.push(skill.rendered_body.clone());
+                        skill_blocks.push(crate::types::ContentBlock::SkillContext {
+                            skill_key: skill.key.clone(),
+                            text: skill.rendered_body.clone(),
+                        });
                     }
                     if !activated_keys.is_empty() {
                         let _ = crate::event_tap::tap_emit(
@@ -1461,15 +1466,7 @@ where
             }
         }
 
-        if prefix_parts.is_empty() {
-            return user_input;
-        }
-
-        if user_input.is_empty() {
-            prefix_parts.join("\n\n")
-        } else {
-            format!("{}\n\n{user_input}", prefix_parts.join("\n\n"))
-        }
+        skill_blocks
     }
 }
 
@@ -1539,7 +1536,7 @@ mod typed_transcript_contract_tests {
 /// `SkillKey`s — distinct from any operator-typed text smuggled into the user
 /// input.
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod skill_activation_effect_tests {
     use super::*;
     use crate::skills::{
@@ -1580,8 +1577,8 @@ mod skill_activation_effect_tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -1815,13 +1812,11 @@ mod skill_activation_effect_tests {
         agent.pending_skill_references = Some(vec![key.clone()]);
 
         let (tx, mut rx) = mpsc::channel::<AgentEvent>(8);
-        let out = agent
-            .apply_skill_ref("operator typed text".to_string(), Some(&tx))
-            .await;
+        let out = agent.resolve_pending_skill_context(Some(&tx)).await;
         drop(tx);
 
-        // Resolution failed, so the operator input is returned unchanged.
-        assert_eq!(out, "operator typed text");
+        // Resolution failed, so no skill-context blocks are produced.
+        assert!(out.is_empty());
 
         let mut events = Vec::new();
         while let Ok(event) = rx.try_recv() {
@@ -1868,20 +1863,19 @@ mod skill_activation_effect_tests {
         agent.pending_skill_references = Some(vec![key.clone()]);
 
         let (tx, mut rx) = mpsc::channel::<AgentEvent>(8);
-        let out = agent
-            .apply_skill_ref("operator typed text".to_string(), Some(&tx))
-            .await;
+        let out = agent.resolve_pending_skill_context(Some(&tx)).await;
         drop(tx);
 
-        // The rendered body is still projected onto the turn input (transport),
-        // but that projection is no longer the *only* witness of activation.
+        // The activation yields a typed skill-context block carrying both the
+        // canonical key and the rendered body — never an anonymous text fold.
+        assert_eq!(out.len(), 1, "one activation yields one typed block");
+        let crate::types::ContentBlock::SkillContext { skill_key, text } = &out[0] else {
+            panic!("activation must yield a typed SkillContext block, got {out:?}");
+        };
+        assert_eq!(skill_key, &key, "block must carry the canonical SkillKey");
         assert!(
-            out.contains("<skill>injected canonical skill</skill>"),
-            "rendered body should still reach the turn input, saw: {out}"
-        );
-        assert!(
-            out.contains("operator typed text"),
-            "operator text must be preserved alongside the activation"
+            text.contains("<skill>injected canonical skill</skill>"),
+            "rendered body should reach the typed block, saw: {text}"
         );
 
         let mut events = Vec::new();
@@ -1908,6 +1902,124 @@ mod skill_activation_effect_tests {
         assert_eq!(
             resolved.1, 34,
             "typed activation record must carry the injection byte size"
+        );
+    }
+
+    /// A `SkillEngine` whose health snapshot fails with a typed error.
+    struct HealthFaultSkillEngine;
+
+    // Test mock mirrors the `SkillEngine` trait's `-> impl Future + Send`
+    // method shapes verbatim (see `FailingSkillEngine` above).
+    #[allow(clippy::manual_async_fn)]
+    impl SkillEngine for HealthFaultSkillEngine {
+        fn inventory_section(&self) -> impl Future<Output = Result<String, SkillError>> + Send {
+            async move { Ok(String::new()) }
+        }
+
+        fn resolve_and_render(
+            &self,
+            _keys: &[SkillKey],
+        ) -> impl Future<Output = Result<Vec<ResolvedSkill>, SkillError>> + Send {
+            async move { Ok(Vec::new()) }
+        }
+
+        fn collections(
+            &self,
+        ) -> impl Future<Output = Result<Vec<SkillCollection>, SkillError>> + Send {
+            async move { Ok(Vec::new()) }
+        }
+
+        fn list_skills(
+            &self,
+            _filter: &SkillFilter,
+        ) -> impl Future<Output = Result<Vec<SkillDescriptor>, SkillError>> + Send {
+            async move { Ok(Vec::new()) }
+        }
+
+        fn quarantined_diagnostics(
+            &self,
+        ) -> impl Future<Output = Result<Vec<crate::skills::SkillQuarantineDiagnostic>, SkillError>> + Send
+        {
+            async move { Ok(Vec::new()) }
+        }
+
+        fn health_snapshot(
+            &self,
+        ) -> impl Future<Output = Result<crate::skills::SourceHealthSnapshot, SkillError>> + Send
+        {
+            async move {
+                Err(SkillError::NotFound {
+                    key: fixture_skill_key("health-fault"),
+                })
+            }
+        }
+
+        fn list_artifacts(
+            &self,
+            key: &SkillKey,
+        ) -> impl Future<Output = Result<Vec<crate::skills::SkillArtifact>, SkillError>> + Send
+        {
+            let missing = key.clone();
+            async move { Err(SkillError::NotFound { key: missing }) }
+        }
+
+        fn read_artifact(
+            &self,
+            key: &SkillKey,
+            _artifact_path: &str,
+        ) -> impl Future<Output = Result<crate::skills::SkillArtifactContent, SkillError>> + Send
+        {
+            let missing = key.clone();
+            async move { Err(SkillError::NotFound { key: missing }) }
+        }
+
+        fn invoke_function(
+            &self,
+            key: &SkillKey,
+            _function_name: &str,
+            _arguments: serde_json::Value,
+        ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send {
+            let missing = key.clone();
+            async move { Err(SkillError::NotFound { key: missing }) }
+        }
+    }
+
+    /// Dogma row #239: a skill-diagnostics collection fault at run terminality
+    /// is recorded as a typed `collection_fault` inside the run result —
+    /// surfaces never receive absent or healthy-looking diagnostics in place
+    /// of failure truth.
+    #[tokio::test]
+    async fn skill_diagnostics_collection_fault_is_recorded_in_run_result() {
+        let skill_runtime = Arc::new(SkillRuntime::new(Arc::new(HealthFaultSkillEngine)));
+        let mut agent = AgentBuilder::new()
+            .with_skill_engine(skill_runtime)
+            .with_turn_state_handle(Arc::new(
+                crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+            ))
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        let result = agent
+            .run("hello".to_string().into())
+            .await
+            .expect("run should complete despite diagnostics collection fault");
+
+        let diagnostics = result
+            .skill_diagnostics
+            .expect("collection fault must yield fault-carrying diagnostics, not None");
+        let fault = diagnostics
+            .collection_fault
+            .expect("diagnostics must carry the typed collection fault");
+        assert!(
+            matches!(
+                fault,
+                crate::event::SkillResolutionFailureReason::NotFound { .. }
+            ),
+            "fault must preserve the typed failure reason, got {fault:?}"
         );
     }
 }

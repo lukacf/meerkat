@@ -163,30 +163,44 @@ impl SessionDefaults {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SurfaceSessionRecoveryContext {
     pub llm_client_override: Option<Arc<dyn Any + Send + Sync>>,
     pub agent_llm_client_decorator: Option<crate::AgentLlmClientDecorator>,
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     pub checkpointer: Option<Arc<dyn SessionCheckpointer>>,
-    /// Runtime build mode supplied by the host, with a fail-closed presence
-    /// assertion.
+    /// Runtime build mode supplied by the host.
     ///
-    /// This is deliberately a `(value, required)` pair rather than a collapsed
-    /// enum: `require_runtime_build_mode` is the host-plumbing contract ("a
-    /// runtime-backed surface MUST hand us a mode"), and `runtime_build_mode`
-    /// carries it. All four combinations are meaningful — when `required` is
-    /// set and the mode is absent the recover path fails closed with
-    /// `MissingRuntimeBuildMode` (guarded by a test); when not required the
-    /// mode is genuinely optional (standalone/ephemeral surfaces). No facts are
-    /// reduced to a verdict here, so there is no illegal state to make
+    /// Required by construction: runtime-backed surfaces pass
+    /// `RuntimeBuildMode::SessionOwned(bindings)` and standalone/ephemeral
+    /// surfaces pass `RuntimeBuildMode::StandaloneEphemeral` explicitly. The
+    /// previous `(Option<RuntimeBuildMode>, require_runtime_build_mode)` pair
+    /// made "required but absent" representable and silently fell back to
+    /// `StandaloneEphemeral` on the optional path; both states are now
     /// unrepresentable.
-    pub runtime_build_mode: Option<RuntimeBuildMode>,
-    pub require_runtime_build_mode: bool,
+    pub runtime_build_mode: RuntimeBuildMode,
     pub realm_id: Option<crate::RealmId>,
     pub instance_id: Option<String>,
     pub backend: Option<String>,
     pub config_generation: Option<u64>,
+}
+
+impl Default for SurfaceSessionRecoveryContext {
+    fn default() -> Self {
+        Self {
+            llm_client_override: None,
+            agent_llm_client_decorator: None,
+            external_tools: None,
+            checkpointer: None,
+            // Standalone/test surfaces own the default explicitly; runtime
+            // surfaces must overwrite with `SessionOwned(bindings)`.
+            runtime_build_mode: RuntimeBuildMode::StandaloneEphemeral,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        }
+    }
 }
 
 /// Resolved semantic config for the next recovered turn.
@@ -262,8 +276,6 @@ pub enum SurfaceSessionRecoveryError {
     MissingSessionMetadata(String),
     #[error("persisted session {0} is missing session build state")]
     MissingSessionBuildState(String),
-    #[error("{0}")]
-    MissingRuntimeBuildMode(String),
     #[error("{0}")]
     InvalidOverride(String),
 }
@@ -465,16 +477,6 @@ pub fn resolve_effective_turn_config(
         first_turn_phase,
     )?;
 
-    // Runtime-binding presence is host plumbing, not a session-document
-    // semantic: it asserts the caller supplied canonical SessionRuntimeBindings
-    // for a runtime-backed recovery. It stays a pure shell guard because there
-    // is no facts->verdict reduction over session-document state — it is a
-    // single presence assertion over caller-supplied transport context.
-    if context.require_runtime_build_mode && context.runtime_build_mode.is_none() {
-        return Err(SurfaceSessionRecoveryError::MissingRuntimeBuildMode(
-            "runtime-backed session recovery requires canonical SessionRuntimeBindings; refusing StandaloneEphemeral fallback".to_string(),
-        ));
-    }
     let resume_override_mask = ResumeOverrideMask {
         model: overrides.model.is_some(),
         provider: llm_binding.provider_overridden,
@@ -650,9 +652,7 @@ pub fn resolve_effective_turn_config(
         call_timeout_override: build_state.call_timeout_override,
         resume_override_mask,
         mob_tools: None,
-        runtime_build_mode: context
-            .runtime_build_mode
-            .unwrap_or(RuntimeBuildMode::StandaloneEphemeral),
+        runtime_build_mode: context.runtime_build_mode,
         initial_turn_metadata: None,
     };
     if let Some(override_mob) = overrides.override_mob {
@@ -1309,24 +1309,26 @@ mod tests {
         );
     }
 
+    /// Row: recovery runtime mode is required by construction — the context
+    /// carries a non-optional `RuntimeBuildMode`, so "required but absent"
+    /// and "optional silent standalone fallback" are unrepresentable. The
+    /// explicit default is `StandaloneEphemeral`, and the recovered build
+    /// carries exactly the mode the caller supplied.
     #[test]
-    fn build_recovered_session_rejects_missing_runtime_build_mode_when_required() {
-        let error = build_recovered_session(
+    fn build_recovered_session_carries_explicit_runtime_build_mode() {
+        let recovered = build_recovered_session(
             sample_session(),
             &SurfaceSessionRecoveryOverrides::default(),
-            SurfaceSessionRecoveryContext {
-                require_runtime_build_mode: true,
-                ..Default::default()
-            },
+            SurfaceSessionRecoveryContext::default(),
         )
-        .expect_err("runtime-backed recovery must reject silent standalone fallback");
+        .expect("standalone recovery should succeed");
 
         assert!(
             matches!(
-                error,
-                SurfaceSessionRecoveryError::MissingRuntimeBuildMode(_)
+                recovered.build.runtime_build_mode,
+                RuntimeBuildMode::StandaloneEphemeral
             ),
-            "missing runtime bindings should be called out explicitly"
+            "explicit standalone mode must flow through unchanged"
         );
     }
 

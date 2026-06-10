@@ -229,6 +229,21 @@ EOF
     fi
 fi
 
+# ── 7. Docs version projections ────────────────────────────────────────────
+# Public docs carry version strings only as stamped projections (rewritten by
+# scripts/stamp-docs-contract-version.sh in the release hook). Fail closed on
+# any hand-maintained drift so docs cannot publish a stale contract version.
+
+echo ""
+echo "Docs version projections:"
+if "$ROOT/scripts/stamp-docs-contract-version.sh" --check "$CARGO_VER"; then
+    green "  Docs version projections: OK"
+else
+    red "FAIL: docs version projections are stale"
+    red "  Run: ./scripts/stamp-docs-contract-version.sh"
+    FAIL=1
+fi
+
 # ── Summary ─────────────────────────────────────────────────────────────────
 
 echo ""

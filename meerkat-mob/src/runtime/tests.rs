@@ -2243,7 +2243,6 @@ impl SubscribableInjector for CountingInjector {
                 AgentEvent::InteractionFailed {
                     interaction_id: interaction_id_for_task,
                     reason: InteractionFailureReason::abandoned("mock flow turn failure"),
-                    error: "mock flow turn failure".to_string(),
                 }
             } else {
                 AgentEvent::InteractionComplete {
@@ -3808,6 +3807,7 @@ fn sample_definition_with_supervisor_threshold(threshold: u32) -> MobDefinition 
     def.supervisor = Some(crate::definition::SupervisorSpec {
         role: ProfileName::from("lead"),
         escalation_threshold: threshold,
+        escalation_turn_timeout_ms: None,
     });
     def
 }
@@ -33813,7 +33813,7 @@ async fn test_resume_reconciliation_runs_spawn_customizer_for_missing_session_re
     override_profile.external_addressable = true;
     let customizer = ResumeAddressabilityCustomizer::new(override_profile);
     let service = Arc::new(MockSessionService::new());
-    let _ = service.enable_runtime_adapter();
+    let adapter = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
     let runtime_metadata = storage.runtime_metadata.clone();
@@ -33835,6 +33835,11 @@ async fn test_resume_reconciliation_runs_spawn_customizer_for_missing_session_re
         .archive(&session_id)
         .await
         .expect("archive live session before resume reconciliation");
+    // Mirror real archive cleanup: archiving a session detaches its peer
+    // ingress and unregisters its runtime. The machine's transport-swap guard
+    // rightly rejects re-attaching a different comms runtime to a stale
+    // pre-archive ingress, so the simulation must not leave one behind.
+    adapter.unregister_session(&session_id).await;
 
     let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
         events,

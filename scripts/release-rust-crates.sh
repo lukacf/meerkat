@@ -9,7 +9,6 @@ printf '%s\n' \
   meerkat-core \
   meerkat-capabilities \
   meerkat-machine-dsl \
-  meerkat-models \
   meerkat-machine-schema \
   meerkat-machine-kernels \
   meerkat-skills \

@@ -144,12 +144,12 @@ mod tests {
                     ToolCatalogEntry::session_deferred(
                         deferred,
                         true,
-                        "callback:deferred-catalog".to_string(),
+                        deferred_catalog_provenance(),
                     ),
                     ToolCatalogEntry::session_deferred(
                         deferred_two,
                         true,
-                        "callback:deferred-catalog".to_string(),
+                        deferred_catalog_provenance(),
                     ),
                 ]
                 .into(),
@@ -406,10 +406,6 @@ mod tests {
             .requested_witnesses
             .get("deferred_mcp_tool")
             .expect("store projection must persist the catalog-derived witness");
-        assert_eq!(
-            persisted_witness.stable_owner_key.as_deref(),
-            Some("callback:deferred-catalog")
-        );
         assert_eq!(
             persisted_witness.last_seen_provenance.as_ref(),
             Some(&deferred_catalog_provenance()),

@@ -227,7 +227,23 @@ impl ArchiveRuntimeCleanup {
             mob_state.cleanup(session_id).await?;
         }
         #[cfg(feature = "comms")]
-        self.runtime_adapter.abort_comms_drain(session_id).await;
+        match self.runtime_adapter.abort_comms_drain(session_id).await {
+            Ok(()) => {}
+            // The session was unregistered above, so the machine may
+            // legitimately report the runtime as absent or already terminal;
+            // both verdicts prove no drain remains running, which is exactly
+            // the post-condition this cleanup wants.
+            Err(
+                meerkat_runtime::RuntimeDriverError::NotFound { .. }
+                | meerkat_runtime::RuntimeDriverError::Destroyed
+                | meerkat_runtime::RuntimeDriverError::NotReady { .. },
+            ) => {}
+            Err(error) => {
+                return Err(meerkat_core::service::SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(error.to_string()),
+                ));
+            }
+        }
         Ok(())
     }
 }

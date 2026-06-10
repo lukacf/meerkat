@@ -174,7 +174,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let response = json!({
                             "jsonrpc": "2.0",
                             "id": id,
-                            "result": { "tools": meerkat_mcp_server::tools_list() }
+                            // Runtime-conditional advertisement: skills tools
+                            // are listed only when the skill runtime exists.
+                            "result": { "tools": state.advertised_tools_list() }
                         });
                         if writer.send(response).await.is_err() {
                             break Ok(());
@@ -192,8 +194,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .cloned()
                             .unwrap_or_else(|| json!({}));
 
-                        let semantics =
-                            SurfaceRequestSemantics::from(mcp_tool_request_lifecycle(&name));
+                        // Unknown tool names have no feature-owned lifecycle:
+                        // fail closed before admitting a request rather than
+                        // classifying an unadvertised name under a default.
+                        let Some(lifecycle) = mcp_tool_request_lifecycle(&name) else {
+                            let response = json!({
+                                "jsonrpc": "2.0",
+                                "id": request_id,
+                                "error": {
+                                    "code": -32601,
+                                    "message": format!("Unknown tool: {name}")
+                                }
+                            });
+                            if writer.send(response).await.is_err() {
+                                break Ok(());
+                            }
+                            continue;
+                        };
+                        let semantics = SurfaceRequestSemantics::from(lifecycle);
                         let context = match request_executor.try_begin_request_with_semantics(
                             request_key.clone(),
                             noop_request_action(),
@@ -489,7 +507,9 @@ mod tests {
             let context = executor.begin_request_with_semantics(
                 request_key.clone(),
                 noop_request_action(),
-                SurfaceRequestSemantics::from(mcp_tool_request_lifecycle(tool_name)),
+                SurfaceRequestSemantics::from(
+                    mcp_tool_request_lifecycle(tool_name).expect("known base tool"),
+                ),
             );
             context.set_unpublished_cleanup(meerkat::surface::request_action({
                 let cleanup_count = Arc::clone(&cleanup_count);

@@ -290,10 +290,12 @@ pub fn build_capabilities_response(config: &Config) -> CapabilitiesResponse {
     }
 }
 
-/// Build a [`ModelsCatalogResponse`] from the compiled-in catalog.
+/// Build a [`ModelsCatalogResponse`] from the resolved model registry.
 ///
-/// This is a pure function with no config dependency — the catalog is static data
-/// compiled into the binary from `meerkat-models`.
+/// This is **not** a pure compiled-in snapshot: it reads the config-backed
+/// `ModelRegistry`, which combines the compiled-in
+/// `meerkat_core::model_profile` catalog with any config-declared self-hosted
+/// aliases, so two responses for the same binary can differ by config.
 pub fn build_models_catalog_response(
     config: &meerkat_core::Config,
 ) -> Result<meerkat_contracts::ModelsCatalogResponse, meerkat_core::ConfigError> {
@@ -340,10 +342,10 @@ pub fn build_models_catalog_response(
                         id: entry.id.clone(),
                         display_name: entry.display_name.clone(),
                         tier: match entry.tier {
-                            meerkat_models::ModelTier::Recommended => {
+                            meerkat_core::model_profile::catalog::ModelTier::Recommended => {
                                 meerkat_contracts::WireModelTier::Recommended
                             }
-                            meerkat_models::ModelTier::Supported => {
+                            meerkat_core::model_profile::catalog::ModelTier::Supported => {
                                 meerkat_contracts::WireModelTier::Supported
                             }
                         },

@@ -146,7 +146,10 @@ fn anthropic_tag(request: &LlmRequest) -> Option<&AnthropicProviderTag> {
     }
 }
 
-fn catalog_beta_value(request: &LlmRequest, feature: &str) -> Option<&'static str> {
+fn catalog_beta_value(
+    request: &LlmRequest,
+    feature: meerkat_core::model_profile::capabilities::BetaFeature,
+) -> Option<&'static str> {
     meerkat_core::model_profile::capabilities::capabilities_for(
         Provider::Anthropic,
         &request.model,
@@ -953,14 +956,20 @@ impl LlmClient for AnthropicClient {
                 .and_then(|t| t.get("type"))
                 .and_then(|t| t.as_str());
             if thinking_type == Some("enabled")
-                && let Some(beta) = catalog_beta_value(request, "interleaved_thinking")
+                && let Some(beta) = catalog_beta_value(
+                    request,
+                    meerkat_core::model_profile::capabilities::BetaFeature::InterleavedThinking,
+                )
             {
                 betas.push(beta.to_string());
             }
 
             // Structured output format requires beta header
             if body.get("output_config").and_then(|c| c.get("format")).is_some()
-                && let Some(beta) = catalog_beta_value(request, "structured_output")
+                && let Some(beta) = catalog_beta_value(
+                    request,
+                    meerkat_core::model_profile::capabilities::BetaFeature::StructuredOutput,
+                )
             {
                 betas.push(beta.to_string());
             }
@@ -975,7 +984,10 @@ impl LlmClient for AnthropicClient {
 
             // Compaction API (beta)
             if body.get("context_management").is_some()
-                && let Some(beta) = catalog_beta_value(request, "compaction")
+                && let Some(beta) = catalog_beta_value(
+                    request,
+                    meerkat_core::model_profile::capabilities::BetaFeature::Compaction,
+                )
             {
                 betas.push(beta.to_string());
             }

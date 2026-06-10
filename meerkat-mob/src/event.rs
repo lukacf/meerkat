@@ -225,11 +225,46 @@ impl<'de> Deserialize<'de> for MemberRef {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-const CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION: u32 = 6;
+// v7: `FlowFailed` carries the required typed `cause: FlowFailureClass`.
+const CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION: u32 = 7;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn stored_mob_event_format_error(message: impl Into<String>) -> serde_json::Error {
     serde_json::Error::io(IoError::new(IoErrorKind::InvalidData, message.into()))
+}
+
+/// Typed classification of why a flow run failed, persisted on
+/// [`MobEventKind::FlowFailed`].
+///
+/// The class is derived ONCE from the typed failure (`MobError` /
+/// admission outcome) at terminalization time; consumers reason about the
+/// failure origin through this enum instead of re-parsing the display
+/// `reason` string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowFailureClass {
+    /// A step turn timed out.
+    StepTimeout,
+    /// A delegation edge violated the mob topology policy.
+    TopologyViolation,
+    /// A step output failed schema validation.
+    SchemaValidation,
+    /// The run was canceled while a step was in flight.
+    RunCanceled,
+    /// Supervisor escalation itself failed.
+    SupervisorEscalation,
+    /// A step could not be dispatched to enough targets.
+    InsufficientTargets,
+    /// A step (dispatch, collection, render, deadline) failed and aborted the
+    /// run.
+    StepError,
+    /// The mob lifecycle rejected the run during admission.
+    AdmissionFailed,
+    /// Repair fallback for a run already persisted as `Failed` whose original
+    /// failure class is no longer reconstructable.
+    AlreadyFailed,
+    /// An internal runtime fault aborted the run.
+    Internal,
 }
 
 /// Structural event kinds covering all mob state transitions.
@@ -406,6 +441,9 @@ pub enum MobEventKind {
     FlowFailed {
         run_id: RunId,
         flow_id: FlowId,
+        /// Typed classification of the failure origin. Consumers reason about
+        /// the failure class through this enum; `reason` is display detail.
+        cause: FlowFailureClass,
         reason: String,
     },
     /// Flow run canceled.
@@ -748,6 +786,7 @@ mod tests {
         roundtrip(&MobEventKind::FlowFailed {
             run_id: run_id.clone(),
             flow_id: flow_id.clone(),
+            cause: FlowFailureClass::StepError,
             reason: "boom".to_string(),
         });
         roundtrip(&MobEventKind::FlowCanceled {

@@ -331,8 +331,8 @@ mod tests {
                 .expect("FakeClient outcome consumed more than once")
         }
 
-        fn provider(&self) -> &'static str {
-            "openai"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::OpenAI
         }
 
         fn model(&self) -> &'static str {

@@ -163,11 +163,39 @@ pub struct BetaValue<T: 'static> {
     pub value: T,
 }
 
+/// Typed semantic feature gated by a beta header.
+///
+/// The single typed owner of the beta-feature value domain: catalog rows
+/// declare which feature each [`BetaHeader`] gates via this enum, and request
+/// shaping selects headers by typed feature — never by matching a raw string
+/// label. The wire/display label is a derived projection
+/// ([`BetaFeature::as_wire_str`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BetaFeature {
+    /// Anthropic server-side compaction / context management.
+    Compaction,
+    /// Structured output (`output_config.format`).
+    StructuredOutput,
+    /// Interleaved thinking between tool calls.
+    InterleavedThinking,
+}
+
+impl BetaFeature {
+    /// Canonical wire/display label for this feature (derived projection).
+    pub const fn as_wire_str(self) -> &'static str {
+        match self {
+            BetaFeature::Compaction => "compaction",
+            BetaFeature::StructuredOutput => "structured_output",
+            BetaFeature::InterleavedThinking => "interleaved_thinking",
+        }
+    }
+}
+
 /// A beta header that gates a feature on this model.
 #[derive(Debug, Clone, Copy)]
 pub struct BetaHeader {
-    /// Short feature identifier (e.g. `"compaction"`).
-    pub feature: &'static str,
+    /// Typed semantic feature this header gates.
+    pub feature: BetaFeature,
     /// HTTP header name (usually `"anthropic-beta"`).
     pub header_name: &'static str,
     /// HTTP header value (e.g. `"compact-2026-01-12"`).
@@ -274,7 +302,7 @@ mod tests {
     #[test]
     fn every_capability_matches_a_catalog_entry() {
         for caps in all_capabilities() {
-            let entry = crate::model_profile::catalog::entry_for(caps.provider.as_str(), caps.id);
+            let entry = crate::model_profile::catalog::entry_for(caps.provider, caps.id);
             assert!(
                 entry.is_some(),
                 "capability row '{}' (provider '{}') has no catalog entry",
@@ -318,7 +346,7 @@ mod tests {
     #[test]
     fn tier_matches_catalog_entry() {
         for caps in all_capabilities() {
-            let entry = crate::model_profile::catalog::entry_for(caps.provider.as_str(), caps.id)
+            let entry = crate::model_profile::catalog::entry_for(caps.provider, caps.id)
                 .unwrap_or_else(|| panic!("missing catalog entry for {}", caps.id));
             assert_eq!(caps.tier, entry.tier, "tier mismatch for {}", caps.id);
         }
@@ -334,6 +362,33 @@ mod tests {
             assert_eq!(caps.max_output_tokens, 64_000);
             assert_eq!(caps.thinking, ThinkingSupport::AnthropicEnabledOnly);
             assert!(!caps.supports_compaction);
+        }
+    }
+
+    #[test]
+    fn beta_feature_is_typed_owner_with_projected_wire_labels() {
+        // The semantic beta-feature domain is the typed enum; the wire label is
+        // a derived projection. Pin the projection so the catalog/wire shape
+        // cannot silently drift.
+        assert_eq!(BetaFeature::Compaction.as_wire_str(), "compaction");
+        assert_eq!(
+            BetaFeature::StructuredOutput.as_wire_str(),
+            "structured_output"
+        );
+        assert_eq!(
+            BetaFeature::InterleavedThinking.as_wire_str(),
+            "interleaved_thinking"
+        );
+        // Every catalog beta header declares a typed feature (exhaustive match
+        // proves the field is enum-typed, not a string label).
+        for caps in all_capabilities() {
+            for header in caps.beta_headers {
+                match header.feature {
+                    BetaFeature::Compaction
+                    | BetaFeature::StructuredOutput
+                    | BetaFeature::InterleavedThinking => {}
+                }
+            }
         }
     }
 

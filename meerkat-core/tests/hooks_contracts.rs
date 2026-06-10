@@ -3,8 +3,8 @@
 use meerkat_core::{
     AgentErrorClass, AgentErrorReport, AgentEvent, Config, ContentInput, HookAdapterConfig,
     HookCapability, HookDecision, HookEntryConfig, HookExecutionMode, HookId, HookInvocation,
-    HookLlmRequest, HookOutcome, HookPatch, HookPoint, HookReasonCode, HookRunOverrides,
-    HookRuntimeKind, HooksConfig, SessionId,
+    HookLlmRequest, HookOutcome, HookPoint, HookReasonCode, HookRunOverrides, HookRuntimeKind,
+    HooksConfig, SessionId,
 };
 use serde_json::json;
 
@@ -45,14 +45,12 @@ fn hook_invocation_outcome_roundtrip_contract() -> Result<(), Box<dyn std::error
         session_id: SessionId::new(),
         turn_number: Some(1),
         prompt_input: Some(ContentInput::Text("hello typed prompt".to_string())),
-        prompt: Some("legacy prompt projection".to_string()),
         error_report: Some(AgentErrorReport {
             class: AgentErrorClass::Llm,
             reason: None,
             message: "typed failure".to_string(),
         }),
         error_class: Some(AgentErrorClass::Llm),
-        error: Some("legacy failure projection".to_string()),
         llm_request: Some(HookLlmRequest {
             max_tokens: 512,
             temperature: Some(0.1),
@@ -70,13 +68,22 @@ fn hook_invocation_outcome_roundtrip_contract() -> Result<(), Box<dyn std::error
         priority: 1,
         registration_index: 0,
         decision: Some(HookDecision::Allow),
-        patches: vec![],
-        published_patches: vec![],
         failure_reason: None,
         duration_ms: Some(2),
     };
 
-    let inv_rt: HookInvocation = serde_json::from_value(serde_json::to_value(invocation.clone())?)?;
+    let encoded = serde_json::to_value(invocation.clone())?;
+    // The wire envelope carries serialize-only projections of the typed
+    // owners for external hook consumers.
+    assert_eq!(
+        encoded.get("prompt").and_then(|v| v.as_str()),
+        Some("hello typed prompt")
+    );
+    assert_eq!(
+        encoded.get("error").and_then(|v| v.as_str()),
+        Some("typed failure")
+    );
+    let inv_rt: HookInvocation = serde_json::from_value(encoded)?;
     let out_rt: HookOutcome = serde_json::from_value(serde_json::to_value(outcome.clone())?)?;
 
     assert_eq!(inv_rt, invocation);
@@ -93,33 +100,6 @@ fn hook_invocation_outcome_roundtrip_contract() -> Result<(), Box<dyn std::error
         })
     );
     assert_eq!(out_rt, outcome);
-    Ok(())
-}
-
-#[test]
-fn legacy_semantic_hook_patch_payloads_are_rejected_contract()
--> Result<(), Box<dyn std::error::Error>> {
-    let payloads = [
-        json!({
-            "patch_type": "llm_request",
-            "max_tokens": 256,
-            "temperature": 0.2,
-            "provider_params": {"reasoning_effort": "low"}
-        }),
-        json!({"patch_type": "assistant_text", "text": "patched"}),
-        json!({"patch_type": "tool_args", "args": {"query": "patched"}}),
-        json!({"patch_type": "tool_result", "content": "patched", "is_error": false}),
-        json!({"patch_type": "run_result", "text": "patched"}),
-    ];
-
-    for payload in payloads {
-        let result = serde_json::from_value::<HookPatch>(payload.clone());
-        assert!(
-            result.is_err(),
-            "legacy semantic HookPatch payload must be rejected: {payload}"
-        );
-    }
-
     Ok(())
 }
 

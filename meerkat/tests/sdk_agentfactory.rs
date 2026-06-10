@@ -149,8 +149,8 @@ impl AgentLlmClient for ImageAgentLlmClient {
         ))
     }
 
-    fn provider(&self) -> &'static str {
-        "anthropic"
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Anthropic
     }
 
     fn model(&self) -> &'static str {
@@ -180,8 +180,8 @@ impl AgentLlmClient for CustomAgentLlmClient {
         ))
     }
 
-    fn provider(&self) -> &'static str {
-        "custom-provider"
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Other
     }
 
     fn model(&self) -> &'static str {

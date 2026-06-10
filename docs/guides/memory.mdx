@@ -139,7 +139,7 @@ When both a `Compactor` and a `MemoryStore` are wired into the agent, discarded 
 
 For each discarded message:
 - The message's indexable text content is extracted via `message.as_indexable_text()`.
-- If non-empty, it is indexed with `MemoryMetadata` containing the session ID, current turn number, and a timestamp.
+- If non-empty, it is indexed with `MemoryMetadata` containing the session ID, the typed source handle (the offset range of the source message(s)), and a timestamp.
 
 This means previously discarded conversation content becomes searchable via the `memory_search` tool.
 

@@ -1286,12 +1286,18 @@ impl MeerkatMachine {
             {
                 Ok(staged) => staged,
                 Err(_) => {
-                    return Err(RuntimeDriverError::NotReady {
-                        state: self
-                            .existing_session_runtime_state(session_id)
-                            .await
-                            .unwrap_or(RuntimeState::Destroyed),
-                    });
+                    // Stage-first classification (dispatch_user_interrupt
+                    // shape): the machine rejected the input; a Destroyed
+                    // binding surfaces as the terminal `Destroyed` truth,
+                    // every other phase as `NotReady`.
+                    let state = self
+                        .existing_session_runtime_state(session_id)
+                        .await
+                        .unwrap_or(RuntimeState::Destroyed);
+                    if state == RuntimeState::Destroyed {
+                        return Err(RuntimeDriverError::Destroyed);
+                    }
+                    return Err(RuntimeDriverError::NotReady { state });
                 }
             };
             let projected_effect =
@@ -1367,7 +1373,7 @@ impl MeerkatMachine {
                 });
             };
             let gate_guard = Arc::clone(&gate).lock_owned().await;
-            let staged = self
+            let staged = match self
                 .stage_session_dsl_transition(
                     session_id,
                     crate::meerkat_machine::dsl::MeerkatMachineInput::StopRuntimeExecutor {
@@ -1376,7 +1382,16 @@ impl MeerkatMachine {
                     "StopRuntimeExecutor",
                 )
                 .await
-                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+            {
+                Ok(staged) => staged,
+                Err(reason) => {
+                    // Stage-first classification: a rejection on a Destroyed
+                    // binding surfaces as the terminal `Destroyed` truth.
+                    return Err(self
+                        .classify_session_dsl_rejection(session_id, reason)
+                        .await);
+                }
+            };
             let projected_effect =
                 crate::effect::runtime_effect_projection_from_dsl_effects(&staged.effects)
                     .map_err(RuntimeDriverError::Internal)?;

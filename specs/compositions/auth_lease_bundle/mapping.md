@@ -22,8 +22,8 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 
 ### Invariants
 - `auth_lease_lifecycle_publication_protocol_covered`
-  - anchors: `auth_lease_handle`, `auth_lease_bundle_schema`
-  - scenarios: `auth-lease-lifecycle-publication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 
 <!-- GENERATED_COVERAGE_END -->

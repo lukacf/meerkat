@@ -42,7 +42,7 @@ where
             }
         }
 
-        let mut report = match hook_engine
+        let report = match hook_engine
             .execute(invocation.clone(), Some(&self.hook_run_overrides))
             .await
         {
@@ -53,18 +53,6 @@ where
                 return Err(Self::map_hook_engine_error(err));
             }
         };
-        let mut published = match hook_engine
-            .drain_published_patches(&invocation.session_id)
-            .await
-        {
-            Ok(published) => published,
-            Err(err) => {
-                self.emit_hook_engine_error(&invocation, event_tx, &err)
-                    .await;
-                return Err(Self::map_hook_engine_error(err));
-            }
-        };
-        report.published_patches.append(&mut published);
 
         for outcome in &report.outcomes {
             if let Some(reason) = &outcome.failure_reason {
@@ -75,7 +63,6 @@ where
                         hook_id: outcome.hook_id.clone(),
                         point: outcome.point,
                         reason: reason.clone(),
-                        error: reason.to_string(),
                     },
                 )
                 .await;
@@ -135,7 +122,6 @@ where
                     hook_id: hook_id.clone(),
                     point: invocation.point,
                     reason: HookFailureReason::from_engine_error(err),
-                    error: err.to_string(),
                 },
             )
             .await;

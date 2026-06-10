@@ -419,23 +419,17 @@ fn render_event(
             );
         }
 
-        AgentEvent::Retrying {
-            attempt,
-            max_attempts,
-            error,
-            delay_ms,
-            ..
-        } => {
+        AgentEvent::Retrying { retry } => {
             chrome_line(
                 mux,
                 scope_id,
                 &format!(
                     "{}⟳ Retry {}/{}: {} ({}ms){}",
                     style(ansi, YELLOW),
-                    attempt,
-                    max_attempts,
-                    error,
-                    delay_ms,
+                    retry.plan.attempt,
+                    retry.plan.max_retries,
+                    retry.failure.message,
+                    retry.plan.selected_delay_ms,
                     reset(ansi)
                 ),
             );
@@ -574,7 +568,9 @@ fn render_event(
             );
         }
 
-        AgentEvent::HookFailed { hook_id, error, .. } => {
+        AgentEvent::HookFailed {
+            hook_id, reason, ..
+        } => {
             chrome_line(
                 mux,
                 scope_id,
@@ -583,7 +579,7 @@ fn render_event(
                     style(ansi, RED),
                     style(ansi, BOLD),
                     hook_id,
-                    error,
+                    reason,
                     reset(ansi)
                 ),
             );

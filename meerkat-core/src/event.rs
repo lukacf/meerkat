@@ -1526,13 +1526,44 @@ impl std::fmt::Display for CompactionFailureReason {
     }
 }
 
+/// Typed reason a best-effort event stream dropped frames.
+///
+/// The variant is the typed owner of the truncation cause; the human-readable
+/// string is a [`Display`](std::fmt::Display) derivation, never a
+/// separately-carried field. `StreamTruncated` is a UI hint — the terminal
+/// event remains authoritative.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StreamTruncationReason {
+    /// The per-interaction tap channel was full; streaming frames dropped.
+    ChannelFull,
+    /// A broadcast event stream lagged and skipped events.
+    StreamLagged {
+        /// Number of events skipped by the lagging receiver.
+        dropped: u64,
+    },
+}
+
+impl std::fmt::Display for StreamTruncationReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ChannelFull => write!(f, "channel full"),
+            Self::StreamLagged { dropped } => write!(
+                f,
+                "event stream lagged; {dropped} events dropped (terminal event remains authoritative)"
+            ),
+        }
+    }
+}
+
 /// Typed reason an interaction-scoped run failed (terminal event for tap
 /// subscribers).
 ///
 /// Mirrors [`CompactionFailureReason`]: the variant is the typed owner of the
-/// failure cause; the human-readable string is a [`Display`] derivation that
-/// the `InteractionFailed` event carries as a fused mirror, never as the
-/// authoritative cause.
+/// failure cause; the human-readable string is a [`Display`] derivation,
+/// never a separately-carried field.
 ///
 /// [`Display`]: std::fmt::Display
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1656,12 +1687,9 @@ pub enum AgentEvent {
     HookFailed {
         hook_id: HookId,
         point: HookPoint,
-        /// Typed failure cause.
+        /// Typed failure cause. The human-readable string is the `Display`
+        /// projection of this reason, never a separately-carried field.
         reason: HookFailureReason,
-        /// Display projection of `reason`. Fused mirror retained for consumers
-        /// still reading a string error.
-        #[serde(default)]
-        error: String,
     },
 
     /// Hook denied an action.
@@ -1785,15 +1813,12 @@ pub enum AgentEvent {
     },
 
     // === Retry Events ===
-    /// Retrying after error
-    Retrying {
-        attempt: u32,
-        max_attempts: u32,
-        error: String,
-        delay_ms: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        retry: Option<LlmRetrySchedule>,
-    },
+    /// Retrying after a recoverable LLM failure.
+    ///
+    /// The typed schedule is the single owner of the retry facts (failure
+    /// kind/provider/diagnostic and plan attempt/delay); display strings are
+    /// derived from it, never carried beside it.
+    Retrying { retry: LlmRetrySchedule },
 
     // === Skill Events ===
     /// Skills resolved for this turn.
@@ -1840,17 +1865,14 @@ pub enum AgentEvent {
     /// An interaction failed (terminal event for tap subscribers).
     InteractionFailed {
         interaction_id: crate::interaction::InteractionId,
-        /// Typed failure cause.
+        /// Typed failure cause. The human-readable string is the `Display`
+        /// projection of this reason, never a separately-carried field.
         reason: InteractionFailureReason,
-        /// Display projection of `reason`. Fused mirror retained for consumers
-        /// still reading a string error.
-        #[serde(default)]
-        error: String,
     },
 
     /// Some streaming events were dropped due to channel backpressure.
     /// Best-effort marker — the terminal event is authoritative.
-    StreamTruncated { reason: String },
+    StreamTruncated { reason: StreamTruncationReason },
 
     /// Live tool configuration changed for this session.
     ToolConfigChanged { payload: ToolConfigChangedPayload },
@@ -2054,14 +2076,12 @@ pub fn format_verbose_event_with_config(
                 Some(format!("  💭 Thinking: {preview}"))
             }
         }
-        AgentEvent::Retrying {
-            attempt,
-            max_attempts,
-            error,
-            delay_ms,
-            ..
-        } => Some(format!(
-            "  ⟳ Retry {attempt}/{max_attempts}: {error} (waiting {delay_ms}ms)"
+        AgentEvent::Retrying { retry } => Some(format!(
+            "  ⟳ Retry {}/{}: {} (waiting {}ms)",
+            retry.plan.attempt,
+            retry.plan.max_retries,
+            retry.failure.message,
+            retry.plan.selected_delay_ms
         )),
         AgentEvent::BudgetWarning {
             budget_type,
@@ -2597,11 +2617,24 @@ mod tests {
                 percent: 0.8,
             },
             AgentEvent::Retrying {
-                attempt: 1,
-                max_attempts: 3,
-                error: "Rate limited".to_string(),
-                delay_ms: 1000,
-                retry: None,
+                retry: LlmRetrySchedule {
+                    failure: crate::retry::LlmRetryFailure {
+                        provider: "anthropic".to_string(),
+                        kind: crate::retry::LlmRetryFailureKind::RateLimited,
+                        retry_after_ms: Some(1000),
+                        duration_ms: None,
+                        message: "Rate limited".to_string(),
+                    },
+                    plan: crate::retry::LlmRetryPlan {
+                        attempt: 1,
+                        max_retries: 3,
+                        computed_delay_ms: 1000,
+                        selected_delay_ms: 1000,
+                        retry_after_hint_ms: Some(1000),
+                        rate_limit_floor_applied: false,
+                        budget_capped: false,
+                    },
+                },
             },
             AgentEvent::RunCompleted {
                 session_id: SessionId::new(),
@@ -2656,10 +2689,9 @@ mod tests {
             AgentEvent::InteractionFailed {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
                 reason: InteractionFailureReason::abandoned("LLM failure"),
-                error: "LLM failure".to_string(),
             },
             AgentEvent::StreamTruncated {
-                reason: "channel full".to_string(),
+                reason: StreamTruncationReason::ChannelFull,
             },
             AgentEvent::ToolConfigChanged {
                 payload: ToolConfigChangedPayload::new(
@@ -2891,18 +2923,16 @@ mod tests {
                 budget_capped: false,
             },
         };
-        let event = AgentEvent::Retrying {
-            attempt: schedule.plan.attempt,
-            max_attempts: schedule.plan.max_retries,
-            error: schedule.failure.message.clone(),
-            delay_ms: schedule.plan.selected_delay_ms,
-            retry: Some(schedule),
-        };
+        let event = AgentEvent::Retrying { retry: schedule };
 
         let value = serde_json::to_value(&event).unwrap();
         assert_eq!(value["retry"]["failure"]["kind"], "rate_limited");
         assert_eq!(value["retry"]["plan"]["attempt"], 1);
         assert_eq!(value["retry"]["plan"]["selected_delay_ms"], 30_000);
+        // No string mirrors travel beside the typed schedule.
+        assert!(value.get("attempt").is_none());
+        assert!(value.get("error").is_none());
+        assert!(value.get("delay_ms").is_none());
     }
 
     #[test]
@@ -3115,7 +3145,6 @@ mod tests {
                 hook_id: HookId::new("hook-1"),
                 point: HookPoint::RunStarted,
                 reason: HookFailureReason::execution_failed("failed"),
-                error: "failed".to_string(),
             },
             AgentEvent::HookDenied {
                 hook_id: HookId::new("hook-1"),
@@ -3203,11 +3232,24 @@ mod tests {
                 percent: 50.0,
             },
             AgentEvent::Retrying {
-                attempt: 1,
-                max_attempts: 2,
-                error: "retry".to_string(),
-                delay_ms: 100,
-                retry: None,
+                retry: LlmRetrySchedule {
+                    failure: crate::retry::LlmRetryFailure {
+                        provider: "anthropic".to_string(),
+                        kind: crate::retry::LlmRetryFailureKind::NetworkTimeout,
+                        retry_after_ms: None,
+                        duration_ms: Some(100),
+                        message: "retry".to_string(),
+                    },
+                    plan: crate::retry::LlmRetryPlan {
+                        attempt: 1,
+                        max_retries: 2,
+                        computed_delay_ms: 100,
+                        selected_delay_ms: 100,
+                        retry_after_hint_ms: None,
+                        rate_limit_floor_applied: false,
+                        budget_capped: false,
+                    },
+                },
             },
             AgentEvent::SkillsResolved {
                 skills: vec![],
@@ -3234,10 +3276,9 @@ mod tests {
             AgentEvent::InteractionFailed {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
                 reason: InteractionFailureReason::abandoned("failed"),
-                error: "failed".to_string(),
             },
             AgentEvent::StreamTruncated {
-                reason: "lag".to_string(),
+                reason: StreamTruncationReason::StreamLagged { dropped: 3 },
             },
             AgentEvent::ToolConfigChanged {
                 payload: ToolConfigChangedPayload::new(

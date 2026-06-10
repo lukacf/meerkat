@@ -34,6 +34,17 @@ pub enum PromptAssemblyError {
         /// The underlying I/O error.
         source: std::io::Error,
     },
+    /// A discovered project `AGENTS.md` exists (or its existence could not be
+    /// probed) but could not be read. Absence of the file is honest and yields
+    /// no error; a file that is present but unreadable is a fault and must not
+    /// silently vanish so a lower-precedence prompt becomes authoritative.
+    #[error("project AGENTS.md '{path}' is not readable: {source}")]
+    AgentsMdUnreadable {
+        /// The discovered path that failed to read.
+        path: String,
+        /// The underlying I/O error.
+        source: std::io::Error,
+    },
 }
 
 /// Assemble the final system prompt. Single canonical path.
@@ -112,9 +123,12 @@ pub async fn assemble_system_prompt(
         spc.system_prompt = Some(prompt.clone());
     }
 
-    // AGENTS.md is resolved only from explicit context roots.
+    // AGENTS.md is resolved only from explicit context roots. Absence is
+    // honest (`None`); an existing-but-unreadable file propagates as a typed
+    // fault instead of disappearing so a lower-precedence prompt never
+    // silently becomes authoritative.
     if let Some(context) = context_root
-        && let Some(content) = load_project_agents_md_in(context).await
+        && let Some(content) = load_project_agents_md_in(context).await?
     {
         spc = spc.with_project_agents_md_content(content);
     }
@@ -139,22 +153,40 @@ pub async fn assemble_system_prompt(
     ))
 }
 
-async fn load_project_agents_md_in(dir: &Path) -> Option<String> {
+async fn load_project_agents_md_in(dir: &Path) -> Result<Option<String>, PromptAssemblyError> {
     for candidate in [dir.join("AGENTS.md"), dir.join(".rkat/AGENTS.md")] {
-        if let Some(content) = load_agents_md_file(&candidate).await {
-            return Some(content);
+        if let Some(content) = load_agents_md_file(&candidate).await? {
+            return Ok(Some(content));
         }
     }
-    None
+    Ok(None)
 }
 
-async fn load_agents_md_file(path: &Path) -> Option<String> {
-    if !tokio::fs::try_exists(path).await.ok()? {
-        return None;
+/// Load one discovered AGENTS.md candidate.
+///
+/// `Ok(None)` means honest absence (file missing, or present but empty after
+/// normalization). Every I/O fault — an existence probe that errors, or a
+/// file that exists but cannot be read (permissions, invalid UTF-8) — is a
+/// typed [`PromptAssemblyError::AgentsMdUnreadable`], never laundered into
+/// absence.
+async fn load_agents_md_file(path: &Path) -> Result<Option<String>, PromptAssemblyError> {
+    let exists = tokio::fs::try_exists(path).await.map_err(|source| {
+        PromptAssemblyError::AgentsMdUnreadable {
+            path: path.display().to_string(),
+            source,
+        }
+    })?;
+    if !exists {
+        return Ok(None);
     }
 
-    let content = tokio::fs::read_to_string(path).await.ok()?;
-    normalize_agents_md_content(&content)
+    let content = tokio::fs::read_to_string(path).await.map_err(|source| {
+        PromptAssemblyError::AgentsMdUnreadable {
+            path: path.display().to_string(),
+            source,
+        }
+    })?;
+    Ok(normalize_agents_md_content(&content))
 }
 
 /// Append extra sections and tool instructions to a base prompt.
@@ -473,7 +505,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_context_root_agents_md_falls_back_when_root_file_is_unusable() {
+    async fn test_context_root_agents_md_unreadable_is_error_not_silent_fallback() {
+        // An AGENTS.md that EXISTS but cannot be read (here: invalid UTF-8,
+        // so read_to_string fails) is a fault. It must propagate as a typed
+        // PromptAssemblyError instead of silently disappearing so that a
+        // lower-precedence source (.rkat/AGENTS.md, inline, default) never
+        // becomes authoritative over a prompt the operator placed.
         let temp = TempDir::new().unwrap();
         let agents_path = temp.path().join("AGENTS.md");
         tokio::fs::write(&agents_path, [0xff, 0xfe]).await.unwrap();
@@ -491,9 +528,30 @@ mod tests {
             &[],
             "",
         )
+        .await;
+        let err = result.expect_err("unreadable AGENTS.md must be a typed fault");
+        assert!(matches!(
+            err,
+            PromptAssemblyError::AgentsMdUnreadable { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_context_root_agents_md_absent_is_honest_absence() {
+        // A context root with NO AGENTS.md at all is honest absence: no
+        // error, default prompt applies.
+        let temp = TempDir::new().unwrap();
+        let config = default_config();
+        let result = assemble_system_prompt(
+            &config,
+            &SystemPromptOverride::Inherit,
+            Some(temp.path()),
+            &[],
+            "",
+        )
         .await
         .unwrap();
-        assert!(result.contains("Fallback instructions"));
+        assert!(result.contains(DEFAULT_SYSTEM_PROMPT));
     }
 
     // --- Precedence level 4: default prompt ---

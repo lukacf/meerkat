@@ -178,17 +178,16 @@ pub struct Profile {
     pub max_inline_peer_notifications: Option<i32>,
     /// Optional JSON Schema for structured output extraction.
     ///
-    /// When set, the agent session is configured with an [`OutputSchema`] that
+    /// When set, the agent session is configured with an `OutputSchema` that
     /// forces the LLM to respond with validated JSON conforming to this schema.
-    /// The value should be a valid JSON Schema object (root must be an object).
     ///
-    /// **Note:** Validation is deferred to spawn time (`build_session_config`)
-    /// where `MeerkatSchema::new()` rejects invalid schemas. This is intentional:
-    /// `Profile` is a serializable template that may be persisted or transmitted
-    /// before any agent is spawned, and `MeerkatSchema` does not currently
-    /// implement `Eq` or validate on deserialization.
-    #[serde(default)]
-    pub output_schema: Option<serde_json::Value>,
+    /// Typed owner: a validated, normalized [`meerkat_core::MeerkatSchema`].
+    /// The schema is validated ONCE at profile ingress — deserialization fails
+    /// closed on an invalid schema (non-object root) — so a profile holding an
+    /// invalid schema can no longer be persisted or transmitted and rejected
+    /// only later at spawn time.
+    #[serde(default, deserialize_with = "deserialize_output_schema")]
+    pub output_schema: Option<meerkat_core::MeerkatSchema>,
     /// Optional provider-specific parameters passed to the LLM adapter.
     ///
     /// This maps directly to `AgentBuildConfig.provider_params` and is useful
@@ -196,6 +195,21 @@ pub struct Profile {
     /// `reasoning_effort`.
     #[serde(default)]
     pub provider_params: Option<serde_json::Value>,
+}
+
+/// Validate-at-ingress deserializer for [`Profile::output_schema`]: the raw
+/// JSON is parsed into a [`meerkat_core::MeerkatSchema`] exactly once, failing
+/// closed on an invalid schema instead of ferrying an unvalidated `Value`
+/// through persistence and wire until spawn time.
+fn deserialize_output_schema<'de, D>(
+    deserializer: D,
+) -> Result<Option<meerkat_core::MeerkatSchema>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<serde_json::Value>::deserialize(deserializer)?
+        .map(|value| meerkat_core::MeerkatSchema::new(value).map_err(serde::de::Error::custom))
+        .transpose()
 }
 
 #[cfg(test)]
@@ -349,6 +363,28 @@ max_inline_peer_notifications = -1
 "#;
         let profile: Profile = toml::from_str(toml_str).unwrap();
         assert_eq!(profile.max_inline_peer_notifications, Some(-1));
+    }
+
+    #[test]
+    fn test_profile_output_schema_validates_at_ingress() {
+        // A well-formed object schema parses into the typed owner, normalized
+        // once at deserialization.
+        let profile: Profile = serde_json::from_str(
+            r#"{"model":"claude-sonnet-4-5","output_schema":{"type":"object"}}"#,
+        )
+        .unwrap();
+        assert!(profile.output_schema.is_some());
+
+        // Regression: an invalid schema (non-object root) fails CLOSED at
+        // profile ingress — it can no longer be persisted/transmitted and
+        // rejected only later at spawn time.
+        assert!(
+            serde_json::from_str::<Profile>(
+                r#"{"model":"claude-sonnet-4-5","output_schema":"not an object"}"#,
+            )
+            .is_err(),
+            "an invalid output_schema must be rejected at profile deserialization"
+        );
     }
 
     #[test]

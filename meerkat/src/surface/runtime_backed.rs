@@ -451,11 +451,12 @@ pub async fn configure_peer_ingress(
     service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
     session_id: &SessionId,
     keep_alive: bool,
-) {
+) -> Result<(), RuntimeDriverError> {
     let comms_rt = service.comms_runtime(session_id).await;
     adapter
         .update_peer_ingress_context(session_id, keep_alive, comms_rt)
-        .await;
+        .await
+        .map(|_spawned| ())
 }
 
 pub fn default_persistent_executor(
@@ -2106,7 +2107,9 @@ mod tests {
         .await
         .expect("materialize session");
 
-        configure_peer_ingress(&adapter, &service, &result.session_id, true).await;
+        configure_peer_ingress(&adapter, &service, &result.session_id, true)
+            .await
+            .expect("configure peer ingress");
         expect_prompt_completion(&adapter, &result.session_id, "peer ingress prompt").await;
         service
             .discard_live_session(&result.session_id)
@@ -2141,7 +2144,9 @@ mod tests {
         .await
         .expect("materialize session");
 
-        configure_peer_ingress(&adapter, &service, &result.session_id, false).await;
+        configure_peer_ingress(&adapter, &service, &result.session_id, false)
+            .await
+            .expect("configure peer ingress");
         let persisted = service
             .export_live_session(&result.session_id)
             .await

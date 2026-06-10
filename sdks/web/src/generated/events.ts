@@ -127,6 +127,10 @@ export type ContentBlock = {
 } | {
   data: unknown;
   type: "structured";
+} | {
+  skill_key: SkillKey;
+  text: string;
+  type: "skill_context";
 };
 
 export type ContentInput = string | ContentBlock[];
@@ -308,6 +312,13 @@ export type SourceUuid = string;
 
 export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "content_filter" | "cancelled";
 
+export type StreamTruncationReason = {
+  kind: "channel_full";
+} | {
+  dropped: number;
+  kind: "stream_lagged";
+};
+
 export interface SystemTime {
   nanos_since_epoch: number;
   secs_since_epoch: number;
@@ -451,7 +462,6 @@ export interface HookCompletedEvent {
 }
 
 export interface HookFailedEvent {
-  error?: string;
   hook_id: HookId;
   point: HookPoint;
   reason: HookFailureReason;
@@ -576,11 +586,7 @@ export interface BudgetWarningEvent {
 }
 
 export interface RetryingEvent {
-  attempt: number;
-  delay_ms: number;
-  error: string;
-  max_attempts: number;
-  retry?: LlmRetrySchedule | null;
+  retry: LlmRetrySchedule;
   type: "retrying";
 }
 
@@ -613,14 +619,13 @@ export interface InteractionCallbackPendingEvent {
 }
 
 export interface InteractionFailedEvent {
-  error?: string;
   interaction_id: InteractionId;
   reason: InteractionFailureReason;
   type: "interaction_failed";
 }
 
 export interface StreamTruncatedEvent {
-  reason: string;
+  reason: StreamTruncationReason;
   type: "stream_truncated";
 }
 

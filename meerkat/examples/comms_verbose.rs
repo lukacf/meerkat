@@ -203,8 +203,8 @@ impl AgentLlmClient for LoggingLlmAdapter {
         Ok(LlmStreamResult::new(blocks, stop_reason, usage))
     }
 
-    fn provider(&self) -> &'static str {
-        "anthropic"
+    fn provider(&self) -> meerkat::Provider {
+        meerkat::Provider::Anthropic
     }
 
     fn model(&self) -> &str {

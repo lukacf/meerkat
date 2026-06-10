@@ -313,7 +313,11 @@ pub fn profile_to_wire(profile: &crate::Profile) -> meerkat_contracts::WireMobPr
             crate::MobRuntimeMode::TurnDriven => meerkat_contracts::WireMobRuntimeMode::TurnDriven,
         },
         max_inline_peer_notifications: profile.max_inline_peer_notifications,
-        output_schema: profile.output_schema.clone(),
+        // Read-only wire projection of the typed, validated schema owner.
+        output_schema: profile
+            .output_schema
+            .as_ref()
+            .map(|schema| schema.as_value().clone()),
         provider_params: profile.provider_params.clone(),
     }
 }

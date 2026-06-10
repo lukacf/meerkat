@@ -13,7 +13,9 @@ use meerkat_core::skills::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::skills_config::GitRefType;
-use meerkat_core::skills_config::{SkillRepoTransport, SkillsConfig};
+#[cfg(all(feature = "skills-http", not(target_arch = "wasm32")))]
+use meerkat_core::skills_config::HttpSkillRepoAuth;
+use meerkat_core::skills_config::{GitSkillRepoAuth, SkillRepoTransport, SkillsConfig};
 
 use crate::source::composite::NamedSource;
 #[cfg(not(target_arch = "wasm32"))]
@@ -98,21 +100,21 @@ pub async fn resolve_repositories_with_roots(
                 }
                 SkillRepoTransport::Http {
                     url,
-                    auth_header,
-                    auth_token,
+                    auth,
                     refresh_seconds,
                     timeout_seconds,
                 } => {
                     #[cfg(all(feature = "skills-http", not(target_arch = "wasm32")))]
                     {
-                        let auth = match (auth_header, auth_token) {
-                            (Some(name), Some(value)) => Some(HttpSkillAuth::Header {
+                        let auth = auth.as_ref().map(|auth| match auth {
+                            HttpSkillRepoAuth::Bearer { token } => {
+                                HttpSkillAuth::Bearer(token.clone())
+                            }
+                            HttpSkillRepoAuth::Header { name, value } => HttpSkillAuth::Header {
                                 name: name.clone(),
                                 value: value.clone(),
-                            }),
-                            (None, Some(value)) => Some(HttpSkillAuth::Bearer(value.clone())),
-                            _ => None,
-                        };
+                            },
+                        });
                         sources.push(NamedSource::new(
                             source_identity,
                             SourceNode::Http(Box::new(HttpSkillSource::new_with_thresholds(
@@ -127,13 +129,7 @@ pub async fn resolve_repositories_with_roots(
                     }
                     #[cfg(any(not(feature = "skills-http"), target_arch = "wasm32"))]
                     {
-                        let _ = (
-                            url,
-                            auth_header,
-                            auth_token,
-                            refresh_seconds,
-                            timeout_seconds,
-                        );
+                        let _ = (url, auth, refresh_seconds, timeout_seconds);
                         #[cfg(target_arch = "wasm32")]
                         return Err(unavailable_on_wasm("HTTP"));
                         #[cfg(not(target_arch = "wasm32"))]
@@ -179,8 +175,7 @@ pub async fn resolve_repositories_with_roots(
                     git_ref,
                     ref_type,
                     skills_root,
-                    auth_token,
-                    ssh_key,
+                    auth,
                     refresh_seconds,
                     depth,
                 } => {
@@ -194,14 +189,12 @@ pub async fn resolve_repositories_with_roots(
                         GitRefType::Tag => GitRef::Tag(git_ref.clone()),
                         GitRefType::Commit => GitRef::Commit(git_ref.clone()),
                     };
-                    let auth = auth_token
-                        .as_ref()
-                        .map(|token| GitSkillAuth::HttpsToken(token.clone()))
-                        .or_else(|| {
-                            ssh_key
-                                .as_ref()
-                                .map(|key| GitSkillAuth::SshKey(key.clone()))
-                        });
+                    let auth = auth.as_ref().map(|auth| match auth {
+                        GitSkillRepoAuth::Token { token } => {
+                            GitSkillAuth::HttpsToken(token.clone())
+                        }
+                        GitSkillRepoAuth::SshKey { path } => GitSkillAuth::SshKey(path.clone()),
+                    });
                     sources.push(NamedSource::new(
                         source_identity,
                         SourceNode::Git(Box::new(GitSkillSource::new(GitSkillConfig {

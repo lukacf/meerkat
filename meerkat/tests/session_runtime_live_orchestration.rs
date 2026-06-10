@@ -13,8 +13,6 @@
 //!   B18 branch.
 //! * `live_channel_requires_close_for_identity_change` — closes on
 //!   model swap, closes on provider swap, in-place refresh otherwise.
-//! * `extract_system_prompt_from_seed_messages_runtime` — surfaces the
-//!   first `System`/`SystemNotice` lead.
 //!
 //! Coverage of the load-bearing methods (`precheck_live_open`,
 //! `materialize_staged_session_for_realtime_open`,
@@ -27,14 +25,11 @@
 
 use meerkat::session_runtime::errors::LiveOpenPrecheckError;
 use meerkat::session_runtime::live_orchestration::{
-    LiveChannelRefreshFailure, LiveConfigPropagationReport, LiveHotSwapSkipReason,
-    apply_precheck_gates, extract_system_prompt_from_seed_messages_runtime,
-    live_channel_requires_close_for_identity_change, should_apply_global_model_hot_swap,
-    should_fire_live_propagation,
+    LiveChannelCloseFailure, LiveChannelRefreshFailure, LiveConfigPropagationReport,
+    LiveHotSwapSkipReason, apply_precheck_gates, live_channel_requires_close_for_identity_change,
+    should_apply_global_model_hot_swap, should_fire_live_propagation,
 };
-use meerkat_core::types::{
-    Message, SessionId, SystemMessage, SystemNoticeKind, SystemNoticeMessage,
-};
+use meerkat_core::types::SessionId;
 use meerkat_core::{Provider, SessionLlmIdentity};
 
 #[test]
@@ -358,35 +353,23 @@ fn propagation_report_deliberate_skip_and_close_stay_clean() {
 }
 
 #[test]
-fn extract_system_prompt_returns_system_message_content() {
-    let msgs = vec![
-        Message::System(SystemMessage::new("you are helpful")),
-        Message::User(meerkat_core::types::UserMessage::text("hi")),
-    ];
-    assert_eq!(
-        extract_system_prompt_from_seed_messages_runtime(&msgs),
-        Some("you are helpful".to_string())
-    );
-}
-
-#[test]
-fn extract_system_prompt_returns_rendered_notice_text() {
-    let notice = SystemNoticeMessage::new(SystemNoticeKind::McpPending, "MCP servers connecting");
-    let rendered = notice.model_projection_text();
-    let msgs = vec![Message::SystemNotice(notice)];
-    assert_eq!(
-        extract_system_prompt_from_seed_messages_runtime(&msgs),
-        Some(rendered)
-    );
-}
-
-#[test]
-fn extract_system_prompt_none_when_first_is_user() {
-    let msgs = vec![Message::User(meerkat_core::types::UserMessage::text("hi"))];
-    assert_eq!(
-        extract_system_prompt_from_seed_messages_runtime(&msgs),
-        None
-    );
+fn propagation_report_with_close_failure_is_not_clean() {
+    // A config-rejection close that itself failed must surface as a typed
+    // `LiveChannelCloseFailure` in `close_failed` (NOT in `closed`) and flip
+    // `is_clean()` false — a failed close must never be laundered into a
+    // clean propagation.
+    let failed = SessionId::new();
+    let report = LiveConfigPropagationReport {
+        close_failed: vec![(
+            failed.clone(),
+            LiveChannelCloseFailure::CommitHandoffMissing,
+        )],
+        ..Default::default()
+    };
+    assert!(!report.is_clean());
+    assert!(report.closed.is_empty());
+    assert_eq!(report.close_failed.len(), 1);
+    assert_eq!(report.close_failed[0].0, failed);
 }
 
 // Phase 4 R1: end-to-end coverage of the load-bearing methods now

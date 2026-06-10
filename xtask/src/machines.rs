@@ -19,11 +19,11 @@ use meerkat_machine_codegen::{
     render_machine_mapping_coverage, render_machine_semantic_model,
 };
 use meerkat_machine_schema::{
-    CompositionCoverageManifest, CompositionSchema, CoverageSchemaTarget, MachineCoverageManifest,
-    MachineProductionOwnerRelation, MachineSchema, SchedulerRule, SemanticCoverageEntry,
+    CompositionCoverageManifest, CompositionSchema, CoverageClaims, CoverageSchemaTarget,
+    MachineCoverageManifest, MachineProductionOwnerRelation, MachineSchema, SemanticCoverageEntry,
     TriggerKind, canonical_composition_coverage_manifests, canonical_composition_schemas,
     canonical_machine_coverage_manifests, canonical_machine_production_owner_relations,
-    canonical_machine_schemas,
+    canonical_machine_schemas, scheduler_rule_coverage_name,
 };
 use quote::ToTokens;
 use serde::Serialize;
@@ -3510,6 +3510,51 @@ fn validate_machine_semantic_coverage(
         .map(|scenario| scenario.id.as_str())
         .collect::<BTreeSet<_>>();
 
+    // Typed claim resolution (fail-closed): every anchor/scenario claim must
+    // name a real schema element of the matching kind. A machine coverage
+    // manifest declares no routes or scheduler rules, so claims of those
+    // kinds are structurally mismatched.
+    let owner = format!("machine {}", schema.machine);
+    let transition_names = schema
+        .transitions
+        .iter()
+        .map(|transition| transition.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let effect_names = schema
+        .effects
+        .variants
+        .iter()
+        .map(|variant| variant.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let invariant_names = schema
+        .invariants
+        .iter()
+        .map(|invariant| invariant.name.as_str())
+        .collect::<BTreeSet<_>>();
+    for (claimant_kind, claimant_id, claims) in manifest
+        .code_anchors
+        .iter()
+        .map(|anchor| ("code anchor", anchor.id.as_str(), &anchor.claims))
+        .chain(
+            manifest
+                .scenarios
+                .iter()
+                .map(|scenario| ("scenario", scenario.id.as_str(), &scenario.claims)),
+        )
+    {
+        validate_claims_against(
+            &owner,
+            claimant_kind,
+            claimant_id,
+            claims,
+            Some(&transition_names),
+            Some(&effect_names),
+            &invariant_names,
+            None,
+            None,
+        )?;
+    }
+
     validate_semantic_entries(
         &format!("machine {}", schema.machine),
         "transition",
@@ -3566,6 +3611,54 @@ fn validate_composition_semantic_coverage(
         .map(|scenario| scenario.id.as_str())
         .collect::<BTreeSet<_>>();
 
+    // Typed claim resolution (fail-closed): every anchor/scenario claim must
+    // name a real schema element of the matching kind. A composition
+    // coverage manifest declares no machine transitions or effects, so
+    // claims of those kinds are structurally mismatched.
+    let owner = format!("composition {}", schema.name);
+    let route_names = schema
+        .routes
+        .iter()
+        .map(|route| route.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let scheduler_rule_names = schema
+        .scheduler_rules
+        .iter()
+        .map(scheduler_rule_coverage_name)
+        .collect::<Vec<_>>();
+    let scheduler_rule_names = scheduler_rule_names
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let invariant_names = schema
+        .invariants
+        .iter()
+        .map(|invariant| invariant.name.as_str())
+        .collect::<BTreeSet<_>>();
+    for (claimant_kind, claimant_id, claims) in manifest
+        .code_anchors
+        .iter()
+        .map(|anchor| ("code anchor", anchor.id.as_str(), &anchor.claims))
+        .chain(
+            manifest
+                .scenarios
+                .iter()
+                .map(|scenario| ("scenario", scenario.id.as_str(), &scenario.claims)),
+        )
+    {
+        validate_claims_against(
+            &owner,
+            claimant_kind,
+            claimant_id,
+            claims,
+            None,
+            None,
+            &invariant_names,
+            Some(&route_names),
+            Some(&scheduler_rule_names),
+        )?;
+    }
+
     validate_semantic_entries(
         &format!("composition {}", schema.name),
         "route",
@@ -3584,7 +3677,7 @@ fn validate_composition_semantic_coverage(
         &schema
             .scheduler_rules
             .iter()
-            .map(scheduler_rule_name)
+            .map(scheduler_rule_coverage_name)
             .collect::<Vec<_>>(),
         &manifest.scheduler_rule_coverage,
         &anchor_ids,
@@ -3674,12 +3767,69 @@ fn validate_semantic_entries(
     Ok(())
 }
 
-fn scheduler_rule_name(rule: &SchedulerRule) -> String {
-    match rule {
-        SchedulerRule::PreemptWhenReady { higher, lower } => {
-            format!("PreemptWhenReady({higher}, {lower})")
+/// Resolve one claimant's typed claims against the owning schema's element
+/// name sets. `None` for a kind means the manifest type structurally owns no
+/// elements of that kind, so any claim of it is a mismatch.
+#[allow(clippy::too_many_arguments)]
+fn validate_claims_against(
+    owner: &str,
+    claimant_kind: &str,
+    claimant_id: &str,
+    claims: &CoverageClaims,
+    transitions: Option<&BTreeSet<&str>>,
+    effects: Option<&BTreeSet<&str>>,
+    invariants: &BTreeSet<&str>,
+    routes: Option<&BTreeSet<&str>>,
+    scheduler_rules: Option<&BTreeSet<&str>>,
+) -> Result<()> {
+    let kinds: [(&str, Vec<&str>, Option<&BTreeSet<&str>>); 5] = [
+        (
+            "transition",
+            claims.transitions.iter().map(|id| id.as_str()).collect(),
+            transitions,
+        ),
+        (
+            "effect",
+            claims.effects.iter().map(|id| id.as_str()).collect(),
+            effects,
+        ),
+        (
+            "invariant",
+            claims.invariants.iter().map(String::as_str).collect(),
+            Some(invariants),
+        ),
+        (
+            "route",
+            claims.routes.iter().map(|id| id.as_str()).collect(),
+            routes,
+        ),
+        (
+            "scheduler rule",
+            claims.scheduler_rules.iter().map(String::as_str).collect(),
+            scheduler_rules,
+        ),
+    ];
+    for (kind, claimed, declared) in kinds {
+        match declared {
+            None => {
+                if let Some(first) = claimed.first() {
+                    bail!(
+                        "{owner} {claimant_kind} `{claimant_id}` claims {kind} `{first}` but this manifest type declares no {kind}s"
+                    );
+                }
+            }
+            Some(declared) => {
+                for name in claimed {
+                    if !declared.contains(name) {
+                        bail!(
+                            "{owner} {claimant_kind} `{claimant_id}` claims nonexistent {kind} `{name}`"
+                        );
+                    }
+                }
+            }
         }
     }
+    Ok(())
 }
 
 pub struct Selection {

@@ -1583,6 +1583,7 @@ fn route_literal_to_meerkat_input(
             source: RouteBindingSource::Literal(expr),
         }],
         delivery: RouteDelivery::Immediate,
+        teardown: None,
     }
 }
 
@@ -1831,6 +1832,7 @@ mod handoff_binding {
             liveness_annotation: None,
             comms_trust_authority: None,
             durable_marker: None,
+            teardown: None,
             rust,
         }
     }
@@ -1966,6 +1968,7 @@ mod handoff_binding {
             liveness_annotation: None,
             comms_trust_authority: None,
             durable_marker: None,
+            teardown: None,
             rust: binding,
         };
         let composition = composition_with_protocol(protocol);
@@ -2199,6 +2202,7 @@ mod handoff_binding {
                 liveness_annotation: None,
                 comms_trust_authority: None,
                 durable_marker: None,
+                teardown: None,
                 rust: ProtocolRustBinding {
                     module_path: "meerkat-mcp/src/generated/test_protocol.rs".into(),
                     generation_mode: ProtocolGenerationMode::EffectExtractor,
